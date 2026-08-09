@@ -64,7 +64,48 @@ if [[ "$1" == resolve ]]; then
           printf '%s\\n' "${FAKE_EXPECTED_DIGEST}"
           exit 0
         fi
+        printf 'Error response from registry: failed to resolve digest: %s: not found\\n' "$2" >&2
+        exit 1
+        ;;
+      partial-absent)
+        printf '%s\\n' "${FAKE_EXPECTED_DIGEST}"
+        printf 'Error response from registry: failed to resolve digest: %s: not found\\n' "$2" >&2
+        exit 1
+        ;;
+      wrong-reference-not-found)
+        printf 'Error response from registry: failed to resolve digest: ghcr.io/example/other:sha-deadbeef: not found\\n' >&2
+        exit 1
+        ;;
+      extra-line-not-found)
+        printf 'Error response from registry: failed to resolve digest: %s: not found\\nwarning: synthetic extra context\\n' "$2" >&2
+        exit 1
+        ;;
+      extra-blank-line-not-found)
+        printf 'Error response from registry: failed to resolve digest: %s: not found\\n\\n' "$2" >&2
+        exit 1
+        ;;
+      wrong-status-not-found)
+        printf 'Error response from registry: failed to resolve digest: %s: not found\\n' "$2" >&2
+        exit 17
+        ;;
+      manifest-unknown)
         printf 'MANIFEST_UNKNOWN: synthetic missing destination\\n' >&2
+        exit 1
+        ;;
+      name-unknown)
+        printf 'NAME_UNKNOWN: synthetic missing repository\\n' >&2
+        exit 1
+        ;;
+      generic-not-found)
+        printf 'repository not found after an authentication proxy timeout\\n' >&2
+        exit 1
+        ;;
+      unauthorized)
+        printf 'Error response from registry: response status code 401: Unauthorized\\n' >&2
+        exit 1
+        ;;
+      server-error)
+        printf 'Error response from registry: response status code 503: Service Unavailable\\n' >&2
         exit 1
         ;;
       mismatch)
@@ -207,7 +248,7 @@ printf '%s\\n' "${media_type}"
             )
 
     @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
-    def test_explicit_manifest_unknown_is_the_only_absent_destination_path(self):
+    def test_exact_reference_bound_not_found_allows_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             result, calls = self._run_fixture(
                 Path(temporary), destination_state="absent", roundtrip_succeeds_at=1
@@ -216,6 +257,31 @@ printf '%s\\n' "${media_type}"
             self.assertEqual(
                 len([call for call in calls if "--from-oci-layout" in call]), 1
             )
+
+    @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
+    def test_not_found_lookalikes_fail_before_copy(self):
+        """Only the byte-exact pinned-ORAS result proves reference absence."""
+
+        for destination_state in (
+            "partial-absent",
+            "wrong-reference-not-found",
+            "extra-line-not-found",
+            "extra-blank-line-not-found",
+            "wrong-status-not-found",
+            "manifest-unknown",
+            "name-unknown",
+            "generic-not-found",
+            "unauthorized",
+            "server-error",
+        ):
+            with self.subTest(destination_state=destination_state):
+                with tempfile.TemporaryDirectory() as temporary:
+                    result, calls = self._run_fixture(
+                        Path(temporary), destination_state=destination_state
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("could not prove destination absence", result.stderr)
+                    self.assertEqual(calls, [])
 
     @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
     def test_existing_destination_mismatch_fails_before_copy(self):

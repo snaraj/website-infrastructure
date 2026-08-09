@@ -46,11 +46,15 @@ graph:
 
 Repository tag listings are advisory only. Immediately before every full-SHA
 write, the publisher directly resolves that exact destination: the same digest
-is an idempotent retry, a different digest is a stop, and only an explicit
-registry `MANIFEST_UNKNOWN`/`NAME_UNKNOWN` response is absence. The stable tag
-uses the same direct resolve-before-create rule. The full-SHA name uploads the
-graph so its digest can be signed and attested; only after those checks pass is
-the stable SemVer name added. Both names are then resolved and must equal the
+is an idempotent retry, a different digest is a stop, and only the
+checksum-pinned ORAS client's byte-exact not-found line for that same canonical
+reference, exit status 1, and empty stdout prove absence. The stable tag uses
+the same direct resolve-before-create rule. Every other registry,
+authentication, transport,
+proxy, partial-output, or differently scoped response stops the release. The
+full-SHA name uploads the graph so its digest can be signed and attested; only
+after those checks pass is the stable SemVer name added. Both names are then
+resolved and must equal the
 scanned digest. No `latest`, major-only, minor-only, branch, or environment
 alias is produced.
 
