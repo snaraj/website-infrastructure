@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - require-restricted-workloads.yaml
+  - disallow-public-services.yaml
+  - require-approved-images.yaml
+  - disallow-undiscovered-storage.yaml
+  - disallow-tenant-media-payloads.yaml
+  - require-zero-site-capacity.yaml
+  - require-exact-tenant-networking.yaml
+  - require-release-readiness.yaml
+  - require-signed-naranjo-online.yaml
+  - require-signed-lidersea-com.yaml

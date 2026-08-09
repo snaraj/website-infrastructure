@@ -1,0 +1,21 @@
+replicaCount: 2
+# This sentinel remains false until the independently verified image digest and
+# admission controls have passed the documented promotion gate.
+deploymentReady: false
+
+image:
+  repository: ghcr.io/snaraj/lidersea-com
+  # Fail-closed sentinel. Replace only with the verified published index digest.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8080
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

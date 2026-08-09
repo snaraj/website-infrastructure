@@ -1,0 +1,22 @@
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/containerd --config /etc/containerd/config.toml
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=5
+LimitNPROC=65536
+LimitCORE=0
+TasksMax=65536
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

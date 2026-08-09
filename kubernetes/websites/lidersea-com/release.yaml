@@ -1,0 +1,35 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: lidersea-com
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/readiness: suspended-until-capacity-lock-build-signature-and-digest
+spec:
+  suspend: true
+  interval: 10m0s
+  releaseName: lidersea-com
+  serviceAccountName: helm-reconciler
+  driftDetection:
+    mode: enabled
+  chart:
+    spec:
+      chart: ./websites/lidersea.com/chart
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: lidersea-com-source
+      interval: 10m0s
+  install:
+    remediation:
+      retries: 0
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    deploymentReady: false
+    image:
+      repository: ghcr.io/snaraj/lidersea-com
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

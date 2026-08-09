@@ -1,0 +1,125 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-undiscovered-storage
+  annotations:
+    policies.kyverno.io/category: Storage Security
+    policies.kyverno.io/description: Keep persistent and node-coupled storage unavailable until Pi discovery and restore evidence are approved.
+spec:
+  admission: true
+  background: true
+  validationFailureAction: Enforce
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  rules:
+    - name: disallow-persistent-storage-resources
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolume
+                - PersistentVolumeClaim
+                - StorageClass
+                - CSIDriver
+      validate:
+        failureAction: Enforce
+        message: Persistent storage resources are forbidden until discovery and restore evidence are approved.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.kind || '' }}"
+                operator: NotEquals
+                value: ""
+    - name: disallow-stateful-claim-templates
+      match:
+        any:
+          - resources:
+              kinds: [StatefulSet]
+      validate:
+        failureAction: Enforce
+        message: StatefulSets must not create claims before storage discovery.
+        pattern:
+          spec:
+            X(volumeClaimTemplates): "*"
+    - name: allow-only-site-scratch-volumes
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        message: Site Pods may use only the reviewed bounded memory-backed tmp volume.
+        foreach:
+          - list: request.object.spec.volumes || `[]`
+            pattern:
+              name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi
+    - name: allow-only-tunnel-token-volume
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                !has(object.spec.volumes) || object.spec.volumes.all(volume,
+                volume.name == 'tunnel-token' && has(volume.secret) &&
+                volume.secret.secretName == 'pi-websites-tunnel-token' &&
+                has(volume.secret.defaultMode) && volume.secret.defaultMode == 288 &&
+                has(volume.secret.items) && volume.secret.items.size() == 1 &&
+                volume.secret.items[0].key == 'token' && volume.secret.items[0].path == 'token')
+              message: Tunnel Pods may mount only the exact reviewed tunnel-token Secret key.
+    - name: disallow-legacy-service-account-token-secrets
+      match:
+        any:
+          - resources:
+              kinds: [Secret]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        message: Legacy ServiceAccount token Secrets are forbidden in tenant namespaces.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.type || 'Opaque' }}"
+                operator: Equals
+                value: kubernetes.io/service-account-token
+    - name: disallow-disk-pressure-toleration
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        message: Public workloads must yield to node DiskPressure.
+        foreach:
+          - list: request.object.spec.tolerations || `[]`
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.key || '' }}"
+                    operator: Equals
+                    value: node.kubernetes.io/disk-pressure
+    - name: disallow-wildcard-toleration
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                !has(object.spec.tolerations) || object.spec.tolerations.all(toleration,
+                !((!has(toleration.key) || toleration.key == '') &&
+                has(toleration.operator) && toleration.operator == 'Exists'))
+              message: Wildcard Exists tolerations are forbidden because they include node DiskPressure.

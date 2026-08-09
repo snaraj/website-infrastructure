@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-to-lidersea-com
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lidersea-com.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lidersea-com.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The public tunnel is the only workload allowed to reach this origin, and
+    # it may use only the application's unprivileged HTTP port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+  # The site has no runtime dependency, so any outbound connection is denied.
+  egress: []

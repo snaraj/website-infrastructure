@@ -1,0 +1,33 @@
+replicaCount: 2
+
+image:
+  repository: cloudflare/cloudflared
+  tag: "2026.7.3"
+  digest: sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+  pullPolicy: IfNotPresent
+
+tunnel:
+  secretName: pi-websites-tunnel-token
+  secretKey: token
+  # Change this non-secret revision in the same reviewed PR as a token rotation.
+  tokenRevision: not-configured
+
+origin:
+  namespace: naranjo-online
+  podLabels:
+    app.kubernetes.io/name: naranjo-online
+  port: 8080
+
+liderseaOrigin:
+  namespace: lidersea-com
+  podLabels:
+    app.kubernetes.io/name: lidersea-com
+  port: 8080
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

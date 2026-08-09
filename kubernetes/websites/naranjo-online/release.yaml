@@ -1,0 +1,35 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: naranjo-online
+  namespace: naranjo-online
+  annotations:
+    platform.snaraj.dev/readiness: suspended-until-lock-build-signature-and-digest
+spec:
+  suspend: true
+  interval: 10m0s
+  releaseName: naranjo-online
+  serviceAccountName: helm-reconciler
+  driftDetection:
+    mode: enabled
+  chart:
+    spec:
+      chart: ./websites/naranjo.online/chart
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: naranjo-online-source
+      interval: 10m0s
+  install:
+    remediation:
+      retries: 0
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    deploymentReady: false
+    image:
+      repository: ghcr.io/snaraj/naranjo-online
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

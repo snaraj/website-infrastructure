@@ -1,0 +1,63 @@
+# Staged only. The tenant HelmRelease remains suspended and the release gate
+# requires this policy to become Enforce after real public-artifact verification.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-lidersea-com
+  annotations:
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/description: Verify the exact lidersea.com workflow signature and SLSA provenance bundle.
+spec:
+  admission: true
+  background: false
+  validationFailureAction: Audit
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 30
+  rules:
+    - name: verify-lidersea-com-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [lidersea-com]
+      verifyImages:
+        - imageReferences: ["ghcr.io/snaraj/lidersea-com*"]
+          mutateDigest: false
+          required: true
+          verifyDigest: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-lidersea-com-image.yml@refs/heads/main
+                    issuer: https://token.actions.githubusercontent.com
+                    rekor:
+                      url: https://rekor.sigstore.dev
+    - name: verify-lidersea-com-provenance
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [lidersea-com]
+      verifyImages:
+        - imageReferences: ["ghcr.io/snaraj/lidersea-com*"]
+          type: SigstoreBundle
+          mutateDigest: false
+          required: true
+          verifyDigest: true
+          attestations:
+            - type: https://slsa.dev/provenance/v1
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-lidersea-com-image.yml@refs/heads/main
+                        issuer: https://token.actions.githubusercontent.com
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{ buildDefinition.buildType }}"
+                      operator: Equals
+                      value: https://actions.github.io/buildtypes/workflow/v1

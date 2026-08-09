@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "deploymentReady", "image", "service", "resources"],
+  "definitions": {
+    "cpuQuantity": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]*m|[1-9][0-9]*(?:\\.[0-9]{1,3})?|0\\.(?:[1-9][0-9]{0,2}|0[1-9][0-9]?|00[1-9]))$"
+    },
+    "memoryQuantity": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(?:Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E)?$"
+    },
+    "resourcePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": {"$ref": "#/definitions/cpuQuantity"},
+        "memory": {"$ref": "#/definitions/memoryQuantity"}
+      }
+    }
+  },
+  "properties": {
+    "replicaCount": {"type": "integer", "const": 2},
+    "deploymentReady": {"type": "boolean"},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "const": "ghcr.io/snaraj/lidersea-com"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "pullPolicy": {"type": "string", "enum": ["IfNotPresent", "Never"]}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "properties": {"port": {"type": "integer", "const": 8080}}
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {"$ref": "#/definitions/resourcePair"},
+        "limits": {"$ref": "#/definitions/resourcePair"}
+      }
+    }
+  }
+}

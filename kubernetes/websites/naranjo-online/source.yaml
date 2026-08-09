@@ -1,0 +1,21 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: naranjo-online-source
+  namespace: naranjo-online
+spec:
+  # This source may archive only the reviewed naranjo.online chart subtree.
+  ignore: |
+    /*
+    !/websites
+    /websites/*
+    !/websites/naranjo.online
+    /websites/naranjo.online/*
+    !/websites/naranjo.online/chart
+  interval: 10m0s
+  ref:
+    branch: main
+  sparseCheckout:
+    - websites/naranjo.online/chart
+  timeout: 60s
+  url: https://github.com/snaraj/website-infrastructure.git

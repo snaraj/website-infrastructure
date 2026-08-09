@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Website Infrastructure"
+  short_description: "Build secure sites and cost-controlled infrastructure"
+  default_prompt: "Use $build-website-infrastructure to build or evolve this website platform from its repository-defined contracts."
