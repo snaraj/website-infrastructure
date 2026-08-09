@@ -99,6 +99,7 @@ class PublishWorkflowContractTests(unittest.TestCase):
             ': "${OCI_ARCHIVE:?Set OCI_ARCHIVE to the verified multi-platform OCI layout archive}"',
             ': "${EXPECTED_DIGEST:?Set EXPECTED_DIGEST to the verified sha256 index digest}"',
             ': "${PUBLISH_VERIFY_ROOT:?Set PUBLISH_VERIFY_ROOT to a new temporary verification directory}"',
+            "for command_name in cmp jq oras",
             'source_digest="$(oras resolve --oci-layout "${source_reference}")"',
             'readonly image_index_media_type="application/vnd.oci.image.index.v1+json"',
             "oras manifest fetch --oci-layout",
@@ -107,9 +108,12 @@ class PublishWorkflowContractTests(unittest.TestCase):
             "oras cp --no-tty --concurrency 1 --to-oci-layout",
             'destination_reference="${IMAGE}:sha-${GITHUB_SHA}"',
             '[[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]',
-            'existing_destination_digest="$(oras resolve "${destination_reference}"',
+            'if oras resolve "${destination_reference}"',
+            "Error response from registry: failed to resolve digest: %s: not found",
+            '[[ "${destination_resolve_status}" -ne 1 ||',
+            '-s "${destination_resolve_output}"',
+            'cmp -s -- "${destination_resolve_error}"',
             "could not prove destination absence",
-            "MANIFEST_UNKNOWN|manifest unknown|NAME_UNKNOWN|name unknown",
             "readonly max_attempts=4",
             'readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"',
             '[[ "${resolved}" == "${EXPECTED_DIGEST}" ]]',
@@ -127,16 +131,21 @@ class PublishWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("docker build", self.publisher)
         self.assertNotIn("GHCR_TOKEN", self.publisher)
         self.assertNotIn("[0-9a-f]{64})", self.publisher)
+        self.assertNotIn("grep ", self.publisher)
+        self.assertNotIn("MANIFEST_UNKNOWN", self.publisher)
 
     def test_stable_tag_publisher_resolves_directly_and_fails_closed(self):
-        """Only an explicit registry unknown response can authorize tagging."""
+        """Only pinned ORAS's exact reference-bound absence can authorize tagging."""
 
         publisher = self.stable_tag_publisher
         for fragment in (
             ': "${STABLE_TAG_VERIFY_ROOT:?Set STABLE_TAG_VERIFY_ROOT to a new temporary directory}"',
+            "for command_name in cmp oras",
             'stable_reference="${IMAGE}:${RELEASE_TAG}"',
             'oras resolve "${stable_reference}"',
-            "MANIFEST_UNKNOWN|manifest unknown|NAME_UNKNOWN|name unknown",
+            "Error response from registry: failed to resolve digest: %s: not found",
+            '[[ "${resolve_status}" -eq 1 && ! -s "${resolve_output}" ]]',
+            'cmp -s -- "${resolve_error}" "${expected_absence}"',
             'oras tag "${IMAGE}@${EXPECTED_DIGEST}" "${RELEASE_TAG}"',
             "could not prove stable tag absence",
             '[[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]',
@@ -145,6 +154,8 @@ class PublishWorkflowContractTests(unittest.TestCase):
                 self.assertIn(fragment, publisher)
         self.assertNotIn("|not found", publisher)
         self.assertNotIn("oras repo tags", publisher)
+        self.assertNotIn("grep ", publisher)
+        self.assertNotIn("MANIFEST_UNKNOWN", publisher)
 
     def test_manual_release_verifier_is_read_only_and_direct(self):
         verifier = self.read_only_release_verifier

@@ -498,7 +498,14 @@ class ImageReleaseVersionTests(unittest.TestCase):
                 self.assertNotIn("publish-stable-oci-tag.sh", manual_block)
                 self.assertNotIn("oras tag", manual_block)
         self.assertIn("refusing to reassign immutable tag", stable_publisher)
-        self.assertIn("MANIFEST_UNKNOWN", stable_publisher)
+        self.assertIn(
+            "Error response from registry: failed to resolve digest: %s: not found",
+            stable_publisher,
+        )
+        self.assertIn(
+            'cmp -s -- "${resolve_error}" "${expected_absence}"', stable_publisher
+        )
+        self.assertNotIn("MANIFEST_UNKNOWN", stable_publisher)
         self.assertNotIn("|not found", stable_publisher)
         self.assertIn(
             'oras tag "${IMAGE}@${EXPECTED_DIGEST}" "${RELEASE_TAG}"',

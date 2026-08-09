@@ -27,10 +27,12 @@ set -euo pipefail
   printf 'RELEASE_TAG is not a canonical stable SemVer tag\n' >&2
   exit 2
 }
-command -v oras >/dev/null 2>&1 || {
-  printf 'oras is required\n' >&2
-  exit 2
-}
+for command_name in cmp oras; do
+  command -v "${command_name}" >/dev/null 2>&1 || {
+    printf '%s is required\n' "${command_name}" >&2
+    exit 2
+  }
+done
 [[ ! -e "${STABLE_TAG_VERIFY_ROOT}" ]] || {
   printf 'STABLE_TAG_VERIFY_ROOT must not already exist\n' >&2
   exit 2
@@ -38,21 +40,32 @@ command -v oras >/dev/null 2>&1 || {
 mkdir -- "${STABLE_TAG_VERIFY_ROOT}"
 
 stable_reference="${IMAGE}:${RELEASE_TAG}"
+resolve_output="${STABLE_TAG_VERIFY_ROOT}/stable-resolve.output"
 resolve_error="${STABLE_TAG_VERIFY_ROOT}/stable-resolve.error"
+expected_absence="${STABLE_TAG_VERIFY_ROOT}/stable-resolve.absent"
+printf 'Error response from registry: failed to resolve digest: %s: not found\n' \
+  "${stable_reference}" >"${expected_absence}"
+: >"${resolve_output}"
 : >"${resolve_error}"
-if resolved_digest="$(oras resolve "${stable_reference}" 2>"${resolve_error}")"; then
+if oras resolve "${stable_reference}" >"${resolve_output}" 2>"${resolve_error}"; then
+  resolved_digest="$(<"${resolve_output}")"
   [[ "${resolved_digest}" == "${EXPECTED_DIGEST}" ]] || {
     printf 'refusing to reassign immutable tag %s\n' "${RELEASE_TAG}" >&2
     exit 1
   }
-elif grep -Eqi \
-  'MANIFEST_UNKNOWN|manifest unknown|NAME_UNKNOWN|name unknown' \
-  "${resolve_error}"; then
-  oras tag "${IMAGE}@${EXPECTED_DIGEST}" "${RELEASE_TAG}"
 else
-  sed -n '1,20p' "${resolve_error}" >&2
-  printf 'could not prove stable tag absence for %s\n' "${RELEASE_TAG}" >&2
-  exit 1
+  # Checksum-pinned ORAS turns a typed registry 404 into one reference-bound
+  # line. Require its exact bytes, exit status 1, and empty stdout so generic
+  # proxy/authentication text and partial failures cannot create a tag.
+  resolve_status=$?
+  if [[ "${resolve_status}" -eq 1 && ! -s "${resolve_output}" ]] && \
+    cmp -s -- "${resolve_error}" "${expected_absence}"; then
+    oras tag "${IMAGE}@${EXPECTED_DIGEST}" "${RELEASE_TAG}"
+  else
+    sed -n '1,20p' "${resolve_error}" >&2
+    printf 'could not prove stable tag absence for %s\n' "${RELEASE_TAG}" >&2
+    exit 1
+  fi
 fi
 
 [[ "$(oras resolve "${IMAGE}:sha-${GITHUB_SHA}")" == "${EXPECTED_DIGEST}" ]] || {
