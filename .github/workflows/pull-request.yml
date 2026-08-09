@@ -94,16 +94,24 @@ jobs:
         with:
           go-version: '1.26.5'
           check-latest: false
+      - name: Verify application toolchain
+        # setup-node selects Node, but npm is bundled independently. Checking
+        # both prevents a base/runtime bump from silently changing lock behavior.
+        run: |
+          test "$(node --version)" = "v24.19.0"
+          test "$(npm --version)" = "11.17.0"
+          test "$(go env GOVERSION)" = "go1.26.5"
       - name: Build and check Svelte
         working-directory: websites/${{ matrix.site }}/frontend
         run: |
           test -f package-lock.json
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
-          npm test --if-present
+          npm test
           npm run build
+          python3 ../../../scripts/validate_frontend_dist.py --site "${{ matrix.site }}"
           python3 ../../../scripts/validate_repository.py media
-      - name: Test Go service
+      - name: Test Go service and embedded website experience
         working-directory: websites/${{ matrix.site }}
         env:
           GOTOOLCHAIN: local

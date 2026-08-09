@@ -15,7 +15,7 @@ help:
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
 	  'kind-check       Check pinned prerequisites for the disposable local Kind harness' \
-	  'website-test     Check, build, vet, and test the Svelte/Go application'
+	  'website-test     Check Svelte/Go code, artifacts, and served-site contracts'
 
 check: check-fast check-gitleaks check-shell check-workflows check-container check-kubernetes check-cloudflare website-test
 
@@ -62,8 +62,10 @@ check-tofu: check-cloudflare
 website-test:
 	@test -f websites/naranjo.online/frontend/package-lock.json
 	@cd websites/naranjo.online/frontend && npm ci --ignore-scripts --no-audit --no-fund && npm run check && npm test && npm run build
+	@$(PYTHON) scripts/validate_frontend_dist.py --site naranjo.online
 	@test -f websites/lidersea.com/frontend/package-lock.json
-	@cd websites/lidersea.com/frontend && npm ci --ignore-scripts --no-audit --no-fund && npm run check && npm run build
+	@cd websites/lidersea.com/frontend && npm ci --ignore-scripts --no-audit --no-fund && npm run check && npm test && npm run build
+	@$(PYTHON) scripts/validate_frontend_dist.py --site lidersea.com
 	@$(PYTHON) scripts/validate_repository.py media
 	@test -z "$$(gofmt -l websites/naranjo.online)"
 	@cd websites/naranjo.online && GOTOOLCHAIN=local go vet ./...

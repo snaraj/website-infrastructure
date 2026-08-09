@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Protect the independent website build contexts from local credential files."""
 
-import json
 import unittest
 from pathlib import Path
 
@@ -94,8 +93,8 @@ class DockerContextContractTests(unittest.TestCase):
                     )
             self.assertIn("- versions.env", workflow)
 
-    def test_both_sites_match_the_reviewed_runtime_pins(self):
-        """Independent images must still share the repository's toolchain review."""
+    def test_both_sites_use_reviewed_builder_and_runtime_images(self):
+        """Independent images must consume every centrally reviewed base image."""
 
         versions = {}
         for line in (ROOT / "versions.env").read_text(encoding="utf-8").splitlines():
@@ -105,18 +104,8 @@ class DockerContextContractTests(unittest.TestCase):
 
         for site, (binary_name, _) in SITE_RELEASES.items():
             site_root = ROOT / "websites" / site
-            package = json.loads(
-                (site_root / "frontend" / "package.json").read_text(encoding="utf-8")
-            )
             dockerfile = (site_root / "Dockerfile").read_text(encoding="utf-8")
             with self.subTest(site=site):
-                self.assertEqual(package["engines"]["node"], versions["NODE_VERSION"])
-                self.assertEqual(
-                    package["packageManager"], "npm@{}".format(versions["NPM_VERSION"])
-                )
-                self.assertEqual(
-                    package["devDependencies"]["svelte"], versions["SVELTE_VERSION"]
-                )
                 for key in (
                     "WEBSITE_NODE_BUILDER",
                     "WEBSITE_GO_BUILDER",
@@ -127,23 +116,35 @@ class DockerContextContractTests(unittest.TestCase):
                 self.assertIn('ENTRYPOINT ["/{}"]'.format(binary_name), dockerfile)
                 self.assertNotIn(":latest", dockerfile)
 
-    def test_dependabot_covers_each_independent_dependency_root(self):
-        """Both images receive equivalent Go, npm, and Docker update reviews."""
+    def test_dependabot_consolidates_equivalent_roots_by_ecosystem(self):
+        """One ecosystem job should update both sites without joining releases."""
 
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
-        for site in SITES:
-            directories = {
-                "gomod": "/websites/{}".format(site),
-                "npm": "/websites/{}/frontend".format(site),
-                "docker": "/websites/{}".format(site),
-            }
-            for ecosystem, directory in directories.items():
-                with self.subTest(site=site, ecosystem=ecosystem):
-                    entry = (
-                        "- package-ecosystem: {}\n"
-                        "    directory: {}\n"
-                    ).format(ecosystem, directory)
-                    self.assertEqual(dependabot.count(entry), 1)
+        blocks = {}
+        for raw_block in dependabot.split("\n  - package-ecosystem: ")[1:]:
+            ecosystem, *lines = raw_block.splitlines()
+            self.assertNotIn(ecosystem, blocks)
+            blocks[ecosystem] = "\n".join(lines)
+
+        expected = {
+            "gomod": ["/websites/naranjo.online", "/websites/lidersea.com"],
+            "npm": [
+                "/websites/naranjo.online/frontend",
+                "/websites/lidersea.com/frontend",
+            ],
+            "docker": ["/websites/naranjo.online", "/websites/lidersea.com"],
+        }
+        for ecosystem, directories in expected.items():
+            block = blocks[ecosystem]
+            with self.subTest(ecosystem=ecosystem):
+                self.assertIn("    directories:", block)
+                self.assertNotIn("    directory:", block)
+                # The plural-directory job already updates one dependency
+                # across both roots. A groups rule would instead combine
+                # unrelated dependencies and is intentionally absent.
+                self.assertNotIn("    groups:", block)
+                for directory in directories:
+                    self.assertEqual(block.count("      - {}".format(directory)), 1)
 
 
 if __name__ == "__main__":

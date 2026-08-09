@@ -3,9 +3,13 @@
 FROM docker.io/library/node:24.19.0-trixie-slim@sha256:0711b541c1c33a8a530ac4f0d391baa9a15b3d804695b1b24a47daa5fb60e74d AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+# The tag and digest select Node, while these checks also prove the npm bundled
+# by that image matches the separately reviewed package-manager pin.
+RUN test "$(node --version)" = "v24.19.0" && \
+    test "$(npm --version)" = "11.17.0" && \
+    npm ci --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
-RUN npm run check && npm run build
+RUN npm run check && npm test && npm run build
 
 # Compile and test a static Go binary for both amd64 CI and arm64 production;
 # Buildx selects the matching architecture from this manifest-list pin.

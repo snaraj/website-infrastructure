@@ -18,12 +18,15 @@ and the chart schema rejects enablement until ADR 0012's Pi/storage/backup/load
 evidence exists. Current Cloudflare self-serve terms also make deliberate
 large-media delivery a zero-spend `NO-GO`, independent of local code readiness.
 
-`frontend/package-lock.json` was generated with the exact Node 24.19.0/npm
-11.17.0 pins. `npm ci`, Svelte checks/build, Go 1.26.5 tests/vet/build, and a
-local HTTP/security-header smoke test pass. The container build and multi-arch
-publication still require the pinned CI builder. Until a reviewed published
-image digest exists, the HelmRelease remains suspended and the all-zero digest
-sentinel blocks deployment readiness.
+`frontend/package-lock.json`, both builder stages, Go modules, and CI selectors
+must match the exact public pins in `versions.env`; the contract fails a partial
+Dependabot upgrade instead of guessing compatible versions. `npm ci` keeps
+lifecycle scripts disabled, then the Svelte checks, dependency-free source
+tests, generated-artifact budgets, Go tests, and production-handler cache/header
+smoke tests run before a container can be accepted. The container build and
+multi-arch publication still require the pinned CI builder. Until a reviewed
+published image digest exists, the HelmRelease remains suspended and the
+all-zero digest sentinel blocks deployment readiness.
 
 Python is not in this application or image. Repository-level Python checks exist
 only because they provide dependency-free policy/redaction on the current

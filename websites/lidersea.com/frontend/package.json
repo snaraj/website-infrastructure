@@ -10,7 +10,8 @@
   "scripts": {
     "build": "vite build && node ./scripts/ensure-dist-placeholder.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "dev": "vite --host 127.0.0.1"
+    "dev": "vite --host 127.0.0.1",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.0",
