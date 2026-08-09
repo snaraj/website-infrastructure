@@ -67,6 +67,22 @@ class CiToolPinTests(unittest.TestCase):
             self.installer.index("tar -xf"),
         )
 
+    def test_release_assets_use_the_publishers_canonical_linux_names(self):
+        """Release URL spelling must match the publisher's exact asset metadata."""
+
+        configured = self.versions["ACTIONLINT_VERSION"]
+        version = configured[1:] if configured.startswith("v") else configured
+        expected_asset = "actionlint_{}_linux_amd64.tar.gz".format(version)
+        self.assertIn(expected_asset, self.installer)
+        self.assertNotIn("actionlint_{}_linux_x86_64.tar.gz".format(version), self.installer)
+
+        hadolint = self.versions["HADOLINT_VERSION"].lstrip("v")
+        self.assertIn(
+            "hadolint/releases/download/v{}/hadolint-linux-x86_64".format(hadolint),
+            self.installer,
+        )
+        self.assertNotIn("hadolint-Linux-x86_64", self.installer)
+
     def test_installer_rejects_archive_path_traversal(self):
         """A valid release hash must not authorize unsafe archive member paths."""
 

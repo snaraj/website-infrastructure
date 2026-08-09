@@ -17,7 +17,10 @@ fetch() {
   local url="$1"
   local sha256="$2"
   local output="$3"
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+  # The basename is public release metadata and makes a failed pin actionable
+  # without printing query strings, credentials, or a caller's local paths.
+  printf 'Fetching checksum-pinned asset %s.\n' "${url##*/}"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
     --output "${output}" "${url}"
   printf '%s  %s\n' "${sha256}" "${output}" | sha256sum --check --status || {
     printf 'checksum mismatch: %s\n' "${url}" >&2
@@ -85,7 +88,7 @@ install_archive_binary \
   '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' \
   'gitleaks' 'gitleaks' 'gitleaks'
 install_archive_binary \
-  'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_x86_64.tar.gz' \
+  'https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz' \
   '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' \
   'actionlint' 'actionlint' 'actionlint'
 install_archive_binary \
@@ -136,7 +139,7 @@ install_archive_binary \
 # same checksum boundary before installation.
 hadolint_file="${download_root}/hadolint"
 fetch \
-  'https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-x86_64' \
+  'https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64' \
   'c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507' \
   "${hadolint_file}"
 install -m 0755 "${hadolint_file}" "${install_root}/hadolint"
