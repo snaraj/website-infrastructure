@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPO_ROOT / "scripts" / "ci" / "verify-oci-artifact.sh"
+PUBLISHER = REPO_ROOT / "scripts" / "ci" / "publish-oci-artifact.sh"
 PULL_REQUEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pull-request.yml"
 PUBLISH_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "publish-naranjo-online-image.yml"
@@ -24,6 +25,7 @@ class PublishWorkflowContractTests(unittest.TestCase):
         """Read the small contract sources once for deterministic string checks."""
 
         cls.verifier = VERIFIER.read_text(encoding="utf-8")
+        cls.publisher = PUBLISHER.read_text(encoding="utf-8")
         cls.pull_request = PULL_REQUEST_WORKFLOW.read_text(encoding="utf-8")
         cls.publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
@@ -74,6 +76,33 @@ class PublishWorkflowContractTests(unittest.TestCase):
                 self.assertEqual(workflow.count("outputs: type=oci,dest="), 1)
                 self.assertIn("EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}", workflow)
                 self.assertIn("MAX_APPLICATION_LAYER_BYTES: 16777216", workflow)
+
+    def test_publisher_retries_only_the_exact_verified_graph(self):
+        """Transient GHCR visibility failures must not rebuild or retag drift."""
+
+        required_fragments = (
+            ': "${OCI_ARCHIVE:?Set OCI_ARCHIVE to the verified multi-platform OCI layout archive}"',
+            ': "${EXPECTED_DIGEST:?Set EXPECTED_DIGEST to the verified sha256 index digest}"',
+            ': "${PUBLISH_VERIFY_ROOT:?Set PUBLISH_VERIFY_ROOT to a new temporary verification directory}"',
+            'source_digest="$(oras resolve --oci-layout "${source_reference}")"',
+            'readonly image_index_media_type="application/vnd.oci.image.index.v1+json"',
+            "oras manifest fetch --oci-layout",
+            "jq -er '.mediaType'",
+            "oras cp --no-tty --concurrency 1 --from-oci-layout",
+            "oras cp --no-tty --concurrency 1 --to-oci-layout",
+            'destination_reference="${IMAGE}:sha-${GITHUB_SHA}"',
+            "readonly max_attempts=4",
+            'readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"',
+            '[[ "${resolved}" == "${EXPECTED_DIGEST}" ]]',
+            '[[ "${roundtrip_digest}" == "${EXPECTED_DIGEST}" ]]',
+            '[[ "${roundtrip_media_type}" == "${image_index_media_type}" ]]',
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.publisher)
+        self.assertEqual(self.publisher.count("oras cp "), 2)
+        self.assertNotIn("docker build", self.publisher)
+        self.assertNotIn("GHCR_TOKEN", self.publisher)
 
     def test_pull_request_builds_both_sites_independently(self):
         """Every site receives its own Go/Svelte and multiarch matrix entry."""
@@ -133,6 +162,24 @@ class PublishWorkflowContractTests(unittest.TestCase):
             with self.subTest(domain=domain):
                 for fragment in required:
                     self.assertIn(fragment, workflow)
+                self.assertIn(
+                    "run: |\n"
+                    "          printf '%s' \"${GHCR_TOKEN}\" | oras login ghcr.io "
+                    "--username \"${GITHUB_ACTOR}\" --password-stdin\n"
+                    "          ./scripts/ci/publish-oci-artifact.sh",
+                    workflow,
+                )
+                self.assertIn(
+                    "OCI_ARCHIVE: ${{{{ runner.temp }}}}/{}.oci.tar".format(slug),
+                    workflow,
+                )
+                self.assertIn(
+                    "PUBLISH_VERIFY_ROOT: ${{{{ runner.temp }}}}/{}-publish-verify".format(
+                        slug
+                    ),
+                    workflow,
+                )
+                self.assertNotIn("oras cp --from-oci-layout", workflow)
                 self.assertIn("create-storage-record: false", workflow)
                 self.assertNotIn("artifact-metadata: write", workflow)
                 for other_domain, (other_slug, _) in PUBLISH_CONTRACTS.items():

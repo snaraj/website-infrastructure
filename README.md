@@ -74,7 +74,13 @@ one-command deployment template.
 Run `make check` on a workstation with the pinned tools from `versions.env`.
 `make check-fast` performs credential-free static checks and does not contact
 the Pi, GitHub, Cloudflare, or a registry. Validation never runs `tofu plan` or
-`tofu apply` automatically.
+`tofu apply` automatically. Each pull request also builds both frontends,
+rejects remote or unhashed generated resources, source maps, and explicit
+artifact-size budget overruns, then serves the exact embedded bundles through
+the production Go handlers to verify cache identities and browser-security
+headers. These deterministic checks are not a claim about Core Web Vitals;
+live browser timing remains pending until a real edge URL exists and browser
+use is explicitly authorized.
 
 The optional [disposable Kind harness](docs/runbooks/local-kind.md) checks
 rendered local artifacts against a short-lived workstation cluster. It is not
