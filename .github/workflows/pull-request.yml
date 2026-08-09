@@ -94,6 +94,9 @@ jobs:
         with:
           go-version: '1.26.5'
           check-latest: false
+          # Both Go applications currently use only the standard library, so
+          # they intentionally have no go.sum dependency graph to cache.
+          cache: false
       - name: Verify application toolchain
         # setup-node selects Node, but npm is bundled independently. Checking
         # both prevents a base/runtime bump from silently changing lock behavior.
@@ -116,7 +119,11 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: |
-          test -z "$(gofmt -l .)"
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            printf 'gofmt is required for:\n%s\n' "${unformatted}" >&2
+            exit 1
+          fi
           go vet ./...
           CGO_ENABLED=0 go test ./...
           go test -race ./...

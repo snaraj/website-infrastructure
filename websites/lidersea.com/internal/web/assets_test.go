@@ -31,7 +31,7 @@ var strongETag = regexp.MustCompile(`^"[0-9a-f]{64}"$`)
 // expectedOriginHeaders is the complete browser-facing policy shared by the
 // generated shell and its immutable resources at the production Go boundary.
 var expectedOriginHeaders = map[string]string{
-	"Content-Security-Policy":       "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+	"Content-Security-Policy":      "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
 	"Cross-Origin-Resource-Policy": "same-origin",
 	"Permissions-Policy":           "camera=(), geolocation=(), microphone=()",
 	"Referrer-Policy":              "no-referrer",

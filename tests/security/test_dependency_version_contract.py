@@ -137,6 +137,10 @@ class DependencyVersionContractTests(unittest.TestCase):
         self.assertEqual(node_selectors, [self.versions["NODE_VERSION"]])
         self.assertEqual(pull_go_selectors, [self.versions["GO_VERSION"]])
         self.assertEqual(codeql_go_selectors, [self.versions["GO_VERSION"]])
+        self.assertIn(
+            "cache: false",
+            pull_request,
+        )
 
         node_check = 'test "$(node --version)" = "v{}"'.format(
             self.versions["NODE_VERSION"]
