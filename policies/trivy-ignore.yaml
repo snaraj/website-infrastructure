@@ -1,0 +1,29 @@
+# Trivy's generic Kubernetes RBAC checks cannot express Flux's separately
+# enforced namespace and reconciliation boundaries. Each accepted finding is
+# limited to one ID and the source/rendered paths that contain the same object;
+# the expiry forces a fresh review instead of making this permanent policy.
+misconfigurations:
+  - id: AVD-KSV-0041
+    paths:
+      - "kubernetes/flux-system/controllers/gotk-components.yaml"
+      - ".artifacts/rendered/kubernetes-flux-system.yaml"
+    statement: >-
+      The version-pinned generated Flux controller manifest uses its standard
+      cluster-scoped Secret discovery permission; all other findings stay active.
+    expired_at: 2027-08-08
+  - id: AVD-KSV-0046
+    paths:
+      - "kubernetes/flux-system/controllers/gotk-components.yaml"
+      - ".artifacts/rendered/kubernetes-flux-system.yaml"
+    statement: >-
+      Generated Flux aggregation roles use wildcard resources only inside named
+      Flux API groups; controller composition and images are validated separately.
+    expired_at: 2027-08-08
+  - id: AVD-KSV-0056
+    paths:
+      - "kubernetes/flux-system/access.yaml"
+      - ".artifacts/rendered/kubernetes-flux-system.yaml"
+    statement: >-
+      Namespaced reconcilers must write Services and NetworkPolicies; the exact
+      namespace, resource, and verb envelope is enforced by repository policy.
+    expired_at: 2027-08-08

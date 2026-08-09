@@ -57,8 +57,17 @@ jobs:
           test -f infrastructure/cloudflare/.terraform.lock.hcl
           test -z "$(git status --porcelain -- infrastructure/cloudflare/.terraform.lock.hcl)"
           ./scripts/test-cloudflare-policy.sh
-      - name: Scan filesystem, IaC, and configuration
-        run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,misconfig,secret --severity HIGH,CRITICAL .
+      - name: Scan dependencies and full-tree secrets
+        run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,secret --severity HIGH,CRITICAL .
+      - name: Scan IaC and configuration
+        # Negative fixtures are rejected by Conftest and Kyverno. Separating
+        # this pass keeps them inside the full-tree secret scan above.
+        run: >-
+          trivy fs --exit-code 1
+          --ignorefile policies/trivy-ignore.yaml
+          --skip-dirs ./tests/kubernetes/fixtures/deny
+          --scanners misconfig
+          --severity HIGH,CRITICAL .
 
   application:
     runs-on: ubuntu-24.04

@@ -3,6 +3,7 @@
 
 import argparse
 import codecs
+import hashlib
 import ipaddress
 import re
 import sys
@@ -62,6 +63,13 @@ DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 SITE_RELEASE_CONTRACTS = (
     ("naranjo.online", "naranjo-online", "publish-naranjo-online-image.yml"),
     ("lidersea.com", "lidersea-com", "publish-lidersea-com-image.yml"),
+)
+
+# This literal digest couples Trivy's path-scoped AVD-KSV-0056 acceptance to
+# every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
+# Update it only after reviewing that complete authorization file.
+FLUX_ACCESS_CONTRACT_SHA256 = (
+    "0e6c9c7f1dac58f9a5be61108c4dca106fff07ebd9b02cbebd7dec5508b689b5"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -269,6 +277,21 @@ def direct_mapping_entries(document, mapping_name):
                 entries[scalar.group(1).strip()] = scalar.group(2).split(" #", 1)[0].strip().strip("'\"")
         break
     return entries
+
+
+def flux_access_contract_errors(text):
+    """Require review of every byte in the accepted Flux authorization file."""
+
+    # read_text already normalizes platform newlines; the explicit replacement
+    # also makes direct unit-test input behave identically on Windows and Linux.
+    normalized = text.replace("\r\n", "\n")
+    observed = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    if observed != FLUX_ACCESS_CONTRACT_SHA256:
+        return [
+            "Flux access authorization changed; review every ServiceAccount, "
+            "Role, RoleBinding, rule, and subject before updating its digest"
+        ]
+    return []
 
 
 def tunnel_secret_errors(text, expected_recipient):
@@ -654,8 +677,8 @@ def check_kubernetes(root):
                 if fragment not in text:
                     errors.append("Flux hardening fragment missing from {}: {}".format(name, fragment))
         access = flux / "access.yaml"
-        if access.is_file() and re.search(r"(?m)^kind:\s*ClusterRole(?:Binding)?\s*$", read(access)):
-            errors.append("Flux bootstrap access must not grant any cluster-scoped RBAC")
+        if access.is_file():
+            errors.extend(flux_access_contract_errors(read(access)))
         default_denies = root / "kubernetes/platform/prerequisites/network-policies.yaml"
         if not default_denies.is_file():
             errors.append("bootstrap-owned default-deny NetworkPolicies are missing")

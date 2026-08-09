@@ -33,6 +33,12 @@ publish without authorization.
   when the repository deliberately authorizes a separately secured automation.
 - Treat artifacts and caches as untrusted inputs across privilege boundaries.
   Minimize retention and never upload state, plans, credentials, or inventories.
+- Keep intentional negative fixtures in their dedicated policy tests instead of
+  letting a generic scanner interpret them as deployable input. If an upstream
+  or required manifest needs an accepted finding, scope it to the exact finding
+  ID and path, set an expiry, and enforce the compensating boundary separately;
+  every workflow using the exception must run that guard first, and must never
+  skip the file from vulnerability or secret scanning.
 - Give every independently released site its own workflow identity, registry
   subject, digest, inventory names, signature subject, promotion key, and
   rollback. A validation matrix may share setup and verification machinery, but

@@ -9,9 +9,64 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "validate_repository.
 SPEC = importlib.util.spec_from_file_location("validate_repository", str(SCRIPT))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class RepositoryPolicyTests(unittest.TestCase):
+    def test_flux_access_authorization_matches_the_reviewed_file(self):
+        """Any accepted RBAC change must force review of the complete boundary."""
+
+        access = REPO_ROOT.joinpath(
+            "kubernetes", "flux-system", "access.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(MODULE.flux_access_contract_errors(access), [])
+        self.assertEqual(
+            MODULE.flux_access_contract_errors(access.replace("\n", "\r\n")), []
+        )
+
+        def assert_rejected(candidate):
+            self.assertTrue(any(
+                "authorization changed" in error
+                for error in MODULE.flux_access_contract_errors(candidate)
+            ))
+
+        widened = access.replace(
+            "resources: [networkpolicies]",
+            "resources: [networkpolicies, ingresses]",
+            1,
+        )
+        assert_rejected(widened)
+
+        cluster_scoped = access.replace("kind: Role\n", "kind: ClusterRole\n", 1)
+        assert_rejected(cluster_scoped)
+
+        broad_subject = access.replace(
+            "  - kind: ServiceAccount\n"
+            "    name: platform-prerequisites-reconciler\n"
+            "    namespace: flux-system\n",
+            "  - kind: Group\n"
+            "    name: system:authenticated\n"
+            "    namespace: flux-system\n",
+            1,
+        )
+        assert_rejected(broad_subject)
+
+        quoted_kind = access.replace("kind: Role\n", 'kind: "Role"\n', 1)
+        assert_rejected(quoted_kind)
+
+        duplicate_role_ref = access.replace(
+            "subjects:\n  - kind: ServiceAccount\n    name: root-reconciler",
+            "roleRef:\n"
+            "  apiGroup: rbac.authorization.k8s.io\n"
+            "  kind: ClusterRole\n"
+            "  name: cluster-admin\n"
+            "subjects:\n"
+            "  - kind: ServiceAccount\n"
+            "    name: root-reconciler",
+            1,
+        )
+        assert_rejected(duplicate_role_ref)
+
     def test_rejects_local_identity_and_opaque_identifiers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
