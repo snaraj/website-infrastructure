@@ -1,0 +1,26 @@
+name: Scheduled security
+
+on:
+  schedule:
+    - cron: '19 10 * * 6'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Scan Git history for secrets
+        run: gitleaks git --no-banner --redact --config policies/gitleaks.toml .
+      - name: Scan repository
+        run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,misconfig,secret --severity HIGH,CRITICAL .

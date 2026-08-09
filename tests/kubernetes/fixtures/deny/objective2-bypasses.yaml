@@ -1,0 +1,384 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidersea-bypass
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  hostNetwork: true
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  tolerations:
+    - key: node.kubernetes.io/disk-pressure
+      operator: Exists
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com:latest
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+  volumes:
+    - name: media
+      persistentVolumeClaim:
+        claimName: invented-media
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: public-bypass
+  namespace: lidersea-com
+spec:
+  type: NodePort
+  externalIPs: [192.0.2.44]
+  ports:
+    - port: 8080
+      nodePort: 30080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: unexpected-hostname
+  namespace: lidersea-com
+spec:
+  rules:
+    - host: unexpected.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lidersea-com
+                port:
+                  number: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: unexpected-hostname
+  namespace: lidersea-com
+spec:
+  gatewayClassName: forbidden
+  listeners:
+    - name: https
+      hostname: unexpected.example.com
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: forbidden
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: widened-ingress
+  namespace: lidersea-com
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    - {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: invented-media
+  namespace: lidersea-com
+spec:
+  accessModes: [ReadOnlyMany]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: invented-capacity
+  namespace: lidersea-com
+spec:
+  hard:
+    pods: "2"
+    limits.cpu: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: media-in-etcd
+  namespace: lidersea-com
+binaryData:
+  album.flac: ZkxhQwAAAAA=
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: media-in-etcd
+  namespace: naranjo-online
+type: Opaque
+stringData:
+  clip.mp4: synthetic-policy-fixture
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lidersea-not-ready
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/deployment-ready: "false"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lidersea-not-ready
+  template:
+    metadata:
+      labels:
+        app: lidersea-not-ready
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: lidersea-com
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: lidersea-com
+          image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: lidersea-com-source
+  namespace: lidersea-com
+spec:
+  interval: 10m0s
+  ref:
+    branch: main
+  # Deliberately omits sparseCheckout and fail-closed ignore rules so the
+  # artifact would contain the whole repository.
+  timeout: 60s
+  url: https://github.com/snaraj/website-infrastructure.git
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: endport-widening
+  namespace: lidersea-com
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: lidersea-com
+      app.kubernetes.io/name: lidersea-com
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+      ports:
+        - port: 8080
+          endPort: 9000
+          protocol: TCP
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: capability-readd
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+          add: [NET_BIND_SERVICE]
+        readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wildcard-disk-pressure
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  tolerations:
+    - operator: Exists
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unlisted-storage-source
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+  volumes:
+    - name: tmp
+      azureFile:
+        secretName: invented-storage
+        shareName: media
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: helm-reconciler-token
+  namespace: lidersea-com
+  annotations:
+    kubernetes.io/service-account.name: helm-reconciler
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy-token-mount
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: stolen-token
+          mountPath: /var/run/stolen
+          readOnly: true
+  volumes:
+    - name: stolen-token
+      secret:
+        secretName: helm-reconciler-token
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: encoded-media-in-data
+  namespace: lidersea-com
+data:
+  blob: iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: raw-replicaset
+  namespace: lidersea-com
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: raw-replicaset}
+  template:
+    metadata:
+      labels: {app: raw-replicaset}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: lidersea-com
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: lidersea-com
+          image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helm-reconciler
+  namespace: lidersea-com
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]

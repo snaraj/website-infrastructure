@@ -1,0 +1,23 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: cloudflare-public-source
+  namespace: cloudflare-public
+spec:
+  # This source may archive only the reviewed tunnel chart subtree.
+  ignore: |
+    /*
+    !/kubernetes
+    /kubernetes/*
+    !/kubernetes/platform
+    /kubernetes/platform/*
+    !/kubernetes/platform/cloudflare-public
+    /kubernetes/platform/cloudflare-public/*
+    !/kubernetes/platform/cloudflare-public/chart
+  interval: 10m0s
+  ref:
+    branch: main
+  sparseCheckout:
+    - kubernetes/platform/cloudflare-public/chart
+  timeout: 60s
+  url: https://github.com/snaraj/website-infrastructure.git

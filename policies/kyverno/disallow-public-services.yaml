@@ -1,0 +1,68 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-public-services
+  annotations:
+    policies.kyverno.io/category: Networking
+    policies.kyverno.io/description: Enforce ClusterIP-only Services and reject Ingress and Gateway API entry points.
+spec:
+  admission: true
+  background: true
+  validationFailureAction: Enforce
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  rules:
+    - name: disallow-public-service
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+      validate:
+        failureAction: Enforce
+        message: Services must be ClusterIP without externalIPs.
+        anyPattern:
+          - spec:
+              type: ClusterIP
+              X(externalIPs): "*"
+          - spec:
+              X(type): "*"
+              X(externalIPs): "*"
+    - name: disallow-ingress
+      match:
+        any:
+          - resources:
+              kinds:
+                - networking.k8s.io/v1/Ingress
+      validate:
+        failureAction: Enforce
+        message: Ingress is forbidden; Cloudflare Tunnel routes directly to ClusterIP Services.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.kind }}"
+                operator: Equals
+                value: Ingress
+    - name: disallow-gateway-api
+      match:
+        any:
+          - resources:
+              kinds:
+                - gateway.networking.k8s.io/*/GatewayClass
+                - gateway.networking.k8s.io/*/Gateway
+                - gateway.networking.k8s.io/*/HTTPRoute
+                - gateway.networking.k8s.io/*/GRPCRoute
+                - gateway.networking.k8s.io/*/TCPRoute
+                - gateway.networking.k8s.io/*/TLSRoute
+                - gateway.networking.k8s.io/*/UDPRoute
+                - gateway.networking.k8s.io/*/ReferenceGrant
+      validate:
+        failureAction: Enforce
+        message: Gateway API resources are forbidden before an approved routing redesign.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.kind || '' }}"
+                operator: NotEquals
+                value: ""

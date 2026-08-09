@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "tunnel", "origin", "liderseaOrigin", "resources"],
+  "properties": {
+    "replicaCount": {"type": "integer", "const": 2},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "const": "cloudflare/cloudflared"},
+        "tag": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "pullPolicy": {"type": "string", "enum": ["IfNotPresent", "Never"]}
+      }
+    },
+    "tunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secretName", "secretKey", "tokenRevision"],
+      "properties": {
+        "secretName": {"type": "string", "const": "pi-websites-tunnel-token"},
+        "secretKey": {"type": "string", "const": "token"},
+        "tokenRevision": {"type": "string", "minLength": 1}
+      }
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "podLabels", "port"],
+      "properties": {
+        "namespace": {"type": "string", "const": "naranjo-online"},
+        "podLabels": {
+          "type": "object",
+          "required": ["app.kubernetes.io/name"],
+          "properties": {"app.kubernetes.io/name": {"type": "string", "const": "naranjo-online"}}
+        },
+        "port": {"type": "integer", "const": 8080}
+      }
+    },
+    "liderseaOrigin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "podLabels", "port"],
+      "properties": {
+        "namespace": {"type": "string", "const": "lidersea-com"},
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["app.kubernetes.io/name"],
+          "properties": {"app.kubernetes.io/name": {"type": "string", "const": "lidersea-com"}}
+        },
+        "port": {"type": "integer", "const": 8080}
+      }
+    },
+    "resources": {"type": "object"}
+  }
+}

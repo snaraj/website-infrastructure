@@ -1,0 +1,39 @@
+[Unit]
+Description=Verified local snapshot of kubeadm stacked etcd
+Documentation=https://etcd.io/docs/
+Wants=kubelet.service
+After=local-fs.target kubelet.service
+RequiresMountsFor=/var/backups/kubernetes/etcd /etc/kubernetes/pki/etcd
+ConditionPathExists=/etc/kubernetes/manifests/etcd.yaml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=WEBSITE_INFRA_VERSIONS_FILE=/etc/website-infrastructure/versions.env
+Environment=PI_DECISIONS_PATH=/etc/website-infrastructure/pi-decisions.env
+Environment=CONFIRM_ETCD_SNAPSHOT=create-reviewed-stacked-etcd-snapshot
+ExecStart=/usr/local/sbin/website-infrastructure-etcd-snapshot --apply
+TimeoutStartSec=10min
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/kubernetes/pki/etcd /etc/website-infrastructure
+ReadWritePaths=/var/backups/kubernetes/etcd /run/lock
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+IPAddressDeny=any
+IPAddressAllow=127.0.0.0/8

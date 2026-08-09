@@ -1,0 +1,19 @@
+# Flux needs only declared cluster state, admission policy, and Helm charts.
+# Default-denying the artifact keeps application source, media, CI evidence,
+# documentation, bootstrap material, and provider state off the Pi.
+/*
+!/.sourceignore
+!/kubernetes/
+!/policies/
+!/websites/
+
+/policies/*
+!/policies/kyverno/
+
+/websites/*
+!/websites/naranjo.online/
+!/websites/lidersea.com/
+/websites/naranjo.online/*
+!/websites/naranjo.online/chart/
+/websites/lidersea.com/*
+!/websites/lidersea.com/chart/

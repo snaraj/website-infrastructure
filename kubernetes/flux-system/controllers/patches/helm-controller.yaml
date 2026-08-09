@@ -1,0 +1,15 @@
+# Pod-level defaults protect current and future sidecars; the generated
+# controller already repeats these controls on its manager container.
+- op: add
+  path: /spec/template/spec/securityContext/runAsNonRoot
+  value: true
+- op: add
+  path: /spec/template/spec/securityContext/seccompProfile
+  value:
+    type: RuntimeDefault
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --no-cross-namespace-refs=true
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --default-service-account=default

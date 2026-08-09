@@ -1,0 +1,110 @@
+# Copy to kubeadm-config.yaml.local only after read-only Pi discovery. The local
+# file is ignored because it contains private addressing and host identity.
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: REPLACE_PI_STABLE_PRIVATE_IP
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  imagePullPolicy: IfNotPresent
+  imagePullSerial: true
+  name: REPLACE_PI_NODE_NAME
+  taints: []
+  kubeletExtraArgs:
+    - name: node-ip
+      value: REPLACE_PI_STABLE_PRIVATE_IP
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+clusterName: pi-production
+kubernetesVersion: v1.36.3
+controlPlaneEndpoint: REPLACE_PI_STABLE_PRIVATE_IP:6443
+imageRepository: registry.k8s.io
+certificatesDir: /etc/kubernetes/pki
+networking:
+  dnsDomain: cluster.local
+  podSubnet: REPLACE_CONFLICT_CHECKED_POD_CIDR
+  serviceSubnet: REPLACE_CONFLICT_CHECKED_SERVICE_CIDR
+apiServer:
+  certSANs:
+    - REPLACE_PI_STABLE_PRIVATE_IP
+    - REPLACE_PI_PRIVATE_KUBERNETES_HOSTNAME
+  extraArgs:
+    - name: admission-control-config-file
+      value: /etc/kubernetes/admission/psa.yaml
+    - name: audit-policy-file
+      value: /etc/kubernetes/audit/audit-policy.yaml
+    - name: audit-log-path
+      value: /var/log/kubernetes/audit/audit.log
+    - name: audit-log-maxage
+      value: "30"
+    - name: audit-log-maxbackup
+      value: "10"
+    - name: audit-log-maxsize
+      value: "100"
+    - name: encryption-provider-config
+      value: /etc/kubernetes/encryption/encryption-config.yaml
+    - name: encryption-provider-config-automatic-reload
+      value: "true"
+    - name: service-account-extend-token-expiration
+      value: "false"
+  extraVolumes:
+    - name: psa-config
+      hostPath: /etc/kubernetes/admission/psa.yaml
+      mountPath: /etc/kubernetes/admission/psa.yaml
+      readOnly: true
+      pathType: File
+    - name: audit-policy
+      hostPath: /etc/kubernetes/audit/audit-policy.yaml
+      mountPath: /etc/kubernetes/audit/audit-policy.yaml
+      readOnly: true
+      pathType: File
+    - name: audit-log
+      hostPath: /var/log/kubernetes/audit
+      mountPath: /var/log/kubernetes/audit
+      readOnly: false
+      pathType: DirectoryOrCreate
+    - name: encryption-config
+      hostPath: /etc/kubernetes/encryption/encryption-config.yaml
+      mountPath: /etc/kubernetes/encryption/encryption-config.yaml
+      readOnly: true
+      pathType: File
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+    extraArgs:
+      - name: auto-compaction-mode
+        value: periodic
+      - name: auto-compaction-retention
+        value: 1h
+      - name: quota-backend-bytes
+        value: "8589934592"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failSwapOn: true
+failCgroupV1: true
+protectKernelDefaults: true
+readOnlyPort: 0
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+authorization:
+  mode: Webhook
+rotateCertificates: true
+seccompDefault: true
+serverTLSBootstrap: false
+enforceNodeAllocatable:
+  - pods
+containerLogMaxFiles: 5
+containerLogMaxSize: 10Mi
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: REPLACE_REVIEWED_PROXY_MODE
+clusterCIDR: REPLACE_CONFLICT_CHECKED_POD_CIDR
+detectLocalMode: ClusterCIDR

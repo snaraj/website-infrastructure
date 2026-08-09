@@ -1,0 +1,22 @@
+[Unit]
+Description=Kubernetes kubelet
+Documentation=https://kubernetes.io/docs/
+Wants=network-online.target containerd.service
+After=network-online.target containerd.service
+StartLimitIntervalSec=0
+
+[Service]
+Environment="KUBELET_KUBEADM_ARGS="
+EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+ExecStart=/usr/local/bin/kubelet $KUBELET_KUBEADM_ARGS
+Restart=always
+RestartSec=10
+Delegate=yes
+KillMode=process
+OOMScoreAdjust=-999
+LimitNPROC=65536
+LimitCORE=0
+TasksMax=65536
+
+[Install]
+WantedBy=multi-user.target

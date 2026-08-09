@@ -1,0 +1,67 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-tenant-media-payloads
+  annotations:
+    policies.kyverno.io/category: Storage Security
+    policies.kyverno.io/description: Keep media and oversized opaque payloads out of tenant ConfigMaps, Secrets, and etcd.
+spec:
+  admission: true
+  background: true
+  validationFailureAction: Enforce
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  rules:
+    - name: reject-configmap-binary-data
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: "!has(object.binaryData) || object.binaryData.size() == 0"
+              message: Tenant ConfigMaps must not store binary data in etcd.
+    - name: bound-configmap-control-data
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                !has(object.data) ||
+                (object.data.size() <= 4 && object.data.all(key, value,
+                value.size() <= 65536 &&
+                !key.matches('(?i).*[.](avif|bmp|flac|gif|ico|jpe?g|m4a|mkv|mov|mp3|mp4|ogg|opus|pdf|png|svg|tiff?|wav|webm|webp|woff2?|zip)$') &&
+                !value.matches('^(iVBORw0KGgo|/9j/|R0lGOD|UklGR|JVBERi0|SUQz|T2dnUw|ZkxhQw|UEsDB)') &&
+                !value.matches('(?is)^\\s*<svg(\\s|>)')))
+              message: Tenant ConfigMap data is limited to four 64 KiB control values and may not contain media payloads.
+    - name: bound-secret-control-data
+      match:
+        any:
+          - resources:
+              kinds: [Secret]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                ((!has(object.data) ? 0 : object.data.size()) +
+                (!has(object.stringData) ? 0 : object.stringData.size()) <= 4) &&
+                (!has(object.data) || object.data.all(key, value,
+                value.size() <= 65536 &&
+                !key.matches('(?i).*[.](avif|bmp|flac|gif|ico|jpe?g|m4a|mkv|mov|mp3|mp4|ogg|opus|pdf|png|svg|tiff?|wav|webm|webp|woff2?|zip)$') &&
+                !value.matches('^(iVBORw0KGgo|/9j/|R0lGOD|UklGR|JVBERi0|SUQz|T2dnUw|ZkxhQw|UEsDB)'))) &&
+                (!has(object.stringData) || object.stringData.all(key, value,
+                value.size() <= 65536 &&
+                !key.matches('(?i).*[.](avif|bmp|flac|gif|ico|jpe?g|m4a|mkv|mov|mp3|mp4|ogg|opus|pdf|png|svg|tiff?|wav|webm|webp|woff2?|zip)$') &&
+                !value.matches('(?is)^\\s*<svg(\\s|>)')))
+              message: Tenant Secret data is limited to four 64 KiB control values and may not contain media payloads.

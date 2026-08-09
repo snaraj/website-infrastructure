@@ -1,0 +1,112 @@
+name: Publish naranjo.online image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - websites/naranjo.online/cmd/**
+      - websites/naranjo.online/frontend/**
+      - websites/naranjo.online/internal/**
+      - websites/naranjo.online/.dockerignore
+      - websites/naranjo.online/Dockerfile
+      - websites/naranjo.online/go.mod
+      - websites/naranjo.online/go.sum
+      - .github/workflows/publish-naranjo-online-image.yml
+      - scripts/ci/install-tools.sh
+      - scripts/ci/verify-oci-artifact.sh
+      - versions.env
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: publish-naranjo-online
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'snaraj/website-infrastructure' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/snaraj/naranjo-online
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified scanners and OCI client
+        run: ./scripts/ci/install-tools.sh
+      - name: Revalidate repository policy on the release commit
+        run: python3 scripts/validate_repository.py all
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build the final multi-architecture OCI artifact once
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: websites/naranjo.online
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/naranjo-online.oci.tar
+          push: false
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/snaraj/website-infrastructure
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify and scan exact per-platform views
+        env:
+          ARTIFACT_NAME: naranjo-online
+          MAX_APPLICATION_LAYER_BYTES: 16777216
+          OCI_ARCHIVE: ${{ runner.temp }}/naranjo-online.oci.tar
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+          EVIDENCE_DIR: ${{ runner.temp }}/naranjo-online-evidence
+        run: ./scripts/ci/verify-oci-artifact.sh
+      - name: Publish the exact scanned OCI graph
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf '%s' "${GHCR_TOKEN}" | oras login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          oras cp --from-oci-layout "${RUNNER_TEMP}/naranjo-online.oci.tar@${EXPECTED_DIGEST}" "${IMAGE}:sha-${GITHUB_SHA}"
+          test "$(oras resolve "${IMAGE}:sha-${GITHUB_SHA}")" = "${EXPECTED_DIGEST}"
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Sign immutable image digest
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # GitHub storage records are organization-only; this repository is
+          # user-owned, while registry and repository attestations still work.
+          create-storage-record: false
+      - name: Verify keyless signature identity
+        run: |
+          cosign verify \
+            --certificate-identity 'https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
+      - name: Record non-secret release evidence
+        run: printf '%s\n' '${{ steps.build.outputs.digest }}' > "${RUNNER_TEMP}/naranjo-online.digest"
+      - name: Upload SBOM and digest evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: naranjo-online-release-evidence
+          path: |
+            ${{ runner.temp }}/naranjo-online.digest
+            ${{ runner.temp }}/naranjo-online-evidence/naranjo-online-amd64.spdx.json
+            ${{ runner.temp }}/naranjo-online-evidence/naranjo-online-arm64.spdx.json
+          if-no-files-found: error
+          retention-days: 14

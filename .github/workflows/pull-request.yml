@@ -1,0 +1,162 @@
+name: Pull request
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pull-request-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-and-infrastructure:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Validate workflows
+        run: actionlint
+      - name: Validate Python policy tooling
+        run: |
+          python3 -m py_compile scripts/validate_repository.py scripts/redact_inventory.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 scripts/validate_repository.py all
+      - name: Check shell
+        run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+      - name: Check Dockerfile
+        run: hadolint websites/naranjo.online/Dockerfile websites/lidersea.com/Dockerfile
+      - name: Scan current tree for secrets
+        run: gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
+      - name: Render and validate Helm and Kubernetes
+        run: |
+          ./scripts/render-kubernetes.sh
+          if ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/websites/naranjo-online/release.yaml ||
+             ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/websites/lidersea-com/release.yaml ||
+             ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/platform/cloudflare-public/release/release.yaml; then
+            for rendered in .artifacts/rendered/*.yaml; do
+              conftest test --policy policies/release-conftest "${rendered}"
+            done
+          else
+            printf 'PENDING release-state policy: releases remain deliberately suspended.\n'
+          fi
+      - name: Test staged Kyverno policies
+        run: kyverno test tests/kubernetes/kyverno
+      - name: Validate OpenTofu without credentials
+        run: |
+          tofu -chdir=infrastructure/cloudflare fmt -check -recursive
+          tofu -chdir=infrastructure/cloudflare init -backend=false
+          tofu -chdir=infrastructure/cloudflare validate
+          test -f infrastructure/cloudflare/.terraform.lock.hcl
+          test -z "$(git status --porcelain -- infrastructure/cloudflare/.terraform.lock.hcl)"
+          ./scripts/test-cloudflare-policy.sh
+      - name: Scan filesystem, IaC, and configuration
+        run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,misconfig,secret --severity HIGH,CRITICAL .
+
+  application:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        site:
+          - naranjo.online
+          - lidersea.com
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          check-latest: false
+      - name: Build and check Svelte
+        working-directory: websites/${{ matrix.site }}/frontend
+        run: |
+          test -f package-lock.json
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          npm test --if-present
+          npm run build
+          python3 ../../../scripts/validate_repository.py media
+      - name: Test Go service
+        working-directory: websites/${{ matrix.site }}
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          CGO_ENABLED=0 go test ./...
+          go test -race ./...
+
+  container:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - site: naranjo.online
+            artifact: naranjo-online
+          - site: lidersea.com
+            artifact: lidersea-com
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified scanners and OCI client
+        run: ./scripts/ci/install-tools.sh
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build both production architectures once without publishing
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: websites/${{ matrix.site }}
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/${{ matrix.artifact }}.oci.tar
+          push: false
+          provenance: mode=max
+          sbom: true
+      - name: Verify and scan exact per-platform views
+        env:
+          ARTIFACT_NAME: ${{ matrix.artifact }}
+          MAX_APPLICATION_LAYER_BYTES: 16777216
+          OCI_ARCHIVE: ${{ runner.temp }}/${{ matrix.artifact }}.oci.tar
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+          EVIDENCE_DIR: ${{ runner.temp }}/${{ matrix.artifact }}-evidence
+        run: ./scripts/ci/verify-oci-artifact.sh
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high

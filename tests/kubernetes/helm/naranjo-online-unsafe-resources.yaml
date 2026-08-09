@@ -1,0 +1,9 @@
+# This fixture must fail the naranjo-online chart schema: resource quantities
+# cannot be zero or negative.
+resources:
+  requests:
+    cpu: "0"
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: -128Mi

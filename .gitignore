@@ -1,0 +1,70 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.agekey
+keys.txt
+*.pem
+*.key
+*.p12
+*.pfx
+.ssh/
+id_rsa*
+id_ed25519*
+known_hosts*
+*.kubeconfig
+*.dec.*
+*.plaintext.*
+cloudflared-token*
+kubeconfig*
+bootstrap/pi/kubeadm-config.yaml.local
+bootstrap/pi/encryption-config.yaml.local
+bootstrap/pi/decisions.env.local
+bootstrap/pi/protected-services.env.local
+bootstrap/pi/images.lock.local
+bootstrap/pi/cni-manifest.local.yaml
+/local-evidence/
+
+# OpenTofu/Terraform state and authenticated plans are sensitive
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.auto.tfvars
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Generated validation artifacts
+.artifacts/
+.cache/
+coverage/
+dist/
+# Keep only the empty embed placeholders. Generated Vite output remains ignored
+# even beneath these directories so local builds cannot become a Git payload.
+!websites/naranjo.online/internal/web/dist/
+websites/naranjo.online/internal/web/dist/*
+!websites/naranjo.online/internal/web/dist/.gitkeep
+!websites/lidersea.com/internal/web/dist/
+websites/lidersea.com/internal/web/dist/*
+!websites/lidersea.com/internal/web/dist/.gitkeep
+node_modules/
+results/
+*.sarif
+*.sbom.json
+__pycache__/
+*.py[cod]
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Keep SOPS ciphertext tracked. Do not add *.sops.yaml here.

@@ -1,0 +1,26 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-services
+  namespace: flux-system
+spec:
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+  dependsOn:
+    - name: platform-prerequisites
+    - name: admission
+  interval: 10m0s
+  path: ./kubernetes/platform/cloudflare-public/release
+  prune: true
+  retryInterval: 1m0s
+  serviceAccountName: platform-services-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  suspend: true
+  timeout: 5m0s
+  # Admission readiness is a hard dependency. This reconciliation and its
+  # contained HelmRelease remain independently suspended until runtime evidence.
+  wait: false

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: lidersea-com
+description: Go service with embedded Svelte frontend for lidersea.com
+type: application
+version: 0.1.0
+appVersion: "0.0.0"
+kubeVersion: ">=1.36.0-0"

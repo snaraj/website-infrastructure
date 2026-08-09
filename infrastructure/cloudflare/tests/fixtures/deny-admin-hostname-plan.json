@@ -1,0 +1,6 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {"address":"cloudflare_zero_trust_tunnel_cloudflared_config.pi_admin[0]","mode":"managed","type":"cloudflare_zero_trust_tunnel_cloudflared_config","change":{"actions":["create"],"after":{"config":{"ingress":[{"hostname":"admin.example.invalid","service":"ssh://localhost:22"},{"service":"http_status:404"}]}}}}
+  ]
+}

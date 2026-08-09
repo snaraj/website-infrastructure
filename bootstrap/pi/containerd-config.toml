@@ -1,0 +1,22 @@
+version = 3
+root = '/var/lib/containerd'
+state = '/run/containerd'
+disabled_plugins = []
+
+[grpc]
+  address = '/run/containerd/containerd.sock'
+
+[plugins.'io.containerd.cri.v1.images']
+  snapshotter = 'overlayfs'
+
+[plugins.'io.containerd.cri.v1.images'.pinned_images]
+  sandbox = 'registry.k8s.io/pause:3.10.2'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd]
+  default_runtime_name = 'runc'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+  runtime_type = 'io.containerd.runc.v2'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+  SystemdCgroup = true

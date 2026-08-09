@@ -1,0 +1,22 @@
+{
+  "name": "lidersea-com-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": "24.19.0"
+  },
+  "packageManager": "npm@11.17.0",
+  "scripts": {
+    "build": "vite build && node ./scripts/ensure-dist-placeholder.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "dev": "vite --host 127.0.0.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.0",
+    "svelte": "5.56.8",
+    "svelte-check": "4.7.5",
+    "typescript": "6.0.3",
+    "vite": "8.2.1"
+  }
+}
