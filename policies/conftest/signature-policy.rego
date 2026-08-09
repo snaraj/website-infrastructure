@@ -1,0 +1,121 @@
+package main
+
+import rego.v1
+
+# The rendered object must equal this complete data model. Object equality
+# rejects duplicate semantic alternatives, extra attestors, skip lists, regular
+# expressions, disabled transparency checks, and Kustomize-added bypass fields.
+signature_policy_contracts := {
+  "require-signed-naranjo-online": {
+    "slug": "naranjo-online",
+    "workflow": "publish-naranjo-online-image.yml",
+    "description": "Verify the exact GitHub workflow signature and SLSA provenance bundle.",
+  },
+  "require-signed-lidersea-com": {
+    "slug": "lidersea-com",
+    "workflow": "publish-lidersea-com-image.yml",
+    "description": "Verify the exact lidersea.com workflow signature and SLSA provenance bundle.",
+  },
+}
+
+signature_policy_actions := {"Audit", "Enforce"}
+
+signature_keyless(contract) := {
+  "subject": sprintf(
+    "https://github.com/snaraj/website-infrastructure/.github/workflows/%s@refs/heads/main",
+    [contract.workflow],
+  ),
+  "issuer": "https://token.actions.githubusercontent.com",
+  "rekor": {"url": "https://rekor.sigstore.dev"},
+}
+
+signature_match(contract) := {
+  "any": [{
+    "resources": {
+      "kinds": ["Pod"],
+      "namespaces": [contract.slug],
+    },
+  }],
+}
+
+signature_verify_image(contract) := {
+  "imageReferences": [sprintf("ghcr.io/snaraj/%s@sha256:*", [contract.slug])],
+  "mutateDigest": false,
+  "required": true,
+  "verifyDigest": true,
+  "attestors": [{
+    "count": 1,
+    "entries": [{"keyless": signature_keyless(contract)}],
+  }],
+}
+
+provenance_verify_image(contract) := {
+  "imageReferences": [sprintf("ghcr.io/snaraj/%s@sha256:*", [contract.slug])],
+  "type": "SigstoreBundle",
+  "mutateDigest": false,
+  "required": true,
+  "verifyDigest": true,
+  "attestations": [{
+    "type": "https://slsa.dev/provenance/v1",
+    "attestors": [{
+      "count": 1,
+      "entries": [{"keyless": signature_keyless(contract)}],
+    }],
+    "conditions": [{
+      "all": [{
+        "key": "{{ buildDefinition.buildType }}",
+        "operator": "Equals",
+        "value": "https://actions.github.io/buildtypes/workflow/v1",
+      }],
+    }],
+  }],
+}
+
+expected_signature_policy(name, contract, action) := {
+  "apiVersion": "kyverno.io/v1",
+  "kind": "ClusterPolicy",
+  "metadata": {
+    "name": name,
+    "annotations": {
+      "policies.kyverno.io/category": "Software Supply Chain Security",
+      "policies.kyverno.io/description": contract.description,
+    },
+  },
+  "spec": {
+    "admission": true,
+    "background": false,
+    "validationFailureAction": action,
+    "webhookConfiguration": {
+      "failurePolicy": "Fail",
+      "timeoutSeconds": 30,
+    },
+    "rules": [
+      {
+        "name": sprintf("verify-%s-signature", [contract.slug]),
+        "match": signature_match(contract),
+        "verifyImages": [signature_verify_image(contract)],
+      },
+      {
+        "name": sprintf("verify-%s-provenance", [contract.slug]),
+        "match": signature_match(contract),
+        "verifyImages": [provenance_verify_image(contract)],
+      },
+    ],
+  },
+}
+
+valid_signature_policy if {
+  name := object.get(object.get(input, "metadata", {}), "name", "")
+  contract := signature_policy_contracts[name]
+  action := object.get(object.get(input, "spec", {}), "validationFailureAction", "")
+  action in signature_policy_actions
+  input == expected_signature_policy(name, contract, action)
+}
+
+deny contains msg if {
+  input.kind == "ClusterPolicy"
+  name := object.get(object.get(input, "metadata", {}), "name", "")
+  name in object.keys(signature_policy_contracts)
+  not valid_signature_policy
+  msg := sprintf("signature admission policy %s has a non-canonical verification contract", [name])
+}

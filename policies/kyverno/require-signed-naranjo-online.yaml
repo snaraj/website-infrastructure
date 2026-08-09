@@ -22,7 +22,7 @@ spec:
               kinds: [Pod]
               namespaces: [naranjo-online]
       verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/naranjo-online*"]
+        - imageReferences: ["ghcr.io/snaraj/naranjo-online@sha256:*"]
           mutateDigest: false
           required: true
           verifyDigest: true
@@ -41,7 +41,7 @@ spec:
               kinds: [Pod]
               namespaces: [naranjo-online]
       verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/naranjo-online*"]
+        - imageReferences: ["ghcr.io/snaraj/naranjo-online@sha256:*"]
           type: SigstoreBundle
           mutateDigest: false
           required: true

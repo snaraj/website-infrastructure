@@ -62,6 +62,19 @@ signals and separate data-filesystem monitoring. The required response is:
 The website never deletes originals or enables a paid storage fallback. Etcd
 snapshots do not back up the media filesystem.
 
+## Protected legacy archive exclusion
+
+Preserved legacy bytes are unavailable to Kubernetes and are not media,
+control-plane, image, ephemeral, or workload capacity. Discovery may record
+bounded filesystem and mount metadata but must not recursively scan or hash the
+archive merely to estimate usable space. The platform may not format, resize,
+rebind, relocate, recursively change, mount into a Pod, or silently write to
+that storage. If the archive shares a physical device or failure boundary with
+the proposed platform, the capacity review must subtract it and prove that
+Kubernetes disk pressure, garbage collection, and media publication cannot
+touch it. An uncertain binding keeps installation and storage enablement
+blocked.
+
 ## Bounded media serving
 
 The Go media path opens a regular file inside a directory-limited root and lets

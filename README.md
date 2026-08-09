@@ -28,6 +28,10 @@ read-only Pi and Cloudflare discovery followed by explicit review.
 - Any pre-existing protected host services, VPN/tunnel interfaces, firewall,
   and policy-routing state are discovered read-only and left unchanged until
   conflicts are reviewed with a tested recovery path.
+- A privacy-sensitive legacy workload and its retained data are an inactive,
+  operator-only archive under [ADR 0013](docs/adr/0013-protected-legacy-archive.md),
+  never a co-hosted Kubernetes workload. Product classification is not host
+  inventory; exact units, paths, mounts, identities, and evidence remain local.
 - Heavy media never enters Git, frontend output, Go embeds, OCI images, Flux,
   ConfigMaps, Secrets, or etcd. Its proposed read-only data-volume profile is
   disabled pending Pi discovery, restore evidence, and a compatible delivery
@@ -35,6 +39,7 @@ read-only Pi and Cloudflare discovery followed by explicit review.
   delivery a zero-spend `NO-GO`.
 
 See [architecture](docs/architecture/overview.md), [kubeadm decision](docs/adr/0011-kubeadm-on-pi.md),
+[legacy archive decision](docs/adr/0013-protected-legacy-archive.md),
 [security controls](docs/security/security-control-matrix.md), and the
 [Cloudflare zero-spend ADR](docs/adr/0006-cloudflare-zero-spend.md).
 
@@ -92,6 +97,7 @@ the production runtime or a substitute for kubeadm/Pi acceptance.
 | --- | --- |
 | Repository and policies | Local scaffold only |
 | Pi discovery | Not run |
+| Protected legacy archive | Policy accepted; local inventory/retirement evidence not run |
 | Media storage/profile | Disabled; SSD/filesystem/backup evidence not collected |
 | Public heavy-media delivery | NO-GO under current zero-spend Cloudflare boundary |
 | Cloudflare subscription audit | Not run |

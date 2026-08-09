@@ -432,44 +432,20 @@ elif [[ "${phase}" == init ]]; then
   fi
 fi
 
-# Private workload names belong in this mode-0600 local contract, never in public source or diagnostics.
-if [[ -L "${protected_services_path}" ]]; then
-  fail 'protected-service contract must be a regular file, not a symbolic link'
-elif [[ -f "${protected_services_path}" ]]; then
-  check_mode_0600 "${protected_services_path}"
-  if grep -Eqv '^(#|$|PROTECTED_SERVICES_REVIEWED=yes|PROTECTED_SYSTEMD_UNIT=[A-Za-z0-9_][A-Za-z0-9_.:@-]*[.]service)$' \
-      "${protected_services_path}"; then
-    fail 'protected-service contract contains a malformed or unsupported entry'
+# Private identities belong in this ignored mode-0600 contract. The shared
+# validator emits indexed diagnostics only and keeps static parsing separate
+# from the live active/inactive, enablement, and archive-root checks used here.
+if [[ -e "${protected_services_path}" || -L "${protected_services_path}" ]]; then
+  if python3 "${repo_root}/scripts/validate_protected_host_contract.py" \
+      "${protected_services_path}" --check-live; then
+    pass 'protected-host live checks and mandatory presence-bound boot attestation passed'
+  else
+    fail 'protected-host live checks or presence-bound boot attestation is invalid'
   fi
-  reviewed_count="$(grep -Ec '^PROTECTED_SERVICES_REVIEWED=yes$' "${protected_services_path}" || true)"
-  if [[ "${reviewed_count}" != 1 ]]; then
-    fail 'protected-service contract must contain PROTECTED_SERVICES_REVIEWED=yes exactly once'
-  fi
-
-  declare -A protected_service_seen=()
-  protected_service_index=0
-  while IFS= read -r protected_service; do
-    protected_service_index=$((protected_service_index + 1))
-    if [[ ! "${protected_service}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.:@-]*[.]service$ ]]; then
-      fail "protected service ${protected_service_index} has an unsafe unit identifier"
-      continue
-    fi
-    if [[ -n "${protected_service_seen["${protected_service}"]+present}" ]]; then
-      fail "protected service ${protected_service_index} duplicates an earlier declaration"
-      continue
-    fi
-    protected_service_seen["${protected_service}"]=1
-    if systemctl is-active --quiet -- "${protected_service}"; then
-      pass "protected service ${protected_service_index} is active"
-    else
-      fail "protected service ${protected_service_index} is inactive or unavailable"
-    fi
-  done < <(awk -F= '$1 == "PROTECTED_SYSTEMD_UNIT" {sub(/^[^=]*=/, ""); print}' "${protected_services_path}")
-  pass "protected-service contract reviewed ${protected_service_index} declared unit(s)"
 elif [[ "${phase}" == install || "${phase}" == init ]]; then
-  fail 'protected-service contract is required before an install or init phase'
+  fail 'protected-host contract is required before an install or init phase'
 else
-  warn 'protected-service contract is absent; install and init will fail closed until it is reviewed'
+  warn 'protected-host contract is absent; install and init will fail closed until it is reviewed'
 fi
 
 if (( failures > 0 )); then

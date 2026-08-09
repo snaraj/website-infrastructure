@@ -36,6 +36,8 @@ class PublishOCIArtifactBehaviorTests(unittest.TestCase):
         source_media_type=OCI_INDEX_MEDIA_TYPE,
         roundtrip_media_type=OCI_INDEX_MEDIA_TYPE,
         roundtrip_succeeds_at=3,
+        destination_state="expected",
+        github_sha="b" * 40,
     ):
         """Run the publisher against isolated ORAS and jq command doubles."""
 
@@ -51,6 +53,31 @@ class PublishOCIArtifactBehaviorTests(unittest.TestCase):
             b"""#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == resolve ]]; then
+  if [[ " $* " == *" ghcr.io/example/site:sha-"* ]]; then
+    case "${FAKE_DESTINATION_STATE}" in
+      expected)
+        printf '%s\\n' "${FAKE_EXPECTED_DIGEST}"
+        exit 0
+        ;;
+      absent)
+        if [[ -f "${FAKE_DESTINATION_CREATED}" ]]; then
+          printf '%s\\n' "${FAKE_EXPECTED_DIGEST}"
+          exit 0
+        fi
+        printf 'MANIFEST_UNKNOWN: synthetic missing destination\\n' >&2
+        exit 1
+        ;;
+      mismatch)
+        printf 'sha256:%064d\\n' 0
+        exit 0
+        ;;
+      indeterminate)
+        printf 'synthetic registry timeout\\n' >&2
+        exit 70
+        ;;
+      *) exit 91 ;;
+    esac
+  fi
   printf '%s\\n' "${FAKE_EXPECTED_DIGEST}"
   exit 0
 fi
@@ -65,6 +92,7 @@ fi
 [[ "$1" == cp ]] || exit 90
 printf '%s\\n' "$*" >> "${ORAS_CALL_LOG}"
 if [[ " $* " != *" --to-oci-layout "* ]]; then
+  : > "${FAKE_DESTINATION_CREATED}"
   exit 0
 fi
 count=0
@@ -96,11 +124,13 @@ printf '%s\\n' "${media_type}"
                 "OCI_ARCHIVE": archive.as_posix(),
                 "EXPECTED_DIGEST": EXPECTED_DIGEST,
                 "IMAGE": "ghcr.io/example/site",
-                "GITHUB_SHA": "b" * 40,
+                "GITHUB_SHA": github_sha,
                 "FAKE_EXPECTED_DIGEST": EXPECTED_DIGEST,
                 "FAKE_SOURCE_MEDIA_TYPE": source_media_type,
                 "FAKE_ROUNDTRIP_MEDIA_TYPE": roundtrip_media_type,
                 "FAKE_ROUNDTRIP_SUCCEEDS_AT": str(roundtrip_succeeds_at),
+                "FAKE_DESTINATION_STATE": destination_state,
+                "FAKE_DESTINATION_CREATED": (root / "destination-created").as_posix(),
                 "ORAS_COUNT_FILE": count_file.as_posix(),
                 "ORAS_CALL_LOG": call_log.as_posix(),
                 "PUBLISH_RETRY_DELAY_SECONDS": "0",
@@ -175,6 +205,47 @@ printf '%s\\n' "${media_type}"
                 len([call for call in calls if "--to-oci-layout" in call]),
                 4,
             )
+
+    @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
+    def test_explicit_manifest_unknown_is_the_only_absent_destination_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, calls = self._run_fixture(
+                Path(temporary), destination_state="absent", roundtrip_succeeds_at=1
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                len([call for call in calls if "--from-oci-layout" in call]), 1
+            )
+
+    @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
+    def test_existing_destination_mismatch_fails_before_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, calls = self._run_fixture(
+                Path(temporary), destination_state="mismatch"
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("refusing to reassign", result.stderr)
+            self.assertEqual(calls, [])
+
+    @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
+    def test_indeterminate_destination_resolution_fails_before_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, calls = self._run_fixture(
+                Path(temporary), destination_state="indeterminate"
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("could not prove destination absence", result.stderr)
+            self.assertEqual(calls, [])
+
+    @unittest.skipUnless(bash_executable(), "Bash is required for release-helper behavior tests")
+    def test_non_github_sha_width_fails_before_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, calls = self._run_fixture(
+                Path(temporary), github_sha="b" * 64
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("GITHUB_SHA is malformed", result.stderr)
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

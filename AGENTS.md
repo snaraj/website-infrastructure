@@ -40,6 +40,12 @@ These rules apply to every human and automated contributor.
     Flux release, workflow signature, promotion, DNS zone variable, and Tunnel
     origin as one exact identity tuple. Shared tooling must not couple digests,
     readiness, rollback, or release authority.
+15. Treat every declared protected legacy archive as inert. Never add an
+    installer, updater, automatic start/restore, public route, listener,
+    container/Kubernetes mount, CI artifact, or broad storage operation for it;
+    exact units, roots, identities, contents, and recovery evidence stay in the
+    ignored local contract. Reactivation requires a new ADR and threat-model
+    review.
 
 ## Change workflow
 

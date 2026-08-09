@@ -47,10 +47,15 @@ durable storage.
 
 ## Image promotion
 
-CI builds amd64/arm64, scans, emits SBOM/provenance, publishes to public GHCR,
-and signs/attests keylessly for each site independently. A human uses the exact
-site promotion command to create a digest-only diff and opens a PR. Flux does
-not write Git.
+CI reads each site's independently committed stable SemVer, builds amd64/arm64
+once, scans the exact graph, emits SBOM/provenance, and publishes immutable
+`sha-<full-commit>` and `vMAJOR.MINOR.PATCH` names to GHCR that must resolve to
+the same digest. Anonymous package visibility is a separate launch gate; only
+after that gate is proven may documentation or deployment treat the package as
+public. CI records source/version/SHA/digest evidence and signs/attests the
+digest keylessly. A human supplies the selected version and digest to the
+exact-site promotion command; it verifies their mapping and creates a
+digest-only diff. Flux does not write Git and never deploys a tag.
 
 ## Sensitive flows excluded from CI
 

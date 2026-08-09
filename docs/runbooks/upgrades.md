@@ -5,6 +5,14 @@ and security notes, verify checksums/digests/action commits/provider schema and
 Free entitlement, update pins in a feature branch, render/test/scan, and retain a
 compatible rollback artifact.
 
+For a website image change, increment only that site's committed VERSION in the
+same PR. Use a v0 PATCH for a compatible fix and a v0 MINOR for a compatible
+feature while its production gate remains `no`. Shared publication/verification
+tooling changes require both versions to increase. Production graduation is a
+separate reviewed change that atomically switches the selected gate in
+`release-policy.env` to `yes` and moves its VERSION to `1.0.0` or later; never
+reuse or manually move an existing OCI version tag.
+
 Before a Kubernetes upgrade, create a fresh local snapshot with
 `sudo env CONFIRM_ETCD_SNAPSHOT=create-reviewed-stacked-etcd-snapshot /usr/local/sbin/website-infrastructure-etcd-snapshot --apply`, then run
 `sudo /usr/local/sbin/website-infrastructure-etcd-snapshot --check`. Copy that

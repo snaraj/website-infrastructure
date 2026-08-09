@@ -1,9 +1,10 @@
 # Kubernetes installer recovery
 
 `install-kubernetes.sh --apply` builds and collision-checks a complete target
-manifest before its first host mutation. Each target is then committed with an
-exclusive same-directory hard link, so a file that appears concurrently is
-never overwritten.
+manifest, then re-runs the complete protected-host preflight immediately before
+its transaction starts. A failed or stale final gate leaves every host target
+untouched. Each target is then committed with an exclusive same-directory hard
+link, so a file that appears concurrently is never overwritten.
 
 If a normal command failure or `HUP`, `INT`, or `TERM` occurs after mutation
 starts, the exit handler prints the failed `phase=...` and one of these states:

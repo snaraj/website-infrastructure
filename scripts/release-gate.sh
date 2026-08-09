@@ -7,13 +7,16 @@ set -euo pipefail
 # the public edge from this machine.
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/versions.env"
 readonly LIVE_ACK='I_ACKNOWLEDGE_RELEASE_GATE_WILL_MUTATE_LOCAL_KIND_AND_PROBE_PRODUCTION_AND_PUBLIC_EDGE'
-readonly KIND_ACK='I_ACKNOWLEDGE_KIND_WILL_CREATE_AND_DELETE_website-infra-local-test'
+readonly KIND_ACK='I_ACKNOWLEDGE_KIND_WILL_CREATE_AND_DELETE_website-infra-local-test_AND_ITS_INTERNAL_DOCKER_NETWORK'
 TEMP_ROOT=''
 PROD_KUBECONFIG=''
 PROD_CONTEXT=''
 PYTHON_BIN=''
 CAPACITY_EVIDENCE_SHA256=''
+RELEASE_GIT_COMMIT=''
 
 die() {
   printf 'release-gate: NO-GO: %s\n' "$*" >&2
@@ -29,11 +32,21 @@ usage() {
 Usage:
   scripts/release-gate.sh --check
   scripts/release-gate.sh --scaffold
+  scripts/release-gate.sh --transition-check
+  scripts/release-gate.sh --transition-runtime {naranjo-online|lidersea-com} ${KIND_ACK}
   scripts/release-gate.sh --release-check
   scripts/release-gate.sh --live ${LIVE_ACK} KUBECONFIG CONTEXT
 
 --check         checks required local tools only; reads no cluster/network state.
 --scaffold      proves the checked-in desired state remains fail-closed.
+--transition-check
+                proves the complete canonical transition gate without Docker,
+                Kind, production, registry, or public-network access.
+--transition-runtime
+                statically proves one safe transition, then runs only the
+                selected staged site in owned loopback Kind on an exactly owned
+                internal Docker bridge; no production, Flux, Tunnel, registry,
+                LAN, or public network is accessed.
 --release-check requires promoted static desired state and local capacity review.
 --live          additionally creates/deletes owned local Kind, reads the exact
                 production context, sends server-side dry-run admission probes,
@@ -101,9 +114,25 @@ require_live_tools() {
 }
 
 assert_clean_commit() {
-  git -C "$REPO_ROOT" rev-parse --verify HEAD >/dev/null 2>&1 || die 'release requires an existing Git commit'
-  [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]] || \
+  local before_commit after_commit status_output
+  before_commit="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')" || \
+    die 'release requires an existing Git commit'
+  [[ "$before_commit" =~ ^[0-9a-f]{40}$ ]] || \
+    die 'release HEAD is not one canonical 40-hex Git commit'
+  status_output="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" || \
+    die 'release worktree status could not be read'
+  [[ -z "$status_output" ]] || \
     die 'release requires a clean worktree, including no untracked release inputs'
+  after_commit="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')" || \
+    die 'release HEAD became unavailable while checking the worktree'
+  [[ "$after_commit" == "$before_commit" ]] || \
+    die 'release HEAD changed while checking the worktree'
+  if [[ -n "$RELEASE_GIT_COMMIT" ]]; then
+    [[ "$after_commit" == "$RELEASE_GIT_COMMIT" ]] || \
+      die 'release HEAD changed after static evidence was captured'
+  else
+    RELEASE_GIT_COMMIT="$after_commit"
+  fi
 }
 
 assert_storage_disabled() {
@@ -138,7 +167,9 @@ assert_storage_disabled() {
 assert_capacity_evidence() {
   : "${CAPACITY_EVIDENCE_FILE:?Set CAPACITY_EVIDENCE_FILE to the ignored mode-0600 review contract}"
   local commit
-  commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  commit="$RELEASE_GIT_COMMIT"
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || \
+    die 'capacity evidence cannot bind to an unavailable release commit'
   "$PYTHON_BIN" - "$CAPACITY_EVIDENCE_FILE" "$commit" "$REPO_ROOT" \
     "${REPO_ROOT}/.artifacts/rendered/kubernetes-platform-prerequisites.yaml" <<'PY'
 import datetime as dt
@@ -304,6 +335,9 @@ assert_signature_policies_enforced() {
 
 run_static_gate() {
   local mode="$1"
+  if [[ "$mode" == '--release' ]]; then
+    assert_clean_commit
+  fi
   "$PYTHON_BIN" "${REPO_ROOT}/scripts/validate_repository.py" all
   bash "${REPO_ROOT}/scripts/render-manifests.sh" "$mode"
   assert_storage_disabled
@@ -411,17 +445,31 @@ new_temp_root() {
 }
 
 capture_production_state() {
+  capture_prod_json namespaces.json Namespaces get namespaces -o json
   capture_prod_json nodes.json nodes get nodes -o json
   capture_prod_json deployments.json deployments get deployments -A -o json
+  capture_prod_json daemonsets.json DaemonSets get daemonsets.apps -A -o json
+  capture_prod_json statefulsets.json StatefulSets get statefulsets.apps -A -o json
   capture_prod_json replicasets.json replicasets get replicasets.apps -A -o json
+  capture_prod_json replicationcontrollers.json ReplicationControllers get replicationcontrollers -A -o json
+  capture_prod_json jobs.json Jobs get jobs.batch -A -o json
+  capture_prod_json cronjobs.json CronJobs get cronjobs.batch -A -o json
+  capture_prod_json horizontalpodautoscalers.json HorizontalPodAutoscalers get horizontalpodautoscalers.autoscaling -A -o json
   capture_prod_json pods.json pods get pods -A -o json
   capture_prod_json services.json services get services -A -o json
   capture_prod_json networkpolicies.json networkpolicies get networkpolicies.networking.k8s.io -A -o json
   capture_prod_json pvcs.json pvcs get persistentvolumeclaims -A -o json
   capture_prod_json quotas.json quotas get resourcequotas -A -o json
   capture_prod_json webhooks.json webhooks get validatingwebhookconfigurations -o json
+  capture_prod_json mutatingwebhooks.json MutatingWebhooks get mutatingwebhookconfigurations -o json
   capture_prod_json policies.json policies get clusterpolicies.kyverno.io -o json
-  capture_prod_json kustomizations.json kustomizations -n flux-system get kustomizations.kustomize.toolkit.fluxcd.io -o json
+  capture_prod_json gitrepositories.json GitRepositories get gitrepositories.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json buckets.json Buckets get buckets.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json externalartifacts.json ExternalArtifacts get externalartifacts.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json helmrepositories.json HelmRepositories get helmrepositories.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json ocirepositories.json OCIRepositories get ocirepositories.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json helmcharts.json HelmCharts get helmcharts.source.toolkit.fluxcd.io -A -o json
+  capture_prod_json kustomizations.json Kustomizations get kustomizations.kustomize.toolkit.fluxcd.io -A -o json
   capture_prod_json helmreleases.json helmreleases get helmreleases.helm.toolkit.fluxcd.io -A -o json
 }
 
@@ -434,6 +482,1182 @@ capture_prod_json() {
     die "production ${label} query failed (details withheld in temporary local evidence)"
   fi
   : >"$error_file"
+}
+
+capture_desired_security_policy_state() {
+  local error_file="${TEMP_ROOT}/kubectl-error.txt"
+  local kind name namespace source
+
+  # Extract the complete expected Flux authority chain from canonical rendered
+  # output, then ask the real API server to apply CRD defaults without writing.
+  # The live validator compares each resulting spec exactly. This closes fields
+  # such as Kustomization patches/postBuild and GitRepository include/proxy/auth
+  # that a revision-only check cannot see.
+  "$PYTHON_BIN" - "$REPO_ROOT" "$TEMP_ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+repo = pathlib.Path(sys.argv[1]).resolve()
+output_root = pathlib.Path(sys.argv[2]).resolve()
+expected = {
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "flux-system"),
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "platform-prerequisites"),
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "admission"),
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "platform-services"),
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "naranjo-online"),
+    ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "flux-system", "lidersea-com"),
+    ("source.toolkit.fluxcd.io/v1", "GitRepository", "flux-system", "flux-system"),
+    ("source.toolkit.fluxcd.io/v1", "GitRepository", "naranjo-online", "naranjo-online-source"),
+    ("source.toolkit.fluxcd.io/v1", "GitRepository", "lidersea-com", "lidersea-com-source"),
+    ("source.toolkit.fluxcd.io/v1", "GitRepository", "cloudflare-public", "cloudflare-public-source"),
+    ("helm.toolkit.fluxcd.io/v2", "HelmRelease", "naranjo-online", "naranjo-online"),
+    ("helm.toolkit.fluxcd.io/v2", "HelmRelease", "lidersea-com", "lidersea-com"),
+    ("helm.toolkit.fluxcd.io/v2", "HelmRelease", "cloudflare-public", "cloudflare-public"),
+}
+relevant_types = {(identity[0], identity[1]) for identity in expected}
+artifacts = (
+    repo / ".artifacts/rendered/kubernetes-flux-system.yaml",
+    repo / ".artifacts/rendered/kubernetes-reconciliation.yaml",
+    repo / ".artifacts/rendered/kubernetes-websites-naranjo-online.yaml",
+    repo / ".artifacts/rendered/kubernetes-websites-lidersea-com.yaml",
+    repo / ".artifacts/rendered/kubernetes-platform-cloudflare-public-release.yaml",
+)
+
+
+def one_top_level(lines, key):
+    prefix = key + ": "
+    values = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+    if len(values) != 1 or not values[0]:
+        return None
+    return values[0]
+
+
+def metadata_identity(lines):
+    indexes = [index for index, line in enumerate(lines) if line == "metadata:"]
+    if len(indexes) != 1:
+        return None
+    values = {}
+    for line in lines[indexes[0] + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break
+        if indent != 2:
+            continue
+        match = re.fullmatch(
+            r"  (name|namespace): ([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)",
+            line,
+        )
+        if match is not None:
+            key, value = match.groups()
+            if key in values:
+                return None
+            values[key] = value
+    if set(values) != {"name", "namespace"}:
+        return None
+    return values["namespace"], values["name"]
+
+
+selected = {}
+for artifact in artifacts:
+    if artifact.is_symlink() or not artifact.is_file():
+        raise SystemExit("rendered Flux artifact is unavailable or unsafe")
+    text = artifact.read_text(encoding="utf-8")
+    for document in re.split(r"(?m)^---[ \t]*$", text):
+        lines = document.splitlines()
+        api_version = one_top_level(lines, "apiVersion")
+        kind = one_top_level(lines, "kind")
+        if (api_version, kind) not in relevant_types:
+            continue
+        identity = metadata_identity(lines)
+        if identity is None:
+            raise SystemExit("rendered Flux object identity is non-canonical")
+        complete = (api_version, kind, identity[0], identity[1])
+        if complete not in expected or complete in selected:
+            raise SystemExit("rendered Flux object inventory is outside the closed contract")
+        selected[complete] = document.strip() + "\n"
+if set(selected) != expected:
+    raise SystemExit("rendered Flux object inventory is incomplete")
+for (_api_version, kind, namespace, name), document in selected.items():
+    destination = output_root / (
+        "desired-flux-{}-{}-{}.yaml".format(kind.lower(), namespace, name)
+    )
+    destination.write_text(document, encoding="utf-8")
+PY
+
+  while IFS='|' read -r kind namespace name; do
+    source="${TEMP_ROOT}/desired-flux-${kind,,}-${namespace}-${name}.yaml"
+    [[ -f "$source" && ! -L "$source" ]] || \
+      die "desired Flux object source is unavailable or unsafe: ${kind} ${namespace}/${name}"
+    if ! kubectl_prod apply \
+      --server-side \
+      --dry-run=server \
+      --force-conflicts \
+      --field-manager=website-infrastructure-release-gate \
+      -f "$source" \
+      -o json >"${TEMP_ROOT}/desired-flux-${kind,,}-${namespace}-${name}.json" 2>"$error_file"; then
+      die "production server could not normalize desired ${kind} ${namespace}/${name} (details withheld)"
+    fi
+    : >"$error_file"
+  done <<'EOF'
+kustomization|flux-system|flux-system
+kustomization|flux-system|platform-prerequisites
+kustomization|flux-system|admission
+kustomization|flux-system|platform-services
+kustomization|flux-system|naranjo-online
+kustomization|flux-system|lidersea-com
+gitrepository|flux-system|flux-system
+gitrepository|naranjo-online|naranjo-online-source
+gitrepository|lidersea-com|lidersea-com-source
+gitrepository|cloudflare-public|cloudflare-public-source
+helmrelease|naranjo-online|naranjo-online
+helmrelease|lidersea-com|lidersea-com
+helmrelease|cloudflare-public|cloudflare-public
+EOF
+
+  for name in \
+    disallow-public-services \
+    disallow-tenant-media-payloads \
+    disallow-undiscovered-storage \
+    require-approved-images \
+    require-exact-tenant-networking \
+    require-release-readiness \
+    require-restricted-workloads \
+    require-signed-naranjo-online \
+    require-signed-lidersea-com; do
+    source="${REPO_ROOT}/policies/kyverno/${name}.yaml"
+    [[ -f "$source" && ! -L "$source" ]] || \
+      die "desired ClusterPolicy source is unavailable or unsafe: ${name}"
+    # Ask the real API server to apply CRD defaults without persisting anything.
+    # --force-conflicts only affects this dry-run representation; it can never
+    # take ownership of a live field because the request is explicitly dry-run.
+    if ! kubectl_prod apply \
+      --server-side \
+      --dry-run=server \
+      --force-conflicts \
+      --field-manager=website-infrastructure-release-gate \
+      -f "$source" \
+      -o json >"${TEMP_ROOT}/desired-policy-${name}.json" 2>"$error_file"; then
+      die "production server could not normalize desired ClusterPolicy ${name} (details withheld)"
+    fi
+    : >"$error_file"
+  done
+
+  # Extract only the nine closed tenant NetworkPolicy identities from the
+  # canonical rendered artifacts. This parser does not interpret YAML; it
+  # accepts one exact block-form identity shape and refuses missing, duplicate,
+  # or extra tenant policies before any production dry-run request is made.
+  "$PYTHON_BIN" - "$REPO_ROOT" "$TEMP_ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+repo = pathlib.Path(sys.argv[1]).resolve()
+output_root = pathlib.Path(sys.argv[2]).resolve()
+expected = {
+    ("cloudflare-public", "default-deny"),
+    ("cloudflare-public", "cloudflared-dns"),
+    ("cloudflare-public", "cloudflared-edge"),
+    ("cloudflare-public", "cloudflared-naranjo-online"),
+    ("cloudflare-public", "cloudflared-lidersea-com"),
+    ("naranjo-online", "default-deny"),
+    ("naranjo-online", "cloudflared-to-naranjo-online"),
+    ("lidersea-com", "default-deny"),
+    ("lidersea-com", "cloudflared-to-lidersea-com"),
+}
+tenant_namespaces = {identity[0] for identity in expected}
+artifacts = (
+    repo / ".artifacts/rendered/kubernetes-platform-prerequisites.yaml",
+    repo / ".artifacts/rendered/helm-naranjo-online.yaml",
+    repo / ".artifacts/rendered/helm-lidersea-com.yaml",
+    repo / ".artifacts/rendered/helm-cloudflare-public.yaml",
+)
+selected = {}
+for artifact in artifacts:
+    if artifact.is_symlink() or not artifact.is_file():
+        raise SystemExit("rendered NetworkPolicy artifact is unavailable or unsafe")
+    text = artifact.read_text(encoding="utf-8")
+    for document in re.split(r"(?m)^---[ \t]*$", text):
+        lines = document.splitlines()
+        kinds = [line[6:] for line in lines if line.startswith("kind: ")]
+        if kinds != ["NetworkPolicy"]:
+            continue
+        metadata_indexes = [
+            index for index, line in enumerate(lines) if line == "metadata:"
+        ]
+        if len(metadata_indexes) != 1:
+            raise SystemExit("rendered NetworkPolicy metadata is non-canonical")
+        direct = []
+        for line in lines[metadata_indexes[0] + 1 :]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            if indent == 0:
+                break
+            if indent != 2:
+                continue
+            match = re.fullmatch(r"  (name|namespace): ([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)", line)
+            if match is not None:
+                direct.append(match.groups())
+        if [key for key, _ in direct] != ["name", "namespace"]:
+            raise SystemExit("rendered NetworkPolicy identity is non-canonical")
+        values = dict(direct)
+        identity = (values["namespace"], values["name"])
+        if identity[0] not in tenant_namespaces:
+            continue
+        if identity not in expected or identity in selected:
+            raise SystemExit("rendered tenant NetworkPolicy inventory is outside the closed contract")
+        selected[identity] = document.strip() + "\n"
+if set(selected) != expected:
+    raise SystemExit("rendered tenant NetworkPolicy inventory is incomplete")
+for (namespace, name), document in selected.items():
+    destination = output_root / f"desired-networkpolicy-{namespace}-{name}.yaml"
+    destination.write_text(document, encoding="utf-8")
+PY
+
+  local identity namespace name
+  for identity in \
+    cloudflare-public/default-deny \
+    cloudflare-public/cloudflared-dns \
+    cloudflare-public/cloudflared-edge \
+    cloudflare-public/cloudflared-naranjo-online \
+    cloudflare-public/cloudflared-lidersea-com \
+    naranjo-online/default-deny \
+    naranjo-online/cloudflared-to-naranjo-online \
+    lidersea-com/default-deny \
+    lidersea-com/cloudflared-to-lidersea-com; do
+    namespace="${identity%%/*}"
+    name="${identity#*/}"
+    source="${TEMP_ROOT}/desired-networkpolicy-${namespace}-${name}.yaml"
+    [[ -f "$source" && ! -L "$source" ]] || \
+      die "desired NetworkPolicy source is unavailable or unsafe: ${identity}"
+    if ! kubectl_prod apply \
+      --server-side \
+      --dry-run=server \
+      --force-conflicts \
+      --field-manager=website-infrastructure-release-gate \
+      -f "$source" \
+      -o json >"${TEMP_ROOT}/desired-networkpolicy-${namespace}-${name}.json" 2>"$error_file"; then
+      die "production server could not normalize desired NetworkPolicy ${identity} (details withheld)"
+    fi
+    : >"$error_file"
+  done
+}
+
+assert_flux_revision_and_security_policy_state() {
+  "$PYTHON_BIN" - "$TEMP_ROOT" "$RELEASE_GIT_COMMIT" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+commit = sys.argv[2]
+if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+    raise SystemExit("release Git commit is unavailable or non-canonical")
+expected_git_revision = "main@sha1:" + commit
+
+
+def load_items(name):
+    document = json.loads((root / name).read_text(encoding="utf-8"))
+    items = document.get("items")
+    if not isinstance(items, list):
+        raise SystemExit(f"{name} does not contain one Kubernetes item list")
+    return items
+
+
+def metadata(item):
+    value = item.get("metadata", {})
+    return value if isinstance(value, dict) else {}
+
+
+def status(item):
+    value = item.get("status", {})
+    return value if isinstance(value, dict) else {}
+
+
+def one_ready(item, kind, identity):
+    conditions = status(item).get("conditions", [])
+    ready = [
+        condition
+        for condition in conditions
+        if isinstance(condition, dict) and condition.get("type") == "Ready"
+    ]
+    if len(ready) != 1 or ready[0].get("status") != "True":
+        raise SystemExit(f"{kind} {identity} does not have exactly one Ready=True condition")
+
+
+def exact_generation(item, kind, identity):
+    generation = metadata(item).get("generation")
+    observed = status(item).get("observedGeneration")
+    if (
+        type(generation) is not int
+        or generation < 1
+        or type(observed) is not int
+        or observed != generation
+    ):
+        raise SystemExit(f"{kind} {identity} has not observed its exact current generation")
+    return generation
+
+
+def by_identity(items, namespace, name, kind):
+    matches = [
+        item
+        for item in items
+        if metadata(item).get("namespace") == namespace
+        and metadata(item).get("name") == name
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one {kind} {namespace}/{name}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def exact_namespaced_inventory(items, expected, kind):
+    identities = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise SystemExit(f"{kind} inventory contains a non-object item")
+        identities.append(
+            (metadata(item).get("namespace"), metadata(item).get("name"))
+        )
+    if len(identities) != len(expected) or set(identities) != expected:
+        raise SystemExit(f"live {kind} inventory differs from the exact release set")
+
+
+def desired_flux_object(kind, api_version, namespace, name):
+    path = root / "desired-flux-{}-{}-{}.json".format(
+        kind.lower(), namespace, name
+    )
+    desired = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        desired.get("apiVersion") != api_version
+        or desired.get("kind") != kind
+        or metadata(desired).get("namespace") != namespace
+        or metadata(desired).get("name") != name
+        or not isinstance(desired.get("spec"), dict)
+    ):
+        raise SystemExit(f"desired {kind} normalization is invalid: {namespace}/{name}")
+    return desired
+
+
+kustomization_identities = {
+    ("flux-system", "flux-system"),
+    ("flux-system", "platform-prerequisites"),
+    ("flux-system", "admission"),
+    ("flux-system", "platform-services"),
+    ("flux-system", "naranjo-online"),
+    ("flux-system", "lidersea-com"),
+}
+kustomizations = load_items("kustomizations.json")
+exact_namespaced_inventory(
+    kustomizations, kustomization_identities, "Kustomization"
+)
+for name in (
+    "flux-system",
+    "platform-prerequisites",
+    "admission",
+    "platform-services",
+    "naranjo-online",
+    "lidersea-com",
+):
+    identity = "flux-system/" + name
+    item = by_identity(kustomizations, "flux-system", name, "Kustomization")
+    desired = desired_flux_object(
+        "Kustomization",
+        "kustomize.toolkit.fluxcd.io/v1",
+        "flux-system",
+        name,
+    )
+    exact_generation(item, "Kustomization", identity)
+    one_ready(item, "Kustomization", identity)
+    current_status = status(item)
+    if (
+        current_status.get("lastAppliedRevision") != expected_git_revision
+        or current_status.get("lastAttemptedRevision") != expected_git_revision
+    ):
+        raise SystemExit(
+            f"Kustomization {identity} is not applied and attempted at exact local HEAD"
+        )
+    if item.get("spec") != desired.get("spec"):
+        raise SystemExit(f"Kustomization {identity} spec differs from exact desired state")
+
+
+source_identities = {
+    ("flux-system", "flux-system"),
+    ("naranjo-online", "naranjo-online-source"),
+    ("lidersea-com", "lidersea-com-source"),
+    ("cloudflare-public", "cloudflare-public-source"),
+}
+gitrepositories = load_items("gitrepositories.json")
+exact_namespaced_inventory(gitrepositories, source_identities, "GitRepository")
+for namespace, name in sorted(source_identities):
+    identity = f"{namespace}/{name}"
+    item = by_identity(gitrepositories, namespace, name, "GitRepository")
+    desired = desired_flux_object(
+        "GitRepository", "source.toolkit.fluxcd.io/v1", namespace, name
+    )
+    exact_generation(item, "GitRepository", identity)
+    one_ready(item, "GitRepository", identity)
+    spec = item.get("spec", {})
+    artifact = status(item).get("artifact", {})
+    if (
+        spec.get("url") != "https://github.com/snaraj/website-infrastructure.git"
+        or spec.get("ref") != {"branch": "main"}
+        or not isinstance(artifact, dict)
+        or artifact.get("revision") != expected_git_revision
+    ):
+        raise SystemExit(f"GitRepository {identity} is not the exact current main artifact")
+    if spec != desired.get("spec"):
+        raise SystemExit(f"GitRepository {identity} spec differs from exact desired state")
+
+
+for filename, kind in (
+    ("buckets.json", "Bucket"),
+    ("externalartifacts.json", "ExternalArtifact"),
+    ("helmrepositories.json", "HelmRepository"),
+    ("ocirepositories.json", "OCIRepository"),
+):
+    if load_items(filename):
+        raise SystemExit(f"live {kind} inventory must be empty")
+
+
+helmreleases = load_items("helmreleases.json")
+helmcharts = load_items("helmcharts.json")
+release_sources = {
+    ("naranjo-online", "naranjo-online"): "naranjo-online-source",
+    ("lidersea-com", "lidersea-com"): "lidersea-com-source",
+    ("cloudflare-public", "cloudflare-public"): "cloudflare-public-source",
+}
+expected_chart_identities = {
+    (namespace, f"{namespace}-{name}")
+    for namespace, name in release_sources
+}
+exact_namespaced_inventory(helmreleases, set(release_sources), "HelmRelease")
+exact_namespaced_inventory(helmcharts, expected_chart_identities, "HelmChart")
+for (namespace, name), source_name in release_sources.items():
+    identity = f"{namespace}/{name}"
+    release = by_identity(helmreleases, namespace, name, "HelmRelease")
+    desired_release = desired_flux_object(
+        "HelmRelease", "helm.toolkit.fluxcd.io/v2", namespace, name
+    )
+    if release.get("spec") != desired_release.get("spec"):
+        raise SystemExit(f"HelmRelease {identity} spec differs from exact desired state")
+    generation = exact_generation(release, "HelmRelease", identity)
+    one_ready(release, "HelmRelease", identity)
+    release_status = status(release)
+    attempted_generation = release_status.get("lastAttemptedGeneration")
+    attempted_revision = release_status.get("lastAttemptedRevision")
+    if type(attempted_generation) is not int or attempted_generation != generation:
+        raise SystemExit(f"HelmRelease {identity} did not attempt its exact current generation")
+    if not isinstance(attempted_revision, str) or not attempted_revision:
+        raise SystemExit(f"HelmRelease {identity} has no attempted source revision")
+    history = release_status.get("history")
+    if not isinstance(history, list) or not history or not isinstance(history[0], dict):
+        raise SystemExit(f"HelmRelease {identity} has no successful release history")
+    latest = history[0]
+    if (
+        latest.get("name") != name
+        or latest.get("namespace") != namespace
+        or latest.get("status") != "deployed"
+        or latest.get("chartVersion") != attempted_revision
+    ):
+        raise SystemExit(
+            f"HelmRelease {identity} attempted revision is not its latest deployed revision"
+        )
+    chart_reference = release_status.get("helmChart")
+    if not isinstance(chart_reference, str) or chart_reference.count("/") != 1:
+        raise SystemExit(f"HelmRelease {identity} has no canonical HelmChart reference")
+    chart_namespace, chart_name = chart_reference.split("/", 1)
+    expected_chart_name = f"{namespace}-{name}"
+    if chart_namespace != namespace or chart_name != expected_chart_name:
+        raise SystemExit(f"HelmRelease {identity} references an unexpected HelmChart")
+    chart_identity = f"{chart_namespace}/{chart_name}"
+    chart = by_identity(helmcharts, chart_namespace, chart_name, "HelmChart")
+    exact_generation(chart, "HelmChart", chart_identity)
+    one_ready(chart, "HelmChart", chart_identity)
+    chart_spec = chart.get("spec", {})
+    desired_chart_spec = desired_release.get("spec", {}).get("chart", {}).get("spec")
+    chart_status = status(chart)
+    chart_artifact = chart_status.get("artifact", {})
+    if (
+        chart_spec.get("reconcileStrategy") != "Revision"
+        or chart_spec.get("sourceRef")
+        != {"kind": "GitRepository", "name": source_name}
+        or chart_spec != desired_chart_spec
+        or chart_status.get("observedSourceArtifactRevision")
+        != expected_git_revision
+        or not isinstance(chart_artifact, dict)
+        or chart_artifact.get("revision") != attempted_revision
+    ):
+        raise SystemExit(
+            f"HelmRelease {identity} is not applied from its exact current Git artifact"
+        )
+
+
+required_policies = {
+    "disallow-public-services",
+    "disallow-tenant-media-payloads",
+    "disallow-undiscovered-storage",
+    "require-approved-images",
+    "require-exact-tenant-networking",
+    "require-release-readiness",
+    "require-restricted-workloads",
+    "require-signed-naranjo-online",
+    "require-signed-lidersea-com",
+}
+live_policies = {
+    metadata(policy).get("name"): policy for policy in load_items("policies.json")
+}
+if len(live_policies) != len(required_policies) or set(live_policies) != required_policies:
+    raise SystemExit("live ClusterPolicy inventory differs from the exact desired state")
+for name in sorted(required_policies):
+    live = live_policies.get(name)
+    if live is None:
+        raise SystemExit(f"required live ClusterPolicy is missing: {name}")
+    desired_path = root / f"desired-policy-{name}.json"
+    desired = json.loads(desired_path.read_text(encoding="utf-8"))
+    if (
+        desired.get("apiVersion") != "kyverno.io/v1"
+        or desired.get("kind") != "ClusterPolicy"
+        or metadata(desired).get("name") != name
+        or not isinstance(desired.get("spec"), dict)
+    ):
+        raise SystemExit(f"desired ClusterPolicy normalization is invalid: {name}")
+    if live.get("spec") != desired.get("spec"):
+        raise SystemExit(f"live ClusterPolicy spec differs from exact desired state: {name}")
+
+
+expected_network_policies = {
+    ("cloudflare-public", "default-deny"),
+    ("cloudflare-public", "cloudflared-dns"),
+    ("cloudflare-public", "cloudflared-edge"),
+    ("cloudflare-public", "cloudflared-naranjo-online"),
+    ("cloudflare-public", "cloudflared-lidersea-com"),
+    ("naranjo-online", "default-deny"),
+    ("naranjo-online", "cloudflared-to-naranjo-online"),
+    ("lidersea-com", "default-deny"),
+    ("lidersea-com", "cloudflared-to-lidersea-com"),
+}
+tenant_namespaces = {identity[0] for identity in expected_network_policies}
+tenant_network_policies = [
+    policy
+    for policy in load_items("networkpolicies.json")
+    if metadata(policy).get("namespace") in tenant_namespaces
+]
+live_network_policies = {
+    (metadata(policy).get("namespace"), metadata(policy).get("name")): policy
+    for policy in tenant_network_policies
+}
+if (
+    len(tenant_network_policies) != len(expected_network_policies)
+    or set(live_network_policies) != expected_network_policies
+):
+    raise SystemExit("live tenant NetworkPolicy inventory differs from exact desired state")
+for namespace, name in sorted(expected_network_policies):
+    desired_path = root / f"desired-networkpolicy-{namespace}-{name}.json"
+    desired = json.loads(desired_path.read_text(encoding="utf-8"))
+    if (
+        desired.get("apiVersion") != "networking.k8s.io/v1"
+        or desired.get("kind") != "NetworkPolicy"
+        or metadata(desired).get("namespace") != namespace
+        or metadata(desired).get("name") != name
+        or not isinstance(desired.get("spec"), dict)
+    ):
+        raise SystemExit(
+            f"desired NetworkPolicy normalization is invalid: {namespace}/{name}"
+        )
+    if live_network_policies[(namespace, name)].get("spec") != desired.get("spec"):
+        raise SystemExit(
+            f"live NetworkPolicy spec differs from exact desired state: {namespace}/{name}"
+        )
+
+print(
+    "release-gate: PASS Flux sources, Helm revisions, and live security-policy specs are bound to exact local HEAD"
+)
+PY
+}
+
+assert_global_runtime_inventory() {
+  "$PYTHON_BIN" - \
+    "$TEMP_ROOT" \
+    "$NARANJO_RUNTIME_IMAGE" \
+    "$LIDERSEA_RUNTIME_IMAGE" \
+    "$CLOUDFLARED_RUNTIME_IMAGE" \
+    "$ADMISSION_RUNTIME_IMAGE" \
+    "$FLUX_SOURCE_CONTROLLER_IMAGE" \
+    "$FLUX_KUSTOMIZE_CONTROLLER_IMAGE" \
+    "$FLUX_HELM_CONTROLLER_IMAGE" \
+    "$KUBERNETES_VERSION" \
+    "$COREDNS_IMAGE" \
+    "$ETCD_IMAGE" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+naranjo_image = sys.argv[2]
+lidersea_image = sys.argv[3]
+cloudflared_image = sys.argv[4]
+admission_image = sys.argv[5]
+flux_source_image = sys.argv[6]
+flux_kustomize_image = sys.argv[7]
+flux_helm_image = sys.argv[8]
+kubernetes_version = sys.argv[9]
+coredns_image = sys.argv[10]
+etcd_image = sys.argv[11]
+
+
+def load_items(name):
+    document = json.loads((root / name).read_text(encoding="utf-8"))
+    items = document.get("items")
+    if not isinstance(items, list):
+        raise SystemExit(f"{name} does not contain one Kubernetes item list")
+    if any(not isinstance(item, dict) for item in items):
+        raise SystemExit(f"{name} contains a non-object item")
+    return items
+
+
+def metadata(item):
+    value = item.get("metadata", {})
+    return value if isinstance(value, dict) else {}
+
+
+def namespaced_identity(item):
+    return metadata(item).get("namespace"), metadata(item).get("name")
+
+
+def exact_namespaced_map(items, expected, kind):
+    identities = [namespaced_identity(item) for item in items]
+    if len(identities) != len(expected) or set(identities) != expected:
+        raise SystemExit(f"live {kind} inventory differs from the exact release set")
+    result = {}
+    for item in items:
+        identity = namespaced_identity(item)
+        uid = metadata(item).get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise SystemExit(f"{kind} {identity[0]}/{identity[1]} has no stable UID")
+        result[identity] = item
+    return result
+
+
+def dynamic_namespaced_map(items, kind):
+    result = {}
+    uids = set()
+    for item in items:
+        identity = namespaced_identity(item)
+        uid = metadata(item).get("uid")
+        if (
+            not all(isinstance(value, str) and value for value in identity)
+            or identity in result
+            or not isinstance(uid, str)
+            or not uid
+            or uid in uids
+        ):
+            raise SystemExit(f"live {kind} inventory has an invalid or duplicate identity")
+        result[identity] = item
+        uids.add(uid)
+    return result
+
+
+def one_controller_owner(item, kind, identity):
+    owners = metadata(item).get("ownerReferences", [])
+    if not isinstance(owners, list):
+        raise SystemExit(f"{kind} {identity[0]}/{identity[1]} has invalid owner references")
+    controllers = [
+        owner
+        for owner in owners
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if len(owners) != 1 or len(controllers) != 1:
+        raise SystemExit(f"{kind} {identity[0]}/{identity[1]} lacks one exact controller owner")
+    return controllers[0]
+
+
+def pod_spec(item):
+    value = item.get("spec", {})
+    return value if isinstance(value, dict) else {}
+
+
+def container_images(spec):
+    regular = spec.get("containers", [])
+    init = spec.get("initContainers", [])
+    if (
+        not isinstance(regular, list)
+        or not regular
+        or not isinstance(init, list)
+        or any(not isinstance(container, dict) for container in regular + init)
+    ):
+        return None
+    images = [container.get("image") for container in regular + init]
+    if any(not isinstance(image, str) or not image for image in images):
+        return None
+    return images
+
+
+def assert_no_host_port(spec, label):
+    containers = (
+        spec.get("containers", [])
+        + spec.get("initContainers", [])
+        + spec.get("ephemeralContainers", [])
+    )
+    for container in containers:
+        for port in container.get("ports", []):
+            if port.get("hostPort") not in {None, 0}:
+                raise SystemExit(f"{label} declares a hostPort")
+
+
+def assert_restricted_spec(spec, label, allowed_capabilities=()):
+    if any(spec.get(field) is True for field in ("hostNetwork", "hostPID", "hostIPC")):
+        raise SystemExit(f"{label} enters a host namespace")
+    if any("hostPath" in volume for volume in spec.get("volumes", [])):
+        raise SystemExit(f"{label} mounts a hostPath")
+    containers = (
+        spec.get("containers", [])
+        + spec.get("initContainers", [])
+        + spec.get("ephemeralContainers", [])
+    )
+    for container in containers:
+        security = container.get("securityContext", {})
+        capabilities = security.get("capabilities", {})
+        added = capabilities.get("add", [])
+        if (
+            security.get("privileged") is True
+            or security.get("allowPrivilegeEscalation") is True
+            or security.get("procMount") == "Unmasked"
+            or not isinstance(added, list)
+            or any(value not in allowed_capabilities for value in added)
+        ):
+            raise SystemExit(f"{label} contains a privileged container capability")
+    assert_no_host_port(spec, label)
+
+
+def stable_deployment(item, identity):
+    meta = metadata(item)
+    spec = item.get("spec", {})
+    status = item.get("status", {})
+    replicas = spec.get("replicas")
+    generation = meta.get("generation")
+    if (
+        type(replicas) is not int
+        or replicas < 1
+        or type(generation) is not int
+        or generation < 1
+        or status.get("observedGeneration") != generation
+        or status.get("replicas") != replicas
+        or status.get("updatedReplicas") != replicas
+        or status.get("readyReplicas") != replicas
+        or status.get("availableReplicas") != replicas
+        or status.get("unavailableReplicas") not in {None, 0}
+    ):
+        raise SystemExit(f"Deployment {identity[0]}/{identity[1]} is not exactly stable")
+    return replicas
+
+
+def stable_daemonset(item, identity):
+    meta = metadata(item)
+    status = item.get("status", {})
+    generation = meta.get("generation")
+    desired = status.get("desiredNumberScheduled")
+    if (
+        type(generation) is not int
+        or generation < 1
+        or status.get("observedGeneration") != generation
+        or type(desired) is not int
+        or desired != 1
+        or status.get("currentNumberScheduled") != desired
+        or status.get("updatedNumberScheduled") != desired
+        or status.get("numberReady") != desired
+        or status.get("numberAvailable") != desired
+        or status.get("numberMisscheduled") not in {None, 0}
+        or status.get("numberUnavailable") not in {None, 0}
+    ):
+        raise SystemExit(f"DaemonSet {identity[0]}/{identity[1]} is not exactly stable")
+    return desired
+
+
+namespace_items = load_items("namespaces.json")
+expected_namespaces = {
+    "default",
+    "kube-node-lease",
+    "kube-public",
+    "kube-system",
+    "flux-system",
+    "kyverno",
+    "cloudflare-public",
+    "naranjo-online",
+    "lidersea-com",
+}
+namespace_names = [metadata(item).get("name") for item in namespace_items]
+if len(namespace_names) != len(expected_namespaces) or set(namespace_names) != expected_namespaces:
+    raise SystemExit("live Namespace inventory differs from the exact release set")
+for item in namespace_items:
+    if item.get("status", {}).get("phase") != "Active" or metadata(item).get("deletionTimestamp") is not None:
+        raise SystemExit("an expected Namespace is not exactly Active")
+
+nodes = load_items("nodes.json")
+if len(nodes) != 1:
+    raise SystemExit("global inventory requires exactly one production node")
+node_name = metadata(nodes[0]).get("name")
+node_uid = metadata(nodes[0]).get("uid")
+if (
+    not isinstance(node_name, str)
+    or not node_name
+    or not isinstance(node_uid, str)
+    or not node_uid
+):
+    raise SystemExit("production node identity is unavailable")
+
+base_deployments = {
+    ("naranjo-online", "naranjo-online"),
+    ("lidersea-com", "lidersea-com"),
+    ("cloudflare-public", "cloudflared"),
+    ("kyverno", "kyverno-admission-controller"),
+    ("flux-system", "source-controller"),
+    ("flux-system", "kustomize-controller"),
+    ("flux-system", "helm-controller"),
+    ("kube-system", "coredns"),
+}
+provider_variants = {
+    "cilium": (
+        ("kube-system", "cilium-operator"),
+        ("kube-system", "cilium"),
+    ),
+    "calico": (
+        ("kube-system", "calico-kube-controllers"),
+        ("kube-system", "calico-node"),
+    ),
+}
+deployment_items = load_items("deployments.json")
+daemonset_items = load_items("daemonsets.json")
+deployment_identities = set(namespaced_identity(item) for item in deployment_items)
+daemonset_identities = set(namespaced_identity(item) for item in daemonset_items)
+provider = None
+for candidate, (provider_deployment, provider_daemonset) in provider_variants.items():
+    if (
+        deployment_identities == base_deployments | {provider_deployment}
+        and daemonset_identities
+        == {("kube-system", "kube-proxy"), provider_daemonset}
+    ):
+        provider = candidate
+        break
+if provider is None:
+    raise SystemExit("live Deployment/DaemonSet inventory is outside the exact kubeadm/CNI release variants")
+provider_deployment, provider_daemonset = provider_variants[provider]
+deployments = exact_namespaced_map(
+    deployment_items, base_deployments | {provider_deployment}, "Deployment"
+)
+daemonsets = exact_namespaced_map(
+    daemonset_items,
+    {("kube-system", "kube-proxy"), provider_daemonset},
+    "DaemonSet",
+)
+
+for filename, kind in (
+    ("statefulsets.json", "StatefulSet"),
+    ("replicationcontrollers.json", "ReplicationController"),
+    ("jobs.json", "Job"),
+    ("cronjobs.json", "CronJob"),
+    ("horizontalpodautoscalers.json", "HorizontalPodAutoscaler"),
+):
+    if load_items(filename):
+        raise SystemExit(f"live {kind} inventory must be empty")
+
+expected_deployment_images = {
+    ("naranjo-online", "naranjo-online"): naranjo_image,
+    ("lidersea-com", "lidersea-com"): lidersea_image,
+    ("cloudflare-public", "cloudflared"): cloudflared_image,
+    ("kyverno", "kyverno-admission-controller"): admission_image,
+    ("flux-system", "source-controller"): flux_source_image,
+    ("flux-system", "kustomize-controller"): flux_kustomize_image,
+    ("flux-system", "helm-controller"): flux_helm_image,
+    ("kube-system", "coredns"): coredns_image,
+}
+provider_image = {
+    "cilium": re.compile(r"quay[.]io/cilium/[A-Za-z0-9._/-]+(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}\Z"),
+    "calico": re.compile(r"docker[.]io/calico/[A-Za-z0-9._/-]+(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}\Z"),
+}[provider]
+deployment_replicas = {}
+for identity, deployment in deployments.items():
+    deployment_replicas[identity] = stable_deployment(deployment, identity)
+    template = deployment.get("spec", {}).get("template", {}).get("spec", {})
+    images = container_images(template)
+    if images is None:
+        raise SystemExit(f"Deployment {identity[0]}/{identity[1]} has invalid container images")
+    if identity == provider_deployment:
+        if any(provider_image.fullmatch(image) is None or image.endswith("@sha256:" + "0" * 64) for image in images):
+            raise SystemExit("CNI controller Deployment image is outside the reviewed provider registry/digest contract")
+    elif images != [expected_deployment_images[identity]]:
+        raise SystemExit(f"Deployment {identity[0]}/{identity[1]} image inventory differs from exact desired state")
+    allowed_capabilities = {"NET_BIND_SERVICE"} if identity == ("kube-system", "coredns") else set()
+    assert_restricted_spec(
+        template,
+        f"Deployment {identity[0]}/{identity[1]} template",
+        allowed_capabilities,
+    )
+
+daemonset_desired = {}
+for identity, daemonset in daemonsets.items():
+    daemonset_desired[identity] = stable_daemonset(daemonset, identity)
+    template = daemonset.get("spec", {}).get("template", {}).get("spec", {})
+    images = container_images(template)
+    if images is None:
+        raise SystemExit(f"DaemonSet {identity[0]}/{identity[1]} has invalid container images")
+    if identity == ("kube-system", "kube-proxy"):
+        if images != [f"registry.k8s.io/kube-proxy:{kubernetes_version}"]:
+            raise SystemExit("kube-proxy image differs from the exact reviewed Kubernetes version")
+    elif any(provider_image.fullmatch(image) is None or image.endswith("@sha256:" + "0" * 64) for image in images):
+        raise SystemExit("CNI DaemonSet image is outside the reviewed provider registry/digest contract")
+    assert_no_host_port(template, f"DaemonSet {identity[0]}/{identity[1]} template")
+
+replicasets = dynamic_namespaced_map(load_items("replicasets.json"), "ReplicaSet")
+deployment_uids = {
+    metadata(item)["uid"]: identity for identity, item in deployments.items()
+}
+active_replicasets = {}
+replicaset_parent = {}
+replicaset_identity_by_uid = {}
+for identity, replicaset in replicasets.items():
+    owner = one_controller_owner(replicaset, "ReplicaSet", identity)
+    parent = deployment_uids.get(owner.get("uid"))
+    if (
+        owner.get("apiVersion") != "apps/v1"
+        or owner.get("kind") != "Deployment"
+        or parent is None
+        or owner.get("name") != parent[1]
+        or identity[0] != parent[0]
+        or not identity[1].startswith(parent[1] + "-")
+    ):
+        raise SystemExit(f"ReplicaSet {identity[0]}/{identity[1]} is outside the exact Deployment UID chain")
+    replicas = replicaset.get("spec", {}).get("replicas")
+    if type(replicas) is not int or replicas < 0:
+        raise SystemExit(f"ReplicaSet {identity[0]}/{identity[1]} has an invalid replica count")
+    replicaset_parent[metadata(replicaset)["uid"]] = parent
+    replicaset_identity_by_uid[metadata(replicaset)["uid"]] = identity
+    if replicas:
+        deployment = deployments[parent]
+        deployment_selector = json.loads(
+            json.dumps(deployment.get("spec", {}).get("selector", {}))
+        )
+        replicaset_selector = json.loads(
+            json.dumps(replicaset.get("spec", {}).get("selector", {}))
+        )
+        deployment_template = json.loads(
+            json.dumps(deployment.get("spec", {}).get("template", {}))
+        )
+        replicaset_template = json.loads(
+            json.dumps(replicaset.get("spec", {}).get("template", {}))
+        )
+        selector_hash = replicaset_selector.get("matchLabels", {}).pop(
+            "pod-template-hash", None
+        )
+        template_hash = replicaset_template.get("metadata", {}).get(
+            "labels", {}
+        ).pop("pod-template-hash", None)
+        if (
+            not isinstance(selector_hash, str)
+            or not selector_hash
+            or template_hash != selector_hash
+            or replicaset_selector != deployment_selector
+            or replicaset_template != deployment_template
+            or replicas != deployment_replicas[parent]
+            or replicaset.get("status", {}).get("readyReplicas") != replicas
+            or replicaset.get("status", {}).get("availableReplicas") != replicas
+        ):
+            raise SystemExit(f"active ReplicaSet {identity[0]}/{identity[1]} differs from its exact stable Deployment")
+        if parent in active_replicasets:
+            raise SystemExit(f"Deployment {parent[0]}/{parent[1]} has more than one active ReplicaSet")
+        active_replicasets[parent] = metadata(replicaset)["uid"]
+    elif any(replicaset.get("status", {}).get(field, 0) not in {None, 0} for field in ("replicas", "readyReplicas", "availableReplicas")):
+        raise SystemExit(f"inactive ReplicaSet {identity[0]}/{identity[1]} still has live replicas")
+if set(active_replicasets) != set(deployments):
+    raise SystemExit("each exact Deployment must have one and only one active ReplicaSet")
+
+daemonset_uids = {
+    metadata(item)["uid"]: identity for identity, item in daemonsets.items()
+}
+pod_counts = {identity: 0 for identity in deployments}
+pod_counts.update({identity: 0 for identity in daemonsets})
+static_expected = {
+    ("kube-system", f"etcd-{node_name}"),
+    ("kube-system", f"kube-apiserver-{node_name}"),
+    ("kube-system", f"kube-controller-manager-{node_name}"),
+    ("kube-system", f"kube-scheduler-{node_name}"),
+}
+static_seen = set()
+pod_uids = set()
+for pod in load_items("pods.json"):
+    identity = namespaced_identity(pod)
+    uid = metadata(pod).get("uid")
+    if (
+        identity[0] not in expected_namespaces
+        or not isinstance(identity[1], str)
+        or not identity[1]
+        or not isinstance(uid, str)
+        or not uid
+        or uid in pod_uids
+        or metadata(pod).get("deletionTimestamp") is not None
+    ):
+        raise SystemExit("live Pod inventory has an invalid, duplicate, or deleting identity")
+    pod_uids.add(uid)
+    spec = pod_spec(pod)
+    images = container_images(spec)
+    if images is None:
+        raise SystemExit(f"Pod {identity[0]}/{identity[1]} has invalid container images")
+    owners = metadata(pod).get("ownerReferences", [])
+    elevated = False
+    expected_images = None
+    restricted_allowed_capabilities = set()
+    mirror_annotation = metadata(pod).get("annotations", {}).get(
+        "kubernetes.io/config.mirror"
+    )
+    if identity in static_expected and mirror_annotation not in {None, ""}:
+        if owners:
+            owner = one_controller_owner(pod, "mirror Pod", identity)
+            if (
+                owner.get("apiVersion") != "v1"
+                or owner.get("kind") != "Node"
+                or owner.get("name") != node_name
+                or owner.get("uid") != node_uid
+            ):
+                raise SystemExit(
+                    f"mirror Pod {identity[0]}/{identity[1]} has an unexpected Node owner"
+                )
+        if (
+            identity in static_seen
+            or spec.get("nodeName") != node_name
+            or spec.get("initContainers")
+            or spec.get("ephemeralContainers")
+        ):
+            raise SystemExit(f"unowned Pod {identity[0]}/{identity[1]} is not one exact kubeadm mirror Pod")
+        static_seen.add(identity)
+        elevated = True
+        component = identity[1][:-len(node_name) - 1]
+        expected_images = {
+            "etcd": [etcd_image],
+            "kube-apiserver": [f"registry.k8s.io/kube-apiserver:{kubernetes_version}"],
+            "kube-controller-manager": [f"registry.k8s.io/kube-controller-manager:{kubernetes_version}"],
+            "kube-scheduler": [f"registry.k8s.io/kube-scheduler:{kubernetes_version}"],
+        }.get(component)
+    else:
+        if not owners:
+            raise SystemExit(
+                f"unowned Pod {identity[0]}/{identity[1]} is not one exact kubeadm mirror Pod"
+            )
+        owner = one_controller_owner(pod, "Pod", identity)
+        owner_uid = owner.get("uid")
+        if owner.get("apiVersion") != "apps/v1" or owner.get("kind") not in {"ReplicaSet", "DaemonSet"}:
+            raise SystemExit(f"Pod {identity[0]}/{identity[1]} has an unapproved controller kind")
+        if owner.get("kind") == "ReplicaSet":
+            parent = replicaset_parent.get(owner_uid)
+            if (
+                parent is None
+                or active_replicasets.get(parent) != owner_uid
+                or owner.get("name") != replicaset_identity_by_uid.get(owner_uid, (None, None))[1]
+                or identity[0] != parent[0]
+                or not identity[1].startswith(owner.get("name", "") + "-")
+            ):
+                raise SystemExit(f"Pod {identity[0]}/{identity[1]} is outside the active Deployment UID chain")
+            pod_counts[parent] += 1
+            expected_images = container_images(
+                deployments[parent].get("spec", {}).get("template", {}).get("spec", {})
+            )
+            if parent == ("kube-system", "coredns"):
+                restricted_allowed_capabilities = {"NET_BIND_SERVICE"}
+        else:
+            parent = daemonset_uids.get(owner_uid)
+            if (
+                parent is None
+                or owner.get("name") != parent[1]
+                or identity[0] != parent[0]
+                or not identity[1].startswith(parent[1] + "-")
+            ):
+                raise SystemExit(f"Pod {identity[0]}/{identity[1]} is outside the exact DaemonSet UID chain")
+            pod_counts[parent] += 1
+            elevated = True
+            expected_images = container_images(
+                daemonsets[parent].get("spec", {}).get("template", {}).get("spec", {})
+            )
+    if images != expected_images:
+        raise SystemExit(f"Pod {identity[0]}/{identity[1]} image inventory differs from its exact controller")
+    if pod.get("status", {}).get("phase") != "Running":
+        raise SystemExit(f"Pod {identity[0]}/{identity[1]} is not Running")
+    ready = [
+        condition
+        for condition in pod.get("status", {}).get("conditions", [])
+        if isinstance(condition, dict) and condition.get("type") == "Ready"
+    ]
+    if len(ready) != 1 or ready[0].get("status") != "True":
+        raise SystemExit(f"Pod {identity[0]}/{identity[1]} is not exactly Ready")
+    assert_no_host_port(spec, f"Pod {identity[0]}/{identity[1]}")
+    if not elevated:
+        assert_restricted_spec(
+            spec,
+            f"Pod {identity[0]}/{identity[1]}",
+            restricted_allowed_capabilities,
+        )
+if static_seen != static_expected:
+    raise SystemExit("live kubeadm mirror Pod inventory is incomplete")
+expected_pod_counts = dict(deployment_replicas)
+expected_pod_counts.update(daemonset_desired)
+if pod_counts != expected_pod_counts:
+    raise SystemExit("live controller-owned Pod counts differ from exact stable controller replicas")
+
+expected_services = {
+    ("default", "kubernetes"),
+    ("kube-system", "kube-dns"),
+    ("flux-system", "source-controller"),
+    ("kyverno", "kyverno-svc"),
+    ("naranjo-online", "naranjo-online"),
+    ("lidersea-com", "lidersea-com"),
+}
+services = exact_namespaced_map(load_items("services.json"), expected_services, "Service")
+for identity, service in services.items():
+    spec = service.get("spec", {})
+    if (
+        spec.get("type", "ClusterIP") != "ClusterIP"
+        or spec.get("externalIPs")
+        or spec.get("externalName")
+        or spec.get("healthCheckNodePort") not in {None, 0}
+        or any(port.get("nodePort") not in {None, 0} for port in spec.get("ports", []))
+    ):
+        raise SystemExit(f"Service {identity[0]}/{identity[1]} has a direct-origin exposure field")
+
+if load_items("mutatingwebhooks.json"):
+    raise SystemExit("live MutatingWebhookConfiguration inventory must be empty")
+validating = load_items("webhooks.json")
+if len(validating) != 1 or metadata(validating[0]).get("name") != "kyverno-resource-validating-webhook-cfg":
+    raise SystemExit("live ValidatingWebhookConfiguration inventory differs from the exact Kyverno boundary")
+tenant_namespaces = {"cloudflare-public", "naranjo-online", "lidersea-com"}
+webhooks = validating[0].get("webhooks", [])
+if not isinstance(webhooks, list) or not webhooks:
+    raise SystemExit("exact Kyverno validating webhook set is unavailable")
+for webhook in webhooks:
+    service = webhook.get("clientConfig", {}).get("service", {})
+    selector = webhook.get("namespaceSelector", {})
+    expressions = selector.get("matchExpressions", [])
+    if (
+        webhook.get("failurePolicy") != "Fail"
+        or service.get("namespace") != "kyverno"
+        or service.get("name") != "kyverno-svc"
+        or selector.get("matchLabels")
+        or not isinstance(expressions, list)
+        or len(expressions) != 1
+        or expressions[0].get("key") != "kubernetes.io/metadata.name"
+        or expressions[0].get("operator") != "In"
+        or set(expressions[0].get("values", [])) != tenant_namespaces
+        or len(expressions[0].get("values", [])) != len(tenant_namespaces)
+    ):
+        raise SystemExit("live Kyverno validating webhook does not fail closed over the exact tenant set")
+
+print(
+    "release-gate: PASS exact global namespace, controller, Pod, Service, and admission inventories are closed"
+)
+PY
 }
 
 assert_production_state() {
@@ -673,7 +1897,7 @@ for name in ("platform-prerequisites", "admission", "platform-services", "naranj
     if name == "admission" and item.get("spec", {}).get("wait") is not True:
         raise SystemExit("admission Kustomization must keep wait=true as its runtime readiness boundary")
     observed = item.get("status", {}).get("observedGeneration")
-    if observed is not None and observed != meta(item).get("generation"):
+    if observed != meta(item).get("generation"):
         raise SystemExit(f"Flux Kustomization {name} has not observed its current generation")
 
 releases = load("helmreleases.json")
@@ -682,7 +1906,7 @@ for namespace, name in (("naranjo-online", "naranjo-online"), ("lidersea-com", "
     if item.get("spec", {}).get("suspend", False) or condition(item, "Ready") != "True":
         raise SystemExit(f"HelmRelease {namespace}/{name} is suspended or not Ready")
     observed = item.get("status", {}).get("observedGeneration")
-    if observed is not None and observed != meta(item).get("generation"):
+    if observed != meta(item).get("generation"):
         raise SystemExit(f"HelmRelease {namespace}/{name} has not observed its current generation")
 
 required_policies = {
@@ -989,12 +2213,24 @@ run_live_gate() {
 
   validate_production_context
   bash "${REPO_ROOT}/scripts/test-kind.sh" --runtime "$KIND_ACK"
+  assert_clean_commit
+  capture_desired_security_policy_state
   capture_production_state
+  assert_flux_revision_and_security_policy_state
+  assert_global_runtime_inventory
   assert_production_state
   assert_no_live_routes
   exercise_production_admission
   bash "${REPO_ROOT}/scripts/verify-exposure.sh" --live \
     'I_ACKNOWLEDGE_THIS_WILL_PROBE_PUBLIC_DNS_CLOUDFLARE_AND_MY_HOME_IP'
+  assert_clean_commit
+  capture_desired_security_policy_state
+  capture_production_state
+  assert_flux_revision_and_security_policy_state
+  assert_global_runtime_inventory
+  assert_production_state
+  assert_no_live_routes
+  assert_clean_commit
   log 'GO: static, reviewed capacity, Kind, production admission/readiness, storage, and public exposure evidence all passed'
 }
 
@@ -1015,6 +2251,23 @@ case "${1:---check}" in
     require_static_tools
     run_static_gate --release
     log 'PASS promoted static state and capacity review; runtime evidence is still required for GO'
+    ;;
+  --transition-check)
+    (($# == 1)) || { usage >&2; exit 2; }
+    require_static_tools
+    run_static_gate --transition
+    log 'PASS canonical static transition gate; no Docker or cluster object was created'
+    ;;
+  --transition-runtime)
+    (($# == 3)) || { usage >&2; exit 2; }
+    case "$2" in
+      naranjo-online|lidersea-com) ;;
+      *) die 'transition runtime site must be naranjo-online or lidersea-com' ;;
+    esac
+    [[ "$3" == "$KIND_ACK" ]] || die "exact acknowledgement is required: ${KIND_ACK}"
+    require_static_tools
+    bash "${REPO_ROOT}/scripts/test-kind.sh" --transition-runtime "$2" "$KIND_ACK"
+    log "PASS bounded local transition runtime evidence for staged $2; production remains untouched"
     ;;
   --live)
     (($# == 4)) || { usage >&2; exit 2; }

@@ -1,5 +1,9 @@
 # Architecture overview
 
+The diagram below is the reviewed **target state**, not a claim about the
+current Pi. Protected discovery, retirement, capacity, recovery, and live-gate
+evidence must all pass before any component is described as deployed.
+
 ```mermaid
 flowchart LR
   Visitor["Public visitor"] --> Edge["Cloudflare edge\nDNS + TLS"]
@@ -20,6 +24,7 @@ flowchart LR
       Delivery["future delivery derivatives\nread-only mount — disabled"]
     end
     Originals["media originals + metadata\noperator-only data filesystem"]
+    LegacyArchive["inactive protected legacy archive\noperator-only; no runtime"]
   end
 
   Edge -->|"outbound Tunnel path"| PublicTunnel
@@ -32,6 +37,8 @@ flowchart LR
   AdminTunnel --> API
   PublicTunnel -. "denied" .-> SSH
   PublicTunnel -. "denied" .-> API
+  PublicTunnel -. "denied" .-> LegacyArchive
+  Kubernetes -. "denied" .-> LegacyArchive
 ```
 
 Both Tunnel connectors initiate outbound connections. The residential address
@@ -64,6 +71,13 @@ There is one node, one ISP path, and one Cloudflare dependency. If any fails the
 site may be offline. No component is allowed to activate a paid fallback or
 expose the origin. Administrative recovery remains host-level and independent
 of kubelet, containerd, and the Kubernetes control plane.
+
+The inactive protected legacy archive is also outside Kubernetes. It has no
+runtime, listener, Tunnel route, container mount, Flux object, or CI artifact.
+Only the operator may inventory and preserve it through the ignored local
+contract and the [archive runbook](../runbooks/protected-legacy-archive.md).
+Its product classification is public policy, not evidence of a particular
+unit, path, version, mount, identity, or archive content on the host.
 
 Production uses upstream Kubernetes bootstrapped by kubeadm with containerd and
 stacked single-member etcd. kube-proxy remains installed; its mode and the CNI

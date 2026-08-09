@@ -14,6 +14,9 @@ aspirational until a timed restore drill succeeds.
 - Git desired state and immutable image evidence;
 - encrypted, checksum-verified off-device media originals and publication
   metadata, stored independently from the Pi data filesystem;
+- separately encrypted protected legacy wallet/signing or anonymity identity
+  material when locally present, plus a content-neutral archive manifest and
+  tested restore result that disclose no values;
 - Cloudflare/GitHub recovery factors stored separately;
 - future application/database backups (etcd is not an application-data backup).
 
@@ -55,3 +58,11 @@ Record start/end, versions, snapshot age/hash, non-sensitive evidence, failures,
 and achieved RPO/RTO. Record the media restore and derivative-regeneration drill
 separately; success in one stream is not evidence for the other. A backup is not
 accepted until both applicable drills complete.
+
+The protected legacy archive is a third, independent recovery stream. An etcd
+or media restore does not restore it, and a cluster rebuild must not mount,
+repair, upgrade, or start it. Preserve its verified storage binding in place or
+restore a tested copy only onto isolated storage. Follow
+[the protected legacy archive runbook](protected-legacy-archive.md); runtime
+reactivation requires a new decision and is never an automatic disaster-
+recovery step.

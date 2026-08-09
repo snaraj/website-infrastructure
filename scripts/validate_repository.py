@@ -6,8 +6,47 @@ import codecs
 import hashlib
 import ipaddress
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+
+# Tests load this file directly from its path, so make the sibling release
+# policy module importable without depending on a caller's working directory.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from validate_image_release import repository_errors as image_release_errors
+from validate_release_state import (
+    CanonicalYamlError,
+    RELEASE_CONTRACTS,
+    ZERO_DIGEST,
+    _parse_simple_mapping,
+    canonical_scalar,
+    load_helm_release,
+    load_parent_suspension,
+    load_simple_mapping_file,
+)
+from validate_release_transition import (
+    CLOUDFLARE_TERRAFORM_SOURCE_FILES,
+    STATE as TRANSITION_RELEASE_STATE,
+    classify as classify_release_transition,
+    cloudflare_default_off_errors,
+    contains_secret_document,
+    direct_mapping_entries,
+    load_admission_suspension,
+    sops_secret_errors,
+    tunnel_secret_errors,
+)
+from validate_signature_policy import (
+    admission_kustomization_errors,
+    flux_sync_errors,
+    flux_system_kustomization_errors,
+    reconciliation_kustomization_errors,
+    signature_policy_action,
+    signature_policy_errors,
+    signature_policy_kustomization_errors,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -213,72 +252,6 @@ def active_kustomization_resource(text, name):
     ) is not None
 
 
-def sops_secret_errors(text):
-    """Validate the fail-closed structure of every Secret document without PyYAML."""
-    errors = []
-    for document in re.split(r"(?m)^---\s*$", text):
-        if not re.search(r"(?m)^kind:\s*Secret\s*$", document):
-            continue
-        encrypted_values = 0
-        lines = document.splitlines()
-        for index, line in enumerate(lines):
-            mapping = re.match(r"^(\s*)(data|stringData):\s*(?:#.*)?$", line)
-            if not mapping:
-                continue
-            parent_indent = len(mapping.group(1))
-            for child in lines[index + 1:]:
-                if not child.strip() or child.lstrip().startswith("#"):
-                    continue
-                child_indent = len(child) - len(child.lstrip())
-                if child_indent <= parent_indent:
-                    break
-                scalar = re.match(r"^\s+[^:#][^:]*:\s*(.*?)\s*$", child)
-                if not scalar:
-                    errors.append("malformed scalar beneath {}".format(mapping.group(2)))
-                    continue
-                value = scalar.group(1).split(" #", 1)[0].strip().strip("'\"")
-                if not re.fullmatch(r"ENC\[[^\r\n]+\]", value):
-                    errors.append("plaintext or malformed value beneath {}".format(mapping.group(2)))
-                else:
-                    encrypted_values += 1
-        if encrypted_values == 0:
-            errors.append("Secret contains no encrypted data/stringData values")
-        if not re.search(r"(?m)^sops:\s*$", document):
-            errors.append("SOPS metadata mapping is missing")
-        if not re.search(r"(?m)^\s+mac:\s*ENC\[[^\r\n]+\]\s*$", document):
-            errors.append("SOPS MAC is missing or malformed")
-        if not re.search(r"(?m)^\s+age:\s*$", document) or not re.search(
-            r"(?m)^\s+-?\s*recipient:\s*age1[0-9a-z]+\s*$", document
-        ):
-            errors.append("SOPS age recipient metadata is missing")
-    return errors
-
-
-def direct_mapping_entries(document, mapping_name):
-    """Return direct scalar entries for one top-level YAML mapping."""
-    lines = document.splitlines()
-    entries = {}
-    for index, line in enumerate(lines):
-        if not re.match(r"^{}:\s*(?:#.*)?$".format(re.escape(mapping_name)), line):
-            continue
-        direct_indent = None
-        for child in lines[index + 1:]:
-            if not child.strip() or child.lstrip().startswith("#"):
-                continue
-            indent = len(child) - len(child.lstrip())
-            if indent == 0:
-                break
-            if direct_indent is None:
-                direct_indent = indent
-            if indent != direct_indent:
-                continue
-            scalar = re.match(r"^\s*([^:#][^:]*):\s*(.*?)\s*$", child)
-            if scalar:
-                entries[scalar.group(1).strip()] = scalar.group(2).split(" #", 1)[0].strip().strip("'\"")
-        break
-    return entries
-
-
 def flux_access_contract_errors(text):
     """Require review of every byte in the accepted Flux authorization file."""
 
@@ -292,33 +265,6 @@ def flux_access_contract_errors(text):
             "Role, RoleBinding, rule, and subject before updating its digest"
         ]
     return []
-
-
-def tunnel_secret_errors(text, expected_recipient):
-    errors = sops_secret_errors(text)
-    documents = [doc for doc in re.split(r"(?m)^---\s*$", text) if doc.strip()]
-    secrets = [doc for doc in documents if re.search(r"(?m)^kind:\s*Secret\s*$", doc)]
-    if len(documents) != 1 or len(secrets) != 1:
-        return errors + ["file must contain exactly one Secret document"]
-    secret = secrets[0]
-    if not re.search(r"(?m)^apiVersion:\s*v1\s*$", secret):
-        errors.append("apiVersion must be v1")
-    metadata = direct_mapping_entries(secret, "metadata")
-    if metadata.get("name") != "pi-websites-tunnel-token":
-        errors.append("Secret name must be pi-websites-tunnel-token")
-    if metadata.get("namespace") != "cloudflare-public":
-        errors.append("Secret namespace must be cloudflare-public")
-    if not re.search(r"(?m)^type:\s*Opaque\s*$", secret):
-        errors.append("Secret type must be Opaque")
-    secret_keys = set(direct_mapping_entries(secret, "data")) | set(
-        direct_mapping_entries(secret, "stringData")
-    )
-    if secret_keys != {"token"}:
-        errors.append("Secret must contain only the token key")
-    recipients = set(re.findall(r"(?m)^\s+-?\s*recipient:\s*(age1[0-9a-z]+)\s*$", secret))
-    if recipients != {expected_recipient}:
-        errors.append("SOPS recipient must exactly match .sops.yaml")
-    return errors
 
 
 def check_layout(root):
@@ -335,7 +281,9 @@ def check_layout(root):
         if len(lowered) >= 2 and lowered[0:2] == ("kubernetes", "homelab"):
             errors.append("forbidden kubernetes/homelab layout: " + relative(path, root))
     required = [
-        "AGENTS.md", "SECURITY.md", "versions.env", "kubernetes", "websites",
+        "AGENTS.md", "SECURITY.md", "versions.env", "release-policy.env",
+        "kubernetes", "websites", "scripts/validate_image_release.py",
+        "websites/naranjo.online/VERSION", "websites/lidersea.com/VERSION",
         "policies/gitleaks.toml",
     ]
     for name in required:
@@ -364,7 +312,7 @@ def check_secrets(root):
 
         rel = relative(path, root)
         if rel.startswith("kubernetes/") and path.suffix in {".yaml", ".yml"}:
-            if re.search(r"(?m)^kind:\s*Secret\s*$", text):
+            if contains_secret_document(text):
                 if not re.search(r"\.sops\.ya?ml$", path.name) and not is_fixture(path):
                     errors.append("unencrypted Kubernetes Secret manifest: " + rel)
                 elif re.search(r"\.sops\.ya?ml$", path.name):
@@ -561,6 +509,7 @@ def check_workflows(root):
             errors.append("pull_request_target is forbidden: " + rel)
         if re.search(r"(?m)^\s*persist-credentials:\s*true\s*$", text):
             errors.append("checkout credential persistence enabled: " + rel)
+    errors.extend(image_release_errors(root))
     return errors
 
 
@@ -712,6 +661,7 @@ def check_kubernetes(root):
             for policy_name in policy_names:
                 if policy_name not in text:
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
+    errors.extend(signature_policy_source_errors(root))
     return errors
 
 
@@ -720,7 +670,33 @@ def check_cloudflare(root):
     base = root / "infrastructure" / "cloudflare"
     if not base.exists():
         return ["Cloudflare OpenTofu directory missing"]
-    for path in base.rglob("*.tf"):
+    errors.extend(cloudflare_default_off_errors(root))
+    visible_paths, visibility_errors = _git_visible_cloudflare_paths(root)
+    errors.extend(visibility_errors)
+    expected_sources = {
+        path.as_posix() for path in CLOUDFLARE_TERRAFORM_SOURCE_FILES
+    }
+    visible_sources = {
+        relative_path
+        for relative_path in visible_paths
+        if relative_path.endswith(".tf")
+    }
+    for missing in sorted(expected_sources - visible_sources):
+        errors.append("required Cloudflare Terraform source is not Git-visible: " + missing)
+    for unexpected in sorted(visible_sources - expected_sources):
+        errors.append("unexpected Git-visible Cloudflare Terraform source: " + unexpected)
+    for relative_path in sorted(visible_paths):
+        name = Path(relative_path).name
+        if name.endswith(".tf.json"):
+            errors.append("Git-visible Terraform JSON configuration is forbidden: " + relative_path)
+        if name.endswith(".tfvars") or name.endswith(".tfvars.json"):
+            errors.append("Git-visible Terraform variable input is forbidden: " + relative_path)
+
+    for relative_path in sorted(visible_sources):
+        path = root / relative_path
+        if path.is_symlink() or not path.is_file():
+            errors.append("Cloudflare Terraform source is missing or symbolic: " + relative_path)
+            continue
         text = read(path)
         for match in re.finditer(r'(?m)^\s*data\s+"(cloudflare_[^"]+)"', text):
             errors.append("Cloudflare data source is forbidden in {}: {}".format(
@@ -732,6 +708,157 @@ def check_cloudflare(root):
                 errors.append("Cloudflare resource outside allowlist in {}: {}".format(
                     relative(path, root), resource_type
                 ))
+    return errors
+
+
+def _git_visible_cloudflare_paths(root):
+    """Return tracked plus unignored Cloudflare files; ignored local inputs stay local."""
+
+    base = root / "infrastructure" / "cloudflare"
+    if not (root / ".git").exists():
+        return ({
+            relative(path, root)
+            for path in base.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }, [])
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
+                "--exclude-standard", "--", "infrastructure/cloudflare",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return set(), ["Git-visible Cloudflare source inventory is unavailable"]
+    if result.returncode != 0:
+        return set(), ["Git-visible Cloudflare source inventory is unavailable"]
+    try:
+        decoded = result.stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return set(), ["Git-visible Cloudflare source inventory is not UTF-8"]
+    entries = decoded.split("\0")
+    if entries[-1:] == [""]:
+        entries.pop()
+    if any(not entry.startswith("infrastructure/cloudflare/") for entry in entries):
+        return set(), ["Git-visible Cloudflare source inventory escaped its root"]
+    return set(entries), []
+
+
+def signature_policy_source_errors(root, allowed_inventories=None):
+    """Validate policies and bind their exact inventory to classified release mode."""
+
+    errors = []
+    if allowed_inventories is None:
+        try:
+            plan = classify_release_transition(root)
+        except (
+            CanonicalYamlError,
+            TRANSITION_RELEASE_STATE.CanonicalYamlError,
+            OSError,
+            RuntimeError,
+            UnicodeError,
+        ):
+            # Continue source diagnostics against both closed inventories, but
+            # the missing authoritative mode remains a fail-closed error.
+            errors.append("signature policy inventory mode is unavailable or unsafe")
+            allowed_inventories = ("staging", "promoted")
+        else:
+            if plan.mode == "scaffold":
+                allowed_inventories = ("staging",)
+            elif plan.any_website_active:
+                allowed_inventories = ("promoted",)
+            else:
+                # A staged transition may remove the zero-capacity sentinel in
+                # the same reviewed change that prepares website activation.
+                allowed_inventories = ("staging", "promoted")
+    policy_root = root / "policies/kyverno"
+    # Small unit fixtures without a policy tree remain composable. In the real
+    # repository, policies/gitleaks.toml is layout-required, so a missing
+    # Kyverno subtree is still an unambiguous failure here.
+    if not policy_root.exists() and not (root / "policies").exists():
+        return []
+    if policy_root.is_symlink() or not policy_root.is_dir():
+        return ["signature policy directory is missing or symbolic"]
+    index = policy_root / "kustomization.yaml"
+    if index.is_symlink() or not index.is_file():
+        return ["signature policy Kustomization is missing or symbolic"]
+    try:
+        index_text = read(index)
+    except (OSError, UnicodeError):
+        return ["signature policy Kustomization is unavailable"]
+    if signature_policy_kustomization_errors(index_text, allowed_inventories):
+        errors.append("signature policy Kustomization is non-canonical")
+    for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
+        policy_name = "require-signed-{}.yaml".format(slug)
+        policy = root / "policies/kyverno" / policy_name
+        if policy.is_symlink() or not policy.is_file():
+            errors.append("{} signature admission policy is missing".format(domain))
+            continue
+        try:
+            policy_text = read(policy)
+        except (OSError, UnicodeError):
+            errors.append("{} signature admission policy is unavailable".format(domain))
+            continue
+        if signature_policy_errors(policy_text, slug, workflow):
+            errors.append("{} signature admission policy is non-canonical".format(domain))
+        if not active_kustomization_resource(index_text, policy_name):
+            errors.append(
+                "{} signature admission policy is not active in its Kustomization".format(
+                    domain
+                )
+            )
+    admission_index = root / "kubernetes/platform/admission/kustomization.yaml"
+    if admission_index.is_symlink() or not admission_index.is_file():
+        errors.append("admission parent Kustomization is missing or symbolic")
+    else:
+        try:
+            admission_index_text = read(admission_index)
+        except (OSError, UnicodeError):
+            errors.append("admission parent Kustomization is unavailable")
+        else:
+            if admission_kustomization_errors(admission_index_text):
+                errors.append("admission parent Kustomization is non-canonical")
+    authoritative_files = (
+        (
+            "kubernetes/reconciliation/kustomization.yaml",
+            reconciliation_kustomization_errors,
+            "reconciliation root Kustomization",
+        ),
+        (
+            "kubernetes/flux-system/kustomization.yaml",
+            flux_system_kustomization_errors,
+            "Flux bootstrap Kustomization",
+        ),
+        (
+            "kubernetes/flux-system/gotk-sync.yaml",
+            flux_sync_errors,
+            "Flux root synchronization",
+        ),
+    )
+    for relative_path, validator, label in authoritative_files:
+        path = root / relative_path
+        if path.is_symlink() or not path.is_file():
+            errors.append(label + " is missing or symbolic")
+            continue
+        try:
+            text = read(path)
+        except (OSError, UnicodeError):
+            errors.append(label + " is unavailable")
+            continue
+        if validator(text):
+            errors.append(label + " is non-canonical")
+    try:
+        load_admission_suspension(root)
+    except (
+        CanonicalYamlError,
+        TRANSITION_RELEASE_STATE.CanonicalYamlError,
+        OSError,
+        UnicodeError,
+    ):
+        errors.append("Flux admission reconciliation is non-canonical")
     return errors
 
 
@@ -776,6 +903,205 @@ def signature_admission_install_errors(root):
     return errors
 
 
+def site_chart_default_errors(domain, website_values):
+    """Keep every chart inert even while Flux supplies reviewed overrides."""
+
+    errors = []
+    slug = next(
+        (candidate for candidate_domain, candidate, _ in SITE_RELEASE_CONTRACTS
+         if candidate_domain == domain),
+        None,
+    )
+    expected_repository = (
+        RELEASE_CONTRACTS[slug]["repository"] if slug is not None else None
+    )
+    if (
+        expected_repository is not None
+        and website_values.get(("image", "repository")) != expected_repository
+    ):
+        errors.append("{} chart default image repository is not canonical".format(domain))
+    if website_values.get(("image", "digest")) != ZERO_DIGEST:
+        errors.append("{} chart default must retain the all-zero digest".format(domain))
+    if website_values.get(("deploymentReady",)) != "false":
+        errors.append("{} chart default must remain deploymentReady false".format(domain))
+    return errors
+
+
+def site_release_override_errors(domain, release_state):
+    """Validate the authoritative production values of one HelmRelease."""
+
+    errors = []
+    release_digest = release_state.values.get(("image", "digest"))
+    if release_digest == ZERO_DIGEST:
+        errors.append(
+            "{} HelmRelease override must contain one nonzero image digest".format(
+                domain
+            )
+        )
+    if release_state.values.get(("deploymentReady",)) != "true":
+        errors.append("{} HelmRelease override is not deploymentReady".format(domain))
+    return errors
+
+
+def site_release_value_errors(domain, website_values, release_state):
+    """Validate inert chart defaults and the authoritative Flux overrides."""
+
+    return (
+        site_chart_default_errors(domain, website_values)
+        + site_release_override_errors(domain, release_state)
+    )
+
+
+def all_site_chart_default_errors(root):
+    """Validate inert chart defaults in scaffold, transition, and release."""
+
+    errors = []
+    for domain, _, _ in SITE_RELEASE_CONTRACTS:
+        try:
+            values = load_simple_mapping_file(
+                root / "websites" / domain / "chart" / "values.yaml"
+            )
+        except (CanonicalYamlError, OSError, UnicodeError):
+            errors.append("{} chart defaults are unavailable or non-canonical".format(domain))
+            continue
+        errors.extend(site_chart_default_errors(domain, values))
+    return errors
+
+
+def _plain_yaml_scalar(value):
+    """Normalize the narrow quoted scalars used by capacity manifests."""
+
+    if (
+        isinstance(value, str)
+        and len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in {"'", '"'}
+    ):
+        return value[1:-1]
+    return value
+
+
+def _quota_documents(text):
+    """Return canonical mapping-only ResourceQuota documents."""
+
+    if "\r" in text or not text.endswith("\n"):
+        raise CanonicalYamlError("capacity YAML must be UTF-8/LF terminated")
+    documents = []
+    current = []
+    for line in text.split("\n"):
+        if re.fullmatch(r"[ ]*---[ ]*", line):
+            if current:
+                documents.append("\n".join(current) + "\n")
+                current = []
+            continue
+        if re.fullmatch(r"[ ]*[.][.][.][ ]*", line):
+            raise CanonicalYamlError("capacity YAML document terminator is forbidden")
+        current.append(line)
+    if any(line.strip() for line in current):
+        documents.append("\n".join(current).rstrip("\n") + "\n")
+
+    quotas = []
+    for document in documents:
+        if canonical_scalar(document, ("kind",)) != "ResourceQuota":
+            continue
+        # The shared release parser intentionally limits ordinary mapping keys
+        # to a small grammar. Translate only these two reviewed annotation keys
+        # to internal aliases; every other slash-bearing key still fails closed.
+        normalized = re.sub(
+            r"(?m)^    platform[.]snaraj[.]dev/readiness:",
+            "    capacity_readiness:",
+            document,
+        )
+        normalized = re.sub(
+            r"(?m)^    platform[.]snaraj[.]dev/capacity-evidence-sha256:",
+            "    capacity_evidence_sha256:",
+            normalized,
+        )
+        lines = []
+        for line in normalized.split("\n"):
+            quoted = re.fullmatch(
+                r"(?P<prefix>[ ]*[A-Za-z0-9_.-]+): (?P<quote>['\"])(?P<value>[A-Za-z0-9./][A-Za-z0-9_./:@+-]*)(?P=quote)",
+                line,
+            )
+            if quoted is not None:
+                line = "{}: {}".format(
+                    quoted.group("prefix"), quoted.group("value")
+                )
+            lines.append(line)
+        quotas.append(_parse_simple_mapping(lines, 0, len(lines), 0))
+    return quotas
+
+
+def reviewed_capacity_errors(root):
+    """Require one hash-bound reviewed namespace budget for each website."""
+
+    errors = []
+    prerequisites_index = root / "kubernetes/platform/prerequisites/kustomization.yaml"
+    resource_controls = root / "kubernetes/platform/prerequisites/resource-controls.yaml"
+    if not prerequisites_index.is_file() or not active_kustomization_resource(
+        read(prerequisites_index), "resource-controls.yaml"
+    ):
+        errors.append("reviewed website capacity resource-controls are not reconciled")
+
+    try:
+        quotas = _quota_documents(read(resource_controls))
+    except (CanonicalYamlError, OSError, UnicodeError):
+        return errors + ["reviewed website capacity quota inventory is non-canonical"]
+
+    expected_namespaces = {slug for _, slug, _ in SITE_RELEASE_CONTRACTS}
+    for namespace in sorted(expected_namespaces):
+        matches = [
+            quota for quota in quotas
+            if _plain_yaml_scalar(quota.get(("metadata", "namespace"))) == namespace
+        ]
+        if len(matches) != 1:
+            errors.append(
+                "reviewed website capacity quota missing or duplicated: " + namespace
+            )
+            continue
+        quota = matches[0]
+        if _plain_yaml_scalar(quota.get(("metadata", "name"))) != "namespace-budget":
+            errors.append("reviewed website capacity quota identity is invalid: " + namespace)
+        if _plain_yaml_scalar(quota.get(
+            ("metadata", "annotations", "capacity_readiness")
+        )) != "reviewed-pi-capacity":
+            errors.append("reviewed website capacity readiness is invalid: " + namespace)
+        evidence = _plain_yaml_scalar(quota.get(
+            (
+                "metadata", "annotations",
+                "capacity_evidence_sha256",
+            )
+        ))
+        if not isinstance(evidence, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence):
+            errors.append("reviewed website capacity evidence hash is invalid: " + namespace)
+        hard = {
+            path[-1]: _plain_yaml_scalar(value)
+            for path, value in quota.items()
+            if len(path) == 3 and path[:2] == ("spec", "hard")
+        }
+        if set(hard) != {
+            "pods", "requests.cpu", "requests.memory", "limits.cpu", "limits.memory"
+        }:
+            errors.append("reviewed website capacity limits are incomplete: " + namespace)
+        else:
+            if not re.fullmatch(r"[2-9]|[1-9][0-9]+", str(hard["pods"])):
+                errors.append("reviewed website Pod capacity is invalid: " + namespace)
+            for key in ("requests.cpu", "requests.memory", "limits.cpu", "limits.memory"):
+                if not re.fullmatch(r"[1-9][0-9]*(?:m|Ki|Mi|Gi)?", str(hard[key])):
+                    errors.append(
+                        "reviewed website capacity quantity is invalid: {} {}".format(
+                            namespace, key
+                        )
+                    )
+
+    kyverno_index = root / "policies/kyverno/kustomization.yaml"
+    if kyverno_index.is_file() and active_kustomization_resource(
+        read(kyverno_index), "require-zero-site-capacity.yaml"
+    ):
+        errors.append("zero-site-capacity admission policy remains active")
+    return errors
+
+
 def check_release(root):
     errors = []
     versions = read(root / "versions.env")
@@ -802,28 +1128,35 @@ def check_release(root):
     if len(configured_recipients) != 1:
         errors.append(".sops.yaml must contain exactly one valid age recipient")
 
-    for domain, _, _ in SITE_RELEASE_CONTRACTS:
-        website_values = read(root / "websites" / domain / "chart" / "values.yaml")
-        if "sha256:" + ("0" * 64) in website_values:
-            errors.append("{} chart still uses the all-zero image digest".format(domain))
-        if re.search(r"(?m)^deploymentReady:\s*false\s*$", website_values):
-            errors.append("{} chart is not marked deploymentReady".format(domain))
+    for domain, slug, _ in SITE_RELEASE_CONTRACTS:
+        try:
+            website_values = load_simple_mapping_file(
+                root / "websites" / domain / "chart" / "values.yaml"
+            )
+            release_state = load_helm_release(slug, root)
+        except (CanonicalYamlError, OSError, UnicodeError):
+            errors.append("{} release state is unavailable or non-canonical".format(domain))
+            continue
+        errors.extend(site_release_value_errors(domain, website_values, release_state))
+        if release_state.suspended:
+            errors.append("HelmRelease remains suspended: " + slug)
+        try:
+            if load_parent_suspension(slug, root):
+                errors.append("parent Kustomization remains suspended: " + slug)
+        except (CanonicalYamlError, OSError, UnicodeError):
+            errors.append("{} parent release state is unavailable or non-canonical".format(domain))
 
-    site_releases = [
-        "kubernetes/websites/{}/release.yaml".format(slug)
-        for _, slug, _ in SITE_RELEASE_CONTRACTS
-    ]
-    for name in site_releases + [
-        "kubernetes/platform/cloudflare-public/release/release.yaml",
-    ]:
-        if re.search(r"(?m)^\s*suspend:\s*true\s*$", read(root / name)):
-            errors.append("HelmRelease remains suspended: " + name)
-
-    public_release = read(
-        root / "kubernetes/platform/cloudflare-public/release/release.yaml"
-    )
-    if re.search(r"(?m)^\s*tokenRevision:\s*(?:not-configured|UNRESOLVED|['\"]?['\"]?)\s*$", public_release):
-        errors.append("public tunnel tokenRevision is unresolved")
+    try:
+        public_release = load_helm_release("cloudflare-public", root)
+        if public_release.suspended:
+            errors.append("HelmRelease remains suspended: cloudflare-public")
+        token_revision = public_release.values.get(("tunnel", "tokenRevision"))
+        if token_revision in {None, "not-configured", "UNRESOLVED"}:
+            errors.append("public tunnel tokenRevision is unresolved")
+        if load_parent_suspension("cloudflare-public", root):
+            errors.append("parent Kustomization remains suspended: platform-services")
+    except (CanonicalYamlError, OSError, UnicodeError):
+        errors.append("public tunnel release state is unavailable or non-canonical")
 
     tunnel_kustomization = read(
         root / "kubernetes/platform/cloudflare-public/release/kustomization.yaml"
@@ -834,54 +1167,69 @@ def check_release(root):
     if tunnel_secret.is_file() and len(configured_recipients) == 1:
         for problem in tunnel_secret_errors(read(tunnel_secret), next(iter(configured_recipients))):
             errors.append("invalid production tunnel Secret: " + problem)
-    kyverno_kustomization = read(root / "policies/kyverno/kustomization.yaml")
+    errors.extend(signature_policy_source_errors(root))
     for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
-        policy_name = "require-signed-{}.yaml".format(slug)
-        signature_policy = root / "policies" / "kyverno" / policy_name
-        if not signature_policy.is_file():
-            errors.append("{} signature admission policy is missing".format(domain))
+        signature_policy = root / "policies/kyverno" / (
+            "require-signed-{}.yaml".format(slug)
+        )
+        if signature_policy.is_symlink() or not signature_policy.is_file():
             continue
-        signature_text = read(signature_policy)
-        if not re.search(
-            r"(?m)^\s*validationFailureAction:\s*Enforce\s*$", signature_text
-        ):
+        try:
+            signature_text = read(signature_policy)
+        except (OSError, UnicodeError):
+            continue
+        if signature_policy_action(signature_text, slug, workflow) != "Enforce":
             errors.append("{} signature admission policy is not enforced".format(domain))
-        for fragment in [
-            "ghcr.io/snaraj/{}*".format(slug),
-            "https://github.com/snaraj/website-infrastructure/.github/workflows/{}@refs/heads/main".format(workflow),
-            "https://token.actions.githubusercontent.com",
-            "https://slsa.dev/provenance/v1",
-            "https://actions.github.io/buildtypes/workflow/v1",
-            "type: SigstoreBundle",
-        ]:
-            if fragment not in signature_text:
-                errors.append("{} signature admission contract is missing: {}".format(domain, fragment))
-        if not active_kustomization_resource(kyverno_kustomization, policy_name):
-            errors.append("{} signature admission policy is not active in its Kustomization".format(domain))
 
     errors.extend(signature_admission_install_errors(root))
+    errors.extend(reviewed_capacity_errors(root))
+    return errors
+
+
+def cloudflare_visible_configuration_errors(root):
+    """Return Git-visible Terraform inventory/input failures as activation signals."""
+
+    base = root / "infrastructure" / "cloudflare"
+    if not base.exists():
+        return []
+    visible_paths, errors = _git_visible_cloudflare_paths(root)
+    expected_sources = {
+        path.as_posix() for path in CLOUDFLARE_TERRAFORM_SOURCE_FILES
+    }
+    visible_sources = {
+        path for path in visible_paths if path.endswith(".tf")
+    }
+    if visible_sources != expected_sources:
+        errors.append("Cloudflare Terraform source inventory is outside the closed contract")
+    for relative_path in visible_paths:
+        name = Path(relative_path).name
+        if name.endswith(".tf.json") or name.endswith(".tfvars") or name.endswith(".tfvars.json"):
+            errors.append("Cloudflare Terraform auto-loaded input is Git-visible")
+            break
     return errors
 
 
 def activation_requested(root):
-    for domain, _, _ in SITE_RELEASE_CONTRACTS:
-        values_path = root / "websites" / domain / "chart" / "values.yaml"
-        if values_path.is_file():
-            values = read(values_path)
-            if not re.search(r"sha256:" + ("0" * 64), values):
+    if cloudflare_visible_configuration_errors(root):
+        return True
+    for name, contract in RELEASE_CONTRACTS.items():
+        release_path = root / str(contract["release"])
+        if release_path.is_file():
+            try:
+                if not load_helm_release(name, root).suspended:
+                    return True
+            except (CanonicalYamlError, OSError, UnicodeError):
+                # An ambiguous activation gate is itself an activation signal:
+                # invoke the full fail-closed release check instead of treating
+                # a parser failure as a safely suspended release.
                 return True
-            if re.search(r"(?m)^deploymentReady:\s*true\s*$", values):
+        parent_path = root / str(contract["parent"])
+        if parent_path.is_file():
+            try:
+                if not load_parent_suspension(name, root):
+                    return True
+            except (CanonicalYamlError, OSError, UnicodeError):
                 return True
-    site_releases = [
-        "kubernetes/websites/{}/release.yaml".format(slug)
-        for _, slug, _ in SITE_RELEASE_CONTRACTS
-    ]
-    for name in site_releases + [
-        "kubernetes/platform/cloudflare-public/release/release.yaml",
-    ]:
-        path = root / name
-        if path.is_file() and not re.search(r"(?m)^\s*suspend:\s*true\s*$", read(path)):
-            return True
     tunnel_kustomization = root / "kubernetes/platform/cloudflare-public/release/kustomization.yaml"
     if tunnel_kustomization.is_file() and active_kustomization_resource(
         read(tunnel_kustomization), "tunnel-token.sops.yaml"
@@ -904,10 +1252,113 @@ def activation_requested(root):
     return False
 
 
+def _allowed_transition_release_errors(plan):
+    """Return only full-release failures made inert by the classified phase."""
+
+    allowed = set()
+    phases = {
+        "naranjo-online": plan.naranjo_online,
+        "lidersea-com": plan.lidersea_com,
+    }
+    for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
+        phase = phases[slug]
+        if phase == "active":
+            continue
+        allowed.update({
+            "HelmRelease remains suspended: " + slug,
+            "parent Kustomization remains suspended: " + slug,
+            "required reviewed/generated file missing: websites/{}/frontend/package-lock.json".format(domain),
+        })
+        # A suspended child is not yet proven inert while its outer Flux
+        # Kustomization remains active. Keep signature enforcement mandatory
+        # through the child-first rollback and parent-first resume windows.
+        if plan.website_parent_suspended(slug):
+            allowed.update({
+                "{} signature admission policy is missing".format(domain),
+                "{} signature admission policy is not enforced".format(domain),
+                "{} signature admission policy is non-canonical".format(domain),
+                "{} signature admission policy is not active in its Kustomization".format(domain),
+            })
+        if phase == "initial":
+            allowed.update({
+                "{} HelmRelease override must contain one nonzero image digest".format(domain),
+                "{} HelmRelease override is not deploymentReady".format(domain),
+            })
+
+    if plan.cloudflare_public != "active":
+        allowed.update({
+            "HelmRelease remains suspended: cloudflare-public",
+            "parent Kustomization remains suspended: platform-services",
+            "required reviewed/generated file missing: infrastructure/cloudflare/.terraform.lock.hcl",
+        })
+    if plan.cloudflare_public == "initial":
+        # Exact classification already proved the Secret absent and unlisted.
+        # Only those expected pre-ceremony failures are inert; staged state must
+        # never filter a missing, unlisted, or malformed encrypted Secret.
+        allowed.update({
+            "public tunnel tokenRevision is unresolved",
+            "required reviewed/generated file missing: kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
+            ".sops.yaml still has the invalid public-recipient sentinel",
+            ".sops.yaml must contain exactly one valid age recipient",
+            "encrypted tunnel token is not active in the public release Kustomization",
+        })
+    return allowed
+
+
+def _transition_release_error_is_allowed(error, plan, allowed):
+    if error in allowed:
+        return True
+    if not plan.any_website_active and error.startswith(
+        (
+            "reviewed website capacity ",
+            "zero-site-capacity admission policy remains active",
+        )
+    ):
+        return True
+    return False
+
+
 def check_activation(root):
-    if activation_requested(root):
+    # The strict classifier is authoritative even when every gate looks inert:
+    # ambiguous YAML, dependency drift, or a one-way suspension violation must
+    # never be mistaken for scaffold state.
+    try:
+        plan = classify_release_transition(root)
+    except (
+        CanonicalYamlError,
+        TRANSITION_RELEASE_STATE.CanonicalYamlError,
+        OSError,
+        RuntimeError,
+        UnicodeError,
+    ):
+        return ["release transition state is unavailable or unsafe"]
+
+    if plan.mode == "release":
         return check_release(root)
-    return []
+
+    errors = all_site_chart_default_errors(root)
+    try:
+        activation_signal = activation_requested(root)
+    except (CanonicalYamlError, OSError, RuntimeError, UnicodeError):
+        return ["release transition state is unavailable or unsafe"]
+    if plan.mode == "scaffold":
+        if activation_signal:
+            errors.append("scaffold desired state contains a release activation signal")
+        return errors
+    if not plan.any_workload_active and not activation_signal:
+        return errors
+
+    # Reuse the complete production contract whenever any controller or public
+    # workload is active. Filter only failures whose exact release is proven
+    # inert by the classifier; shared controller/install failures and every
+    # active or outer-reconcilable workload's identity, SOPS, signature, and
+    # capacity proof remain mandatory.
+    allowed = _allowed_transition_release_errors(plan)
+    errors.extend(
+        error for error in check_release(root)
+        if not _transition_release_error_is_allowed(error, plan, allowed)
+    )
+    return list(dict.fromkeys(errors))
 
 
 CHECKS = {

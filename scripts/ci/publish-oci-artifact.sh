@@ -17,7 +17,7 @@ set -euo pipefail
   printf 'IMAGE must be one canonical lowercase GHCR repository\n' >&2
   exit 2
 }
-[[ "${GITHUB_SHA}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || {
+[[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'GITHUB_SHA is malformed\n' >&2
   exit 2
 }
@@ -54,6 +54,7 @@ source_media_type="$(
 }
 
 destination_reference="${IMAGE}:sha-${GITHUB_SHA}"
+destination_resolve_error="${PUBLISH_VERIFY_ROOT}/destination-resolve.error"
 readonly max_attempts=4
 readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"
 [[ "${base_delay_seconds}" =~ ^[0-9]+$ ]] || {
@@ -66,6 +67,26 @@ readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"
 # Serial copy reduces that visibility race; bounded whole-graph retries finish
 # safely because every blob and manifest is addressed by its immutable digest.
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+  # Tag listing is advisory and can be stale or incomplete. Resolve the exact
+  # destination immediately before every write. Only the registry's explicit
+  # unknown-manifest/name response is absence; every other failure is a stop.
+  existing_destination_digest=""
+  : >"${destination_resolve_error}"
+  if existing_destination_digest="$(oras resolve "${destination_reference}" \
+    2>"${destination_resolve_error}")"; then
+    [[ "${existing_destination_digest}" == "${EXPECTED_DIGEST}" ]] || {
+      printf 'refusing to reassign immutable destination %s\n' \
+        "${destination_reference}" >&2
+      exit 1
+    }
+  elif ! grep -Eqi \
+    'MANIFEST_UNKNOWN|manifest unknown|NAME_UNKNOWN|name unknown' \
+    "${destination_resolve_error}"; then
+    sed -n '1,20p' "${destination_resolve_error}" >&2
+    printf 'could not prove destination absence for %s\n' \
+      "${destination_reference}" >&2
+    exit 1
+  fi
   if oras cp --no-tty --concurrency 1 --from-oci-layout \
     "${source_reference}" "${destination_reference}"; then
     resolved=""

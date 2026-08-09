@@ -21,3 +21,12 @@ WARP-off/unauthorized tests fail, and a second LAN session remains open. The
 Gateway L4 block is not a substitute for a host firewall and does not prove ICMP
 denial. Token rotation changes only `pi-admin`; never rotate the public tunnel in
 the same operation.
+
+The initial SSH design retains self-managed host-trusted keys over the private
+WARP-to-Tunnel path. Do not add a public SSH hostname or make sshd trust a
+provider-managed SSH CA without a separate decision. `cloudflared` proxies
+client-initiated access; host-initiated DNS, updates, Git/registry access, and
+other egress continue to use the host routing table. Existing VPN/WireGuard and
+kill-switch behavior therefore remains an independent control. Route the
+connector through that reviewed privacy boundary and prefer loss of remote
+availability to an unreviewed direct-WAN bypass; retain physical/LAN recovery.
