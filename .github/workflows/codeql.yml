@@ -31,17 +31,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
+      # CodeQL installs a Go compiler tracing wrapper during initialization.
+      # Select the exact toolchain first so setup-go cannot replace that wrapper.
       - name: Set up Go
         if: matrix.language == 'go'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
           check-latest: false
+          # This repository has two independent modules instead of one root
+          # module, and CodeQL needs compilation tracing rather than a Go cache.
+          cache: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
       - name: Build Go
         if: matrix.language == 'go'
         env:

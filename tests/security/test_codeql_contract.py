@@ -11,6 +11,15 @@ WORKFLOW = ROOT / ".github" / "workflows" / "codeql.yml"
 class CodeQlContractTests(unittest.TestCase):
     """Prevent one site from falling outside manual Go build tracing."""
 
+    def test_go_toolchain_is_selected_before_codeql_tracing(self):
+        """setup-go must not replace the compiler wrapper installed by CodeQL."""
+
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        setup_go = workflow.index("- name: Set up Go")
+        initialize_codeql = workflow.index("- name: Initialize CodeQL")
+        self.assertLess(setup_go, initialize_codeql)
+        self.assertIn("cache: false", workflow[setup_go:initialize_codeql])
+
     def test_manual_go_build_captures_every_site_module(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("language: go", workflow)
