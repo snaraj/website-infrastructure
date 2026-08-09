@@ -13,6 +13,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DIGEST = "sha256:" + ("a" * 64)
 REVISION = "b" * 40
+NARANJO_VERSION = (
+    REPO_ROOT / "websites" / "naranjo.online" / "VERSION"
+).read_text(encoding="utf-8").strip()
+NARANJO_TAG = "v" + NARANJO_VERSION
 
 
 def pinned_version(name):
@@ -77,6 +81,18 @@ class PromotionBehaviorTests(unittest.TestCase):
             cwd=self.root,
             check=True,
         )
+        # A disposable fixture must not leave detached Git maintenance running
+        # after the command under test exits. Disable both the current
+        # maintenance runner and legacy auto-gc so TemporaryDirectory cleanup
+        # cannot race a process that is still writing beneath .git.
+        subprocess.run(
+            ["git", "config", "maintenance.auto", "false"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "gc.auto", "0"], cwd=self.root, check=True
+        )
         subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=self.root, check=True)
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.root, check=True)
@@ -119,9 +135,13 @@ class PromotionBehaviorTests(unittest.TestCase):
             "jq",
             "#!/usr/bin/env bash\n"
             "case \" $* \" in\n"
-            "  *' -er '*) printf 'https://github.com/snaraj/website-infrastructure\\t0.1.0\\t{}\\n'; {} ;;\n"
+            "  *' -er '*) printf 'https://github.com/snaraj/website-infrastructure\\t{}\\t{}\\n'; {} ;;\n"
             "  *) exit 0 ;;\n"
-            "esac\n".format(REVISION, "exit 41" if fail_after_labels else "exit 0"),
+            "esac\n".format(
+                NARANJO_VERSION,
+                REVISION,
+                "exit 41" if fail_after_labels else "exit 0",
+            ),
         )
 
     def _write_oras(
@@ -167,7 +187,7 @@ class PromotionBehaviorTests(unittest.TestCase):
                 self.bash,
                 "scripts/promote-image.sh",
                 "naranjo-online",
-                "v0.1.0",
+                NARANJO_TAG,
                 DIGEST,
             ],
             cwd=self.root,

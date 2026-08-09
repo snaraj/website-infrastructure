@@ -62,6 +62,8 @@ class PublishWorkflowContractTests(unittest.TestCase):
             '[[ "${amd64_platform}" != "${arm64_platform}" ]]',
             'trivy image --input "${amd64_layout}:scan"',
             'trivy image --input "${arm64_layout}:scan"',
+            'syft "oci-dir:${amd64_layout}"',
+            'syft "oci-dir:${arm64_layout}"',
             ': "${ARTIFACT_NAME:?Set ARTIFACT_NAME to the canonical site slug}"',
             ': "${MAX_APPLICATION_LAYER_BYTES:?Set the reviewed final application-layer ceiling}"',
             'oras manifest fetch --oci-layout "${amd64_layout}:scan"',
@@ -76,6 +78,9 @@ class PublishWorkflowContractTests(unittest.TestCase):
                 self.assertIn(fragment, self.verifier)
         self.assertEqual(self.verifier.count("oras cp --no-tty"), 2)
         self.assertNotIn('trivy image --input "${OCI_ARCHIVE}"', self.verifier)
+        self.assertNotIn('syft "oci-archive:${OCI_ARCHIVE}"', self.verifier)
+        self.assertNotIn("syft \"oci-dir:${amd64_layout}\" --platform", self.verifier)
+        self.assertNotIn("syft \"oci-dir:${arm64_layout}\" --platform", self.verifier)
 
     def test_workflows_build_one_canonical_oci_archive(self):
         """Scans, publication, signatures, and evidence must share one digest."""
