@@ -85,11 +85,14 @@ trivy image --input "${amd64_layout}:scan" \
 trivy image --input "${arm64_layout}:scan" \
   --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL
 
-# SBOMs stay platform-specific so later evidence review can answer which
-# packages shipped to the Pi versus the amd64 development/test environment.
-syft "oci-archive:${OCI_ARCHIVE}" --platform linux/amd64 \
+# Syft receives the same single-platform layouts already selected and proven
+# above. Re-discovering a platform from the original BuildKit archive is
+# ambiguous once its image index also carries SBOM/provenance descriptors.
+# Keeping one evidence source per platform binds the inventory to the exact
+# child that Trivy scanned and that the application-layer checks inspected.
+syft "oci-dir:${amd64_layout}" \
   -o "spdx-json=${EVIDENCE_DIR}/${ARTIFACT_NAME}-amd64.spdx.json"
-syft "oci-archive:${OCI_ARCHIVE}" --platform linux/arm64 \
+syft "oci-dir:${arm64_layout}" \
   -o "spdx-json=${EVIDENCE_DIR}/${ARTIFACT_NAME}-arm64.spdx.json"
 
 printf 'Verified and scanned distinct linux/amd64 and linux/arm64 views of %s.\n' \
