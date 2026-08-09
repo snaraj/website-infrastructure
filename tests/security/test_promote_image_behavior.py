@@ -81,6 +81,18 @@ class PromotionBehaviorTests(unittest.TestCase):
             cwd=self.root,
             check=True,
         )
+        # A disposable fixture must not leave detached Git maintenance running
+        # after the command under test exits. Disable both the current
+        # maintenance runner and legacy auto-gc so TemporaryDirectory cleanup
+        # cannot race a process that is still writing beneath .git.
+        subprocess.run(
+            ["git", "config", "maintenance.auto", "false"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "gc.auto", "0"], cwd=self.root, check=True
+        )
         subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=self.root, check=True)
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.root, check=True)
