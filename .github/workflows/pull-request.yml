@@ -20,15 +20,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Version-bump proof compares release inputs with the exact PR base.
+          fetch-depth: 0
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
       - name: Validate workflows
         run: actionlint
       - name: Validate Python policy tooling
         run: |
-          python3 -m py_compile scripts/validate_repository.py scripts/redact_inventory.py
+          python3 -m py_compile scripts/validate_repository.py scripts/validate_image_release.py scripts/validate_release_state.py scripts/validate_release_transition.py scripts/validate_frontend_dist.py scripts/redact_inventory.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 scripts/validate_repository.py all
+      - name: Require independent version bumps for changed release inputs
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/validate_image_release.py changed --base "${BASE_SHA}"
       - name: Check shell
         run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
       - name: Check Dockerfile
@@ -37,14 +44,13 @@ jobs:
         run: gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
       - name: Render and validate Helm and Kubernetes
         run: |
-          ./scripts/render-kubernetes.sh
-          if ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/websites/naranjo-online/release.yaml ||
-             ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/websites/lidersea-com/release.yaml ||
-             ! grep -Eq '^\s*suspend:\s*true\s*$' kubernetes/platform/cloudflare-public/release/release.yaml; then
-            for rendered in .artifacts/rendered/*.yaml; do
-              conftest test --policy policies/release-conftest "${rendered}"
-            done
-          else
+          release_mode="$(python3 scripts/validate_release_transition.py select-mode)"
+          case "${release_mode}" in
+            scaffold|transition|release) ;;
+            *) printf 'Unsafe release transition mode.\n' >&2; exit 1 ;;
+          esac
+          ./scripts/render-kubernetes.sh "--${release_mode}"
+          if [ "${release_mode}" = scaffold ]; then
             printf 'PENDING release-state policy: releases remain deliberately suspended.\n'
           fi
       - name: Test staged Kyverno policies
@@ -94,21 +100,36 @@ jobs:
         with:
           go-version: '1.26.5'
           check-latest: false
+          # Both Go applications currently use only the standard library, so
+          # they intentionally have no go.sum dependency graph to cache.
+          cache: false
+      - name: Verify application toolchain
+        # setup-node selects Node, but npm is bundled independently. Checking
+        # both prevents a base/runtime bump from silently changing lock behavior.
+        run: |
+          test "$(node --version)" = "v24.19.0"
+          test "$(npm --version)" = "11.17.0"
+          test "$(go env GOVERSION)" = "go1.26.5"
       - name: Build and check Svelte
         working-directory: websites/${{ matrix.site }}/frontend
         run: |
           test -f package-lock.json
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
-          npm test --if-present
+          npm test
           npm run build
+          python3 ../../../scripts/validate_frontend_dist.py --site "${{ matrix.site }}"
           python3 ../../../scripts/validate_repository.py media
-      - name: Test Go service
+      - name: Test Go service and embedded website experience
         working-directory: websites/${{ matrix.site }}
         env:
           GOTOOLCHAIN: local
         run: |
-          test -z "$(gofmt -l .)"
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            printf 'gofmt is required for:\n%s\n' "${unformatted}" >&2
+            exit 1
+          fi
           go vet ./...
           CGO_ENABLED=0 go test ./...
           go test -race ./...

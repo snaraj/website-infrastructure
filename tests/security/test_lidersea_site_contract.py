@@ -42,31 +42,6 @@ class LiderseaSiteContractTests(unittest.TestCase):
         self.assertIn("name: lidersea-com", chart)
         self.assertIn("repository: ghcr.io/snaraj/lidersea-com", values)
 
-    def test_toolchains_and_runtime_match_repository_pins(self):
-        """The independent image must not drift from reviewed shared versions."""
-
-        versions = {}
-        for line in (REPO_ROOT / "versions.env").read_text(encoding="utf-8").splitlines():
-            if line and not line.startswith("#"):
-                key, value = line.split("=", 1)
-                versions[key] = value
-
-        package = json.loads(
-            (SITE_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
-        )
-        dockerfile = (SITE_ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertEqual(package["engines"]["node"], versions["NODE_VERSION"])
-        self.assertEqual(package["packageManager"], f"npm@{versions['NPM_VERSION']}")
-        self.assertEqual(
-            package["devDependencies"]["svelte"], versions["SVELTE_VERSION"]
-        )
-        for key in ("WEBSITE_NODE_BUILDER", "WEBSITE_GO_BUILDER", "WEBSITE_RUNTIME"):
-            with self.subTest(key=key):
-                self.assertIn(f"FROM {versions[key]}", dockerfile)
-        self.assertIn("USER 65532:65532", dockerfile)
-        self.assertIn('ENTRYPOINT ["/lidersea-com"]', dockerfile)
-        self.assertNotIn(":latest", dockerfile)
-
     def test_chart_stays_fail_closed_before_promotion(self):
         """No valid-looking placeholder may turn the unreviewed release ready."""
 

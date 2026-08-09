@@ -22,7 +22,7 @@ spec:
               kinds: [Pod]
               namespaces: [lidersea-com]
       verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/lidersea-com*"]
+        - imageReferences: ["ghcr.io/snaraj/lidersea-com@sha256:*"]
           mutateDigest: false
           required: true
           verifyDigest: true
@@ -41,7 +41,7 @@ spec:
               kinds: [Pod]
               namespaces: [lidersea-com]
       verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/lidersea-com*"]
+        - imageReferences: ["ghcr.io/snaraj/lidersea-com@sha256:*"]
           type: SigstoreBundle
           mutateDigest: false
           required: true

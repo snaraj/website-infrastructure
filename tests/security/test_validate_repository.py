@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import importlib.util
+import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "validate_repository.py"
@@ -10,6 +13,143 @@ SPEC = importlib.util.spec_from_file_location("validate_repository", str(SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ACTIVATION_FIXTURE_FILES = (
+    ".sops.yaml",
+    "kubernetes/websites/naranjo-online/release.yaml",
+    "kubernetes/reconciliation/naranjo-online.yaml",
+    "kubernetes/websites/lidersea-com/release.yaml",
+    "kubernetes/reconciliation/lidersea-com.yaml",
+    "kubernetes/platform/cloudflare-public/release/release.yaml",
+    "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
+    "kubernetes/reconciliation/platform-services.yaml",
+    "kubernetes/reconciliation/admission.yaml",
+    "websites/naranjo.online/chart/values.yaml",
+    "websites/lidersea.com/chart/values.yaml",
+) + tuple(
+    path.as_posix()
+    for path in sorted(MODULE.CLOUDFLARE_TERRAFORM_SOURCE_FILES)
+)
+SYNTHETIC_RECIPIENT = (
+    "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
+)
+
+
+def copy_activation_fixture(root):
+    for relative in ACTIVATION_FIXTURE_FILES:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
+
+
+def replace_once(root, relative, before, after):
+    path = root / relative
+    text = path.read_text(encoding="utf-8")
+    if text.count(before) != 1:
+        raise AssertionError("fixture replacement is not unique: " + relative)
+    path.write_bytes(text.replace(before, after).encode("utf-8"))
+
+
+def configure_cloudflare_fixture(root):
+    """Create the exact synthetic staged encrypted-Secret lifecycle."""
+
+    replace_once(
+        root,
+        "kubernetes/platform/cloudflare-public/release/release.yaml",
+        "      tokenRevision: not-configured\n",
+        "      tokenRevision: rev-reviewed-test\n",
+    )
+    replace_once(
+        root,
+        "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
+        "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
+        "  - tunnel-token.sops.yaml\n",
+    )
+    root.joinpath(".sops.yaml").write_bytes((
+        "creation_rules:\n"
+        "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
+        "    encrypted_regex: ^(data|stringData)$\n"
+        "    age:\n"
+        "      - {}\n".format(SYNTHETIC_RECIPIENT)
+    ).encode("utf-8"))
+    secret = root / "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
+    secret.write_bytes((
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: pi-websites-tunnel-token\n"
+        "  namespace: cloudflare-public\n"
+        "type: Opaque\n"
+        "data:\n"
+        "  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n"
+        "sops:\n"
+        "  age:\n"
+        "    - recipient: {}\n"
+        "      enc: |\n"
+        "        -----BEGIN AGE ENCRYPTED FILE-----\n"
+        "        synthetic-test-ciphertext\n"
+        "        -----END AGE ENCRYPTED FILE-----\n"
+        "  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n".format(
+            SYNTHETIC_RECIPIENT
+        )
+    ).encode("utf-8"))
+
+
+def write_site_release(root, slug, *, suspended=True, ready=False, digest=None):
+    """Write the complete narrow HelmRelease identity used by strict tests."""
+
+    if digest is None:
+        digest = "sha256:" + ("0" * 64)
+    domains = {
+        "naranjo-online": "naranjo.online",
+        "lidersea-com": "lidersea.com",
+    }
+    domain = domains[slug]
+    release = root / "kubernetes" / "websites" / slug / "release.yaml"
+    release.parent.mkdir(parents=True, exist_ok=True)
+    release.write_bytes((
+        "apiVersion: helm.toolkit.fluxcd.io/v2\n"
+        "kind: HelmRelease\n"
+        "metadata:\n"
+        "  name: {slug}\n"
+        "  namespace: {slug}\n"
+        "  annotations:\n"
+        "    platform.snaraj.dev/readiness: {readiness}\n"
+        "spec:\n"
+        "  suspend: {suspended}\n"
+        "  interval: 10m0s\n"
+        "  releaseName: {slug}\n"
+        "  serviceAccountName: helm-reconciler\n"
+        "  driftDetection:\n"
+        "    mode: enabled\n"
+        "  chart:\n"
+        "    spec:\n"
+        "      chart: ./websites/{domain}/chart\n"
+        "      reconcileStrategy: Revision\n"
+        "      sourceRef:\n"
+        "        kind: GitRepository\n"
+        "        name: {slug}-source\n"
+        "      interval: 10m0s\n"
+        "  install:\n"
+        "    remediation:\n"
+        "      retries: 0\n"
+        "  upgrade:\n"
+        "    cleanupOnFail: true\n"
+        "    remediation:\n"
+        "      retries: 0\n"
+        "      strategy: rollback\n"
+        "  values:\n"
+        "    deploymentReady: {ready}\n"
+        "    image:\n"
+        "      repository: ghcr.io/snaraj/{slug}\n"
+        "      digest: {digest}\n".format(
+            slug=slug,
+            domain=domain,
+            readiness=MODULE.RELEASE_CONTRACTS[slug]["readiness"],
+            suspended=str(suspended).lower(),
+            ready=str(ready).lower(),
+            digest=digest,
+        )).encode("utf-8"))
+    return release
 
 
 class RepositoryPolicyTests(unittest.TestCase):
@@ -304,6 +444,18 @@ class RepositoryPolicyTests(unittest.TestCase):
             errors = MODULE.check_secrets(root)
             self.assertTrue(any("unencrypted Kubernetes Secret" in error for error in errors))
 
+    def test_rejects_plaintext_secret_with_quoted_kind_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "kubernetes" / "site"
+            target.mkdir(parents=True)
+            (target / "secret.yaml").write_text(
+                'apiVersion: v1\n"kind": Secret\nstringData:\n  token: nope\n',
+                encoding="utf-8",
+            )
+            errors = MODULE.check_secrets(root)
+            self.assertTrue(any("unencrypted Kubernetes Secret" in error for error in errors))
+
     def test_rejects_mixed_plaintext_sops_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -366,6 +518,13 @@ sops:
         errors = MODULE.tunnel_secret_errors(invalid, recipient)
         self.assertTrue(any("namespace" in error for error in errors))
         self.assertTrue(any("only the token key" in error for error in errors))
+
+        quoted_override = valid.replace(
+            "sops:\n",
+            '"stringData":\n  token: plaintext-override\nsops:\n',
+        )
+        errors = MODULE.tunnel_secret_errors(quoted_override, recipient)
+        self.assertTrue(any("top-level" in error for error in errors))
 
     def test_active_kustomization_resource_ignores_comments(self):
         self.assertFalse(MODULE.active_kustomization_resource(
@@ -458,6 +617,54 @@ sops:
             errors = MODULE.check_cloudflare(root)
             self.assertTrue(any("data source is forbidden" in error for error in errors))
 
+    def test_cloudflare_default_off_contract_rejects_local_bypass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(
+                REPO_ROOT / "infrastructure" / "cloudflare",
+                root / "infrastructure" / "cloudflare",
+            )
+            locals_file = root / "infrastructure/cloudflare/locals.tf"
+            locals_file.write_text(
+                locals_file.read_text(encoding="utf-8").replace(
+                    "  enabled = var.enable_cloudflare_resources ? 1 : 0\n",
+                    "  enabled = 1\n",
+                ),
+                encoding="utf-8",
+            )
+            errors = MODULE.check_cloudflare(root)
+            self.assertTrue(any("default-off contract" in error for error in errors))
+
+    def test_git_visible_terraform_inputs_and_json_configuration_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(
+                REPO_ROOT / "infrastructure" / "cloudflare",
+                root / "infrastructure" / "cloudflare",
+            )
+            base = root / "infrastructure" / "cloudflare"
+            (base / "terraform.tfvars").write_text(
+                "enable_cloudflare_resources = true\n", encoding="utf-8"
+            )
+            (base / "forced.auto.tfvars.json").write_text(
+                '{"enable_cloudflare_resources":true}\n', encoding="utf-8"
+            )
+            (base / "override.tf.json").write_text("{}\n", encoding="utf-8")
+            errors = MODULE.check_cloudflare(root)
+            self.assertTrue(any("variable input is forbidden" in error for error in errors))
+            self.assertTrue(any("JSON configuration is forbidden" in error for error in errors))
+
+    def test_ignored_local_terraform_inputs_are_excluded_by_git_visibility(self):
+        expected = {
+            path.as_posix() for path in MODULE.CLOUDFLARE_TERRAFORM_SOURCE_FILES
+        }
+        with mock.patch.object(
+            MODULE,
+            "_git_visible_cloudflare_paths",
+            return_value=(expected, []),
+        ):
+            self.assertEqual(MODULE.cloudflare_visible_configuration_errors(REPO_ROOT), [])
+
     def test_release_gate_requires_reconciled_admission_controller(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -497,26 +704,76 @@ sops:
             )
             self.assertEqual(MODULE.signature_admission_install_errors(root), [])
 
-    def test_activation_gate_observes_every_site_release_signal(self):
-        """No site's digest, readiness, release, or signature state may bypass gating."""
+    def test_active_capacity_requires_exact_aggregate_quota_inventory(self):
+        """Per-object policy cannot silently accept an absent site budget."""
 
-        zero_digest = "sha256:" + ("0" * 64)
+        def quota(namespace, digit):
+            return (
+                "apiVersion: v1\n"
+                "kind: ResourceQuota\n"
+                "metadata:\n"
+                "  name: namespace-budget\n"
+                "  namespace: {namespace}\n"
+                "  annotations:\n"
+                "    platform.snaraj.dev/readiness: reviewed-pi-capacity\n"
+                "    platform.snaraj.dev/capacity-evidence-sha256: {evidence}\n"
+                "spec:\n"
+                "  hard:\n"
+                "    pods: \"2\"\n"
+                "    requests.cpu: 50m\n"
+                "    requests.memory: 64Mi\n"
+                "    limits.cpu: 500m\n"
+                "    limits.memory: 256Mi\n"
+            ).format(namespace=namespace, evidence=digit * 64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prerequisites = root / "kubernetes/platform/prerequisites"
+            prerequisites.mkdir(parents=True)
+            prerequisites.joinpath("kustomization.yaml").write_bytes(
+                b"resources:\n  - resource-controls.yaml\n"
+            )
+            quotas = quota("naranjo-online", "1") + "---\n" + quota(
+                "lidersea-com", "2"
+            )
+            prerequisites.joinpath("resource-controls.yaml").write_bytes(
+                quotas.encode("utf-8")
+            )
+            policy = root / "policies/kyverno"
+            policy.mkdir(parents=True)
+            policy.joinpath("kustomization.yaml").write_bytes(
+                b"resources:\n  - require-release-readiness.yaml\n"
+            )
+            self.assertEqual(MODULE.reviewed_capacity_errors(root), [])
+
+            prerequisites.joinpath("resource-controls.yaml").write_bytes(
+                quota("naranjo-online", "1").encode("utf-8")
+            )
+            self.assertIn(
+                "reviewed website capacity quota missing or duplicated: lidersea-com",
+                MODULE.reviewed_capacity_errors(root),
+            )
+
+            prerequisites.joinpath("resource-controls.yaml").write_bytes(
+                quotas.encode("utf-8")
+            )
+            policy.joinpath("kustomization.yaml").write_bytes(
+                b"resources:\n  - require-zero-site-capacity.yaml\n"
+            )
+            self.assertIn(
+                "zero-site-capacity admission policy remains active",
+                MODULE.reviewed_capacity_errors(root),
+            )
+
+    def test_activation_gate_observes_every_site_live_release_signal(self):
+        """Unsuspension or signature enforcement for either site invokes the gate."""
+
         for domain, slug, _ in MODULE.SITE_RELEASE_CONTRACTS:
-            for signal in ("digest", "readiness", "release", "signature"):
+            for signal in ("release", "signature"):
                 with self.subTest(domain=domain, signal=signal):
                     with tempfile.TemporaryDirectory() as directory:
                         root = Path(directory)
-                        values = root / "websites" / domain / "chart" / "values.yaml"
-                        values.parent.mkdir(parents=True)
-                        values.write_text(
-                            "image:\n  digest: {}\ndeploymentReady: false\n".format(
-                                zero_digest
-                            ),
-                            encoding="utf-8",
-                        )
-                        release = root / "kubernetes" / "websites" / slug / "release.yaml"
-                        release.parent.mkdir(parents=True)
-                        release.write_text("spec:\n  suspend: true\n", encoding="utf-8")
+                        release = write_site_release(root, slug)
                         policy = (
                             root / "policies" / "kyverno"
                             / "require-signed-{}.yaml".format(slug)
@@ -526,24 +783,14 @@ sops:
                             "spec:\n  validationFailureAction: Audit\n",
                             encoding="utf-8",
                         )
+                        self.assertTrue(MODULE.load_helm_release(slug, root).suspended)
                         self.assertFalse(MODULE.activation_requested(root))
 
-                        if signal == "digest":
-                            values.write_text(
-                                "image:\n  digest: sha256:{}\n"
-                                "deploymentReady: false\n".format("a" * 64),
-                                encoding="utf-8",
-                            )
-                        elif signal == "readiness":
-                            values.write_text(
-                                "image:\n  digest: {}\ndeploymentReady: true\n".format(
-                                    zero_digest
-                                ),
-                                encoding="utf-8",
-                            )
-                        elif signal == "release":
-                            release.write_text(
-                                "spec:\n  suspend: false\n", encoding="utf-8"
+                        if signal == "release":
+                            release.write_bytes(
+                                release.read_bytes().replace(
+                                    b"  suspend: true\n", b"  suspend: false\n"
+                                )
                             )
                         else:
                             policy.write_text(
@@ -551,6 +798,361 @@ sops:
                                 encoding="utf-8",
                             )
                         self.assertTrue(MODULE.activation_requested(root))
+
+    def test_suspended_promoted_override_is_staging_not_activation(self):
+        """Digest/readiness staging stays inert until a reconciliation gate moves."""
+
+        for _, slug, _ in MODULE.SITE_RELEASE_CONTRACTS:
+            with self.subTest(slug=slug):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_site_release(
+                        root,
+                        slug,
+                        ready=True,
+                        digest="sha256:" + ("a" * 64),
+                    )
+                    self.assertTrue(MODULE.load_helm_release(slug, root).suspended)
+                    self.assertFalse(MODULE.activation_requested(root))
+
+    def test_transition_activation_keeps_chart_defaults_inert(self):
+        """A staged override cannot hide a live digest in chart defaults."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            self.assertEqual(MODULE.check_activation(root), [])
+
+            release = "kubernetes/websites/naranjo-online/release.yaml"
+            replace_once(
+                root, release,
+                "    deploymentReady: false\n",
+                "    deploymentReady: true\n",
+            )
+            replace_once(
+                root, release,
+                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                "      digest: sha256:{}\n".format("a" * 64),
+            )
+            self.assertEqual(MODULE.check_activation(root), [])
+
+            replace_once(
+                root,
+                "websites/naranjo.online/chart/values.yaml",
+                "deploymentReady: false\n",
+                "deploymentReady: true\n",
+            )
+            self.assertIn(
+                "naranjo.online chart default must remain deploymentReady false",
+                MODULE.check_activation(root),
+            )
+
+    def test_transition_activation_rejects_ambiguous_dependency_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "  suspend: true\n",
+                "  suspend: false\n",
+            )
+            self.assertEqual(
+                MODULE.check_activation(root),
+                ["release transition state is unavailable or unsafe"],
+            )
+
+    def test_transition_filters_only_errors_for_proven_inert_releases(self):
+        """An active parent keeps its suspended child's safety envelope."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            for relative in (
+                "kubernetes/reconciliation/admission.yaml",
+                "kubernetes/reconciliation/platform-services.yaml",
+                "kubernetes/reconciliation/naranjo-online.yaml",
+                "kubernetes/reconciliation/lidersea-com.yaml",
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "kubernetes/websites/lidersea-com/release.yaml",
+            ):
+                replace_once(root, relative, "  suspend: true\n", "  suspend: false\n")
+            for slug, digit in (("naranjo-online", "1"), ("lidersea-com", "2")):
+                relative = "kubernetes/websites/{}/release.yaml".format(slug)
+                replace_once(
+                    root, relative,
+                    "    deploymentReady: false\n",
+                    "    deploymentReady: true\n",
+                )
+                replace_once(
+                    root, relative,
+                    "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                    "      digest: sha256:{}\n".format(digit * 64),
+                )
+            configure_cloudflare_fixture(root)
+            replace_once(
+                root,
+                "kubernetes/platform/cloudflare-public/release/release.yaml",
+                "  suspend: true\n",
+                "  suspend: false\n",
+            )
+            # Deterministic rollback first suspends the inner release while its
+            # parent remains active long enough to reconcile that change.
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "  suspend: false\n",
+                "  suspend: true\n",
+            )
+            synthetic = [
+                "HelmRelease remains suspended: naranjo-online",
+                "naranjo.online signature admission policy is not enforced",
+                "lidersea.com signature admission policy is not enforced",
+                "admission desired state is missing active resource: kyverno/controllers.yaml",
+            ]
+            with mock.patch.object(MODULE, "check_release", return_value=synthetic):
+                self.assertEqual(
+                    MODULE.check_activation(root),
+                    synthetic[1:],
+                )
+
+    def test_outer_only_website_transition_retains_signature_and_capacity(self):
+        """Desired child suspension is not observation while its parent is live."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            for relative in (
+                "kubernetes/reconciliation/admission.yaml",
+                "kubernetes/reconciliation/platform-services.yaml",
+                "kubernetes/reconciliation/naranjo-online.yaml",
+            ):
+                replace_once(root, relative, "  suspend: true\n", "  suspend: false\n")
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "    deploymentReady: false\n",
+                "    deploymentReady: true\n",
+            )
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                "      digest: sha256:{}\n".format("a" * 64),
+            )
+            synthetic = [
+                "HelmRelease remains suspended: naranjo-online",
+                "naranjo.online signature admission policy is not enforced",
+                "reviewed website capacity quota missing or duplicated: naranjo-online",
+            ]
+            with mock.patch.object(MODULE, "check_release", return_value=synthetic):
+                self.assertEqual(MODULE.check_activation(root), synthetic[1:])
+
+    def test_fully_suspended_staged_site_can_filter_its_inert_signature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            for relative in (
+                "kubernetes/reconciliation/admission.yaml",
+                "kubernetes/reconciliation/platform-services.yaml",
+            ):
+                replace_once(root, relative, "  suspend: true\n", "  suspend: false\n")
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "    deploymentReady: false\n",
+                "    deploymentReady: true\n",
+            )
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                "      digest: sha256:{}\n".format("a" * 64),
+            )
+            synthetic = [
+                "naranjo.online signature admission policy is not enforced",
+                "admission desired state is missing active resource: kyverno/controllers.yaml",
+            ]
+            with mock.patch.object(MODULE, "check_release", return_value=synthetic):
+                self.assertEqual(MODULE.check_activation(root), synthetic[1:])
+
+    def test_configured_connector_without_secret_fails_before_filtering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            replace_once(
+                root,
+                "kubernetes/platform/cloudflare-public/release/release.yaml",
+                "      tokenRevision: not-configured\n",
+                "      tokenRevision: rev-reviewed-test\n",
+            )
+            self.assertEqual(
+                MODULE.check_activation(root),
+                ["release transition state is unavailable or unsafe"],
+            )
+
+    def test_initial_connector_rejects_latent_secret_resource_listing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            replace_once(
+                root,
+                "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
+                "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
+                "  - tunnel-token.sops.yaml\n",
+            )
+            self.assertEqual(
+                MODULE.check_activation(root),
+                ["release transition state is unavailable or unsafe"],
+            )
+
+    def test_staged_connector_never_filters_invalid_secret_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            configure_cloudflare_fixture(root)
+            for relative in (
+                "kubernetes/reconciliation/admission.yaml",
+                "kubernetes/reconciliation/platform-services.yaml",
+            ):
+                replace_once(root, relative, "  suspend: true\n", "  suspend: false\n")
+            error = "invalid production tunnel Secret: encrypted payload is missing"
+            with mock.patch.object(MODULE, "check_release", return_value=[error]):
+                self.assertEqual(MODULE.check_activation(root), [error])
+
+    def test_cloudflare_default_true_fails_the_integrated_activation_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            replace_once(
+                root,
+                "infrastructure/cloudflare/variables.tf",
+                "  default     = false\n",
+                "  default     = true\n",
+            )
+            self.assertTrue(MODULE.activation_requested(root))
+            self.assertEqual(
+                MODULE.check_activation(root),
+                ["release transition state is unavailable or unsafe"],
+            )
+
+    def test_scaffold_signature_enforcement_is_not_an_orphaned_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            policy = root / "policies/kyverno/require-signed-naranjo-online.yaml"
+            policy.parent.mkdir(parents=True)
+            policy.write_bytes(
+                b"spec:\n  validationFailureAction: Enforce\n"
+            )
+            self.assertTrue(MODULE.activation_requested(root))
+            self.assertEqual(
+                MODULE.check_activation(root),
+                ["scaffold desired state contains a release activation signal"],
+            )
+
+    def test_staged_signature_signal_invokes_shared_release_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "    deploymentReady: false\n",
+                "    deploymentReady: true\n",
+            )
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                "      digest: sha256:{}\n".format("a" * 64),
+            )
+            policy = root / "policies/kyverno/require-signed-naranjo-online.yaml"
+            policy.parent.mkdir(parents=True)
+            policy.write_bytes(
+                b"spec:\n  validationFailureAction: Enforce\n"
+            )
+            shared_error = (
+                "admission desired state is missing active resource: "
+                "kyverno/controllers.yaml"
+            )
+            with mock.patch.object(
+                MODULE, "check_release", return_value=[shared_error]
+            ):
+                self.assertEqual(MODULE.check_activation(root), [shared_error])
+
+    def test_active_connector_never_filters_its_sops_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy_activation_fixture(root)
+            for relative in (
+                "kubernetes/reconciliation/admission.yaml",
+                "kubernetes/reconciliation/platform-services.yaml",
+                "kubernetes/platform/cloudflare-public/release/release.yaml",
+            ):
+                replace_once(root, relative, "  suspend: true\n", "  suspend: false\n")
+            configure_cloudflare_fixture(root)
+            sops_error = "invalid production tunnel Secret: encrypted payload is missing"
+            inert_site_error = (
+                "naranjo.online HelmRelease override must contain one nonzero image digest"
+            )
+            capacity_error = "reviewed website capacity quota missing or duplicated: naranjo-online"
+            with mock.patch.object(
+                MODULE,
+                "check_release",
+                return_value=[sops_error, inert_site_error, capacity_error],
+            ):
+                self.assertEqual(MODULE.check_activation(root), [sops_error])
+
+    def test_ambiguous_release_yaml_is_never_treated_as_suspended(self):
+        """A text decoy cannot turn a live or ambiguous gate into inert state."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = write_site_release(root, "naranjo-online")
+            release.write_bytes(
+                release.read_bytes().replace(
+                    b"spec:\n  suspend: true\n",
+                    b"decoy: |\n  suspend: true\nspec:\n  suspend: false\n",
+                )
+            )
+            self.assertTrue(MODULE.activation_requested(root))
+
+    def test_release_values_use_helm_override_and_keep_chart_inert(self):
+        """Production checks follow Flux's effective values, not chart defaults."""
+
+        zero_digest = "sha256:" + ("0" * 64)
+        chart = {
+            ("deploymentReady",): "false",
+            ("image", "digest"): zero_digest,
+        }
+        release = types.SimpleNamespace(
+            values={
+                ("deploymentReady",): "true",
+                ("image", "digest"): "sha256:" + ("a" * 64),
+            }
+        )
+        self.assertEqual(
+            MODULE.site_release_value_errors("example.invalid", chart, release),
+            [],
+        )
+
+        errors = MODULE.site_release_value_errors(
+            "example.invalid",
+            {
+                ("deploymentReady",): "true",
+                ("image", "digest"): "sha256:" + ("b" * 64),
+            },
+            types.SimpleNamespace(
+                values={
+                    ("deploymentReady",): "false",
+                    ("image", "digest"): zero_digest,
+                }
+            ),
+        )
+        self.assertEqual(len(errors), 4)
+        self.assertTrue(any("chart default" in error for error in errors))
+        self.assertTrue(any("HelmRelease override" in error for error in errors))
 
 
 if __name__ == "__main__":

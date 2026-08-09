@@ -21,6 +21,7 @@ bootstrap/pi/kubeadm-config.yaml.local
 bootstrap/pi/encryption-config.yaml.local
 bootstrap/pi/decisions.env.local
 bootstrap/pi/protected-services.env.local
+bootstrap/pi/protected-legacy-runtime-evidence.local
 bootstrap/pi/images.lock.local
 bootstrap/pi/cni-manifest.local.yaml
 /local-evidence/
@@ -31,7 +32,9 @@ bootstrap/pi/cni-manifest.local.yaml
 *.tfstate.*
 *.tfplan
 terraform.tfvars
+terraform.tfvars.json
 *.auto.tfvars
+*.auto.tfvars.json
 crash.log
 crash.*.log
 override.tf

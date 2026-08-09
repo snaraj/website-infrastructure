@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""Parse the narrow GitOps release state without a permissive YAML fallback."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+ZERO_DIGEST = "sha256:" + ("0" * 64)
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+KEY_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
+# Canonical manifests contain relative chart/reconciliation paths beginning
+# with ``./``.  Keep the scalar grammar deliberately narrow, but permit that
+# non-YAML-significant prefix while continuing to reject block scalars,
+# quoting, anchors, aliases, flow collections, and inline comments.
+SCALAR_RE = re.compile(r"[A-Za-z0-9./][A-Za-z0-9_./:@+-]*\Z")
+TOKEN_REVISION_RE = re.compile(
+    r"(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})\Z"
+)
+MAX_RELEASE_YAML_BYTES = 65536
+
+RELEASE_CONTRACTS = {
+    "naranjo-online": {
+        "release": "kubernetes/websites/naranjo-online/release.yaml",
+        "parent": "kubernetes/reconciliation/naranjo-online.yaml",
+        "namespace": "naranjo-online",
+        "repository": "ghcr.io/snaraj/naranjo-online",
+        "readiness": "suspended-until-lock-build-signature-and-digest",
+        "chart": "./websites/naranjo.online/chart",
+        "source": "naranjo-online-source",
+        "parent_path": "./kubernetes/websites/naranjo-online",
+        "parent_service_account": "naranjo-online-reconciler",
+        "parent_dependencies": (
+            "platform-prerequisites",
+            "admission",
+            "platform-services",
+        ),
+    },
+    "lidersea-com": {
+        "release": "kubernetes/websites/lidersea-com/release.yaml",
+        "parent": "kubernetes/reconciliation/lidersea-com.yaml",
+        "namespace": "lidersea-com",
+        "repository": "ghcr.io/snaraj/lidersea-com",
+        "readiness": "suspended-until-capacity-lock-build-signature-and-digest",
+        "chart": "./websites/lidersea.com/chart",
+        "source": "lidersea-com-source",
+        "parent_path": "./kubernetes/websites/lidersea-com",
+        "parent_service_account": "lidersea-com-reconciler",
+        "parent_dependencies": (
+            "platform-prerequisites",
+            "admission",
+            "platform-services",
+        ),
+    },
+    "cloudflare-public": {
+        "release": "kubernetes/platform/cloudflare-public/release/release.yaml",
+        "parent": "kubernetes/reconciliation/platform-services.yaml",
+        "namespace": "cloudflare-public",
+        "repository": None,
+        "readiness": "suspended-until-sops-token-and-cloudflare-plan",
+        "chart": "./kubernetes/platform/cloudflare-public/chart",
+        "source": "cloudflare-public-source",
+        "parent_path": "./kubernetes/platform/cloudflare-public/release",
+        "parent_service_account": "platform-services-reconciler",
+        "parent_dependencies": (
+            "platform-prerequisites",
+            "admission",
+        ),
+    },
+}
+
+
+class CanonicalYamlError(ValueError):
+    """One security-critical YAML field is absent, duplicated, or ambiguous."""
+
+
+class HelmReleaseState(NamedTuple):
+    """Exact effective values consumed by one reviewed HelmRelease."""
+
+    suspended: bool
+    values: dict[tuple[str, ...], str | None]
+    values_text: str
+
+
+def load_simple_mapping_file(path: Path) -> dict[tuple[str, ...], str | None]:
+    """Load a complete canonical scalar/mapping-only YAML document.
+
+    This intentionally supports only the small values-file grammar used by
+    the release gate.  It is not a general YAML parser and fails closed on
+    lists, aliases, anchors, tags, block/flow scalars, duplicate keys, or
+    ambiguous indentation.
+    """
+
+    text = _read_canonical_text(path)
+    lines = text.split("\n")
+    return _parse_simple_mapping(lines, 0, len(lines), 0)
+
+
+def _read_canonical_text(path: Path) -> str:
+    """Read one small canonical UTF-8 YAML file without newline normalization."""
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+
+    absolute_path = Path(os.path.abspath(os.fspath(path)))
+    try:
+        if absolute_path.resolve(strict=True) != absolute_path:
+            raise CanonicalYamlError("release YAML path must not contain symlinks")
+        before = absolute_path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise CanonicalYamlError("release YAML must be a regular file")
+        if before.st_size <= 0 or before.st_size > MAX_RELEASE_YAML_BYTES:
+            raise CanonicalYamlError("release YAML size is outside the bounded contract")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(absolute_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise CanonicalYamlError("release YAML must be a regular file")
+            if identity(opened) != identity(before):
+                raise CanonicalYamlError("release YAML changed while opening")
+            chunks = []
+            remaining = MAX_RELEASE_YAML_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after_read = os.fstat(descriptor)
+            if identity(after_read) != identity(opened) or len(raw) != opened.st_size:
+                raise CanonicalYamlError("release YAML changed while reading")
+        finally:
+            os.close(descriptor)
+        after = absolute_path.lstat()
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or identity(after) != identity(opened)
+            or absolute_path.resolve(strict=True) != absolute_path
+        ):
+            raise CanonicalYamlError("release YAML path changed while reading")
+    except CanonicalYamlError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise CanonicalYamlError("release YAML cannot be opened safely") from error
+
+    if (
+        not raw
+        or len(raw) > MAX_RELEASE_YAML_BYTES
+        or not raw.endswith(b"\n")
+    ):
+        raise CanonicalYamlError("release YAML must be bounded and LF terminated")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise CanonicalYamlError("release YAML must be UTF-8") from error
+    if any(
+        (ord(character) < 32 and character != "\n")
+        or 127 <= ord(character) <= 159
+        or ord(character) in {0x2028, 0x2029}
+        for character in text
+    ):
+        raise CanonicalYamlError("release YAML must use LF as its only control separator")
+    for line in text.split("\n"):
+        if re.fullmatch(r"[ ]*(?:---|[.][.][.])(?:[ ]+#.*)?", line):
+            raise CanonicalYamlError("release YAML document markers are forbidden")
+    return text
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _mapping_entry(line: str, indent: int) -> tuple[str, str | None] | None:
+    """Parse one canonical mapping entry at an exact indentation level."""
+
+    if _indent(line) != indent:
+        return None
+    content = line[indent:]
+    if content in {"---", "..."}:
+        raise CanonicalYamlError("release YAML document markers are forbidden")
+    match = re.fullmatch(r"([A-Za-z0-9_.-]+):(.*)", content)
+    if match is None:
+        raise CanonicalYamlError("release YAML contains a non-canonical mapping line")
+    key, suffix = match.groups()
+    if not KEY_RE.fullmatch(key):
+        raise CanonicalYamlError("release YAML contains an unsupported key")
+    if suffix == "":
+        return key, None
+    if not suffix.startswith(" ") or suffix != " " + suffix[1:].strip():
+        raise CanonicalYamlError("release YAML scalar spacing is not canonical")
+    value = suffix[1:]
+    if not SCALAR_RE.fullmatch(value):
+        raise CanonicalYamlError("release YAML contains an unsupported scalar")
+    return key, value
+
+
+def _child(
+    lines: list[str],
+    start: int,
+    end: int,
+    indent: int,
+    key: str,
+    *,
+    container: bool,
+) -> tuple[str | None, int, int]:
+    """Return one exact child and its bounded nested section."""
+
+    matches: list[tuple[int, str | None]] = []
+    for index in range(start, end):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        entry = _mapping_entry(line, indent)
+        if entry is not None and entry[0] == key:
+            matches.append((index, entry[1]))
+    if len(matches) != 1:
+        raise CanonicalYamlError("release YAML field is missing or duplicated")
+    index, value = matches[0]
+    if container and value is not None:
+        raise CanonicalYamlError("release YAML mapping field is not a mapping")
+    if not container and value is None:
+        raise CanonicalYamlError("release YAML scalar field is not a scalar")
+
+    nested_end = end
+    for candidate in range(index + 1, end):
+        line = lines[candidate]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if _indent(line) <= indent:
+            nested_end = candidate
+            break
+    return value, index + 1, nested_end
+
+
+def canonical_scalar(text: str, path: tuple[str, ...]) -> str:
+    """Extract one scalar only through exact two-space mapping ancestry."""
+
+    if not path:
+        raise CanonicalYamlError("release YAML path is empty")
+    lines = text.split("\n")
+    start = 0
+    end = len(lines)
+    indent = 0
+    for component in path[:-1]:
+        _, start, end = _child(
+            lines,
+            start,
+            end,
+            indent,
+            component,
+            container=True,
+        )
+        indent += 2
+    value, _, _ = _child(
+        lines,
+        start,
+        end,
+        indent,
+        path[-1],
+        container=False,
+    )
+    if value is None:  # Kept explicit for type narrowing and future refactors.
+        raise CanonicalYamlError("release YAML scalar is unavailable")
+    return value
+
+
+def _mapping_section(
+    text: str,
+    path: tuple[str, ...],
+) -> tuple[list[str], int, int, int]:
+    lines = text.split("\n")
+    start = 0
+    end = len(lines)
+    indent = 0
+    for component in path:
+        _, start, end = _child(
+            lines,
+            start,
+            end,
+            indent,
+            component,
+            container=True,
+        )
+        indent += 2
+    return lines, start, end, indent
+
+
+def _parse_simple_mapping(
+    lines: list[str],
+    start: int,
+    end: int,
+    base_indent: int,
+) -> dict[tuple[str, ...], str | None]:
+    """Validate the values subtree as unique map/scalar entries with no YAML magic."""
+
+    parsed: dict[tuple[str, ...], str | None] = {}
+    contexts: dict[int, tuple[str, ...]] = {base_indent: ()}
+    for index in range(start, end):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = _indent(line)
+        if indent < base_indent or (indent - base_indent) % 2:
+            raise CanonicalYamlError("release values indentation is not canonical")
+        for level in tuple(contexts):
+            if level > indent:
+                del contexts[level]
+        parent = contexts.get(indent)
+        if parent is None:
+            raise CanonicalYamlError("release values indentation jumps a mapping level")
+        entry = _mapping_entry(line, indent)
+        if entry is None:
+            raise CanonicalYamlError("release values contain an unsupported document marker")
+        key, value = entry
+        item_path = parent + (key,)
+        if item_path in parsed:
+            raise CanonicalYamlError("release values contain a duplicate key")
+        parsed[item_path] = value
+        contexts.pop(indent + 2, None)
+        if value is None:
+            contexts[indent + 2] = item_path
+    if not parsed:
+        raise CanonicalYamlError("release values mapping is empty")
+    return parsed
+
+
+def _bool_scalar(value: str) -> bool:
+    if value not in {"true", "false"}:
+        raise CanonicalYamlError("release boolean must be explicit true or false")
+    return value == "true"
+
+
+def _require_exact_significant_lines(
+    text: str,
+    expected: list[str | re.Pattern[str]],
+) -> None:
+    """Reject every field outside one closed, ordered reviewed manifest shape."""
+
+    actual = [
+        line
+        for line in text.split("\n")
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if len(actual) != len(expected):
+        raise CanonicalYamlError("release YAML shape is outside the closed contract")
+    for line, requirement in zip(actual, expected):
+        if isinstance(requirement, str):
+            matches = line == requirement
+        else:
+            matches = requirement.fullmatch(line) is not None
+        if not matches:
+            raise CanonicalYamlError("release YAML shape is outside the closed contract")
+
+
+def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
+    """Return the complete per-identity HelmRelease line allowlist."""
+
+    contract = RELEASE_CONTRACTS[name]
+    common = [
+        "apiVersion: helm.toolkit.fluxcd.io/v2",
+        "kind: HelmRelease",
+        "metadata:",
+        "  name: {}".format(name),
+        "  namespace: {}".format(contract["namespace"]),
+        "  annotations:",
+        "    platform.snaraj.dev/readiness: {}".format(contract["readiness"]),
+        "spec:",
+        re.compile(r"  suspend: (?:true|false)\Z"),
+        "  interval: 10m0s",
+        "  releaseName: {}".format(name),
+        "  serviceAccountName: helm-reconciler",
+    ]
+    if contract["repository"] is not None:
+        common.extend(
+            [
+                "  driftDetection:",
+                "    mode: enabled",
+            ]
+        )
+    common.extend(
+        [
+            "  chart:",
+            "    spec:",
+            "      chart: {}".format(contract["chart"]),
+            "      reconcileStrategy: Revision",
+            "      sourceRef:",
+            "        kind: GitRepository",
+            "        name: {}".format(contract["source"]),
+            "      interval: 10m0s",
+            "  install:",
+            "    remediation:",
+            "      retries: 0",
+            "  upgrade:",
+            "    cleanupOnFail: true",
+            "    remediation:",
+            "      retries: 0",
+            "      strategy: rollback",
+            "  values:",
+        ]
+    )
+    if contract["repository"] is not None:
+        common.extend(
+            [
+                re.compile(r"    deploymentReady: (?:true|false)\Z"),
+                "    image:",
+                "      repository: {}".format(contract["repository"]),
+                re.compile(r"      digest: sha256:[0-9a-f]{64}\Z"),
+            ]
+        )
+    else:
+        common.extend(
+            [
+                "    tunnel:",
+                re.compile(
+                    r"      tokenRevision: " + TOKEN_REVISION_RE.pattern
+                ),
+            ]
+        )
+    return common
+
+
+def _parent_shape(name: str) -> list[str | re.Pattern[str]]:
+    """Return the complete per-identity parent Kustomization allowlist."""
+
+    contract = RELEASE_CONTRACTS[name]
+    parent_name = Path(str(contract["parent"])).stem
+    expected: list[str | re.Pattern[str]] = [
+        "apiVersion: kustomize.toolkit.fluxcd.io/v1",
+        "kind: Kustomization",
+        "metadata:",
+        "  name: {}".format(parent_name),
+        "  namespace: flux-system",
+        "spec:",
+    ]
+    if name == "cloudflare-public":
+        expected.extend(
+            [
+                "  decryption:",
+                "    provider: sops",
+                "    secretRef:",
+                "      name: sops-age",
+            ]
+        )
+    expected.append("  dependsOn:")
+    expected.extend(
+        "    - name: {}".format(dependency)
+        for dependency in contract["parent_dependencies"]
+    )
+    expected.extend(
+        [
+            "  interval: 10m0s",
+            "  path: {}".format(contract["parent_path"]),
+            "  prune: true",
+            "  retryInterval: 1m0s",
+            "  serviceAccountName: {}".format(contract["parent_service_account"]),
+            "  sourceRef:",
+            "    kind: GitRepository",
+            "    name: flux-system",
+            re.compile(r"  suspend: (?:true|false)\Z"),
+            "  timeout: 5m0s",
+            "  wait: false",
+        ]
+    )
+    return expected
+
+
+def load_helm_release(name: str, root: Path = ROOT) -> HelmReleaseState:
+    """Load one closed release identity and its exact spec.values mapping."""
+
+    contract = RELEASE_CONTRACTS[name]
+    text = _read_canonical_text(root / str(contract["release"]))
+    _require_exact_significant_lines(text, _helm_release_shape(name))
+    if canonical_scalar(text, ("apiVersion",)) != "helm.toolkit.fluxcd.io/v2":
+        raise CanonicalYamlError("release apiVersion is unsupported")
+    if canonical_scalar(text, ("kind",)) != "HelmRelease":
+        raise CanonicalYamlError("release kind is unsupported")
+    if canonical_scalar(text, ("metadata", "name")) != name:
+        raise CanonicalYamlError("release name does not match its closed identity")
+    if canonical_scalar(text, ("metadata", "namespace")) != contract["namespace"]:
+        raise CanonicalYamlError("release namespace does not match its closed identity")
+    suspended = _bool_scalar(canonical_scalar(text, ("spec", "suspend")))
+
+    lines, start, end, base_indent = _mapping_section(text, ("spec", "values"))
+    values = _parse_simple_mapping(lines, start, end, base_indent)
+    rendered_lines = []
+    for line in lines[start:end]:
+        if line.strip() and not line.lstrip().startswith("#"):
+            if _indent(line) < base_indent:
+                raise CanonicalYamlError("release values escaped their mapping")
+            rendered_lines.append(line[base_indent:])
+        else:
+            rendered_lines.append("")
+    values_text = "\n".join(rendered_lines).rstrip("\n") + "\n"
+
+    expected_repository = contract["repository"]
+    if expected_repository is not None:
+        if values.get(("image", "repository")) != expected_repository:
+            raise CanonicalYamlError("release image repository is not the closed identity")
+        digest = values.get(("image", "digest"))
+        if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+            raise CanonicalYamlError("release image digest is not canonical")
+        _bool_scalar(str(values.get(("deploymentReady",), "")))
+    else:
+        token_revision = values.get(("tunnel", "tokenRevision"))
+        if (
+            not isinstance(token_revision, str)
+            or TOKEN_REVISION_RE.fullmatch(token_revision) is None
+        ):
+            raise CanonicalYamlError("tunnel token revision is not canonical")
+    return HelmReleaseState(suspended, values, values_text)
+
+
+def load_parent_suspension(name: str, root: Path = ROOT) -> bool:
+    """Validate the site's closed parent Kustomization and return suspension."""
+
+    contract = RELEASE_CONTRACTS[name]
+    text = _read_canonical_text(root / str(contract["parent"]))
+    _require_exact_significant_lines(text, _parent_shape(name))
+    if canonical_scalar(text, ("apiVersion",)) != "kustomize.toolkit.fluxcd.io/v1":
+        raise CanonicalYamlError("parent apiVersion is unsupported")
+    if canonical_scalar(text, ("kind",)) != "Kustomization":
+        raise CanonicalYamlError("parent kind is unsupported")
+    parent_name = Path(str(contract["parent"])).stem
+    if canonical_scalar(text, ("metadata", "name")) != parent_name:
+        raise CanonicalYamlError("parent name does not match its closed identity")
+    return _bool_scalar(canonical_scalar(text, ("spec", "suspend")))
+
+
+def site_phase(
+    name: str,
+    root: Path = ROOT,
+    expected_digest: str | None = None,
+) -> str:
+    """Return initial/promoted only when both reconciliation layers are suspended."""
+
+    release = load_helm_release(name, root)
+    if not release.suspended or not load_parent_suspension(name, root):
+        raise CanonicalYamlError("both reconciliation layers must be suspended")
+    readiness = _bool_scalar(str(release.values[("deploymentReady",)]))
+    digest = str(release.values[("image", "digest")])
+    if expected_digest is not None:
+        if not DIGEST_RE.fullmatch(expected_digest) or digest != expected_digest:
+            raise CanonicalYamlError("release digest does not match the expected digest")
+    if not readiness and digest == ZERO_DIGEST:
+        return "initial"
+    if readiness and digest != ZERO_DIGEST:
+        return "promoted"
+    raise CanonicalYamlError("release readiness and digest form an unsafe mixed state")
+
+
+def all_helm_releases_suspended(root: Path = ROOT) -> bool:
+    """Return true only when every exact HelmRelease spec.suspend is true."""
+
+    return all(load_helm_release(name, root).suspended for name in RELEASE_CONTRACTS)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=ROOT)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    phase = subparsers.add_parser("site-phase")
+    phase.add_argument(
+        "--site",
+        required=True,
+        choices=("naranjo-online", "lidersea-com"),
+    )
+    phase.add_argument(
+        "--expect-digest",
+        help="require the exact authoritative image digest while reading the phase",
+    )
+    suspended = subparsers.add_parser("all-helm-suspended")
+    suspended.set_defaults(command="all-helm-suspended")
+    emit = subparsers.add_parser("emit-values")
+    emit.add_argument("--release", required=True, choices=sorted(RELEASE_CONTRACTS))
+    args = parser.parse_args(argv)
+
+    try:
+        root = args.root.resolve()
+        if args.command == "site-phase":
+            print(site_phase(args.site, root, args.expect_digest))
+        elif args.command == "all-helm-suspended":
+            if not all_helm_releases_suspended(root):
+                return 1
+        else:
+            sys.stdout.write(load_helm_release(args.release, root).values_text)
+    except (CanonicalYamlError, OSError, UnicodeError):
+        print("ERROR release state is unavailable or non-canonical", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

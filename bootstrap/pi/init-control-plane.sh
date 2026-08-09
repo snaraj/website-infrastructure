@@ -143,6 +143,11 @@ fi
 [[ "${CONFIRM_KUBEADM_INIT:-}" == "initialize-reviewed-${KUBERNETES_VERSION}" ]] || \
   die 'exact kubeadm initialization acknowledgement missing'
 
+# Image verification and kubeadm dry-run can consume most of the runtime
+# evidence freshness window. Re-run the complete protected-host gate at the
+# last safe boundary before creating any control-plane path.
+bash "${repo_root}/bootstrap/pi/preflight.sh" --phase init
+
 install -d -m 0700 /etc/kubernetes/admission /etc/kubernetes/audit /etc/kubernetes/encryption
 install -d -m 0700 /var/log/kubernetes/audit
 install -m 0600 "${repo_root}/bootstrap/pi/psa.yaml" /etc/kubernetes/admission/psa.yaml

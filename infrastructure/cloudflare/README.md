@@ -2,8 +2,13 @@
 
 This configuration pins OpenTofu `1.12.5` and Cloudflare provider `5.22.0` from
 current official schemas verified on 2026-08-08. It defaults to zero resources;
-`enable_cloudflare_resources` must remain false until read-only discovery,
-imports, Free entitlement checks, and exact plan review are complete.
+the committed `enable_cloudflare_resources` default remains false. Keep every
+idle operator configuration false through read-only discovery and Free
+entitlement checks. Because the import addresses are count-indexed, set the
+flag true only in an ignored, protected local variable file during each
+explicitly approved import/refresh/plan window described below, then return it
+to false when that window closes. A true local override is never permission to
+apply.
 
 ## Managed scope
 
@@ -122,12 +127,16 @@ plans.
    checklist. Any missing, duplicate, swapped, or mismatched target;
    unavailable/unknown evidence; non-Free plan; over-entitlement seat count;
    trial; or nonzero/unknown price is `NO-GO`.
-2. Resolve variables in ignored `terraform.tfvars`. Confirm the hostname is the
+2. Resolve variables in ignored `terraform.tfvars`, leaving
+   `enable_cloudflare_resources=false` while idle. Confirm the hostname is the
    exact canonical apex for each corresponding discovered zone.
 3. `tofu init -backend=false`, review the signed provider/lock, format, and
    validate without credentials.
-4. Import existing resources one at a time following `imports/README.md`, with a
-   refresh-only plan after each. Never recreate an existing zone/tunnel/rule.
+4. At the explicit import checkpoint, temporarily set the ignored local
+   `enable_cloudflare_resources=true`, import existing resources one at a time
+   following `imports/README.md`, and run a refresh-only plan after each. Never
+   recreate an existing zone/tunnel/rule; restore the local override to false
+   when the import window closes.
 5. Create an authenticated plan in protected storage with
    `enable_cloudflare_resources=true`; do not upload it.
 6. Run `scripts/cloudflare-plan-gate.sh`, record the exact plan SHA-256 and safe

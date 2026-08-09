@@ -409,6 +409,12 @@ main() {
     fi
   done
 
+  # Artifact staging and collision checks can consume most of the runtime
+  # evidence freshness window. Re-run the complete protected-host gate at the
+  # last safe boundary so no host target is created against stale evidence.
+  phase='final-protected-host-revalidation'
+  bash "${repo_root}/bootstrap/pi/preflight.sh" --phase install
+
   transaction_started='yes'
   phase='creating-target-directories'
   ensure_directory /usr/local/bin 0755
