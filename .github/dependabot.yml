@@ -1,0 +1,42 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: gomod
+    directory: /websites/naranjo.online
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: npm
+    directory: /websites/naranjo.online/frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: docker
+    directory: /websites/naranjo.online
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: gomod
+    directory: /websites/lidersea.com
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: npm
+    directory: /websites/lidersea.com/frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: docker
+    directory: /websites/lidersea.com
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: terraform
+    directory: /infrastructure/cloudflare
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

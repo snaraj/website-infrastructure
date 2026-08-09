@@ -1,0 +1,11 @@
+# STRUCTURAL EXAMPLE ONLY. This path is not included by any Kustomization.
+# A production file must be named tunnel-token.sops.yaml and contain SOPS
+# ciphertext for stringData/data plus valid SOPS metadata.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: EXAMPLE-DO-NOT-APPLY
+  namespace: cloudflare-public
+type: Opaque
+stringData:
+  token: NOT_A_REAL_TOKEN_AND_INTENTIONALLY_UNUSABLE

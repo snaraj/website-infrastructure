@@ -1,0 +1,14 @@
+# Generate a new key locally with: head -c 32 /dev/urandom | base64
+# Copy this file to encryption-config.yaml.local, replace the sentinel, chmod
+# 0600, and back it up encrypted separately from the etcd snapshot.
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+    providers:
+      - secretbox:
+          keys:
+            - name: key-2026-01
+              secret: REPLACE_BASE64_32_BYTE_KEY
+      - identity: {}

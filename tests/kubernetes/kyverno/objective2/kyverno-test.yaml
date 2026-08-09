@@ -1,0 +1,187 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: objective-two-fail-closed-controls
+policies:
+  - ../../../../policies/kyverno/require-restricted-workloads.yaml
+  - ../../../../policies/kyverno/disallow-public-services.yaml
+  - ../../../../policies/kyverno/require-approved-images.yaml
+  - ../../../../policies/kyverno/disallow-undiscovered-storage.yaml
+  - ../../../../policies/kyverno/disallow-tenant-media-payloads.yaml
+  - ../../../../policies/kyverno/require-exact-tenant-networking.yaml
+  - ../../../../policies/kyverno/require-zero-site-capacity.yaml
+  - ../../../../policies/kyverno/require-release-readiness.yaml
+resources:
+  - ../../fixtures/allow/lidersea-hardened.yaml
+  - ../../fixtures/deny/objective2-bypasses.yaml
+results:
+  - policy: require-restricted-workloads
+    rule: require-restricted-pod
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-secure-containers
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: disallow-host-ports
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-container-resources
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-approved-images
+    rule: require-approved-digest
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-approved-images
+    rule: require-canonical-lidersea-image
+    resources: [lidersea-allowed]
+    kind: Pod
+    result: pass
+  - policy: disallow-public-services
+    rule: disallow-public-service
+    resources: [lidersea-com]
+    kind: Service
+    result: pass
+  - policy: require-exact-tenant-networking
+    rule: exact-site-ingress-and-no-egress
+    resources: [cloudflared-to-lidersea-com]
+    kind: NetworkPolicy
+    result: pass
+  - policy: require-zero-site-capacity
+    rule: require-capacity-not-ready-quota
+    resources: [capacity-not-ready]
+    kind: ResourceQuota
+    result: pass
+  - policy: disallow-tenant-media-payloads
+    rule: bound-configmap-control-data
+    resources: [small-control]
+    kind: ConfigMap
+    result: pass
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [cloudflared-volume-allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-restricted-pod
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: require-restricted-workloads
+    rule: disallow-host-ports
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: require-approved-images
+    rule: require-approved-digest
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: require-approved-images
+    rule: require-canonical-lidersea-image
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-site-scratch-volumes
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-disk-pressure-toleration
+    resources: [lidersea-bypass]
+    kind: Pod
+    result: fail
+  - policy: disallow-public-services
+    rule: disallow-public-service
+    resources: [public-bypass]
+    kind: Service
+    result: fail
+  - policy: disallow-public-services
+    rule: disallow-ingress
+    resources: [unexpected-hostname]
+    kind: Ingress
+    result: fail
+  - policy: disallow-public-services
+    rule: disallow-gateway-api
+    resources: [unexpected-hostname]
+    kind: Gateway
+    result: fail
+  - policy: require-exact-tenant-networking
+    rule: exact-site-ingress-and-no-egress
+    resources: [widened-ingress]
+    kind: NetworkPolicy
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [invented-media]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: require-zero-site-capacity
+    rule: require-capacity-not-ready-quota
+    resources: [invented-capacity]
+    kind: ResourceQuota
+    result: fail
+  - policy: disallow-tenant-media-payloads
+    rule: reject-configmap-binary-data
+    resources: [media-in-etcd]
+    kind: ConfigMap
+    result: fail
+  - policy: disallow-tenant-media-payloads
+    rule: bound-secret-control-data
+    resources: [media-in-etcd]
+    kind: Secret
+    result: fail
+  - policy: require-release-readiness
+    rule: require-site-deployment-readiness
+    resources: [lidersea-not-ready]
+    kind: Deployment
+    result: fail
+  - policy: require-exact-tenant-networking
+    rule: exact-site-ingress-and-no-egress
+    resources: [endport-widening]
+    kind: NetworkPolicy
+    result: fail
+  - policy: require-restricted-workloads
+    rule: require-secure-containers
+    resources: [capability-readd]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-wildcard-toleration
+    resources: [wildcard-disk-pressure]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-site-scratch-volumes
+    resources: [unlisted-storage-source]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-legacy-service-account-token-secrets
+    resources: [helm-reconciler-token]
+    kind: Secret
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-site-scratch-volumes
+    resources: [legacy-token-mount]
+    kind: Pod
+    result: fail
+  - policy: disallow-tenant-media-payloads
+    rule: bound-configmap-control-data
+    resources: [encoded-media-in-data]
+    kind: ConfigMap
+    result: fail
+  - policy: require-release-readiness
+    rule: require-replicaset-owned-by-exact-deployment
+    resources: [raw-replicaset]
+    kind: ReplicaSet
+    result: fail

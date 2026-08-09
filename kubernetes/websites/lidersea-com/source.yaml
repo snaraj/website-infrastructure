@@ -1,0 +1,24 @@
+# The chart is stored in this Git repository. A Flux HelmRepository would
+# require a published Helm index or OCI repository and cannot resolve a local
+# Git path, so this source deliberately follows the anonymous Git convention.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: lidersea-com-source
+  namespace: lidersea-com
+spec:
+  # This source may archive only the reviewed lidersea.com chart subtree.
+  ignore: |
+    /*
+    !/websites
+    /websites/*
+    !/websites/lidersea.com
+    /websites/lidersea.com/*
+    !/websites/lidersea.com/chart
+  interval: 10m0s
+  ref:
+    branch: main
+  sparseCheckout:
+    - websites/lidersea.com/chart
+  timeout: 60s
+  url: https://github.com/snaraj/website-infrastructure.git

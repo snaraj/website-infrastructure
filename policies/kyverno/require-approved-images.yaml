@@ -1,0 +1,106 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-approved-images
+  annotations:
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/description: Enforce canonical tenant publishers, nonzero immutable sha256 digests, and fail-closed admission.
+spec:
+  admission: true
+  background: true
+  validationFailureAction: Enforce
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  rules:
+    - name: require-approved-digest
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        message: Every regular, init, and ephemeral container image must match an approved publisher and full digest.
+        foreach:
+          - list: request.object.spec.containers
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true
+                  - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
+                    operator: Equals
+                    value: true
+          - list: request.object.spec.initContainers || `[]`
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true
+                  - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
+                    operator: Equals
+                    value: true
+          - list: request.object.spec.ephemeralContainers || `[]`
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true
+                  - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
+                    operator: Equals
+                    value: true
+    - name: require-canonical-naranjo-image
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [naranjo-online]
+      validate:
+        failureAction: Enforce
+        message: Every naranjo-online container must use the canonical naranjo image repository.
+        foreach:
+          - list: request.object.spec.[containers, initContainers, ephemeralContainers][]
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^ghcr[.]io/snaraj/naranjo-online@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true
+    - name: require-canonical-lidersea-image
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [lidersea-com]
+      validate:
+        failureAction: Enforce
+        message: Every lidersea-com container must use the canonical lidersea image repository.
+        foreach:
+          - list: request.object.spec.[containers, initContainers, ephemeralContainers][]
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^ghcr[.]io/snaraj/lidersea-com@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true
+    - name: require-canonical-cloudflared-image
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public]
+      validate:
+        failureAction: Enforce
+        message: Every cloudflare-public container must use the canonical cloudflared image repository.
+        foreach:
+          - list: request.object.spec.[containers, initContainers, ephemeralContainers][]
+            deny:
+              conditions:
+                any:
+                  - key: "{{ regex_match('^cloudflare/cloudflared:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$', element.image) }}"
+                    operator: NotEquals
+                    value: true

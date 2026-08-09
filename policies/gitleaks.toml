@@ -1,0 +1,25 @@
+title = "website-infrastructure secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated dependency, provider, cache, and test-tool directories"
+paths = [
+  '''(?:^|[\\/])\.artifacts(?:[\\/]|$)''',
+  '''(?:^|[\\/])\.terraform(?:[\\/]|$)''',
+  '''(?:^|[\\/])node_modules(?:[\\/]|$)''',
+  '''(?:^|[\\/])__pycache__(?:[\\/]|$)''',
+]
+
+[[rules]]
+id = "age-private-identity"
+description = "age private identities must never enter Git"
+regex = '''AGE-SECRET-KEY-1[A-Z0-9]+'''
+keywords = ["AGE-SECRET-KEY-1"]
+
+[[rules]]
+id = "literal-cloudflare-api-token"
+description = "Cloudflare tokens must be supplied only through protected runtime inputs"
+regex = '''(?i)cloudflare_api_token\s*=\s*["'][A-Za-z0-9_-]{20,}["']'''
+keywords = ["cloudflare_api_token"]

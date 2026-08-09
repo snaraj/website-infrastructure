@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Namespace creation remains a bootstrap-owned cluster-scoped action. The
+# scoped reconciler starts only after bootstrap applies namespaces.yaml.
+resources:
+  - network-policies.yaml
+  - resource-controls.yaml

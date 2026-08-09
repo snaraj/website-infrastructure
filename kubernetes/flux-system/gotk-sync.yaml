@@ -1,0 +1,37 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: flux-system
+  namespace: flux-system
+spec:
+  # The root reconciler needs only desired-state manifests. Sparse checkout
+  # limits clone material while ignore rules independently bound the artifact.
+  ignore: |
+    /*
+    !/kubernetes
+    !/policies
+  interval: 1m0s
+  ref:
+    branch: main
+  sparseCheckout:
+    - kubernetes
+    - policies
+  timeout: 60s
+  url: https://github.com/snaraj/website-infrastructure.git
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: flux-system
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  path: ./kubernetes/reconciliation
+  prune: true
+  retryInterval: 1m0s
+  serviceAccountName: root-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 5m0s
+  wait: true

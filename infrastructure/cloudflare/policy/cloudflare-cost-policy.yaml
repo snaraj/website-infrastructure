@@ -1,0 +1,71 @@
+schemaVersion: 1
+defaultDecision: deny
+infrastructureCostUsd: 0
+zonePlanBoundary:
+  expectedActiveZoneCount: 2
+  authorizedPlan: free
+  authorizedInfrastructureUsdMonthly: 0
+  nextPaidPlan: pro
+  nextPaidPlanAuthorized: false
+  priceObservationDate: 2026-08-08
+  proListPriceUsdPerDomainMonthly:
+    annualCommitment: 20
+    monthToMonth: 25
+  illustrativeTwoZoneProTotalUsdMonthly:
+    annualCommitment: 40
+    monthToMonth: 50
+  freshOfficialPriceAuditRequiredBeforeAnyDecision: true
+authorizedCharges:
+  - product: registrar-domain-renewal
+    classification: separate-from-infrastructure
+allowedResourceTypes:
+  - cloudflare_dns_record
+  - cloudflare_zero_trust_gateway_policy
+  - cloudflare_zero_trust_tunnel_cloudflared
+  - cloudflare_zero_trust_tunnel_cloudflared_config
+  - cloudflare_zero_trust_tunnel_cloudflared_route
+allowedProducts:
+  - exactly-two-active-free-domain-zones
+  - existing-free-zone
+  - authoritative-dns
+  - proxied-dns-cdn
+  - universal-ssl
+  - cloudflare-tunnel
+  - zero-trust-free-verified-at-plan-time
+forbiddenProducts:
+  - workers
+  - pages-functions
+  - r2
+  - kv
+  - d1
+  - durable-objects
+  - queues
+  - workflows
+  - containers
+  - workers-ai
+  - vectorize
+  - ai-gateway
+  - images
+  - stream
+  - argo-smart-routing
+  - load-balancing
+  - spectrum
+  - cache-reserve
+  - usage-based-rate-limiting
+  - advanced-certificates
+  - total-tls
+  - paid-waf-or-bot-products
+  - paid-zero-trust
+  - pro-domain-plan
+  - trials
+  - subscription-mutations
+  - plan-upgrades
+  - unknown-products
+requiredControls:
+  unknownEntitlement: reject
+  billingWritePermission: forbidden
+  registrarWritePermission: forbidden
+  automaticPaidFallback: forbidden
+  preAndPostSubscriptionAudit: required
+  reviewedPlanHash: required
+  explicitHumanApproval: required

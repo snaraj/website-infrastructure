@@ -1,0 +1,184 @@
+# Fail-closed staging contract, not a runnable Kyverno installation.
+#
+# The repository has a reviewed Kyverno CLI version but no independently
+# verified controller manifest or image digest. The all-zero digest, disabled
+# API token, unavailable TLS endpoint, default-deny namespace, incomplete
+# installer RBAC, and suspended/waiting Flux Kustomization are independent gates.
+# Replace this entire file with reviewed official desired state and real image
+# digests before unsuspending admission; never promote this sentinel in place.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kyverno-admission-controller
+  namespace: kyverno
+  labels:
+    app.kubernetes.io/name: kyverno
+    app.kubernetes.io/component: admission-controller
+    app.kubernetes.io/part-of: kyverno
+  annotations:
+    platform.snaraj.dev/readiness: blocked-until-reviewed-controller-artifact
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kyverno-admission-controller
+  namespace: kyverno
+  labels:
+    app.kubernetes.io/name: kyverno
+    app.kubernetes.io/component: admission-controller
+    app.kubernetes.io/part-of: kyverno
+  annotations:
+    platform.snaraj.dev/deployment-ready: "false"
+    platform.snaraj.dev/readiness: blocked-until-reviewed-controller-artifact
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kyverno
+      app.kubernetes.io/component: admission-controller
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kyverno
+        app.kubernetes.io/component: admission-controller
+        app.kubernetes.io/part-of: kyverno
+      annotations:
+        platform.snaraj.dev/readiness: blocked-until-reviewed-controller-artifact
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: kyverno-admission-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kyverno
+          # v1.18.2 matches the existing reviewable CLI version; the zero digest
+          # is deliberately impossible and must not be replaced without an
+          # official controller-manifest provenance review.
+          image: reg.kyverno.io/kyverno/kyverno:v1.18.2@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 9443
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: https
+              scheme: HTTPS
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: https
+              scheme: HTTPS
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      terminationGracePeriodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kyverno-svc
+  namespace: kyverno
+  labels:
+    app.kubernetes.io/name: kyverno
+    app.kubernetes.io/component: admission-controller
+    app.kubernetes.io/part-of: kyverno
+  annotations:
+    platform.snaraj.dev/readiness: blocked-until-reviewed-controller-artifact
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kyverno
+    app.kubernetes.io/component: admission-controller
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+---
+# If the suspended reconciliation is accidentally enabled, this tenant-scoped
+# webhook fails closed because the staged Service has no available TLS backend.
+# It intentionally excludes system and admission namespaces from its match set.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: kyverno-resource-validating-webhook-cfg
+  labels:
+    app.kubernetes.io/name: kyverno
+    app.kubernetes.io/component: admission-controller
+    app.kubernetes.io/part-of: kyverno
+  annotations:
+    platform.snaraj.dev/readiness: blocked-until-reviewed-controller-artifact
+webhooks:
+  - name: validate.kyverno.svc
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: kyverno-svc
+        namespace: kyverno
+        path: /validate/fail-closed-staging
+        port: 443
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - cloudflare-public
+            - naranjo-online
+            - lidersea-com
+    rules:
+      - apiGroups:
+          - "*"
+        apiVersions:
+          - "*"
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - deployments
+          - networkpolicies
+          - pods
+          - resourcequotas
+          - services
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10

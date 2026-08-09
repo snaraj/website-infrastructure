@@ -1,0 +1,63 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: website-platform-admission
+policies:
+  - ../../../policies/kyverno/require-restricted-workloads.yaml
+  - ../../../policies/kyverno/disallow-public-services.yaml
+  - ../../../policies/kyverno/require-approved-images.yaml
+resources:
+  - ../fixtures/allow/hardened.yaml
+  - ../fixtures/deny/insecure.yaml
+  - ../fixtures/deny/token-bypass.yaml
+results:
+  - policy: require-restricted-workloads
+    rule: require-restricted-pod
+    resources: [allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-secure-containers
+    resources: [allowed]
+    kind: Pod
+    result: pass
+  - policy: require-approved-images
+    rule: require-approved-digest
+    resources: [allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-approved-service-account
+    resources: [allowed]
+    kind: Pod
+    result: pass
+  - policy: require-restricted-workloads
+    rule: require-restricted-pod
+    resources: [denied]
+    kind: Pod
+    result: fail
+  - policy: require-restricted-workloads
+    rule: require-secure-containers
+    resources: [denied]
+    kind: Pod
+    result: fail
+  - policy: require-approved-images
+    rule: require-approved-digest
+    resources: [denied]
+    kind: Pod
+    result: fail
+  - policy: require-restricted-workloads
+    rule: require-approved-service-account
+    resources: [token-bypass]
+    kind: Pod
+    result: fail
+  - policy: require-restricted-workloads
+    rule: require-secure-containers
+    resources: [token-bypass]
+    kind: Pod
+    result: fail
+  - policy: disallow-public-services
+    rule: disallow-public-service
+    resources: [denied]
+    kind: Service
+    result: fail

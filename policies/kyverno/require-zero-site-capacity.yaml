@@ -1,0 +1,32 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-zero-site-capacity
+  annotations:
+    policies.kyverno.io/category: Resource Management
+    policies.kyverno.io/description: Preserve the explicit zero-Pod site capacity gates until measured Pi workload envelopes are reviewed.
+spec:
+  admission: true
+  background: true
+  validationFailureAction: Enforce
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 10
+  rules:
+    - name: require-capacity-not-ready-quota
+      match:
+        any:
+          - resources:
+              kinds: [ResourceQuota]
+              namespaces: [naranjo-online, lidersea-com]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                object.metadata.name == 'capacity-not-ready' &&
+                has(object.metadata.annotations) &&
+                object.metadata.annotations['platform.snaraj.dev/readiness'] == 'blocked-until-pi-capacity-evidence' &&
+                has(object.spec.hard) && object.spec.hard.size() == 1 &&
+                object.spec.hard['pods'] == '0'
+              message: Site capacity must remain an exact zero-Pod capacity-not-ready quota until measured evidence is approved.

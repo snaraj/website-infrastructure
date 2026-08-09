@@ -1,0 +1,7 @@
+# This recipient is deliberately invalid. Replace it only with the PUBLIC age
+# recipient produced by the user-run ceremony in bootstrap/flux/README.md.
+creation_rules:
+  - path_regex: ^kubernetes/.+\.sops\.ya?ml$
+    encrypted_regex: ^(data|stringData)$
+    age:
+      - age1REPLACE_WITH_PUBLIC_RECIPIENT_BEFORE_ENCRYPTING

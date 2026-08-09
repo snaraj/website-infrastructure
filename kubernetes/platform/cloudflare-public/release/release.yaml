@@ -1,0 +1,31 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudflare-public
+  namespace: cloudflare-public
+  annotations:
+    platform.snaraj.dev/readiness: suspended-until-sops-token-and-cloudflare-plan
+spec:
+  suspend: true
+  interval: 10m0s
+  releaseName: cloudflare-public
+  serviceAccountName: helm-reconciler
+  chart:
+    spec:
+      chart: ./kubernetes/platform/cloudflare-public/chart
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: cloudflare-public-source
+      interval: 10m0s
+  install:
+    remediation:
+      retries: 0
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    tunnel:
+      tokenRevision: not-configured

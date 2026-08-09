@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidersea-allowed
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: lidersea-com
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lidersea-com
+  namespace: lidersea-com
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lidersea-com
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-to-lidersea-com
+  namespace: lidersea-com
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lidersea-com
+      app.kubernetes.io/instance: lidersea-com
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: capacity-not-ready
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/readiness: blocked-until-pi-capacity-evidence
+spec:
+  hard:
+    pods: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: small-control
+  namespace: lidersea-com
+data:
+  mode: static
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cloudflared-volume-allowed
+  namespace: cloudflare-public
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: tunnel-token
+          mountPath: /etc/cloudflared/token
+          readOnly: true
+  volumes:
+    - name: tunnel-token
+      secret:
+        secretName: pi-websites-tunnel-token
+        defaultMode: 288
+        items:
+          - key: token
+            path: token

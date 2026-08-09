@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readiness-missing
+  namespace: naranjo-online
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: readiness-missing}
+  template:
+    metadata:
+      labels: {app: readiness-missing}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: naranjo-online
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: naranjo-online
+          image: ghcr.io/snaraj/naranjo-online@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
