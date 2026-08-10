@@ -56,9 +56,38 @@ if [[ "$1" == resolve ]]; then
       if [[ -f "${FAKE_DESTINATION_CREATED}" ]]; then
         printf '%s\n' "${FAKE_EXPECTED_DIGEST}"
       else
-        printf 'MANIFEST_UNKNOWN: synthetic absent stable tag\n' >&2
+        printf 'Error response from registry: failed to resolve digest: %s: not found\n' "${reference}" >&2
         exit 1
       fi
+      ;;
+    partial-absent)
+      printf '%s\n' "${FAKE_EXPECTED_DIGEST}"
+      printf 'Error response from registry: failed to resolve digest: %s: not found\n' "${reference}" >&2
+      exit 1
+      ;;
+    wrong-reference-not-found)
+      printf 'Error response from registry: failed to resolve digest: ghcr.io/example/other:v0.4.2: not found\n' >&2
+      exit 1
+      ;;
+    extra-line-not-found)
+      printf 'Error response from registry: failed to resolve digest: %s: not found\nwarning: synthetic extra context\n' "${reference}" >&2
+      exit 1
+      ;;
+    extra-blank-line-not-found)
+      printf 'Error response from registry: failed to resolve digest: %s: not found\n\n' "${reference}" >&2
+      exit 1
+      ;;
+    wrong-status-not-found)
+      printf 'Error response from registry: failed to resolve digest: %s: not found\n' "${reference}" >&2
+      exit 17
+      ;;
+    manifest-unknown)
+      printf 'MANIFEST_UNKNOWN: synthetic absent stable tag\n' >&2
+      exit 1
+      ;;
+    name-unknown)
+      printf 'NAME_UNKNOWN: synthetic absent repository\n' >&2
+      exit 1
       ;;
     mismatch)
       printf 'sha256:%064d\n' 0
@@ -70,6 +99,14 @@ if [[ "$1" == resolve ]]; then
     generic-not-found)
       printf 'repository not found after an authentication proxy timeout\n' >&2
       exit 71
+      ;;
+    unauthorized)
+      printf 'Error response from registry: response status code 401: Unauthorized\n' >&2
+      exit 1
+      ;;
+    server-error)
+      printf 'Error response from registry: response status code 503: Service Unavailable\n' >&2
+      exit 1
       ;;
     *) exit 91 ;;
   esac
@@ -121,13 +158,39 @@ exit 90
             self.assertFalse(any(call.startswith("tag ") for call in calls), calls)
 
     @unittest.skipUnless(bash_executable(), "Bash is required")
-    def test_explicit_manifest_unknown_allows_one_tag_creation(self):
+    def test_exact_reference_bound_not_found_allows_one_tag_creation(self):
         with tempfile.TemporaryDirectory() as temporary:
             result, calls = self._run_fixture(Path(temporary), "absent")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 len([call for call in calls if call.startswith("tag ")]), 1, calls
             )
+
+    @unittest.skipUnless(bash_executable(), "Bash is required")
+    def test_not_found_lookalikes_fail_before_tag(self):
+        """Partial, differently scoped, and legacy text cannot create a tag."""
+
+        for destination_state in (
+            "partial-absent",
+            "wrong-reference-not-found",
+            "extra-line-not-found",
+            "extra-blank-line-not-found",
+            "wrong-status-not-found",
+            "manifest-unknown",
+            "name-unknown",
+            "unauthorized",
+            "server-error",
+        ):
+            with self.subTest(destination_state=destination_state):
+                with tempfile.TemporaryDirectory() as temporary:
+                    result, calls = self._run_fixture(
+                        Path(temporary), destination_state
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("could not prove stable tag absence", result.stderr)
+                    self.assertFalse(
+                        any(call.startswith("tag ") for call in calls), calls
+                    )
 
     @unittest.skipUnless(bash_executable(), "Bash is required")
     def test_existing_mismatch_fails_before_tag(self):

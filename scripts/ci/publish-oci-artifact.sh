@@ -21,7 +21,7 @@ set -euo pipefail
   printf 'GITHUB_SHA is malformed\n' >&2
   exit 2
 }
-for command_name in jq oras; do
+for command_name in cmp jq oras; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     printf '%s is required\n' "${command_name}" >&2
     exit 2
@@ -54,7 +54,11 @@ source_media_type="$(
 }
 
 destination_reference="${IMAGE}:sha-${GITHUB_SHA}"
+destination_resolve_output="${PUBLISH_VERIFY_ROOT}/destination-resolve.output"
 destination_resolve_error="${PUBLISH_VERIFY_ROOT}/destination-resolve.error"
+expected_destination_absence="${PUBLISH_VERIFY_ROOT}/destination-resolve.absent"
+printf 'Error response from registry: failed to resolve digest: %s: not found\n' \
+  "${destination_reference}" >"${expected_destination_absence}"
 readonly max_attempts=4
 readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"
 [[ "${base_delay_seconds}" =~ ^[0-9]+$ ]] || {
@@ -68,24 +72,32 @@ readonly base_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-5}"
 # safely because every blob and manifest is addressed by its immutable digest.
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   # Tag listing is advisory and can be stale or incomplete. Resolve the exact
-  # destination immediately before every write. Only the registry's explicit
-  # unknown-manifest/name response is absence; every other failure is a stop.
-  existing_destination_digest=""
+  # destination immediately before every write. Checksum-pinned ORAS
+  # renders its typed not-found result as one reference-bound line. Only that
+  # byte-exact line, exit status 1, and empty stdout prove absence;
+  # authentication, transport, proxy, partial-output, and differently scoped
+  # failures all remain stops.
+  : >"${destination_resolve_output}"
   : >"${destination_resolve_error}"
-  if existing_destination_digest="$(oras resolve "${destination_reference}" \
-    2>"${destination_resolve_error}")"; then
+  if oras resolve "${destination_reference}" \
+    >"${destination_resolve_output}" 2>"${destination_resolve_error}"; then
+    existing_destination_digest="$(<"${destination_resolve_output}")"
     [[ "${existing_destination_digest}" == "${EXPECTED_DIGEST}" ]] || {
       printf 'refusing to reassign immutable destination %s\n' \
         "${destination_reference}" >&2
       exit 1
     }
-  elif ! grep -Eqi \
-    'MANIFEST_UNKNOWN|manifest unknown|NAME_UNKNOWN|name unknown' \
-    "${destination_resolve_error}"; then
-    sed -n '1,20p' "${destination_resolve_error}" >&2
-    printf 'could not prove destination absence for %s\n' \
-      "${destination_reference}" >&2
-    exit 1
+  else
+    destination_resolve_status=$?
+    if [[ "${destination_resolve_status}" -ne 1 || \
+      -s "${destination_resolve_output}" ]] || \
+      ! cmp -s -- "${destination_resolve_error}" \
+        "${expected_destination_absence}"; then
+      sed -n '1,20p' "${destination_resolve_error}" >&2
+      printf 'could not prove destination absence for %s\n' \
+        "${destination_reference}" >&2
+      exit 1
+    fi
   fi
   if oras cp --no-tty --concurrency 1 --from-oci-layout \
     "${source_reference}" "${destination_reference}"; then
