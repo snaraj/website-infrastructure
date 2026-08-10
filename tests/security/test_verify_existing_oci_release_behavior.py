@@ -68,8 +68,8 @@ printf '%s\n' "$*" > "${FAKE_COSIGN_LOG}"
                     "RELEASE_TAG": "v0.1.0",
                     "GITHUB_SHA": "b" * 40,
                     "WORKFLOW_IDENTITY": (
-                        "https://github.com/snaraj/website-infrastructure/.github/"
-                        "workflows/publish-naranjo-online-image.yml@refs/heads/main"
+                        "https://github.com/snaraj/naranjo.online/.github/"
+                        "workflows/release-publisher.yml@refs/tags/v*"
                     ),
                     "VERIFY_ERROR_ROOT": (root / "errors").as_posix(),
                     "FAKE_SHA_DIGEST": sha_digest,

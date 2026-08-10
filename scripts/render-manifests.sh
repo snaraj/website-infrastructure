@@ -162,8 +162,8 @@ python3 -B "${REPO_ROOT}/scripts/validate_signature_policy.py" flux-system-kusto
 python3 -B "${REPO_ROOT}/scripts/validate_signature_policy.py" flux-sync \
   --file "${REPO_ROOT}/kubernetes/flux-system/gotk-sync.yaml"
 declare -a SIGNATURE_POLICY_ROWS=(
-  'naranjo-online|publish-naranjo-online-image.yml'
-  'lidersea-com|publish-lidersea-com-image.yml'
+  'naranjo-online|release-publisher.yml'
+  'lidersea-com|release-publisher.yml'
 )
 signature_row='' signature_site='' signature_workflow=''
 for signature_row in "${SIGNATURE_POLICY_ROWS[@]}"; do
