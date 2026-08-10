@@ -30,6 +30,22 @@ flowchart LR
 > that refuse to work until real, reviewed evidence replaces them. The
 > deployment-state table below tells you exactly how far along things are.
 
+## Website catalog
+
+The sites this platform exists to serve. Each one lives in its own
+repository with independent CI and signed releases, and deploys here by
+immutable digest only.
+
+| Site | What it is | Source |
+| --- | --- | --- |
+| [naranjo.online](https://naranjo.online) | Samuel's personal corner of the internet — portfolio, professional home, and whatever deserves a permanent URL. | [snaraj/naranjo.online](https://github.com/snaraj/naranjo.online) |
+| [lidersea.com](https://lidersea.com) | The web home of Lidersea — luxury yacht maintenance, customization, and detailing. | [snaraj/lidersea.com](https://github.com/snaraj/lidersea.com) |
+
+Both are Svelte frontends embedded into single dependency-free Go binaries,
+shipped as distroless multi-arch containers with Cosign-signed images and
+charts. The public URLs go live at platform cutover; until then the
+deployment-state table below is the honest source of truth.
+
 ## The rules the machines enforce
 
 These aren't aspirations — validators, CI, and admission policies reject
