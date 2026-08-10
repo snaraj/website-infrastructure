@@ -70,6 +70,9 @@ FORBIDDEN_EXACT_PATHS = {
     "bootstrap/pi/protected-legacy-runtime-evidence.local",
     "bootstrap/pi/protected-services.env.local",
 }
+# Historical law: these paths existed in already-published commits before the
+# website extraction, so full-history validation must keep accepting them
+# there even though no websites/ tree exists at HEAD anymore.
 ALLOWED_DIST_PATHS = {
     "websites/lidersea.com/internal/web/dist/.gitkeep",
     "websites/naranjo.online/internal/web/dist/.gitkeep",

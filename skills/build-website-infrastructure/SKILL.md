@@ -1,6 +1,6 @@
 ---
 name: build-website-infrastructure
-description: Build, secure, test, and evolve production websites and self-hosted infrastructure. Use for website source, Go or frontend services, containers, GitHub Actions and supply-chain releases, Kubernetes and Helm, Flux GitOps, encrypted secrets, Cloudflare Tunnel/DNS/Zero Trust infrastructure as code, edge-host bootstrap and recovery, persistent media, or cross-cutting architecture and security changes.
+description: Build, secure, test, and evolve self-hosted website infrastructure. Use for Kubernetes and Helm, Flux GitOps, encrypted secrets, Cloudflare Tunnel/DNS/Zero Trust infrastructure as code, edge-host bootstrap and recovery, supply-chain release policy, persistent media, or cross-cutting architecture and security changes — and, where site source lives alongside the platform, for website source, Go or frontend services, containers, and GitHub Actions publication.
 ---
 
 # Build Website Infrastructure
@@ -26,6 +26,11 @@ the target repository's cost, privacy, origin, and GitOps contracts.
    Never fill an unknown with a plausible value.
 
 ## Choose the relevant workflow
+
+In a split layout (platform repository consuming standalone site
+repositories), the source/build/publication workflows below apply inside each
+site repository; the platform side's role is admitting and promoting their
+signed artifacts by digest.
 
 - For website or container changes, preserve the repository's public response,
   runtime, isolation, image immutability, architecture, and test contracts.

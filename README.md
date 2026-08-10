@@ -95,6 +95,13 @@ sources, and no site source code exists here.
 
 ## Working locally
 
+One-time setup after cloning — point Git at the repository's hooks so the
+pre-push publication gate runs automatically:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ```sh
 make check-fast        # validators + the full test suite (Linux and macOS)
 make check             # everything, including render/policy/container checks

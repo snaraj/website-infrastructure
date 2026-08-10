@@ -42,3 +42,10 @@ absent from the production image and application request path.
 Flux must include helm-controller, CI must test Go/Svelte/Helm independently,
 and the container build has separate Node, Go, and minimal runtime stages. All
 tool/action/base-image versions and the final application digest remain pinned.
+
+## Amendment (2026-08-10)
+
+The decision stands unchanged; only its location moved. The Go/Svelte/Helm
+sources now live in the standalone repositories `snaraj/naranjo.online` and
+`snaraj/lidersea.com`, extracted with full history. This platform repository
+consumes their signed images and OCI charts by digest.

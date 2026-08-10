@@ -2,11 +2,11 @@
 
 Public launch is blocked until every item is evidenced:
 
-- real frontend/provider locks and generated digest-pinned Flux manifest;
-- independent naranjo.online and lidersea.com Go/Svelte tests,
-  dual-architecture builds, scans, per-platform SBOMs, provenance, keyless
-  signatures and verification, plus an immutable stable-version/full-SHA/digest
-  evidence mapping for each selected image;
+- a generated digest-pinned Flux manifest for each site;
+- release evidence supplied by each standalone site repository's tag-triggered
+  publisher: independent Go/Svelte tests, dual-architecture builds, scans,
+  SBOMs, provenance, keyless signatures and verification, plus an immutable
+  stable-version/digest evidence mapping for each selected image;
 - public GHCR visibility for anonymous Pi pulls;
 - final chart digest, no suspended releases, real SOPS tunnel Secret;
 - restricted PSA/RBAC/default-deny negative tests and workload API denial;
@@ -21,16 +21,20 @@ Public launch is blocked until every item is evidenced:
   apply, and immediate post-audit;
 - external HTTPS/header/DNS/port/WARP/identity/tunnel-failure tests.
 
-The final `release-gate.sh --live` result is valid only for the clean local
-commit named by the capacity evidence. Every authoritative Flux Kustomization
+`release-gate.sh --live` currently fails closed PENDING its post-cutover
+successor; the requirements below are the contract that successor must
+re-establish (its captured-evidence validators survive as
+`scripts/validate_flux_release_evidence.py` and
+`scripts/validate_runtime_inventory_evidence.py`). The final live result will
+be valid only for the clean local commit named by the capacity evidence. Every authoritative Flux Kustomization
 and Git source must report that exact `main@sha1:<commit>` as both observed and
 successfully applied/attempted state, and its server-normalized live `spec` must
 equal the canonical render. The global inventory is exactly six Kustomizations,
 four GitRepositories, three HelmReleases, and their three generated HelmCharts;
 Bucket, ExternalArtifact, HelmRepository, and OCIRepository inventories must be
 empty. Each HelmRelease must trace through its current Revision-strategy
-HelmChart to that same source artifact. The gate also
-server-normalizes every required desired Kyverno ClusterPolicy and rendered
+HelmChart to that same source artifact. The successor gate also must
+server-normalize every required desired Kyverno ClusterPolicy and rendered
 tenant NetworkPolicy with explicit non-persistent dry-runs, then requires every
 live policy spec to be exactly equal. Missing generations, revisions, history,
 source links, policy identities, or policy fields are a NO-GO, even when a

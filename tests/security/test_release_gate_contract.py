@@ -9,6 +9,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_GATE = REPO_ROOT / "scripts" / "release-gate.sh"
+FLUX_EVIDENCE_VALIDATOR = REPO_ROOT / "scripts" / "validate_flux_release_evidence.py"
+INVENTORY_VALIDATOR = REPO_ROOT / "scripts" / "validate_runtime_inventory_evidence.py"
 COMMIT = "a" * 40
 GIT_REVISION = "main@sha1:" + COMMIT
 NARANJO_IMAGE = "ghcr.io/snaraj/naranjo-online@sha256:" + "1" * 64
@@ -73,13 +75,6 @@ def function_body(script, name, next_name):
     return script[start:end]
 
 
-def embedded_python(function_text):
-    marker = "<<'PY'\n"
-    start = function_text.index(marker) + len(marker)
-    end = function_text.index("\nPY\n", start)
-    return function_text[start:end]
-
-
 def ready_condition():
     return {"type": "Ready", "status": "True"}
 
@@ -91,26 +86,6 @@ class ReleaseGateContractTests(unittest.TestCase):
         cls.clean_commit = function_body(
             cls.script, "assert_clean_commit", "assert_storage_disabled"
         )
-        cls.capture = function_body(
-            cls.script, "capture_production_state", "capture_prod_json"
-        )
-        cls.desired_policies = function_body(
-            cls.script,
-            "capture_desired_security_policy_state",
-            "assert_flux_revision_and_security_policy_state",
-        )
-        cls.revision_validator = function_body(
-            cls.script,
-            "assert_flux_revision_and_security_policy_state",
-            "assert_global_runtime_inventory",
-        )
-        cls.global_validator = function_body(
-            cls.script,
-            "assert_global_runtime_inventory",
-            "assert_production_state",
-        )
-        cls.validator_program = embedded_python(cls.revision_validator)
-        cls.global_validator_program = embedded_python(cls.global_validator)
         live_start = cls.script.index("run_live_gate() {")
         live_end = cls.script.index('\ncase "${1:---check}" in', live_start)
         cls.live = cls.script[live_start:live_end]
@@ -662,7 +637,7 @@ class ReleaseGateContractTests(unittest.TestCase):
 
     def _run_validator(self, commit=COMMIT):
         return subprocess.run(
-            [sys.executable, "-B", "-c", self.validator_program, str(self.root), commit],
+            [sys.executable, "-B", str(FLUX_EVIDENCE_VALIDATOR), str(self.root), commit],
             check=False,
             capture_output=True,
             text=True,
@@ -674,8 +649,7 @@ class ReleaseGateContractTests(unittest.TestCase):
             [
                 sys.executable,
                 "-B",
-                "-c",
-                self.global_validator_program,
+                str(INVENTORY_VALIDATOR),
                 str(self.root),
                 NARANJO_IMAGE,
                 LIDERSEA_IMAGE,
@@ -1020,73 +994,62 @@ class ReleaseGateContractTests(unittest.TestCase):
         self.assertIn("release worktree status could not be read", self.clean_commit)
         self.assertIn("RELEASE_GIT_COMMIT", self.clean_commit)
         # The local Kind runtime stage retired with the embedded site sources;
-        # the live lane must die fail-closed before any production read until
-        # its post-cutover successor lands.
+        # both runtime lanes must die fail-closed before any production read
+        # until their post-cutover successor lands.
         self.assertNotIn("test-kind.sh", self.script)
         self.assertIn(
             "transition runtime evidence is PENDING its post-cutover successor",
             self.script,
         )
-        pending = self.live.index(
-            "live gate is PENDING its post-cutover successor"
-        )
-        self.assertLess(pending, self.live.index("require_live_tools"))
-        first_recheck = self.live.index("assert_clean_commit", pending)
-        desired = self.live.index(
-            "capture_desired_security_policy_state", first_recheck
-        )
-        capture = self.live.index("capture_production_state", desired)
-        exposure = self.live.index("verify-exposure.sh", capture)
-        final_capture = self.live.rindex("capture_production_state")
-        final_validation = self.live.rindex(
-            "assert_flux_revision_and_security_policy_state"
-        )
-        final_global_validation = self.live.rindex("assert_global_runtime_inventory")
-        final_recheck = self.live.rindex("assert_clean_commit")
-        go = self.live.index("GO:")
-        self.assertLess(pending, first_recheck)
-        self.assertLess(first_recheck, desired)
-        self.assertLess(desired, capture)
-        self.assertLess(first_recheck, capture)
-        self.assertLess(capture, exposure)
-        self.assertLess(exposure, final_capture)
-        self.assertLess(final_capture, final_validation)
-        self.assertLess(final_validation, final_global_validation)
-        self.assertLess(final_global_validation, final_recheck)
-        self.assertLess(capture, final_recheck)
-        self.assertLess(final_recheck, go)
+        self.assertIn("live gate is PENDING its post-cutover successor", self.live)
+        # The stub may not read live state, mutate anything, or reach GO.
+        for forbidden in (
+            "require_live_tools",
+            "kubectl",
+            "capture_production_state",
+            "verify-exposure.sh",
+            "GO:",
+        ):
+            self.assertNotIn(forbidden, self.live)
+        # The stub must hand the successor its surviving executable validators.
+        self.assertIn("validate_flux_release_evidence.py", self.live)
+        self.assertIn("validate_runtime_inventory_evidence.py", self.live)
 
-    def test_shell_captures_full_flux_chain_and_server_normalized_policies(self):
-        self.assertIn("namespaces -o json", self.capture)
-        self.assertIn("daemonsets.apps -A", self.capture)
-        self.assertIn("statefulsets.apps -A", self.capture)
-        self.assertIn("jobs.batch -A", self.capture)
-        self.assertIn("cronjobs.batch -A", self.capture)
-        self.assertIn("gitrepositories.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("buckets.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("externalartifacts.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("helmrepositories.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("ocirepositories.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("helmcharts.source.toolkit.fluxcd.io", self.capture)
-        self.assertIn("kustomizations.kustomize.toolkit.fluxcd.io -A", self.capture)
-        self.assertIn("--server-side", self.desired_policies)
-        self.assertIn("--dry-run=server", self.desired_policies)
-        self.assertIn("--force-conflicts", self.desired_policies)
-        self.assertIn("desired-networkpolicy-", self.desired_policies)
-        self.assertIn("rendered tenant NetworkPolicy inventory", self.desired_policies)
-        desired = self.live.index("capture_desired_security_policy_state")
-        capture = self.live.index("capture_production_state", desired)
-        validate = self.live.index("assert_flux_revision_and_security_policy_state")
-        self.assertLess(desired, capture)
-        self.assertLess(capture, validate)
-        self.assertEqual(
-            self.live.count("capture_desired_security_policy_state"), 2
-        )
-        self.assertEqual(self.live.count("capture_production_state"), 2)
-        self.assertEqual(
-            self.live.count("assert_flux_revision_and_security_policy_state"), 2
-        )
-        self.assertEqual(self.live.count("assert_global_runtime_inventory"), 2)
+    def test_retired_live_machinery_is_fully_absent_from_the_shell(self):
+        # The captured-evidence validators moved to standalone executable
+        # programs; no orphaned live-capture shell may linger where it could
+        # be resurrected without review.
+        for retired in (
+            "capture_production_state",
+            "capture_desired_security_policy_state",
+            "capture_prod_json",
+            "assert_production_state",
+            "assert_global_runtime_inventory",
+            "assert_flux_revision_and_security_policy_state",
+            "desired_deployment_image",
+            "exercise_production_admission",
+            "write_admission_fixtures",
+            "assert_no_live_routes",
+            "new_temp_root",
+            "--dry-run=server",
+        ):
+            self.assertNotIn(retired, self.script)
+        self.assertNotIn("websites/naranjo.online", self.script)
+        self.assertNotIn("websites/lidersea.com", self.script)
+        self.assertNotIn("helm-naranjo-online.yaml", self.script)
+        self.assertNotIn("helm-lidersea-com.yaml", self.script)
+        # Both standalone validators stay wired for the successor and refuse
+        # short argv rather than passing vacuously.
+        for validator in (FLUX_EVIDENCE_VALIDATOR, INVENTORY_VALIDATOR):
+            self.assertTrue(validator.is_file())
+            result = subprocess.run(
+                [sys.executable, "-B", str(validator)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
