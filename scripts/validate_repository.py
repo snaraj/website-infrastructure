@@ -37,7 +37,6 @@ from validate_release_transition import (
     classify as classify_release_transition,
     cloudflare_phase_contract_errors,
     contains_secret_document,
-    direct_mapping_entries,
     load_admission_suspension,
     sops_recipient_from_config,
     sops_secret_errors,

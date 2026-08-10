@@ -19,8 +19,8 @@ flowchart LR
       PublicTunnel["pi-websites cloudflared"]
       NaranjoService["naranjo-online ClusterIP :8080"]
       LiderseaService["lidersea-com ClusterIP :8080"]
-      NaranjoPods["naranjo.online Go pods\nembedded Svelte UI"]
-      LiderseaPods["lidersea.com Go pods\nembedded Svelte UI"]
+      NaranjoPods["naranjo.online Go pods\nimage from its own repo"]
+      LiderseaPods["lidersea.com Go pods\nimage from its own repo"]
       Delivery["future delivery derivatives\nread-only mount — disabled"]
     end
     Originals["media originals + metadata\noperator-only data filesystem"]
@@ -45,7 +45,8 @@ Both Tunnel connectors initiate outbound connections. The residential address
 is never a DNS origin and ports 22, 80, 443, and 6443 are not WAN-forwarded.
 
 Each frontend is compiled from Svelte into immutable assets and embedded into
-its own Go HTTP binary. Each release has its own image, chart, namespace,
+its own Go HTTP binary — in that site's standalone repository, which publishes
+the signed image this platform deploys by digest. Each release has its own image, chart, namespace,
 ServiceAccount, Service, HelmRelease, and digest-promotion path; sharing the
 Tunnel does not couple releases. The services expose static content and health
 endpoints. The naranjo service also contains a tested, bounded file-streaming

@@ -57,11 +57,10 @@ class MediaContractTests(unittest.TestCase):
             self.assertIn("NO-GO", document)
             self.assertIn("service-specific-terms-application-services", document)
 
-    def test_source_and_oci_artifacts_have_independent_media_bounds(self):
+    def test_source_artifact_keeps_exact_media_bounds(self):
+        # The OCI-image media ceiling moved to the site repositories with
+        # their publishers; the platform Flux artifact bound stays here.
         sourceignore = (REPO_ROOT / ".sourceignore").read_text(encoding="utf-8")
-        verifier = (REPO_ROOT / "scripts/ci/verify-oci-artifact.sh").read_text(
-            encoding="utf-8"
-        )
         for fragment in (
             "/*",
             "!/kubernetes/",
@@ -71,8 +70,6 @@ class MediaContractTests(unittest.TestCase):
         # Site charts arrive through their own GitRepository sources now; the
         # platform artifact must not re-include any embedded website tree.
         self.assertNotIn("websites/", sourceignore)
-        self.assertIn("MAX_APPLICATION_LAYER_BYTES", verifier)
-        self.assertIn("application layer exceeds the reviewed byte ceiling", verifier)
 
 
 if __name__ == "__main__":

@@ -153,3 +153,11 @@ References:
 - <https://github.com/opencontainers/image-spec/blob/main/annotations.md>
 - <https://oras.land/docs/commands/oras_repo_tags/>
 - <https://oras.land/docs/commands/oras_tag/>
+
+## Amendment (2026-08-10)
+
+With the website extraction complete, the `websites/*/VERSION` authority files
+named above moved to the standalone site repositories, whose tag-triggered
+publishers now enforce this ADR's three-way tag/VERSION/chart lock in their
+own CI. The promotion command shape and every immutability rule here remain
+authoritative for this platform's digest-promotion path.

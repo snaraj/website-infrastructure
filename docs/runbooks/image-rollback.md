@@ -57,10 +57,10 @@ safe `transition` and runs `scripts/render-kubernetes.sh --transition`. That
 credential-free path renders the exact authoritative HelmRelease values,
 including the staged digest, then applies schema, exposure, and release-policy
 checks without contacting a registry, cluster, Flux, or the Pi. It is static
-pre-resume proof, not runtime evidence. Before resume, preload the exact staged
-image by digest and run `scripts/release-gate.sh --transition-runtime
-<naranjo-online|lidersea-com> <exact acknowledgement shown by --help>`. That
-wrapper rechecks transition policy and exercises only the selected staged site
-in its uniquely owned loopback Kind cluster. It never reconciles Flux, starts
-the tunnel, or contacts production. Never substitute a production
+pre-resume proof, not runtime evidence. The single-site Kind runtime rehearsal
+retired with the embedded site sources: `scripts/release-gate.sh
+--transition-runtime` now fails closed PENDING its post-cutover successor, so
+until that successor lands, a rollback's runtime confidence comes from the
+rollback digest having already served traffic (choose only previously proven
+digests) plus the site repository's own release evidence. Never substitute a production
 reconciliation or an ad hoc `kubectl` deployment for this evidence.

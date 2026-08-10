@@ -577,12 +577,6 @@ def _direct_mapping_items(document: str, mapping_name: str) -> list[tuple[str, s
     return entries
 
 
-def direct_mapping_entries(document: str, mapping_name: str) -> dict[str, str]:
-    """Return direct scalar entries while callers separately reject duplicates."""
-
-    return dict(_direct_mapping_items(document, mapping_name))
-
-
 def tunnel_secret_errors(text: str, expected_recipient: str) -> list[str]:
     """Require one canonical encrypted public-tunnel Secret identity."""
 

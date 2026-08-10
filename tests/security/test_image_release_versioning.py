@@ -199,25 +199,6 @@ class ImageReleaseVersionTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.main(["changed", "--base", "0" * 40])
 
-    def test_stable_publisher_refuses_immutable_tag_reassignment(self):
-        stable_publisher = REPO_ROOT.joinpath(
-            "scripts", "ci", "publish-stable-oci-tag.sh"
-        ).read_text(encoding="utf-8")
-        self.assertIn("refusing to reassign immutable tag", stable_publisher)
-        self.assertIn(
-            "Error response from registry: failed to resolve digest: %s: not found",
-            stable_publisher,
-        )
-        self.assertIn(
-            'cmp -s -- "${resolve_error}" "${expected_absence}"', stable_publisher
-        )
-        self.assertNotIn("MANIFEST_UNKNOWN", stable_publisher)
-        self.assertNotIn("|not found", stable_publisher)
-        self.assertIn(
-            'oras tag "${IMAGE}@${EXPECTED_DIGEST}" "${RELEASE_TAG}"',
-            stable_publisher,
-        )
-
     def test_adr_documents_bumps_graduation_and_digest_authority(self):
         adr = REPO_ROOT.joinpath(
             "docs/adr/0014-immutable-container-release-versioning.md"

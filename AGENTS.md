@@ -24,15 +24,16 @@ These rules apply to every human and automated contributor.
    into OpenTofu immediately afterward.
 10. Every new public route, API, database, authentication system, persistent
     volume, or cross-namespace flow requires a threat-model update.
-11. Production website code uses Svelte for the frontend, Go for the service,
-    and Helm for workload packaging. Python is limited to dependency-free local
+11. Production website code lives in the standalone site repositories
+    (Svelte frontend, Go service, Helm packaging); this platform consumes
+    only their signed digests. Python is limited to dependency-free local
     policy/redaction tooling and must never enter a production image.
 12. Treat the Git index as public. Real host/service inventory, account or zone
    IDs, emails, IPs, machine IDs, user/workspace paths, plans, state, and local
    evidence remain ignored/local unless an explicitly designed SOPS/age Secret
    flow requires ciphertext in Git.
-13. Keep heavyweight media out of Git, frontend output, Go embeds, OCI images,
-    Flux, ConfigMaps, Secrets, and etcd. Before Pi discovery, reject every
+13. Keep heavyweight media out of Git, OCI images, Flux, ConfigMaps,
+    Secrets, and etcd. Before Pi discovery, reject every
     hostPath/PV/PVC/storage-profile activation; current zero-spend Cloudflare
     terms keep deliberate public large-media delivery disabled independently
     from application-code readiness.
