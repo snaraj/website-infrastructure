@@ -41,6 +41,9 @@ path in place;
 bounded evidence and effective-values files without following or replacing an
 existing path; [`remove_review_transaction.py`](./remove_review_transaction.py)
 removes only an exact failed transaction without traversing a symlink root;
+[`validate_pr_flow.py`](./validate_pr_flow.py) holds the allow/deny
+branch-name and push-refspec rules behind the gh-pr-flow skill — pure
+policy with no Git execution, network, or credential logic;
 [`promote-image.sh`](./promote-image.sh)
 binds the selected human version tag to the signed digest and emits that patch
 plus hash-bound evidence without changing the worktree. The candidate prepares
