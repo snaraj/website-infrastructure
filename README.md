@@ -4,128 +4,136 @@
 [![CodeQL](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml)
 [![Scheduled security](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml)
 
-Per-site Go and frontend coverage percentages are reported in each pull
-request run's job summary (badge links above); everything stays on
-GitHub-native, zero-spend tooling.
+Everything needed to run two real websites from one Raspberry Pi 5 at home —
+upstream Kubernetes bootstrapped with kubeadm, GitOps with Flux, and
+Cloudflare's edge in front — with the paranoia turned all the way up and the
+cloud bill pinned at exactly zero.
 
-GitOps source for a single Raspberry Pi 5 running upstream Kubernetes,
-bootstrapped with kubeadm on containerd, and two independently released
-websites built with Svelte frontends, Go services, and Helm charts. The intended
-public request path is Cloudflare's edge, one outbound-only `pi-websites`
-Tunnel, one private ClusterIP Service per domain, and non-root website pods. No
-router port is opened.
+Imagine the ergonomics of a managed platform, except the hardware is yours,
+every byte of configuration is reviewable in this repository, and nothing —
+literally nothing — is allowed to cost money or leak where the box lives.
+That's this repo.
 
-This repository is intentionally **not deployable yet**. Credential-free local
-artifacts are scaffolded first. Values marked `REPLACE_*` or `UNRESOLVED` are
-fail-closed sentinels, not examples. The first external checkpoint is a
-read-only Pi and Cloudflare discovery followed by explicit review.
+```mermaid
+flowchart LR
+    dev[Reviewed PRs] -->|squash to main| repo[(This repository)]
+    repo -->|Flux pulls anonymously| k8s[Kubernetes on the Pi 5]
+    sites[Signed site images by digest] --> k8s
+    k8s --> tunnel[Outbound-only Cloudflare Tunnel]
+    tunnel --> edge[Cloudflare edge] --> visitors((Visitors))
+    visitors -.->|no path exists| k8s
+```
 
-## Non-negotiable policy
+> [!IMPORTANT]
+> This repository is deliberately **not deployable yet**. Everything ships
+> fail-closed first: values marked `REPLACE_*` or `UNRESOLVED` are sentinels
+> that refuse to work until real, reviewed evidence replaces them. The
+> deployment-state table below tells you exactly how far along things are.
 
-- Cloudflare infrastructure cost must remain exactly $0 across exactly two
-  active Free-plan zones. Registrar renewals for those domains are the only
-  authorized Cloudflare charges; Pro is the next paid boundary and is not
-  authorized.
-- Unknown entitlement or billing behavior is a `NO-GO`; downtime is preferred.
-- No inbound WAN ports, public origin IP, NodePort, LoadBalancer, host port,
-  host network, Ingress controller, or public administrative hostname.
-- Flux reads this public repository anonymously and has no Git write credential.
-- Kubernetes Secret manifests committed to Git are SOPS ciphertext. The age
-  private identity never enters Git, CI, documentation, logs, or chat. CI
-  validates ciphertext structure only; protected offline decryption must
-  authenticate the SOPS MAC and the plaintext credential identity before merge.
-- Images are deployed only by immutable digest after review.
-- Any pre-existing protected host services, VPN/tunnel interfaces, firewall,
-  and policy-routing state are discovered read-only and left unchanged until
-  conflicts are reviewed with a tested recovery path.
-- A privacy-sensitive legacy workload and its retained data are an inactive,
-  operator-only archive under [ADR 0013](docs/adr/0013-protected-legacy-archive.md),
-  never a co-hosted Kubernetes workload. Product classification is not host
-  inventory; exact units, paths, mounts, identities, and evidence remain local.
-- Heavy media never enters Git, frontend output, Go embeds, OCI images, Flux,
-  ConfigMaps, Secrets, or etcd. Its proposed read-only data-volume profile is
-  disabled pending Pi discovery, restore evidence, and a compatible delivery
-  entitlement; current Cloudflare self-serve terms make deliberate large-media
-  delivery a zero-spend `NO-GO`.
+## The rules the machines enforce
 
-See [architecture](docs/architecture/overview.md), [kubeadm decision](docs/adr/0011-kubeadm-on-pi.md),
-[legacy archive decision](docs/adr/0013-protected-legacy-archive.md),
-[security controls](docs/security/security-control-matrix.md), and the
-[Cloudflare zero-spend ADR](docs/adr/0006-cloudflare-zero-spend.md). Credential
-work on Windows follows the
-[protected workstation ceremony](docs/runbooks/windows-credential-ceremony.md),
-and every authenticated OpenTofu operation follows the
-[Cloudflare state-custody runbook](docs/runbooks/cloudflare-state-custody.md).
-Secret-bearing age/SOPS and kubectl work follows the separate
-[protected Linux Flux ceremony](bootstrap/flux/README.md); a Windows-local
-attestation hash is not portable authorization for it.
+These aren't aspirations — validators, CI, and admission policies reject
+violations automatically:
 
-## Layout
+- **$0, forever.** Cloudflare stays on exactly two Free-plan zones; registrar
+  renewals are the only authorized charges. Unknown billing behavior means
+  NO-GO; we prefer downtime to surprise invoices.
+- **No way in.** No inbound WAN ports, no public origin IP, no NodePort,
+  LoadBalancer, host network, Ingress controller, or public admin hostname.
+  The only public path is an outbound-only tunnel.
+- **Nothing secret in the open.** Flux reads this public repo anonymously and
+  holds no write credential. Committed Secrets are SOPS ciphertext; the age
+  private identity never touches Git, CI, logs, or chat. Commit metadata
+  itself is scanned — a real email address can't even ride along in a
+  trailer.
+- **Only what was reviewed runs.** Images deploy by immutable digest after
+  keyless signature admission; version tags never move.
+- **Heavy media stays out of the control plane.** Video, audio, and large
+  images never enter Git, embeds, OCI images, ConfigMaps, or etcd — they get
+  their own storage story on the platform.
+- **Pre-existing host services are discovered read-only** and left untouched
+  until conflicts are reviewed with a tested recovery path. A
+  privacy-sensitive legacy archive stays an inactive, operator-only concern
+  ([ADR 0013](docs/adr/0013-protected-legacy-archive.md)) — never a
+  co-hosted workload.
+
+## What lives where
 
 ```text
 bootstrap/             user-run Pi, Flux, and recovery procedures
-docs/                  architecture, decisions, security, and runbooks
-infrastructure/        credential-free OpenTofu configuration and policy
-kubernetes/            desired state for the current single Kubernetes environment
+docs/                  architecture, ADRs, security model, audits, runbooks
+infrastructure/        credential-free OpenTofu for Cloudflare
+kubernetes/            desired state for the single environment
 policies/              Conftest and Kyverno controls
-scripts/               discovery, validation, promotion, and verification
-tests/                 allow/deny fixtures and repository-level tests
-websites/              website source and container build context
+scripts/               the "prove it first" validator suite
+skills/                reusable agent/operator workflows
+tests/                 allow/deny fixtures and 700+ repository tests
+websites/              the two sites (moving to their own repos — see below)
 ```
 
-Directories named `apps`, `clusters`, or `kubernetes/homelab` are forbidden.
-Environment nesting is deferred until a second real Kubernetes environment
-exists.
+The two sites are graduating into standalone repositories
+([naranjo.online](https://github.com/snaraj/naranjo.online),
+[lidersea.com](https://github.com/snaraj/lidersea.com)) with their own CI and
+signed releases; this repository is becoming application-agnostic — it will
+consume their images by digest and stop caring what framework they use.
+Per-site Go and frontend coverage is reported in each PR run's job summary.
 
-## Tailored here, reusable as a fork
+## Working locally
 
-This repository is intentionally opinionated for its operator's public identities:
-the two domains, repository owner, release names, and zero-spend choices are
-visible and tested as one coherent system. It does not publish local host paths,
-service inventory, account/zone IDs, addresses, emails, machine IDs, plans, or
-credentials. Someone else can clone it as a reference or fork it, but should
-replace each complete identity tuple—domain, source/module/package, image,
-chart/namespace/Flux release, workflow/signature, DNS variable, Tunnel rule, and
-tests—rather than search-and-replacing one label. All discovery values stay
-sentinel/local until that fork's own hardware, account, entitlement, backup, and
-recovery evidence passes. This is a reusable fail-closed platform pattern, not a
-one-command deployment template.
+```sh
+make check-fast        # validators + the full test suite (Linux and macOS)
+make check             # everything, including render/policy/container checks
+make pre-push-security # rehearse the exact publication gate before pushing
+```
 
-## Local validation
+`make check-fast` needs only Python and Git. Tool pins live in
+`versions.env`; macOS notes live in
+[the local development runbook](docs/runbooks/local-macos-development.md).
+The optional [Kind harness](docs/runbooks/local-kind.md) exercises rendered
+manifests on a disposable local cluster — it is never mistaken for the Pi.
 
-Run `make check` on a workstation with the pinned tools from `versions.env`.
-`make check-fast` performs credential-free static checks and does not contact
-the Pi, GitHub, Cloudflare, or a registry. Validation never runs `tofu plan` or
-`tofu apply` automatically. Each pull request also builds both frontends,
-rejects remote or unhashed generated resources, source maps, and explicit
-artifact-size budget overruns, then serves the exact embedded bundles through
-the production Go handlers to verify cache identities and browser-security
-headers. These deterministic checks are not a claim about Core Web Vitals;
-live browser timing remains pending until a real edge URL exists and browser
-use is explicitly authorized.
+## Start here, depending on who you are
 
-The optional [disposable Kind harness](docs/runbooks/local-kind.md) checks
-rendered local artifacts against a short-lived workstation cluster. It is not
-the production runtime or a substitute for kubeadm/Pi acceptance.
+- **Reviewing security?** [Practical security model](docs/security/practical-security-model.md),
+  then the [threat model](docs/security/threat-model.md) and
+  [control matrix](docs/security/security-control-matrix.md).
+- **Understanding the design?** [Architecture overview](docs/architecture/overview.md)
+  and the ADRs — start with [kubeadm-on-Pi](docs/adr/0011-kubeadm-on-pi.md)
+  and [zero-spend Cloudflare](docs/adr/0006-cloudflare-zero-spend.md).
+- **Operating it?** The [runbooks](docs/runbooks/), each with explicit stop
+  points; no script here is permission to touch a live system.
+- **An AI agent?** The [skills](skills/) directory, especially
+  [gh-pr-flow](skills/gh-pr-flow/SKILL.md); audits under
+  [docs/audits](docs/audits/) map the current state honestly.
+
+## Forking this
+
+It's intentionally opinionated for its owner's two domains and identities,
+but the pattern — fail-closed sentinels, digest-only deploys, zero-spend
+guards, validator-enforced privacy — is reusable. Replace each complete
+identity tuple (domain, module, package, image, chart, workflow, signature,
+DNS, tunnel rule, tests) rather than search-and-replacing one label, and
+keep every discovery value sentinel until your own hardware and account
+evidence passes. It's a reference platform, not a one-command installer.
 
 ## Deployment state
 
 | Gate | State |
 | --- | --- |
-| Repository and policies | Credential-free scaffold and negative-policy tests implemented; live evidence remains absent |
-| Pi discovery | Read-only discovery completed; current private evidence remains outside Git |
-| Independent recovery + simultaneous two-session gate | Not proven; all host/network/cluster mutation blocked |
-| Protected legacy archive | Local root-private archive exists; independent encrypted off-device restore proof remains absent |
-| Media storage/profile | Disabled; SSD/filesystem/backup evidence not collected |
-| Public heavy-media delivery | NO-GO under current zero-spend Cloudflare boundary |
+| Repository and policies | Credential-free scaffold + negative-policy tests implemented; live evidence pending |
+| Pi discovery | Read-only discovery completed; private evidence stays off Git |
+| Independent recovery drill | Not proven; host/network/cluster mutation blocked |
+| Protected legacy archive | Local archive exists; off-device restore proof pending |
+| Media storage profile | Disabled pending storage evidence |
+| Public heavy-media delivery | NO-GO under the current zero-spend Cloudflare boundary |
 | Cloudflare subscription audit | Not run |
-| kubeadm/containerd installation | Not run |
-| CNI and kube-proxy-mode decision | Blocked on Pi network discovery |
-| kubeadm cluster initialization | Not run |
+| kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
+| CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
+| Cluster initialization | Not run |
 | Flux bootstrap | Not run |
 | SOPS key ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |
 
-No script in this repository should be interpreted as authorization to mutate
-an external system. Each mutation runbook has an explicit stop point.
+No script in this repository authorizes mutating an external system; every
+mutation runbook has an explicit stop point, and the owner holds every key.
