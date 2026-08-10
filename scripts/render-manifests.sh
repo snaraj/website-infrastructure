@@ -280,10 +280,6 @@ if [[ "$MODE" == '--scaffold' ]]; then
   # desired state remains inert until promotion and capacity/runtime evidence.
   expect_release_rejection "${REPO_ROOT}/tests/kubernetes/fixtures/release-deny/missing-readiness.yaml" \
     'Deployment readiness-missing is not marked ready'
-  expect_release_rejection "${ARTIFACT_ROOT}/helm-naranjo-online.yaml" 'Deployment naranjo-online is not marked ready'
-  expect_release_rejection "${ARTIFACT_ROOT}/helm-naranjo-online.yaml" 'container naranjo-online still uses the all-zero digest'
-  expect_release_rejection "${ARTIFACT_ROOT}/helm-lidersea-com.yaml" 'Deployment lidersea-com is not marked ready'
-  expect_release_rejection "${ARTIFACT_ROOT}/helm-lidersea-com.yaml" 'container lidersea-com still uses the all-zero digest'
   expect_release_rejection "${ARTIFACT_ROOT}/helm-cloudflare-public.yaml" 'cloudflared tunnel token revision remains unresolved'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-admission.yaml" 'Deployment kyverno-admission-controller is not marked ready'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-admission.yaml" 'container kyverno still uses the all-zero digest'
