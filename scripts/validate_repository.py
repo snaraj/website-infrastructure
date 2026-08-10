@@ -2,10 +2,12 @@
 """Dependency-free, credential-free repository policy checks."""
 
 import argparse
-import codecs
+import fnmatch
 import hashlib
 import ipaddress
+import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -28,13 +30,16 @@ from validate_release_state import (
     load_simple_mapping_file,
 )
 from validate_release_transition import (
+    CLOUDFLARE_LOCK_FILES,
+    CLOUDFLARE_TERRAFORM_REVIEW_FILES,
     CLOUDFLARE_TERRAFORM_SOURCE_FILES,
     STATE as TRANSITION_RELEASE_STATE,
     classify as classify_release_transition,
-    cloudflare_default_off_errors,
+    cloudflare_phase_contract_errors,
     contains_secret_document,
     direct_mapping_entries,
     load_admission_suspension,
+    sops_recipient_from_config,
     sops_secret_errors,
     tunnel_secret_errors,
 )
@@ -56,14 +61,44 @@ TEXT_SUFFIXES = {
     ".svelte", ".tf", ".timer", ".toml", ".tpl", ".ts", ".txt",
     ".yaml", ".yml",
 }
-SKIP_PARTS = {
-    ".git", ".artifacts", ".cache", ".terraform", "coverage", "dist",
-    "local-evidence", "node_modules",
+FORBIDDEN_LOCAL_ONLY_COMPONENTS = {
+    ".artifacts", ".cache", ".idea", ".ssh", ".terraform", ".vscode",
+    "__pycache__", "coverage", "local-evidence", "node_modules", "results",
 }
-MEDIA_SCAN_SKIP_PARTS = {
-    ".git", ".artifacts", ".cache", ".terraform", "coverage",
-    "local-evidence", "node_modules",
+FORBIDDEN_LOCAL_ONLY_FILE_PATTERNS = {
+    ".ds_store", ".env", ".env.*", ".terraformrc", "*.7z", "*.age", "*.agekey",
+    "*.asc", "*.auto.tfvars", "*.auto.tfvars.json", "*.backend.hcl", "*.bak",
+    "*.bin", "*.blob", "*.bz2", "*.dec.*", "*.enc", "*.encrypted", "*.gpg", "*.key",
+    "*.kubeconfig", "*.p12", "*.pem", "*.pfx", "*.pgp", "*.plaintext.*", "*.rar",
+    "*.pyc", "*.pyd", "*.pyo", "*.sarif", "*.sbom.json", "*.sops.env",
+    "*.sops.ini", "*.sops.json", "*.swo", "*.swp", "*.tar", "*.tar.*",
+    "*.tfbackend", "*.tfplan", "*.tfplan.json", "*.tgz", "*.tmp", "*.token",
+    "*.xz", "*.zip", "*.zst", "*~", "cloudflared-token*", "crash.*.log",
+    "crash.log", "id_ed25519*", "id_rsa*", "keys.txt", "known_hosts*",
+    "kubeconfig*", "api-encryption-config.yaml", "encryption-config.yaml.local",
+    "powershell_transcript.*.txt", "*.transcript.txt", "thumbs.db", "terraform.rc",
+    "terraform.tfvars", "terraform.tfvars.json",
 }
+FORBIDDEN_LOCAL_ONLY_EXACT_NAMES = {
+    "bootstrap/pi/cni-manifest.local.yaml",
+    "bootstrap/pi/decisions.env.local",
+    "bootstrap/pi/encryption-config.yaml.local",
+    "bootstrap/pi/images.lock.local",
+    "bootstrap/pi/kubeadm-config.yaml.local",
+    "bootstrap/pi/protected-legacy-runtime-evidence.local",
+    "bootstrap/pi/protected-services.env.local",
+}
+# Generated frontend output is local-only too. The two empty placeholders are
+# the sole exception and keep the intended directory shape in a fresh clone.
+ALLOWED_DIST_PATHS = {
+    "websites/lidersea.com/internal/web/dist/.gitkeep",
+    "websites/naranjo.online/internal/web/dist/.gitkeep",
+}
+ALLOWED_DIST_DIRECTORIES = {
+    path.rsplit("/", 1)[0] for path in ALLOWED_DIST_PATHS
+}
+SKIP_PARTS = {".git", "dist", *FORBIDDEN_LOCAL_ONLY_COMPONENTS}
+MEDIA_SCAN_SKIP_PARTS = {".git", "dist", *FORBIDDEN_LOCAL_ONLY_COMPONENTS}
 MEDIA_SUFFIXES = {
     ".aac", ".avif", ".avi", ".bmp", ".flac", ".gif", ".heic", ".heif",
     ".ico", ".jpeg", ".jpg", ".m4a", ".mkv", ".mov", ".mp3", ".mp4",
@@ -88,12 +123,23 @@ MEDIA_MAGIC_PREFIXES = (
     b"fLaC", b"ID3", b"\x1aE\xdf\xa3", b"\x00\x01\x00\x00", b"wOFF",
     b"wOF2", b"OTTO",
 )
+OPAQUE_ARTIFACT_MAGIC_PREFIXES = (
+    b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"\x1f\x8b", b"7z\xbc\xaf\x27\x1c",
+    b"Rar!\x1a\x07", b"\xfd7zXZ\x00", b"\x28\xb5\x2f\xfd", b"BZh", b"Salted__",
+    b"-----BEGIN AGE ENCRYPTED FILE-----", b"age-encryption.org/v1",
+    b"-----BEGIN PGP MESSAGE-----", b"U2FsdGVkX1",
+)
 ALLOWED_CLOUDFLARE_RESOURCES = {
     "cloudflare_dns_record",
     "cloudflare_zero_trust_gateway_policy",
     "cloudflare_zero_trust_tunnel_cloudflared",
     "cloudflare_zero_trust_tunnel_cloudflared_config",
     "cloudflare_zero_trust_tunnel_cloudflared_route",
+}
+APPROVED_SOPS_SECRET_PATHS = {
+    "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml": (
+        "pi-websites-tunnel-token"
+    ),
 }
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
@@ -128,6 +174,52 @@ SYNTHETIC_32_HEX = {
     "3" * 32,
     "0123456789abcdef" * 2,
 }
+SECRET_SIGNATURES = {
+    "age private identity": re.compile(
+        r"AGE-SECRET-KEY-(?:PQ-)?1[A-Z0-9]+"
+    ),
+    "private key block": re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    "GitHub classic token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    "GitHub fine-grained token": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    "prefixed Cloudflare API credential": re.compile(
+        r"\b(?:cfk|cfut|cfat)_[A-Za-z0-9]{40}[0-9A-Fa-f]{8}\b"
+    ),
+    "literal Cloudflare API token": re.compile(
+        r"(?i)\bcloudflare_api_token\b[\"']?\s*[:=]\s*"
+        r"[\"']?[A-Za-z0-9_-]{20,}[\"']?"
+    ),
+    "Cloudflare bearer credential": re.compile(
+        r"(?i)\bauthorization\s*:\s*bearer\s+[A-Za-z0-9._~-]{20,}"
+    ),
+    "Cloudflare Tunnel runtime token": re.compile(
+        r"(?i)\b(?:cloudflared[_ -]?)?tunnel[_ -]?token\b[\"']?\s*[:=]\s*"
+        r"[\"']?(?:eyJ[A-Za-z0-9+/_-]{20,}={0,2}|"
+        r"[A-Za-z0-9+/_-]{80,}={0,2})[\"']?"
+    ),
+    "bare Cloudflare Tunnel runtime token": re.compile(
+        r"(?<![A-Za-z0-9+/_-])eyJ[A-Za-z0-9+/_-]{77,}={0,2}"
+        r"(?![A-Za-z0-9+/_=-])"
+    ),
+    "local Cloudflare token receipt": re.compile(
+        r"(?i)[\"']schema[\"']\s*:\s*[\"']"
+        r"cloudflare-phase-token-receipt-v(?:1|2)[\"']"
+    ),
+    "Gitleaks inline suppression": re.compile(r"(?i)gitleaks\s*:\s*allow"),
+}
+ENCRYPTION_CONFIGURATION_SENTINEL = "REPLACE_BASE64_32_BYTE_KEY"
+ENCRYPTION_CONFIGURATION_KIND = re.compile(
+    r'''(?m)^[ \t]*(?:"kind"|'kind'|kind)[ \t]*:[ \t]*'''
+    r'''(?:"EncryptionConfiguration"|'EncryptionConfiguration'|'''
+    r'''EncryptionConfiguration)[ \t]*(?:#.*)?$'''
+)
+SECRETBOX_PROVIDER = re.compile(
+    r'''(?m)^[ \t]*(?:-[ \t]+)?(?:"secretbox"|'secretbox'|secretbox)[ \t]*:'''
+)
+SECRETBOX_SECRET_SCALAR = re.compile(
+    r'''(?m)^[ \t]*(?:"secret"|'secret'|secret)[ \t]*:[ \t]*'''
+    r'''(?P<value>[^#\r\n]*?)[ \t]*(?:#.*)?$'''
+)
 # These literals are network-policy boundaries, cluster test networks, or
 # process bind addresses—not discovered host identities.
 PUBLIC_NETWORK_IPV4 = {
@@ -150,33 +242,309 @@ SYNTHETIC_TEST_IPV4_OCTETS = {
 }
 
 
-def files(root):
-    """Yield public UTF-8 text without following links or trusting suffixes."""
+def _git_visible_paths(root):
+    """Return tracked plus unignored paths without enumerating ignored custody files."""
 
-    for path in root.rglob("*"):
+    root = root.resolve()
+    if not (root / ".git").exists():
+        return ({
+            relative(path, root)
+            for path in root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }, [])
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
+                "--exclude-standard",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return set(), ["Git-visible repository inventory is unavailable"]
+    if result.returncode != 0:
+        return set(), ["Git-visible repository inventory is unavailable"]
+    try:
+        decoded = result.stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return set(), ["Git-visible repository inventory is not UTF-8"]
+    entries = decoded.split("\0")
+    if entries[-1:] == [""]:
+        entries.pop()
+    for entry in entries:
+        parts = Path(entry).parts
         if (
-            path.is_symlink()
-            or not path.is_file()
-            or any(part in SKIP_PARTS for part in path.parts)
-            # The media gate rejects this public file separately; do not load
-            # an arbitrarily large candidate into memory during regex checks.
-            or path.stat().st_size > MAX_REPOSITORY_FILE_BYTES
+            not entry
+            or Path(entry).is_absolute()
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
         ):
+            return set(), ["Git-visible repository inventory escaped its root"]
+    return set(entries), []
+
+
+def _public_candidate_paths(root, include_directories=False):
+    """Return only content that could enter Git, never ignored owner-only files."""
+
+    root = root.resolve()
+    visible, errors = _git_visible_paths(root)
+    if errors:
+        raise OSError(errors[0])
+    paths = [root.joinpath(*Path(entry).parts) for entry in sorted(visible)]
+    if include_directories and not (root / ".git").exists():
+        paths.extend(
+            path for path in root.rglob("*")
+            if path.is_dir() and not path.is_symlink()
+        )
+    return paths
+
+
+def _git_index_text_documents(root):
+    """Return exact stage-0 blobs without reading working-tree substitutes.
+
+    Invalid UTF-8 and NUL bytes are preserved with surrogate escapes so an
+    attacker cannot make an otherwise ASCII credential invisible by appending
+    one binary byte. This repository does not permit symbolic index entries.
+    """
+
+    root = root.resolve()
+    if not (root / ".git").exists():
+        return [], []
+    try:
+        inventory = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--stage"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return [], ["exact Git index inventory is unavailable"]
+    if inventory.returncode != 0:
+        return [], ["exact Git index inventory is unavailable"]
+
+    entries = []
+    errors = []
+    for raw_entry in inventory.stdout.split(b"\0"):
+        if not raw_entry:
             continue
-        decoder = codecs.getincrementaldecoder("utf-8")("strict")
         try:
-            with path.open("rb") as source:
-                for chunk in iter(lambda: source.read(64 * 1024), b""):
-                    if b"\x00" in chunk:
-                        break
-                    decoder.decode(chunk)
-                else:
-                    decoder.decode(b"", final=True)
-                    yield path
-        except (OSError, UnicodeDecodeError):
-            # Binary files remain the media gate's responsibility; privacy and
-            # secret checks never follow or print their contents.
+            metadata, raw_path = raw_entry.split(b"\t", 1)
+            mode, object_id, stage = metadata.decode("ascii").split(" ")
+            relative_path = raw_path.decode("utf-8", "strict")
+        except (UnicodeDecodeError, ValueError):
+            return [], ["exact Git index inventory is malformed"]
+        parts = Path(relative_path).parts
+        if (
+            Path(relative_path).is_absolute()
+            or not parts
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            return [], ["exact Git index inventory escaped its root"]
+        if stage != "0":
+            errors.append("unmerged Git index entry: " + relative_path)
             continue
+        if mode == "120000":
+            errors.append("symbolic Git index entry is forbidden: " + relative_path)
+            continue
+        if mode not in {"100644", "100755"}:
+            errors.append("unsupported Git index mode: " + relative_path)
+            continue
+        if not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            return [], ["exact Git index object identity is malformed"]
+        entries.append((relative_path, object_id))
+
+    if not entries:
+        return [], errors
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(root), "cat-file", "--batch"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return [], errors + ["exact Git index object reader is unavailable"]
+    documents = []
+    aggregate_size = 0
+    aggregate_rejected = False
+    assert process.stdin is not None
+    assert process.stdout is not None
+    try:
+        for relative_path, object_id in entries:
+            process.stdin.write(object_id.encode("ascii") + b"\n")
+            process.stdin.flush()
+            header = process.stdout.readline().decode("ascii", "strict").strip()
+            header_parts = header.split(" ")
+            if (
+                len(header_parts) != 3
+                or header_parts[0] != object_id
+                or header_parts[1] != "blob"
+                or not header_parts[2].isdigit()
+            ):
+                raise ValueError("unexpected batch header")
+            size = int(header_parts[2])
+            aggregate_size += size
+            too_large = size > MAX_REPOSITORY_FILE_BYTES
+            aggregate_overflow = aggregate_size > MAX_PUBLIC_REPOSITORY_BYTES
+            if too_large or aggregate_overflow:
+                remaining = size
+                while remaining:
+                    chunk = process.stdout.read(min(remaining, 64 * 1024))
+                    if not chunk:
+                        raise ValueError("truncated oversized blob")
+                    remaining -= len(chunk)
+                if process.stdout.read(1) != b"\n":
+                    raise ValueError("malformed batch delimiter")
+                if too_large:
+                    errors.append("oversized Git index blob: " + relative_path)
+                if aggregate_overflow and not aggregate_rejected:
+                    errors.append("Git index exceeds the aggregate byte ceiling")
+                    aggregate_rejected = True
+                continue
+            data = process.stdout.read(size)
+            if len(data) != size or process.stdout.read(1) != b"\n":
+                raise ValueError("truncated index blob")
+            text = data.decode("utf-8", "surrogateescape")
+            documents.append((relative_path, text))
+        process.stdin.close()
+        if process.wait(timeout=10) != 0:
+            raise ValueError("batch reader failed")
+        process.stdout.close()
+    except (OSError, UnicodeDecodeError, ValueError, subprocess.TimeoutExpired):
+        if not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        return [], errors + ["exact Git index object scan failed"]
+    return documents, errors
+
+
+class UnsafePublicPathError(OSError):
+    """A Git-visible worktree path crossed a link or changed while read."""
+
+
+def _is_reparse_point(metadata):
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def _path_snapshot(path, root):
+    """Describe each component without following symbolic/reparse links."""
+
+    root = root.resolve()
+    parts = path.relative_to(root).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise UnsafePublicPathError("path escaped repository root")
+    snapshot = []
+    current = root
+    for index, part in enumerate(parts):
+        current = current / part
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or _is_reparse_point(metadata):
+            raise UnsafePublicPathError("link or reparse point is forbidden")
+        final = index == len(parts) - 1
+        if final:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UnsafePublicPathError("public path is not a regular file")
+            if metadata.st_nlink != 1:
+                raise UnsafePublicPathError("hardlinked public file is forbidden")
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise UnsafePublicPathError("public path ancestor is not a directory")
+        snapshot.append((
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_size if final else None,
+            metadata.st_mtime_ns if final else None,
+        ))
+    return tuple(snapshot)
+
+
+def _read_public_regular_file(path, root, byte_limit=None):
+    """Read one stable single-link file using no-follow where available."""
+
+    before = _path_snapshot(path, root)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened_before = os.fstat(descriptor)
+        expected = before[-1]
+        opened_identity = (
+            opened_before.st_dev,
+            opened_before.st_ino,
+            opened_before.st_mode,
+            opened_before.st_nlink,
+            opened_before.st_size,
+            opened_before.st_mtime_ns,
+        )
+        if opened_identity != expected or not stat.S_ISREG(opened_before.st_mode):
+            raise UnsafePublicPathError("public file changed before open")
+        if opened_before.st_nlink != 1:
+            raise UnsafePublicPathError("hardlinked public file is forbidden")
+        chunks = []
+        remaining = (
+            opened_before.st_size
+            if byte_limit is None
+            else min(opened_before.st_size, byte_limit)
+        )
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise UnsafePublicPathError("public file was truncated while read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if byte_limit is None and os.read(descriptor, 1):
+            raise UnsafePublicPathError("public file grew while read")
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = _path_snapshot(path, root)
+    final_identity = (
+        opened_after.st_dev,
+        opened_after.st_ino,
+        opened_after.st_mode,
+        opened_after.st_nlink,
+        opened_after.st_size,
+        opened_after.st_mtime_ns,
+    )
+    if before != after or final_identity != before[-1]:
+        raise UnsafePublicPathError("public path changed while read")
+    return b"".join(chunks), opened_before
+
+
+def files(root):
+    """Yield stable Git-visible text snapshots without following links."""
+
+    for path in _public_candidate_paths(root):
+        relative_parts = path.relative_to(root).parts
+        if any(part in SKIP_PARTS for part in relative_parts):
+            continue
+        try:
+            if _path_snapshot(path, root)[-1][4] > MAX_REPOSITORY_FILE_BYTES:
+                yield path, None
+                continue
+            data, _ = _read_public_regular_file(path, root)
+        except FileNotFoundError:
+            # A tracked deletion has no worktree bytes. The exact stage-0
+            # scanner below remains authoritative for what Git would publish.
+            continue
+        except OSError:
+            yield path, None
+            continue
+        # Preserve every byte for ASCII-oriented deny patterns; NUL or invalid
+        # UTF-8 must not turn a public candidate into a scanner bypass.
+        yield path, data.decode("utf-8", "surrogateescape").replace("\r\n", "\n")
 
 
 def relative(path, root):
@@ -184,7 +552,15 @@ def relative(path, root):
 
 
 def read(path):
-    return path.read_text(encoding="utf-8")
+    """Read one stable public file through an absolute no-link component chain."""
+
+    absolute = Path(path).absolute()
+    anchor = Path(absolute.anchor)
+    metadata = _path_snapshot(absolute, anchor)[-1]
+    if metadata[4] > MAX_REPOSITORY_FILE_BYTES:
+        raise UnsafePublicPathError("public policy file exceeds scan ceiling")
+    data, _ = _read_public_regular_file(absolute, anchor)
+    return data.decode("utf-8", "strict").replace("\r\n", "\n")
 
 
 def has_media_magic(prefix):
@@ -202,6 +578,30 @@ def has_media_magic(prefix):
 def is_fixture(path):
     parts = set(path.parts)
     return "fixtures" in parts or "examples" in parts
+
+
+def contains_plaintext_encryption_configuration(text):
+    """Detect a concrete API-server secretbox scalar independent of its path."""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    documents = re.split(r"(?m)^[ \t]*---[ \t]*(?:#.*)?$", text)
+    for document in documents:
+        if ENCRYPTION_CONFIGURATION_KIND.search(document) is None:
+            continue
+        provider = SECRETBOX_PROVIDER.search(document)
+        if provider is None:
+            continue
+        for match in SECRETBOX_SECRET_SCALAR.finditer(document, provider.end()):
+            value = match.group("value").strip()
+            if (
+                len(value) >= 2
+                and value[0] in {"'", '"'}
+                and value[-1] == value[0]
+            ):
+                value = value[1:-1].strip()
+            if value and value != ENCRYPTION_CONFIGURATION_SENTINEL:
+                return True
+    return False
 
 
 def is_test_path(path, root):
@@ -269,11 +669,40 @@ def flux_access_contract_errors(text):
 
 def check_layout(root):
     errors = []
-    for path in root.rglob("*"):
-        if any(part in SKIP_PARTS for part in path.parts):
-            continue
+    for path in _public_candidate_paths(root, include_directories=True):
         rel_parts = path.relative_to(root).parts
         lowered = tuple(part.lower() for part in rel_parts)
+        rel = "/".join(lowered)
+        forbidden_local_only = any(
+            part in FORBIDDEN_LOCAL_ONLY_COMPONENTS for part in lowered
+        )
+        name = lowered[-1]
+        if name != ".env.example" and any(
+            fnmatch.fnmatchcase(name, pattern)
+            for pattern in FORBIDDEN_LOCAL_ONLY_FILE_PATTERNS
+        ):
+            forbidden_local_only = True
+        if (
+            rel in FORBIDDEN_LOCAL_ONLY_EXACT_NAMES
+            or ("cloudflare" in name and "receipt" in name and name.endswith(".json"))
+            or name.endswith(".tfstate")
+            or ".tfstate." in name
+            or name.endswith("_override.tf")
+            or name.endswith("_override.tf.json")
+            or name in {"override.tf", "override.tf.json"}
+        ):
+            forbidden_local_only = True
+        if "dist" in lowered:
+            allowed_dist = rel in ALLOWED_DIST_PATHS or (
+                path.is_dir() and rel in ALLOWED_DIST_DIRECTORIES
+            )
+            forbidden_local_only = forbidden_local_only or not allowed_dist
+        if forbidden_local_only:
+            errors.append(
+                "local-only directory content is Git-visible: " + relative(path, root)
+            )
+        if any(part in SKIP_PARTS for part in lowered):
+            continue
         if "apps" in lowered:
             errors.append("forbidden directory component 'apps': " + relative(path, root))
         if "clusters" in lowered:
@@ -294,30 +723,66 @@ def check_layout(root):
 
 def check_secrets(root):
     errors = []
-    signatures = {
-        "age private identity": re.compile(r"AGE-SECRET-KEY-1[A-Z0-9]+"),
-        "private key block": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-        "GitHub classic token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-        "GitHub fine-grained token": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-        "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-        "literal Cloudflare API token": re.compile(
-            r"(?i)cloudflare_api_token\s*=\s*[\"'][A-Za-z0-9_-]{20,}[\"']"
-        ),
-    }
-    for path in files(root):
-        text = read(path)
-        for label, pattern in signatures.items():
-            if pattern.search(text):
-                errors.append("{} found in {}".format(label, relative(path, root)))
+    def inspect(text, path, rel):
+        for label, pattern in SECRET_SIGNATURES.items():
+            if pattern.search(text) or pattern.search(rel):
+                problem = "{} found in {}".format(label, rel)
+                if problem not in errors:
+                    errors.append(problem)
 
-        rel = relative(path, root)
         if rel.startswith("kubernetes/") and path.suffix in {".yaml", ".yml"}:
-            if contains_secret_document(text):
-                if not re.search(r"\.sops\.ya?ml$", path.name) and not is_fixture(path):
-                    errors.append("unencrypted Kubernetes Secret manifest: " + rel)
-                elif re.search(r"\.sops\.ya?ml$", path.name):
-                    for problem in sops_secret_errors(text):
-                        errors.append("invalid SOPS Secret {}: {}".format(rel, problem))
+            if not re.search(r"\.sops\.ya?ml$", path.name):
+                if contains_secret_document(text) and not is_fixture(path):
+                    problem = "unencrypted Kubernetes Secret manifest: " + rel
+                    if problem not in errors:
+                        errors.append(problem)
+        if contains_plaintext_encryption_configuration(text):
+            problem = "plaintext Kubernetes API encryption configuration: " + rel
+            if problem not in errors:
+                errors.append(problem)
+
+    def inspect_sops_snapshot(documents):
+        sops_paths = {
+            rel for rel in documents
+            if rel != ".sops.yaml" and re.search(r"\.sops\.ya?ml$", rel)
+        }
+        for rel in sorted(sops_paths - set(APPROVED_SOPS_SECRET_PATHS)):
+            errors.append("unapproved SOPS Secret path: " + rel)
+        approved_present = sorted(sops_paths & set(APPROVED_SOPS_SECRET_PATHS))
+        if not approved_present:
+            return
+        config = documents.get(".sops.yaml")
+        if config is None:
+            errors.append("SOPS configuration is unavailable for approved ciphertext")
+            return
+        try:
+            recipient = sops_recipient_from_config(config)
+        except TRANSITION_RELEASE_STATE.CanonicalYamlError:
+            errors.append("SOPS configuration is unsafe for approved ciphertext")
+            return
+        if recipient is None:
+            errors.append("approved SOPS ciphertext requires a configured recipient")
+            return
+        for rel in approved_present:
+            for problem in tunnel_secret_errors(documents[rel], recipient):
+                detail = "invalid approved SOPS Secret {}: {}".format(rel, problem)
+                if detail not in errors:
+                    errors.append(detail)
+
+    worktree_documents = {}
+    for path, text in files(root):
+        rel = relative(path, root)
+        if text is None:
+            errors.append("unsafe or unstable public repository path: " + rel)
+            continue
+        worktree_documents[rel] = text
+        inspect(text, path, rel)
+    inspect_sops_snapshot(worktree_documents)
+    index_documents, index_errors = _git_index_text_documents(root)
+    errors.extend(index_errors)
+    for rel, text in index_documents:
+        inspect(text, root.joinpath(*Path(rel).parts), rel)
+    inspect_sops_snapshot(dict(index_documents))
     return errors
 
 
@@ -327,26 +792,48 @@ def check_privacy(root):
     errors = []
     local_profile = re.compile(r"(?i)[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+")
     workspace_path = re.compile(r"(?i)[A-Z]:[\\/]+dev(?:[\\/]|\b)")
-    for path in files(root):
-        text = read(path)
-        rel = relative(path, root)
-        if local_profile.search(text) or workspace_path.search(text):
-            errors.append("local workstation path found in " + rel)
-        if any(not allowed_ipv4(value, path, root) for value in IPV4_LITERAL.findall(text)):
-            errors.append("host IPv4 address outside the public allowlist found in " + rel)
-        if forbidden_ipv6_values(text):
-            errors.append("host IPv6 address outside the public allowlist found in " + rel)
+    def inspect(text, path, rel):
+        inspected = text + "\n" + rel
+        if local_profile.search(inspected) or workspace_path.search(inspected):
+            problem = "local workstation path found in " + rel
+            if problem not in errors:
+                errors.append(problem)
+        if any(not allowed_ipv4(value, path, root) for value in IPV4_LITERAL.findall(inspected)):
+            problem = "host IPv4 address outside the public allowlist found in " + rel
+            if problem not in errors:
+                errors.append(problem)
+        if forbidden_ipv6_values(inspected):
+            problem = "host IPv6 address outside the public allowlist found in " + rel
+            if problem not in errors:
+                errors.append(problem)
         if any(
             value != "00000000-0000-0000-0000-000000000000"
-            for value in UUID_IDENTIFIER.findall(text)
+            for value in UUID_IDENTIFIER.findall(inspected)
         ):
-            errors.append("machine or tunnel UUID found in " + rel)
-        for address in EMAIL_ADDRESS.findall(text):
+            problem = "machine or tunnel UUID found in " + rel
+            if problem not in errors:
+                errors.append(problem)
+        for address in EMAIL_ADDRESS.findall(inspected):
             if not address.lower().endswith(".invalid"):
-                errors.append("non-synthetic email address found in " + rel)
-        for identifier in OPAQUE_32_HEX.findall(text):
+                problem = "non-synthetic email address found in " + rel
+                if problem not in errors:
+                    errors.append(problem)
+        for identifier in OPAQUE_32_HEX.findall(inspected):
             if identifier not in SYNTHETIC_32_HEX:
-                errors.append("non-synthetic 32-hex identifier found in " + rel)
+                problem = "non-synthetic 32-hex identifier found in " + rel
+                if problem not in errors:
+                    errors.append(problem)
+
+    for path, text in files(root):
+        rel = relative(path, root)
+        if text is None:
+            errors.append("unsafe or unstable public repository path: " + rel)
+            continue
+        inspect(text, path, rel)
+    index_documents, index_errors = _git_index_text_documents(root)
+    errors.extend(error for error in index_errors if error not in errors)
+    for rel, text in index_documents:
+        inspect(text, root.joinpath(*Path(rel).parts), rel)
     return errors
 
 
@@ -357,20 +844,32 @@ def check_media(root):
     websites_root = root / "websites"
     asset_totals = {}
     repository_total = 0
-    for path in root.rglob("*"):
-        if any(part in MEDIA_SCAN_SKIP_PARTS for part in path.parts):
+    public_paths = _public_candidate_paths(root)
+    for path in public_paths:
+        relative_parts = path.relative_to(root).parts
+        if any(part in MEDIA_SCAN_SKIP_PARTS for part in relative_parts):
             continue
-        if path.is_symlink():
-            errors.append("symlink is forbidden in public repository content: " + relative(path, root))
-            continue
-        if not path.is_file():
-            continue
-
-        size = path.stat().st_size
-        repository_total += size
         rel = relative(path, root)
+        try:
+            metadata = _path_snapshot(path, root)[-1]
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors.append("unsafe or unstable public repository path: " + rel)
+            continue
+        size = metadata[4]
+        repository_total += size
         if size > MAX_REPOSITORY_FILE_BYTES:
             errors.append("file exceeds the public repository size ceiling: " + rel)
+        try:
+            data, _ = _read_public_regular_file(
+                path,
+                root,
+                byte_limit=32 if size > MAX_REPOSITORY_FILE_BYTES else None,
+            )
+        except OSError:
+            errors.append("unsafe or unstable public repository path: " + rel)
+            continue
 
         asset_scope = None
         if websites_root.exists():
@@ -384,9 +883,10 @@ def check_media(root):
                 asset_scope = (parts[0], "generated")
 
         suffix = path.suffix.lower()
-        with path.open("rb") as source:
-            prefix = source.read(32)
+        prefix = data[:64]
         media_magic = has_media_magic(prefix)
+        if any(prefix.startswith(marker) for marker in OPAQUE_ARTIFACT_MAGIC_PREFIXES):
+            errors.append("opaque archive or encrypted artifact is forbidden: " + rel)
         is_media = suffix in MEDIA_SUFFIXES
         if is_media or media_magic:
             if asset_scope is None:
@@ -401,7 +901,7 @@ def check_media(root):
             # Binary-magic detection runs first; tolerant decoding here only
             # looks for an explicit data URI without letting a renamed binary
             # crash the policy process before it can report the violation.
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = data.decode("utf-8", "ignore")
             if re.search(r"(?i)data:(?:image|audio|video|font)/[^;,]+;base64,", text):
                 errors.append("embedded media data URI is forbidden: " + rel)
 
@@ -430,9 +930,11 @@ def check_media(root):
             if fragment not in source_text:
                 errors.append("Flux source artifact allowlist is missing: " + fragment)
 
-    for path in list(live_kubernetes_files(root)) + list(
-        (root / "websites").glob("*/chart/templates/*.yaml")
-    ):
+    chart_templates = [
+        path for path in public_paths
+        if path.match("websites/*/chart/templates/*.yaml")
+    ]
+    for path in list(live_kubernetes_files(root)) + chart_templates:
         text = read(path)
         rel = relative(path, root)
         forbidden = {
@@ -496,7 +998,9 @@ def check_workflows(root):
     workflow_dir = root / ".github" / "workflows"
     if not workflow_dir.exists():
         return ["workflow directory missing: .github/workflows"]
-    for path in workflow_dir.glob("*.y*ml"):
+    for path in _public_candidate_paths(root):
+        if path.parent != workflow_dir or path.suffix not in {".yaml", ".yml"}:
+            continue
         text = read(path)
         rel = relative(path, root)
         for match in re.finditer(r"(?m)^\s*-?\s*uses:\s*([^\s#]+)", text):
@@ -518,7 +1022,13 @@ def live_kubernetes_files(root):
     if not base.exists():
         return []
     result = []
-    for path in base.rglob("*.y*ml"):
+    for path in _public_candidate_paths(root):
+        try:
+            path.relative_to(base)
+        except ValueError:
+            continue
+        if path.suffix not in {".yaml", ".yml"}:
+            continue
         if is_fixture(path) or "templates" in path.parts or path.name == "gotk-components.yaml":
             continue
         result.append(path)
@@ -596,28 +1106,28 @@ def check_kubernetes(root):
     flux = root / "kubernetes" / "flux-system"
     if flux.exists():
         required_fragments = {
-            "controllers/patches/source-controller.yaml": [
+            "flux-system/controllers/patches/source-controller.yaml": [
                 "--no-cross-namespace-refs=true", "runAsNonRoot", "RuntimeDefault",
                 "requests/ephemeral-storage", "limits/ephemeral-storage", "sizeLimit",
             ],
-            "controllers/patches/kustomize-controller.yaml": [
+            "flux-system/controllers/patches/kustomize-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--no-remote-bases=true",
                 "--default-service-account=default", "runAsNonRoot", "RuntimeDefault",
             ],
-            "controllers/patches/helm-controller.yaml": [
+            "flux-system/controllers/patches/helm-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--default-service-account=default",
                 "runAsNonRoot", "RuntimeDefault",
             ],
-            "access.yaml": [
+            "flux-system/access.yaml": [
                 "namespace: cloudflare-public", "namespace: naranjo-online",
                 "namespace: lidersea-com",
             ],
-            "../reconciliation/platform-services.yaml": [
+            "reconciliation/platform-services.yaml": [
                 "provider: sops", "name: sops-age",
             ],
         }
         for name, fragments in required_fragments.items():
-            path = flux / name
+            path = root / "kubernetes" / name
             if not path.is_file():
                 errors.append("required Flux hardening file missing: " + name)
                 continue
@@ -670,12 +1180,24 @@ def check_cloudflare(root):
     base = root / "infrastructure" / "cloudflare"
     if not base.exists():
         return ["Cloudflare OpenTofu directory missing"]
-    errors.extend(cloudflare_default_off_errors(root))
+    errors.extend(cloudflare_phase_contract_errors(root))
     visible_paths, visibility_errors = _git_visible_cloudflare_paths(root)
     errors.extend(visibility_errors)
     expected_sources = {
         path.as_posix() for path in CLOUDFLARE_TERRAFORM_SOURCE_FILES
     }
+    expected_phase_files = {
+        path.as_posix() for path in CLOUDFLARE_TERRAFORM_REVIEW_FILES
+    }
+    visible_phase_files = {
+        relative_path
+        for relative_path in visible_paths
+        if relative_path.startswith("infrastructure/cloudflare/phases/")
+    }
+    for missing in sorted(expected_phase_files - visible_phase_files):
+        errors.append("required Cloudflare phase file is not Git-visible: " + missing)
+    for unexpected in sorted(visible_phase_files - expected_phase_files):
+        errors.append("unexpected Git-visible Cloudflare phase file: " + unexpected)
     visible_sources = {
         relative_path
         for relative_path in visible_paths
@@ -714,37 +1236,16 @@ def check_cloudflare(root):
 def _git_visible_cloudflare_paths(root):
     """Return tracked plus unignored Cloudflare files; ignored local inputs stay local."""
 
-    base = root / "infrastructure" / "cloudflare"
-    if not (root / ".git").exists():
-        return ({
-            relative(path, root)
-            for path in base.rglob("*")
-            if path.is_file() or path.is_symlink()
-        }, [])
-    try:
-        result = subprocess.run(
-            [
-                "git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
-                "--exclude-standard", "--", "infrastructure/cloudflare",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return set(), ["Git-visible Cloudflare source inventory is unavailable"]
-    if result.returncode != 0:
-        return set(), ["Git-visible Cloudflare source inventory is unavailable"]
-    try:
-        decoded = result.stdout.decode("utf-8", "strict")
-    except UnicodeDecodeError:
-        return set(), ["Git-visible Cloudflare source inventory is not UTF-8"]
-    entries = decoded.split("\0")
-    if entries[-1:] == [""]:
-        entries.pop()
-    if any(not entry.startswith("infrastructure/cloudflare/") for entry in entries):
-        return set(), ["Git-visible Cloudflare source inventory escaped its root"]
-    return set(entries), []
+    visible, errors = _git_visible_paths(root)
+    if errors:
+        return set(), [
+            error.replace("repository inventory", "Cloudflare source inventory")
+            for error in errors
+        ]
+    return {
+        entry for entry in visible
+        if entry.startswith("infrastructure/cloudflare/")
+    }, []
 
 
 def signature_policy_source_errors(root, allowed_inventories=None):
@@ -1111,12 +1612,11 @@ def check_release(root):
         "websites/naranjo.online/frontend/package-lock.json",
         "websites/lidersea.com/frontend/package-lock.json",
         "kubernetes/flux-system/controllers/gotk-components.yaml",
-        "infrastructure/cloudflare/.terraform.lock.hcl",
         "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
         "kubernetes/platform/admission/kyverno/controllers.yaml",
         "kubernetes/platform/admission/kustomization.yaml",
         "kubernetes/reconciliation/admission.yaml",
-    ]
+    ] + [path.as_posix() for path in sorted(CLOUDFLARE_LOCK_FILES)]
     for name in required_generated:
         if not (root / name).is_file():
             errors.append("required reviewed/generated file missing: " + name)
@@ -1124,7 +1624,9 @@ def check_release(root):
     sops_config = read(root / ".sops.yaml")
     if "REPLACE_WITH_PUBLIC_RECIPIENT" in sops_config:
         errors.append(".sops.yaml still has the invalid public-recipient sentinel")
-    configured_recipients = set(re.findall(r"(?m)^\s*-\s*(age1[0-9a-z]+)\s*$", sops_config))
+    configured_recipients = re.findall(
+        r"(?m)^\s*-\s*(age1[0-9a-z]+)\s*$", sops_config
+    )
     if len(configured_recipients) != 1:
         errors.append(".sops.yaml must contain exactly one valid age recipient")
 
@@ -1165,7 +1667,7 @@ def check_release(root):
         errors.append("encrypted tunnel token is not active in the public release Kustomization")
     tunnel_secret = root / "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
     if tunnel_secret.is_file() and len(configured_recipients) == 1:
-        for problem in tunnel_secret_errors(read(tunnel_secret), next(iter(configured_recipients))):
+        for problem in tunnel_secret_errors(read(tunnel_secret), configured_recipients[0]):
             errors.append("invalid production tunnel Secret: " + problem)
     errors.extend(signature_policy_source_errors(root))
     for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
@@ -1193,6 +1695,7 @@ def cloudflare_visible_configuration_errors(root):
     if not base.exists():
         return []
     visible_paths, errors = _git_visible_cloudflare_paths(root)
+    errors.extend(cloudflare_phase_contract_errors(root))
     expected_sources = {
         path.as_posix() for path in CLOUDFLARE_TERRAFORM_SOURCE_FILES
     }
@@ -1201,6 +1704,15 @@ def cloudflare_visible_configuration_errors(root):
     }
     if visible_sources != expected_sources:
         errors.append("Cloudflare Terraform source inventory is outside the closed contract")
+    expected_phase_files = {
+        path.as_posix() for path in CLOUDFLARE_TERRAFORM_REVIEW_FILES
+    }
+    visible_phase_files = {
+        path for path in visible_paths
+        if path.startswith("infrastructure/cloudflare/phases/")
+    }
+    if visible_phase_files != expected_phase_files:
+        errors.append("Cloudflare phase file inventory is outside the closed contract")
     for relative_path in visible_paths:
         name = Path(relative_path).name
         if name.endswith(".tf.json") or name.endswith(".tfvars") or name.endswith(".tfvars.json"):
@@ -1243,12 +1755,6 @@ def activation_requested(root):
             r"(?m)^\s*validationFailureAction:\s*Enforce\s*$", read(signature_policy)
         ):
             return True
-    variables = root / "infrastructure/cloudflare/variables.tf"
-    if variables.is_file() and re.search(
-        r'(?s)variable\s+"enable_cloudflare_resources"\s*\{.*?default\s*=\s*true',
-        read(variables),
-    ):
-        return True
     return False
 
 
@@ -1289,7 +1795,6 @@ def _allowed_transition_release_errors(plan):
         allowed.update({
             "HelmRelease remains suspended: cloudflare-public",
             "parent Kustomization remains suspended: platform-services",
-            "required reviewed/generated file missing: infrastructure/cloudflare/.terraform.lock.hcl",
         })
     if plan.cloudflare_public == "initial":
         # Exact classification already proved the Secret absent and unlisted.
@@ -1386,7 +1891,10 @@ def main(argv=None):
         selected = [name for name in CHECKS if name != "release"] + ["release"]
     failures = []
     for name in selected:
-        current = CHECKS[name](args.root.resolve())
+        try:
+            current = CHECKS[name](args.root.resolve())
+        except (OSError, UnicodeError):
+            current = ["safe public file snapshot is unavailable"]
         if current:
             failures.extend("{}: {}".format(name, item) for item in current)
         else:

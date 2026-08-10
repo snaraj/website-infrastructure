@@ -1,173 +1,516 @@
-# Cloudflare OpenTofu — Draft / disabled / unapplied
+# Cloudflare OpenTofu — staged, disabled, and unapplied
 
-This configuration pins OpenTofu `1.12.5` and Cloudflare provider `5.22.0` from
-current official schemas verified on 2026-08-08. It defaults to zero resources;
-the committed `enable_cloudflare_resources` default remains false. Keep every
-idle operator configuration false through read-only discovery and Free
-entitlement checks. Because the import addresses are count-indexed, set the
-flag true only in an ignored, protected local variable file during each
-explicitly approved import/refresh/plan window described below, then return it
-to false when that window closes. A true local override is never permission to
-apply.
+This directory defines seven independent OpenTofu roots. It is a design and
+verification artifact only: nothing here authorizes an authenticated plan,
+import, apply, DNS change, or change to the Pi firewall, VPN, or SSH service.
+OpenTofu is pinned to `1.12.5` and the Cloudflare provider to `5.22.0`.
 
-## Managed scope
+## Phase graph
 
-Exactly eight instances are allowed:
+Each root owns one narrow resource graph and one independently protected state:
 
-- two remotely managed Tunnels (`pi-admin`, `pi-websites`);
-- one exact private `/32` route owned by `pi-admin`;
-- one public tunnel config with two ordered site origins and final 404;
-- one proxied tunnel CNAME with `ttl = 1` in each public zone;
-- one identity/device/port-specific Gateway allow and one later final block.
+| Root | Exact IaC-managed scope | Activation condition |
+| --- | --- | --- |
+| `phases/admin-tunnel` | `pi-admin` Tunnel only | First administrative phase |
+| `phases/admin-policies` | Final Pi block and TCP 22 identity/device allow only | Exact admin-tunnel and strong-posture audit contracts |
+| `phases/admin-route` | One RFC1918 Pi `/32` route through `pi-admin` | Exact admin-policies audit contract |
+| `phases/admin-api` | One identity/device allow for TCP 6443 | Later, separate approval after route verification |
+| `phases/public-edge` | `pi-websites` Tunnel and exact two-origin configuration | Public edge staging only; no DNS |
+| `phases/public-dns-naranjo` | One proxied `naranjo.online` apex CNAME | Exact public-edge audit contract; first DNS activation |
+| `phases/public-dns-lidersea` | One proxied `lidersea.com` apex CNAME | Exact public-edge audit contract; final activation |
 
-The one public Tunnel serves exactly these ordered routes:
+The security dependencies are:
+
+```text
+admin-tunnel -> verified tunnel + posture contracts -> admin-policies
+             -> verified block + SSH contract -> admin-route
+             -> verified route + independent recovery + two working SSH sessions
+             -> optional admin-api
+
+exact healthy admin tunnel + posture + complete policy + route contracts
+             -> public-edge-preflight -> public-edge
+             -> verified edge contract -> public-dns-naranjo
+                                      audit + receipt revalidation
+                                      -> public-dns-lidersea (last)
+```
+
+`admin-tunnel` deliberately contains no Gateway policy or private route.
+`admin-policies` deliberately contains no Tunnel or route. Its exact TCP 22
+allow must have a lower Gateway precedence number than its catch-all Pi block.
+The read-only audit must prove the Tunnel, both policies, their exact account
+and Pi `/32` binding, their enabled state, and their precedence before
+`admin-route` may advertise the `/32`. Cloudflare documents that lower policy
+precedence numbers evaluate first; unmatched enrolled-device private-network
+traffic otherwise requires an explicit catch-all block design.
+
+The administrative posture contract is deliberately closed to one independently
+approved `client_certificate_v2` rule. The audit requires an exact managed
+certificate UUID, `check_private_key = true`, one exact Windows/macOS/Linux
+platform, `${serial_number}` certificate CN binding, `clientAuth` extended-key
+usage only, the same exact platform match, and five-minute evaluation and
+expiration. The operator must independently review and supply the expected
+canonical posture SHA-256; structural nonempty JSON is never treated as strong
+posture. The policy-input contract additionally binds the exact administrator
+email, posture-rule UUID and hash, session freshness, SSH/block precedence,
+account, Tunnel, and Pi `/32`. Route and API plans must reproduce that full
+contract, so a valid predecessor hash cannot be reused with another identity or
+weaker device rule. The route post-audit also emits an API-input contract that
+adds the proposed API precedence plus the exact policy- and route-contract
+hashes; `admin-api` must reproduce that digest before its plan can pass.
+
+`admin-api` is not part of initial SSH access. Its acknowledgement defaults to
+false and it allows only TCP 6443, after the SSH allow and before the final
+block. Both `admin-route` and `admin-api` remain unapplied unless independent
+physical recovery is proven, two simultaneous retained administrative sessions
+pass distinct challenges, and a separate fresh-login challenge succeeds while
+they remain available. The gate validates a fresh protected attestation of
+those facts; it does not make a network connection and must never be described
+as proving connectivity by itself. None of these roots changes UFW, WireGuard,
+WARP enrollment, Tor, `sshd`, host keys, or the operating system.
+
+The audit closes each relevant inventory instead of proving only one matching
+object. Administrative staging permits only `pi-admin`, zero Gateway policies
+before `admin-policies`, then exactly the SSH allow plus unconditional final
+block, and zero routes before `admin-route`, then exactly one Pi `/32`. Public
+staging permits only `pi-admin` plus `pi-websites`. Initial plan gates also
+require the preflight Tunnel/Gateway-policy/route counts appropriate to the next
+root. Any additional Tunnel, Gateway policy, or private route is a `NO-GO`; it
+must be removed through a separate reviewed operation or explicitly
+incorporated into a future closed architecture before deployment continues.
+
+For public staging, the audit must also reproduce the healthy `pi-admin`
+Tunnel, exact posture, complete Gateway-policy, and exact private-route
+contracts. The API policy may be absent with exactly two total Gateway rules or
+exact with exactly three; every other state is a conflict. `public-edge` uses
+the dedicated `public-edge-preflight` audit state, where only `pi-admin` exists,
+the admin route is exact, and both public apex records remain absent.
+
+`public-edge` owns exactly these ordered ingress rules:
 
 1. `naranjo.online` to
    `http://naranjo-online.naranjo-online.svc.cluster.local:8080`;
 2. `lidersea.com` to
    `http://lidersea-com.lidersea-com.svc.cluster.local:8080`;
-3. an unqualified final `http_status:404` catch-all.
+3. an unqualified terminal `http_status:404` catch-all.
 
-Every account-scoped resource resolves only through
-`var.cloudflare_account_id`. The `naranjo.online` and `lidersea.com` DNS
-records resolve only through `var.cloudflare_naranjo_online_zone_id` and
-`var.cloudflare_lidersea_com_zone_id`, respectively. Those three opaque IDs
-must be distinct. Both CNAMEs reference the exact same `pi-websites` Tunnel;
-there is no second public Tunnel. The plan policy rejects missing, extra,
-duplicate, swapped, cross-wired, literal, unknown, malformed, or wrong-account
-targets.
+Each public DNS root owns exactly one proxied `ttl = 1` CNAME in one named
+zone, targeting the single audited `pi-websites` Tunnel. The roots, state, and
+tokens remain separate. Run and audit them serially; `public-dns-lidersea` is
+the literal last activation. `pi-admin` never receives public ingress or DNS,
+and `pi-websites` never owns a private route.
 
-No zone, plan, subscription, Registrar, Worker, storage, AI, media, paid
-certificate/security, usage-based, or trial resource exists. `pi-admin` has no
-public config or DNS. Tunnel runtime tokens are retrieved out of band and never
-through a provider data source/state.
+## Destruction-safe phase acknowledgements
 
-## Subscription boundary for this account
+Every phase acknowledgement defaults to false and is used as a lifecycle
+precondition, not as `count` or `for_each`. Returning an acknowledgement to
+false therefore makes planning fail; it does not turn the phase into a
+destroy-all plan. Every managed Cloudflare resource has `prevent_destroy`, and
+the phase plan gate must reject every delete or replacement, unexpected
+address, cross-phase resource, unknown security-critical value, or
+resource-count mismatch. Initial onboarding is create-only: each accepted
+change has exact action `["create"]` and no prior object. Import,
+reconciliation, update, replacement, and rollback require a separate future
+gate and are intentionally outside this one.
 
-The account contract is exactly two active domain zones on the **Free** website
-plan. Registrar renewal for those two domains is an accepted, separately
-classified ownership cost; it does not authorize infrastructure spend. Pro is
-the known next website tier and is explicitly forbidden by this policy. The
-Zero Trust account must independently remain on its Free tier and within its
-current user entitlement. No limit exhaustion may trigger a paid fallback:
-capacity beyond either Free tier is a `NO-GO` and requires a new decision.
-As observed on 2026-08-08, Pro lists at $20 per domain/month on annual billing or
-$25 month-to-month: two Pro zones would therefore be $40 or $50 monthly before
-tax. Those amounts describe the forbidden boundary only; prices must be checked
-again from Cloudflare before any future plan decision.
+The plan policy also requires exactly one empty `cloudflare` provider
+configuration, environment-only provider authentication, no module call, no
+data source, no provisioner, and no non-managed mode. Each phase root and the
+policy directory have an exact on-disk file inventory. Ignored override files,
+local variable files, provider caches, and any other extra file are a `NO-GO`.
 
-## Public-content boundary
+Do not combine roots, share a backend, add a global enable switch, or apply from
+a directory above a phase root.
 
-The two ordinary sites remain technically in scope only after the current
-account, named-zone, subscription, and Zero Trust Free-entitlement audit passes.
-Cloudflare cache is optional acceleration, not origin capacity or availability:
-standard cache is data-center-local, uses LRU eviction, and does not guarantee
-retention for the configured TTL.
+## Credential reach is broader than the IaC allowlist
 
-Large-media delivery is a fail-closed **NO-GO** on this Free-plan Tunnel design.
-Cloudflare's current self-serve Application Services terms require Free, Pro,
-and Business customers to use an appropriate paid service for video and other
-large files delivered through the CDN, without publishing a safe file-size or
-traffic threshold. Free, Pro, and Business also have a 512 MB maximum cacheable
-file size; an oversized response bypasses cache and can repeatedly reach the
-Pi. Byte ranges, `Cache-Control: no-store`, cache bypass, or object splitting do
-not create contractual permission and must not be used to evade a limit. Keep
-video and deliberate large-download routes disabled. Any future media feature
-requires a new reviewed architecture and an authorized service, which conflicts
-with the present zero-spend decision.
+The plan/state contract can name an exact Tunnel, route, policy, or DNS record;
+a Cloudflare API token cannot be restricted that narrowly. Cloudflare API-token
+policies select User, Account, or Zone resources:
 
-## Credential and state boundary
+- account permissions used for Tunnels, Gateway policies, and private-network
+  routes reach the applicable resource class across the selected account, not
+  one named Tunnel, rule, or route;
+- Zone DNS Write can be limited to one selected zone, but it can create, read,
+  update, delete, and list records across that zone; it cannot be limited to
+  one apex CNAME.
 
-Use `CLOUDFLARE_API_TOKEN` only in a trusted local environment. Maintain two
-different tokens; never add the audit permissions to the apply token.
+This is unavoidable residual credential reach, not authorization to touch those
+other objects. References to an “exact” object below describe the protected
+plan and audit allowlist, never the provider token's enforcement boundary.
+Cloudflare's separate Tunnel-specific runtime token is only for running its
+Tunnel and is not an IaC management token.
 
-The short-lived apply token is scoped to the one exact account and both exact
-managed zones with:
+Compensating controls are mandatory:
 
-- Account: Cloudflare One Connector cloudflared Write, Cloudflare One Networks
-  Write, and Zero Trust Write;
-- Zone: DNS Write;
-- only matching Read permissions if the current token UI/provider requires them.
+1. Mint a new just-in-time write token for exactly one phase. Keep only one
+   Cloudflare write token live at a time and never reuse it.
+2. Restrict it to the one account or one zone needed by that root, the minimum
+   current permission group, a short explicit TTL covering only the approved
+   window, and the trusted operator source IP. If a stable trusted source IP
+   cannot be enforced, stop; do not silently weaken the ceremony.
+3. Authenticate only after the read-only audit contract and exact saved-plan
+   SHA-256 match the phase gate. Apply only that saved plan from protected
+   storage.
+4. Enforce the phase's exact address/type/count/field allowlist, no data source
+   for runtime secrets, `prevent_destroy`, and denial of delete/replacement.
+5. Immediately after apply, revoke the write token and prove that same bearer is
+   rejected using a separate credential. Only then re-audit the entire affected
+   account resource class or zone with the separate read-only audit token.
+6. Retain a redacted receipt containing phase, token ID—not value—permission
+   groups, account/zone selector, source-IP restriction, issue/expiry time,
+   plan hash, input/output audit-contract hashes, revocation time, and
+   revocation-verification result. Missing evidence is a fail-closed `NO-GO`.
 
-The read-only audit token is scoped to the one exact account. Set
-`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_NARANJO_ONLINE_ZONE_ID`, and
-`CLOUDFLARE_LIDERSEA_COM_ZONE_ID` locally when running the audit; the script
-proves each ID belongs to its exact named zone and that both zones belong to the
-same account without printing any ID. Its Zone Read and
-DNS Read scopes must cover **all zones in that account**, not only the two
-expected zones; otherwise the exact-two count is false evidence. It has:
+## State, plan, and secret custody
 
-- Account: Billing Read, Cloudflare One Connector cloudflared Read, Cloudflare
-  One Networks Read, Zero Trust Read, Access: Apps and Policies Read, and
-  Access: Audit Logs Read;
-- Zone: Zone Read and DNS Read for all zones in that exact account.
+Use seven different state paths on a protected encrypted volume:
 
-Set explicit token expiration and an operator egress-IP condition where stable.
-Use the apply token for one reviewed plan/apply window, revoke it immediately
-afterward, and rotate the audit token at least every 30 days. Record only token
-IDs, permission names, scopes, conditions, issue/expiry times, and revocation
-evidence—never token values.
+```text
+<protected>/cloudflare/admin-tunnel/terraform.tfstate
+<protected>/cloudflare/admin-policies/terraform.tfstate
+<protected>/cloudflare/admin-route/terraform.tfstate
+<protected>/cloudflare/admin-api/terraform.tfstate
+<protected>/cloudflare/public-edge/terraform.tfstate
+<protected>/cloudflare/public-dns-naranjo/terraform.tfstate
+<protected>/cloudflare/public-dns-lidersea/terraform.tfstate
+```
 
-Never grant Billing Write, Seats Write, Registrar, zone/plan/subscription write,
-Workers, Load Balancing, certificates, or unrelated account settings. Use a
-separate read-only audit token for `scripts/cloudflare-audit.sh`. The audit
-token intentionally does not have Account Settings or Account API Tokens Read;
-account membership, MFA, and token inventories remain explicit dashboard checks.
+Pass the phase-specific path with local-backend configuration when initializing
+only that root. Use the phase's dedicated protected
+`<protected>/cloudflare/PHASE/tofu-data` as `TF_DATA_DIR`; the offline gate
+requires and parses its `terraform.tfstate` backend metadata and requires the
+configured local-backend path to equal the phase path above. Never initialize live state beside the repository. Never commit
+or upload `.terraform/`, state, state backups, variable files, saved plans,
+plan JSON, provider environment, Tunnel runtime tokens, audit evidence
+containing opaque IDs, or decrypted SOPS material. State and plans remain
+outside Git even when the repository otherwise uses SOPS and age.
 
-OpenTofu state and plans are sensitive (identity, topology, IDs, and possibly
-provider values). Keep them encrypted outside Git. The checked-in provider lock
-file was generated with pinned OpenTofu from the signed Cloudflare provider;
-review changes to it, and never commit `.terraform/`, state, variables, or
-plans.
+Write-token plaintext may enter only through `CLOUDFLARE_API_TOKEN` in the exact
+OpenTofu provider child process. It must not be exported into the parent shell,
+offline gate, parser, audit process, or another child. The distinct read-only
+audit bearer may enter only the future isolated audit child through the same
+trusted reviewed-blob launcher boundary; it is never shared with OpenTofu or an
+offline validator. SOPS/age ciphertext may
+protect approved credential source material, but decryption must be ephemeral
+and must never feed a Terraform variable, provider data source, plan, state,
+log, or repository plaintext. The required child-only launcher is not yet
+implemented, so this rule currently blocks live plan/apply.
 
-## Exit-gated workflow
+The seven JIT write tokens have these maximum Cloudflare-enforced boundaries:
 
-1. Run the read-only audit with the intended account and both named zone IDs,
-   record its labelled `target_binding_sha256`, and complete the dashboard
-   checklist. Any missing, duplicate, swapped, or mismatched target;
-   unavailable/unknown evidence; non-Free plan; over-entitlement seat count;
-   trial; or nonzero/unknown price is `NO-GO`.
-2. Resolve variables in ignored `terraform.tfvars`, leaving
-   `enable_cloudflare_resources=false` while idle. Confirm the hostname is the
-   exact canonical apex for each corresponding discovered zone.
-3. `tofu init -backend=false`, review the signed provider/lock, format, and
-   validate without credentials.
-4. At the explicit import checkpoint, temporarily set the ignored local
-   `enable_cloudflare_resources=true`, import existing resources one at a time
-   following `imports/README.md`, and run a refresh-only plan after each. Never
-   recreate an existing zone/tunnel/rule; restore the local override to false
-   when the import window closes.
-5. Create an authenticated plan in protected storage with
-   `enable_cloudflare_resources=true`; do not upload it.
-6. Run `scripts/cloudflare-plan-gate.sh`, record the exact plan SHA-256 and safe
-   resource counts, and require its `target_binding_sha256` to equal the audit
-   fingerprint exactly. Repeat the read-only subscription audit immediately
-   before approval.
-7. Stop for explicit approval of that exact plan hash and matching target
-   fingerprint. Apply manually from the saved plan only; immediately repeat the
-   subscription audit and negative tests.
+| Root | Cloudflare-enforced reach | Exact protected-plan intent |
+| --- | --- | --- |
+| `admin-tunnel` | Connector/Tunnel write across the selected account | `pi-admin` Tunnel only |
+| `admin-policies` | Required Gateway-policy write across the selected account | Final Pi block and TCP 22 allow only |
+| `admin-route` | Required private-network route write across the selected account | One Pi `/32` through `pi-admin` only |
+| `admin-api` | Required Gateway-policy write across the selected account | TCP 6443 allow only |
+| `public-edge` | Connector/Tunnel config write across the selected account | `pi-websites` Tunnel and exact config only |
+| `public-dns-naranjo` | DNS Write across the `naranjo.online` zone | One audited apex CNAME only |
+| `public-dns-lidersea` | DNS Write across the `lidersea.com` zone | One audited apex CNAME only |
 
-Budget alerts remain secondary detection. They neither cap nor authorize spend.
+Grant only matching read permission if the current provider requires it. The
+read-only audit token is separate from all write tokens. Its Zone Read and DNS
+Read coverage must include every zone in the selected account so the
+exact-two-zone assertion is meaningful. It may also have the narrow Billing,
+Tunnel, Networks, Zero Trust, Access policy, and audit-log reads needed by
+`scripts/cloudflare-audit.sh`. It must not have write access.
+
+`pi-admin` and `pi-websites` runtime tokens are separate from each other and
+from every API token. Retrieve them out of band without a provider data source
+or management-token substitution.
+
+Never grant Billing Write, Seats Write, Registrar, plan/subscription write,
+Workers, storage, AI, media, Load Balancing, certificates, or unrelated account
+settings.
+
+## Exit-gated ceremony
+
+All authenticated steps below are future manual checkpoints. This repository
+work performs none of them.
+
+There are two different gates and they must not be collapsed. The protected
+saved-plan gate is a **pre-apply** check. It runs after the authenticated plan is
+created, with every Cloudflare credential absent from its environment, and must
+finish before any apply starts. A completed `cloudflare-phase-token-receipt-v2`
+is a **post-apply closure** record because it includes revocation/rejected-token
+evidence and the subsequent read-only post-audit; it cannot retroactively authorize the apply it
+describes. Lidersea consumes only the already completed Naranjo receipt as a
+predecessor dependency, never a completed receipt for the current Lidersea
+operation.
+
+A future live implementation still needs a separate strict machine-produced
+current-phase token-preflight record and a launcher that gives the bearer only
+to the exact OpenTofu plan/apply child process. The offline gate now requires a
+protected reviewed manual pre-apply attestation of the zero-paid entitlement,
+account MFA/inventory, phase-exact JIT scope/source-IP/TTL, and recovery gates;
+that human record is not live API proof. The offline gate and every parser must
+see no bearer value. After apply, the separate closure gate must bind the saved
+plan, token ID, preflight evidence, post audit, revocation, and rejected-token
+result. The live preflight/launcher and full broad-scope closure gate are not
+implemented here; this remains an explicit deployment blocker, so policy PASS
+cannot authorize apply.
+
+The current worktree is not a trusted execution source. The audit script is
+code-blocked before token or network access until a trusted launcher can execute
+one exact reviewed immutable blob with a clean environment. The offline plan
+gate remains executable for tests, but a PASS produced by mutable worktree code
+is non-authoritative for live custody. Implementing and validating that common
+reviewed-blob launcher is an explicit deployment blocker for both scripts.
+
+1. Use read-only discovery to bind the selected account and the two exact named
+   zones. Require exactly two active Free zones, a verified Free Zero Trust
+   entitlement, no trial, and no nonzero or unknown price. Record only redacted
+   labelled audit hashes.
+2. Validate all seven roots without credentials and review their pinned
+   provider locks. Resolve values only in ignored, protected phase-specific
+   variable files.
+3. If an exact managed object already exists, import it only into its owning
+   phase using `imports/README.md`. Import and refresh one object at a time
+   within a separately approved JIT-token window.
+4. Gate, approve, and apply `admin-tunnel` alone. Revoke and rejection-verify the
+   write token with a separate credential, then use the read-only audit token to
+   audit the selected account's complete Tunnel set and exact approved
+   certificate-v2 posture/WARP-device contract, verify no unrelated change,
+   emit both audit hashes, and retain the receipt.
+5. Use both contracts to gate `admin-policies`. Apply the exact final block and
+   TCP 22 allow alone; revoke and rejection-verify the write token, then
+   re-audit all relevant policies with the read-only token, emit the matching
+   policies-contract hash, and retain the receipt.
+6. Only that policies contract can unlock `admin-route`. Before any route or
+   host-network change, prove independent recovery and two working
+   administrative sessions. Apply only the approved Pi `/32` saved plan, revoke
+   and rejection-verify the write token, then re-audit all routes with the
+   read-only token, emit the exact API-input contract, and retain the receipt.
+7. Keep `admin-api` default-off until its own later approval, the verified-route
+   and API-input contracts, and repeated recovery/session evidence. Its token is
+   distinct from the earlier policy token despite using the same account
+   permission class.
+8. Gate, approve, and stage `public-edge` without DNS. Revoke and
+   rejection-verify the write token, then use the read-only token to audit the
+   account's complete Tunnel/config set, exact ordered origins, terminal 404,
+   and health. Emit the public-edge contract and retain the receipt.
+9. Use two different zone-scoped JIT tokens and two saved plans. Activate
+   `public-dns-naranjo`, revoke and rejection-verify its write token, and then
+   re-audit the complete Naranjo DNS zone with the read-only token before
+   minting the Lidersea token. Then activate `public-dns-lidersea` last, revoke
+   and rejection-verify its write token, re-audit the complete Lidersea zone
+   with the read-only token, and retain both receipts.
+
+Any mismatch, ambiguity, unknown value, missing evidence, overbroad token
+selector, absent IP/TTL restriction, credential spill, unexpected account/zone
+change, paid product, or session/recovery failure is a fail-closed `NO-GO`.
+Budget alerts are secondary detection; they do not cap or authorize spend.
+
+### Protected saved-plan gate
+
+`scripts/cloudflare-plan-gate.sh` accepts eight baseline positional arguments:
+the exact phase name, saved plan, completed redacted audit, protected workspace
+root, pre-state receipt, exact current-phase state path, initialized protected
+backend-metadata file, and reviewed manual pre-apply attestation. It accepts at
+most one phase-specific ninth argument. `admin-route` and `admin-api` require
+the protected recovery/session JSON described below. `public-dns-lidersea`
+requires the fixed-schema protected Naranjo transaction directory. Every other
+phase rejects a ninth argument. The plan, audit, receipts, backend/state,
+manual attestation, validation evidence, caller-selected `TMPDIR`, and
+every temporary JSON file must resolve inside that one non-symlink protected
+root. The gate rejects an inherited Cloudflare API token before starting any
+child process; it is offline and never authenticates to Cloudflare.
+
+The gate requires the phase, policy, audit/gate, token-validator, and Windows
+workspace-validator sources to equal one unchanged `HEAD` before and after the
+evaluation. It snapshots the inputs, provider lock, exact Rego policy, and
+validators into protected storage, reads backend/state/manual bytes through
+open file descriptors into read-only snapshots, parses only snapshots, rejects ignored or
+untracked source files, and rechecks every original hash and exact directory
+inventory before returning. The snapshotted Windows validator receives the
+actual checkout root plus every original and parsed protected artifact. It
+checks each file's full reparse chain, exact ACL, single-link regular-file
+identity, exclusive same-handle read, and SHA-256, then emits a bounded fresh
+file-set attestation without printing a path.
+
+The owner-readable pre-state receipt has exactly one value for each field:
+
+```text
+backend_metadata_sha256=BACKEND_METADATA_SHA256
+manual_attestation_sha256=MANUAL_ATTESTATION_SHA256
+phase_root=infrastructure/cloudflare/phases/PHASE
+repo_commit=COMMIT_HEX
+phase_lock_sha256=LOCK_SHA256
+workspace_attestation_sha256=WINDOWS_WORKSPACE_ATTESTATION_SHA256
+state_binding_sha256=DERIVED_STATE_BINDING_SHA256
+state_evidence_sha256=CANONICAL_NINE_LINE_STATE_EVIDENCE_SHA256
+state_mode=absent|present
+state_sha256=absent|STATE_SHA256
+plan_sha256=SAVED_PLAN_SHA256
+planned_utc=RFC3339_UTC
+```
+
+`admin-route` and `admin-api` add exactly:
+
+```text
+recovery_evidence_sha256=RECOVERY_SESSION_JSON_SHA256
+```
+
+Only the Lidersea pre-state receipt adds these exact fields:
+
+```text
+predecessor_post_audit_sha256=NARANJO_POST_AUDIT_SHA256
+predecessor_pre_state_receipt_sha256=NARANJO_PRE_STATE_RECEIPT_SHA256
+predecessor_state_evidence_sha256=NARANJO_STATE_EVIDENCE_SHA256
+predecessor_token_receipt_sha256=NARANJO_PHASE_TOKEN_RECEIPT_SHA256
+predecessor_token_validation_sha256=NARANJO_TOKEN_VALIDATOR_PASS_SHA256
+```
+
+Never copy raw lineage or state bytes into the receipt or terminal output. The
+gate derives backend type/path/hash, state hash, labelled lineage hash, and
+serial from the exact parsed snapshots; callers cannot assert lineage or serial.
+Write the receipt fields in exactly the order shown. Before constructing it,
+preserve the state validator's exact nine LF-terminated output lines in protected
+storage; the receipt binds that file's hash, and the plan gate independently
+recreates the same bytes and rejects a mismatch.
+For first create, the exact phase state leaf may be absent, in which case the
+binding uses distinct literal `absent` facts and the gate verifies the unchanged
+parent and continued absence before and after evaluation. Generate the receipt
+in the same protected ceremony that creates the saved plan, then make it
+read-only. Field names are an exact closed set: missing, duplicate, blank, or
+extra fields fail. Every timestamp uses exactly `YYYY-MM-DDTHH:MM:SSZ`; GNU date
+expressions, offsets, fractional seconds, and noncanonical variants fail. The
+gate recomputes the repository commit, phase lock hash, and plan
+hash, invokes `scripts/validate-windows-credential-workspace.ps1 -Session`
+against the supplied protected root, and requires both its fresh output and
+`CLOUDFLARE_WORKSPACE_ATTESTATION_SHA256` to match the receipt. It creates a
+private read-only snapshot of every plan/evidence input and requires identical
+hashes before and after copying before parsing any snapshot. It then requires a
+fresh `audit_result=pass` from the exact predecessor phase, compares every phase
+contract, and prints only hashes and non-secret metadata. Its default audit
+freshness limit and saved-plan age limit are each 900 seconds and may only be
+tightened or raised as far as 3600 seconds.
+
+The gate compares the receipt with the actual protected backend/current-state
+snapshot or explicit absent-state observation. A missing, stale, reused, or
+unverifiable binding blocks deployment. This is still an offline custody check,
+not proof of current Cloudflare API state and not apply authorization.
+
+The manual file is strict duplicate-free UTF-8 JSON with schema
+`cloudflare-preapply-manual-v1`, a maximum five-minute validity window, and
+evidence role `reviewed-manual-preapply-authorization`. It binds the commit,
+workspace attestation, saved plan, predecessor audit, provider lock, and derived
+state binding. Its closed fields require exactly the two named active Free
+zones, Free Zero Trust, no paid/trial/unknown entitlement, authorized
+infrastructure cost exactly zero except separately classified registrar
+renewals, reviewed member/token inventory and administrator MFA, the phase's
+exact scope/permission/unavoidable-reach matrix, a distinct source-IP-policy
+hash, a token lifetime no longer than 30 minutes, only one live write token, no
+plaintext persistence/sharing, physical-or-trusted-LAN recovery, two retained
+sessions, a fresh third login, and account-owner approval. Route/API records
+also exact-match the separately validated recovery evidence hash. These are
+reviewed operator assertions; a future machine-produced live token preflight
+must independently prove active status, restriction, and scope before apply.
+
+The route/API recovery file is strict duplicate-free UTF-8 JSON with schema
+`admin-recovery-session-v1`, the exact phase, a maximum five-minute validity
+window, and the evidence role
+`operator-attestation-plus-independent-challenges`. It binds the current commit
+hash, workspace attestation, saved-plan hash, predecessor-audit hash, and one
+host-identity hash. It contains one fresh physical-console challenge, exactly
+two distinct read-only retained-session challenge/result records verified
+within 60 seconds of one another, and a third distinct fresh-login challenge
+performed after both retained-session checks. Every challenge, result, session,
+and evidence hash is nonzero and distinct. This is a bounded operator
+attestation and evidence binding, not cryptographic or network proof; the
+operator must actually perform the checks. The known current state has not yet
+proved the two-session condition, so `admin-route` and `admin-api` remain
+`NO-GO`.
+
+For Lidersea, argument nine is a directory with one of two exact inventories.
+Both contain `target-binding.txt`, `saved-plan.tfplan`,
+`pre-apply-state-evidence.txt`, `pre-state-receipt.txt`,
+`pre-operation-audit.txt`, `source-ip-policy.txt`, `token-id.txt`,
+`preflight-token-evidence.txt`, `postflight-token-evidence.txt`, and
+`token-receipt.json`, with no extra entry or link. The absent form contains no
+`pre-apply-state.tfstate`; its state evidence and receipt must both say
+`state_mode=absent` and `state_sha256=absent`, while the v2 JSON token receipt
+uses `state_mode="absent"` and `state_sha256=null`. The present form adds exactly
+`pre-apply-state.tfstate`; all three records must say present and the carried
+bytes must match the nonzero state hash. Both forms require a nonzero derived
+`state_binding_sha256`. Mixing either inventory or representation is a
+`NO-GO`.
+
+The gate snapshots the exact inventory and committed Naranjo lock, re-runs
+OpenTofu JSON rendering and the Naranjo Rego policy, reparses the original
+canonical nine-line state evidence, recomputes its derived binding, reparses the
+original canonical pre-state receipt, and compares repository, plan, provider
+lock, backend, workspace, state mode/hash/binding, and optional present-state
+bytes. It then directly re-runs the strict v2 token-receipt validator from its
+protected source snapshot. A caller-supplied PASS file is never accepted.
+
+The current predecessor audit must prove the Naranjo apex is exact while the
+Lidersea apex remains absent. The Lidersea pre-state receipt binds that post
+audit, the exact Naranjo token receipt, and the newly generated bounded
+four-line validator output. The receipt's postflight revocation verification
+must occur at or before the read-only post audit, and its Naranjo pre-operation audit must have
+preceded token issuance by no more than 900 seconds. This makes the second DNS
+activation fail closed until the first zone's plan, audit, source-IP, token-ID,
+revocation, workspace, repository, state, and provider-lock bindings all agree.
+
+## Zero-spend and content boundary
+
+The account contract is exactly two active domain zones on the Free website
+plan plus separately classified Registrar renewal for domain ownership. Zero
+Trust must independently remain on its verified Free entitlement. No limit
+exhaustion may trigger a paid fallback. Pro, trials, usage-based features, and
+unknown products are forbidden.
+
+Cloudflare cache is optional acceleration, not Pi capacity or availability.
+Large-media delivery remains `NO-GO` on this design. Byte ranges, cache bypass,
+`no-store`, or object splitting do not create contractual permission. Any
+future media feature or paid tier requires a new reviewed architecture and an
+explicit cost decision.
 
 ## Current caveats
 
-Gateway network policy documents TCP/UDP; do not claim it blocks every protocol.
-Enforce equivalent host firewall default-deny after recovery-gated review.
-WARP must carry traffic (not DNS-only), proxy TCP, include the Pi `/32`, and pass
-the exact posture check. Posture caching and existing sessions mean SSH keys and
-host controls remain mandatory.
+Deployment is still blocked. The write-token permissions reach broader
+Cloudflare resource classes than these plans, while the current audit does not
+yet produce a canonical before/after digest for every object those permissions
+can mutate. In particular, connector/config closure, all Zero Trust surfaces,
+private virtual networks, and token-ID-attributed audit-log deltas are not yet
+bound as one transaction. DNS pagination is complete and duplicate-ID checked,
+and the complete Gateway-rule inventory is closed, but those narrower checks do
+not prove that a broad account token made no unrelated change. Implement and
+independently validate the full-class before/after and audit-log contract before
+any apply.
+
+The gate also relies on locally resolved OpenTofu, Conftest, jq, Git Bash,
+PowerShell, Python, and checksum tools. Versions alone do not authenticate
+binaries. A reviewed absolute-path SHA-256 tool manifest and protected
+same-file verification are still required for a live ceremony. Until that is
+complete, a policy PASS remains analysis evidence only and never apply
+authorization.
+
+Cloudflare response normalization and the selected read endpoints must be
+confirmed through a separately approved read-only discovery run before the
+first ceremony. No such live confirmation has occurred in this implementation
+work.
+
+Gateway network policy coverage must not be described as a replacement for the
+host firewall. WARP must carry traffic rather than run DNS-only, proxy TCP,
+include only the Pi `/32`, and pass the exact posture check. Cached posture and
+existing sessions make SSH keys, host controls, independent recovery, and
+multiple proven sessions mandatory.
 
 Official references:
 
 - <https://registry.terraform.io/providers/cloudflare/cloudflare/5.22.0>
 - <https://github.com/cloudflare/terraform-provider-cloudflare/releases/tag/v5.22.0>
+- <https://developers.cloudflare.com/fundamentals/api/reference/permissions/>
+- <https://developers.cloudflare.com/fundamentals/api/get-started/create-token/>
+- <https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/>
+- <https://developers.cloudflare.com/cloudflare-one/traffic-policies/order-of-enforcement/>
+- <https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/private-net/cloudflared/connect-cidr/>
 - <https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/>
-- <https://developers.cloudflare.com/cloudflare-one/traffic-policies/network-policies/>
-- <https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/>
 - <https://developers.cloudflare.com/tunnel/>
 - <https://developers.cloudflare.com/cache/concepts/default-cache-behavior/>
-- <https://developers.cloudflare.com/cache/concepts/retention-vs-freshness/>
 - <https://developers.cloudflare.com/fundamentals/reference/policies-compliances/delivering-videos-with-cloudflare/>
 - <https://www.cloudflare.com/service-specific-terms-application-services/>
 - <https://www.cloudflare.com/plans/>
-- <https://developers.cloudflare.com/billing/understand/billing-policy/>
+- <https://developers.cloudflare.com/billing/understand-billing-policy/>

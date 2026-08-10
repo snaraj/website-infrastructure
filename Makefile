@@ -4,13 +4,14 @@ SHELL := /usr/bin/env bash
 PYTHON ?= python3
 .DEFAULT_GOAL := help
 
-.PHONY: help check check-fast release-check check-layout check-privacy check-secrets check-gitleaks check-workflows check-container check-kubernetes check-cloudflare check-shell check-tofu website-test kind-check
+.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-container check-kubernetes check-cloudflare check-shell check-tofu website-test kind-check
 
 help:
 	@printf '%s\n' \
-	  'check            Run every credential-free validation gate' \
+	  'check            Run the credential-free worktree/render validation suite' \
 	  'check-fast       Run repository checks requiring only Python and Git' \
 	  'release-check    Reject every deployment sentinel/suspension' \
+	  'pre-push-security Rehearse the origin/main..HEAD publication gate' \
 	  'check-privacy    Reject private workstation, identity, and host context' \
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
@@ -25,6 +26,9 @@ check-fast:
 
 release-check:
 	@$(PYTHON) scripts/validate_repository.py release
+
+pre-push-security:
+	@./scripts/pre-push-security.sh "$$(git rev-parse --verify refs/remotes/origin/main^{commit})" "$$(git rev-parse --verify HEAD^{commit})"
 
 check-layout:
 	@$(PYTHON) scripts/validate_repository.py layout
@@ -52,10 +56,7 @@ check-kubernetes:
 	@./scripts/validate-security.sh
 
 check-cloudflare:
-	@tofu -chdir=infrastructure/cloudflare fmt -check -recursive
-	@tofu -chdir=infrastructure/cloudflare init -backend=false
-	@tofu -chdir=infrastructure/cloudflare validate
-	@./scripts/test-cloudflare-policy.sh
+	@./scripts/validate-cloudflare-iac.sh
 
 check-tofu: check-cloudflare
 

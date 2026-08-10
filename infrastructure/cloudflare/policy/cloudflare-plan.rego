@@ -2,51 +2,77 @@ package main
 
 import rego.v1
 
-# This policy is the machine-enforced edge of the zero-spend contract. It
-# deliberately accepts one small, named topology so a syntactically valid plan
-# cannot quietly introduce a paid product, a wider route, or a second target.
-allowed_types := {
-  "cloudflare_dns_record",
-  "cloudflare_zero_trust_gateway_policy",
-  "cloudflare_zero_trust_tunnel_cloudflared",
-  "cloudflare_zero_trust_tunnel_cloudflared_config",
-  "cloudflare_zero_trust_tunnel_cloudflared_route",
+# Every state root has one exact graph. The phase is injected by
+# scripts/cloudflare-plan-gate.sh; it is not an operator-controlled tfvar.
+valid_phases := {
+  "admin-tunnel",
+  "admin-policies",
+  "admin-route",
+  "admin-api",
+  "public-edge",
+  "public-dns-naranjo",
+  "public-dns-lidersea",
 }
 
-# Account- and zone-scoped resources are kept separate because their target IDs
-# have different meanings. The plan gate hashes the account and both labelled
-# zone IDs without printing them; operators compare that hash with the read-only
-# audit before approving a plan.
-account_scoped_types := {
-  "cloudflare_zero_trust_gateway_policy",
-  "cloudflare_zero_trust_tunnel_cloudflared",
-  "cloudflare_zero_trust_tunnel_cloudflared_config",
-  "cloudflare_zero_trust_tunnel_cloudflared_route",
+cloudflared_tunnel_resource_type := "cloudflare_zero_trust_tunnel_cloudflared"
+
+expected_types := {
+  "admin-tunnel": {
+    "cloudflare_zero_trust_tunnel_cloudflared.pi_admin": cloudflared_tunnel_resource_type,
+  },
+  "admin-policies": {
+    "cloudflare_zero_trust_gateway_policy.pi_admin_block": "cloudflare_zero_trust_gateway_policy",
+    "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow": "cloudflare_zero_trust_gateway_policy",
+  },
+  "admin-route": {
+    "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin": "cloudflare_zero_trust_tunnel_cloudflared_route",
+  },
+  "admin-api": {
+    "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": "cloudflare_zero_trust_gateway_policy",
+  },
+  "public-edge": {
+    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites": cloudflared_tunnel_resource_type,
+    "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites": "cloudflare_zero_trust_tunnel_cloudflared_config",
+  },
+  "public-dns-naranjo": {
+    "cloudflare_dns_record.naranjo_online": "cloudflare_dns_record",
+  },
+  "public-dns-lidersea": {
+    "cloudflare_dns_record.lidersea_com": "cloudflare_dns_record",
+  },
 }
 
-account_scoped_configuration_addresses := {
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_admin",
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
-  "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
-  "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_allow",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_block",
+approval_variables := {
+  "admin-tunnel": "approve_admin_tunnel_phase",
+  "admin-policies": "approve_admin_policies_phase",
+  "admin-route": "approve_admin_route_phase",
+  "admin-api": "enable_kubernetes_api_access",
+  "public-edge": "approve_public_edge_phase",
+  "public-dns-naranjo": "enable_public_dns_naranjo_activation",
+  "public-dns-lidersea": "enable_public_dns_lidersea_activation",
 }
 
-zone_scoped_configuration_targets := {
-  "cloudflare_dns_record.naranjo_online": "var.cloudflare_naranjo_online_zone_id",
-  "cloudflare_dns_record.lidersea_com":    "var.cloudflare_lidersea_com_zone_id",
+expected_expression_fields := {
+  "cloudflare_zero_trust_tunnel_cloudflared.pi_admin": {"account_id", "name", "config_src"},
+  "cloudflare_zero_trust_gateway_policy.pi_admin_block": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic"},
+  "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
+  "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin": {"account_id", "tunnel_id", "network", "comment"},
+  "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
+  "cloudflare_zero_trust_tunnel_cloudflared.pi_websites": {"account_id", "name", "config_src"},
+  "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites": {"account_id", "tunnel_id", "source", "config"},
+  "cloudflare_dns_record.naranjo_online": {"zone_id", "name", "type", "content", "proxied", "ttl"},
+  "cloudflare_dns_record.lidersea_com": {"zone_id", "name", "type", "content", "proxied", "ttl"},
 }
 
-expected_configuration_addresses := {
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_admin",
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
-  "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
-  "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
-  "cloudflare_dns_record.naranjo_online",
-  "cloudflare_dns_record.lidersea_com",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_allow",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_block",
+critical_fields := {
+  "cloudflare_zero_trust_tunnel_cloudflared": {"account_id", "name", "config_src"},
+  "cloudflare_zero_trust_tunnel_cloudflared_route": {"account_id", "tunnel_id", "network", "comment"},
+  "cloudflare_zero_trust_tunnel_cloudflared_config": {"account_id", "source", "config"},
+  "cloudflare_zero_trust_gateway_policy": {
+    "account_id", "name", "action", "enabled", "filters", "precedence",
+    "traffic", "identity", "device_posture", "rule_settings",
+  },
+  "cloudflare_dns_record": {"zone_id", "name", "type", "content", "proxied", "ttl"},
 }
 
 canonical_naranjo_online_hostname := "naranjo.online"
@@ -54,138 +80,112 @@ canonical_naranjo_online_origin := "http://naranjo-online.naranjo-online.svc.clu
 canonical_lidersea_com_hostname := "lidersea.com"
 canonical_lidersea_com_origin := "http://lidersea-com.lidersea-com.svc.cluster.local:8080"
 
-expected_addresses := {
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_admin[0]",
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_websites[0]",
-  "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin[0]",
-  "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites[0]",
-  "cloudflare_dns_record.naranjo_online[0]",
-  "cloudflare_dns_record.lidersea_com[0]",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_allow[0]",
-  "cloudflare_zero_trust_gateway_policy.pi_admin_block[0]",
-}
-
-critical_fields := {
-  "cloudflare_zero_trust_tunnel_cloudflared": {"account_id", "name", "config_src"},
-  "cloudflare_zero_trust_tunnel_cloudflared_route": {"account_id", "network", "comment"},
-  "cloudflare_zero_trust_tunnel_cloudflared_config": {"account_id", "config", "source"},
-  "cloudflare_dns_record": {"zone_id", "name", "type", "proxied", "ttl"},
-  "cloudflare_zero_trust_gateway_policy": {
-    "account_id", "name", "action", "enabled", "filters", "precedence", "traffic",
-    "identity", "device_posture",
-  },
-}
+phase := object.get(object.get(input, "codex_contract", {}), "phase", "")
 
 managed_changes := [change |
   some change in object.get(input, "resource_changes", [])
   object.get(change, "mode", "managed") == "managed"
 ]
 
-actual_addresses := {change.address | some change in managed_changes}
-
-configuration_resources := object.get(
-  object.get(object.get(input, "configuration", {}), "root_module", {}),
-  "resources",
-  [],
-)
-
-cloudflare_configuration_resources := [resource |
-  some resource in configuration_resources
+configured_managed := [resource |
+  some resource in object.get(
+    object.get(object.get(input, "configuration", {}), "root_module", {}),
+    "resources",
+    [],
+  )
   object.get(resource, "mode", "managed") == "managed"
-  startswith(object.get(resource, "type", split(object.get(resource, "address", ""), ".")[0]), "cloudflare_")
 ]
 
-actual_configuration_addresses := {
-  resource.address | some resource in cloudflare_configuration_resources
-}
+configured_data := [resource |
+  some resource in object.get(
+    object.get(object.get(input, "configuration", {}), "root_module", {}),
+    "resources",
+    [],
+  )
+  object.get(resource, "mode", "managed") == "data"
+]
 
-cloudflare_data_changes := [change |
+planned_data := [change |
   some change in object.get(input, "resource_changes", [])
   object.get(change, "mode", "managed") == "data"
-  startswith(object.get(change, "type", ""), "cloudflare_")
 ]
 
-cloudflare_data_configuration := [resource |
-  some resource in configuration_resources
-  object.get(resource, "mode", "managed") == "data"
-  startswith(object.get(resource, "type", ""), "cloudflare_")
-]
+root_configuration := object.get(
+  object.get(input, "configuration", {}),
+  "root_module",
+  {},
+)
+
+configured_module_calls := object.get(root_configuration, "module_calls", {})
+configured_providers := object.get(
+  object.get(input, "configuration", {}),
+  "provider_config",
+  {},
+)
+
+actual_addresses := {change.address | some change in managed_changes}
+configured_addresses := {resource.address | some resource in configured_managed}
+
+variable_value(name) := value if {
+  value := input.variables[name].value
+}
+
+change_after(address) := after if {
+  some change in managed_changes
+  change.address == address
+  after := change.change.after
+}
+
+configuration_resource(address) := resource if {
+  some resource in configured_managed
+  resource.address == address
+}
 
 has_exact_reference(address, field, expected) if {
-  some resource in configuration_resources
-  resource.address == address
-  expressions := object.get(resource, "expressions", {})
-  references := object.get(object.get(expressions, field, {}), "references", [])
-  count(references) == 1
-  references[0] == expected
+  resource := configuration_resource(address)
+  references := object.get(object.get(resource.expressions, field, {}), "references", [])
+  references == [expected]
 }
 
-# OpenTofu expands a resource traversal into each significant step in plan
-# JSON. Accept only the base, index-zero, and exact `.id` traversal while
-# rejecting another attribute, instance, resource, variable, or literal target.
-reference_within_tree(reference, expected) if {
-  reference == expected
+reference_in_id_tree(reference, root) if {
+  reference == root
 }
 
-reference_within_tree(reference, expected) if {
-  reference == sprintf("%s[0]", [expected])
+reference_in_id_tree(reference, root) if {
+  reference == sprintf("%s.id", [root])
 }
 
-reference_within_tree(reference, expected) if {
-  reference == sprintf("%s[0].id", [expected])
-}
-
-has_only_reference_tree(address, field, expected) if {
-  some resource in configuration_resources
-  resource.address == address
-  expressions := object.get(resource, "expressions", {})
-  references := object.get(object.get(expressions, field, {}), "references", [])
-  expected in references
-  sprintf("%s[0].id", [expected]) in references
+has_only_id_tree(address, field, root) if {
+  resource := configuration_resource(address)
+  references := object.get(object.get(resource.expressions, field, {}), "references", [])
+  root in references
+  sprintf("%s.id", [root]) in references
   every reference in references {
-    reference_within_tree(reference, expected)
+    reference_in_id_tree(reference, root)
   }
 }
 
-# Cloudflare account and zone identifiers are opaque lowercase hex strings. A
-# target that is missing, unknown, or malformed cannot be tied back to an audit.
-valid_target_id(identifier) if {
+valid_account_id(identifier) if {
   regex.match(`^[0-9a-f]{32}$`, identifier)
+  regex.match(`[1-9a-f]`, identifier)
 }
 
-account_target_ids := {
-  object.get(change.change.after, "account_id", "") |
-  some change in managed_changes
-  change.type in account_scoped_types
+valid_uuid(identifier) if {
+  regex.match(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, identifier)
 }
 
-zone_target_ids := {
-  object.get(change.change.after, "zone_id", "") |
-  some change in managed_changes
-  change.type == "cloudflare_dns_record"
+# Repository fixtures use the one privacy-approved nil UUID. Terraform input
+# validation still rejects it in every live phase root.
+valid_uuid("00000000-0000-0000-0000-000000000000")
+
+valid_contract_hash(value) if {
+  regex.match(`^[0-9a-f]{64}$`, value)
+  regex.match(`[1-9a-f]`, value)
 }
 
 private_ipv4_32(network) if {
   regex.match(`^[0-9.]+/32$`, network)
   net.cidr_contains("10.0.0.0/8", network)
-}
-
-exact_dns(dns) if {
-  dns.type == "CNAME"
-  dns.proxied == true
-  dns.ttl == 1
-}
-
-exact_allow_metadata(policy) if {
-  policy.name == "pi-admin-allow"
-  policy.action == "allow"
-  policy.enabled == true
-}
-
-exact_block_metadata(policy) if {
-  policy.name == "pi-admin-block"
-  policy.action == "block"
-  policy.enabled == true
 }
 
 private_ipv4_32(network) if {
@@ -198,20 +198,294 @@ private_ipv4_32(network) if {
   net.cidr_contains("192.168.0.0/16", network)
 }
 
-deny contains msg if {
-  some change in cloudflare_data_changes
-  msg := sprintf("Cloudflare data sources are forbidden: %s", [change.address])
+valid_session_duration(duration) if {
+  regex.match(`^[1-9][0-9]*s$`, duration)
+  to_number(trim_suffix(duration, "s")) <= 900
+}
+
+absent_text(value) if {
+  value == null
+}
+
+absent_text(value) if {
+  value == ""
+}
+
+absent_settings(value) if {
+  value == null
+}
+
+absent_settings(value) if {
+  value == {}
+}
+
+exact_session(policy, duration) if {
+  session := policy.rule_settings.check_session
+  object.keys(policy.rule_settings) == {"check_session"}
+  object.keys(session) == {"enforce", "duration"}
+  session.enforce == true
+  session.duration == duration
+  valid_session_duration(duration)
+}
+
+exact_identity_policy(policy, network, port, email, posture_id, duration) if {
+  regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, email)
+  valid_uuid(posture_id)
+  policy.action == "allow"
+  policy.enabled == true
+  policy.filters == ["l4"]
+  policy.traffic == sprintf(`net.dst.ip in {%s} and net.protocol == "tcp" and net.dst.port in {%d}`, [network, port])
+  policy.identity == sprintf(`identity.email == "%s"`, [email])
+  policy.device_posture == sprintf(`any(device_posture.checks.passed[*] in {"%s"})`, [posture_id])
+  exact_session(policy, duration)
+  absent_text(object.get(policy, "expiration", null))
+  absent_text(object.get(policy, "schedule", null))
+}
+
+account_matches(after) if {
+  account_id := variable_value("cloudflare_account_id")
+  valid_account_id(account_id)
+  after.account_id == account_id
+}
+
+admin_tunnel_exact if {
+  tunnel := change_after("cloudflare_zero_trust_tunnel_cloudflared.pi_admin")
+  account_matches(tunnel)
+  tunnel.name == "pi-admin"
+  tunnel.config_src == "cloudflare"
+  object.get(tunnel, "tunnel_secret", null) == null
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared.pi_admin", "account_id", "var.cloudflare_account_id")
+}
+
+admin_policies_exact if {
+  network := variable_value("pi_admin_cidr")
+  email := variable_value("admin_email")
+  posture_id := variable_value("admin_device_posture_check_id")
+  duration := variable_value("admin_session_freshness")
+  private_ipv4_32(network)
+  valid_uuid(variable_value("pi_admin_tunnel_id"))
+  valid_contract_hash(variable_value("verified_admin_tunnel_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_policy_inputs_contract_sha256"))
+
+  block := change_after("cloudflare_zero_trust_gateway_policy.pi_admin_block")
+  account_matches(block)
+  block.name == "pi-admin-block"
+  block.action == "block"
+  block.enabled == true
+  block.filters == ["l4"]
+  block.precedence == variable_value("pi_admin_block_precedence")
+  block.traffic == sprintf("net.dst.ip in {%s}", [network])
+  absent_text(object.get(block, "identity", null))
+  absent_text(object.get(block, "device_posture", null))
+  absent_settings(object.get(block, "rule_settings", null))
+  absent_text(object.get(block, "expiration", null))
+  absent_text(object.get(block, "schedule", null))
+
+  ssh := change_after("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow")
+  account_matches(ssh)
+  ssh.name == "pi-admin-ssh-allow"
+  exact_identity_policy(ssh, network, 22, email, posture_id, duration)
+  ssh.precedence == variable_value("pi_admin_ssh_allow_precedence")
+  ssh.precedence < block.precedence
+
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_block", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_block", "precedence", "var.pi_admin_block_precedence")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_block", "traffic", "var.pi_admin_cidr")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "precedence", "var.pi_admin_ssh_allow_precedence")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "traffic", "var.pi_admin_cidr")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "identity", "var.admin_email")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "device_posture", "var.admin_device_posture_check_id")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow", "rule_settings", "var.admin_session_freshness")
+}
+
+admin_route_exact if {
+  route := change_after("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin")
+  account_matches(route)
+  network := variable_value("pi_admin_cidr")
+  tunnel_id := variable_value("pi_admin_tunnel_id")
+  private_ipv4_32(network)
+  valid_uuid(tunnel_id)
+  regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, variable_value("admin_email"))
+  valid_uuid(variable_value("admin_device_posture_check_id"))
+  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
+  valid_session_duration(variable_value("admin_session_freshness"))
+  variable_value("pi_admin_ssh_allow_precedence") < variable_value("pi_admin_block_precedence")
+  route.network == network
+  route.tunnel_id == tunnel_id
+  route.comment == "Pi host only; verified block and SSH-only allow required"
+  valid_contract_hash(variable_value("verified_admin_policies_contract_sha256"))
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "network", "var.pi_admin_cidr")
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "tunnel_id", "var.pi_admin_tunnel_id")
+}
+
+admin_api_exact if {
+  policy := change_after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")
+  account_matches(policy)
+  network := variable_value("pi_admin_cidr")
+  email := variable_value("admin_email")
+  posture_id := variable_value("admin_device_posture_check_id")
+  duration := variable_value("admin_session_freshness")
+  private_ipv4_32(network)
+  valid_uuid(variable_value("pi_admin_tunnel_id"))
+  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_policies_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_route_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_api_inputs_contract_sha256"))
+  policy.name == "pi-admin-api-allow"
+  exact_identity_policy(policy, network, 6443, email, posture_id, duration)
+  policy.precedence == variable_value("pi_admin_api_allow_precedence")
+  variable_value("pi_admin_ssh_allow_precedence") < policy.precedence
+  policy.precedence < variable_value("pi_admin_block_precedence")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "precedence", "var.pi_admin_api_allow_precedence")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "traffic", "var.pi_admin_cidr")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "identity", "var.admin_email")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "device_posture", "var.admin_device_posture_check_id")
+  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "rule_settings", "var.admin_session_freshness")
+}
+
+public_edge_exact if {
+  tunnel := change_after("cloudflare_zero_trust_tunnel_cloudflared.pi_websites")
+  account_matches(tunnel)
+  tunnel.name == "pi-websites"
+  tunnel.config_src == "cloudflare"
+  object.get(tunnel, "tunnel_secret", null) == null
+
+  edge := change_after("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites")
+  account_matches(edge)
+  edge.source == "cloudflare"
+  object.keys(edge.config) == {"ingress"}
+  ingress := edge.config.ingress
+  count(ingress) == 3
+  ingress[0] == {"hostname": canonical_naranjo_online_hostname, "service": canonical_naranjo_online_origin}
+  ingress[1] == {"hostname": canonical_lidersea_com_hostname, "service": canonical_lidersea_com_origin}
+  ingress[2] == {"service": "http_status:404"}
+
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared.pi_websites", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites", "account_id", "var.cloudflare_account_id")
+  has_only_id_tree(
+    "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
+    "tunnel_id",
+    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
+  )
+}
+
+exact_dns_record(record, hostname, zone_id, tunnel_id) if {
+  record.name == hostname
+  record.zone_id == zone_id
+  record.type == "CNAME"
+  record.content == sprintf("%s.cfargotunnel.com", [tunnel_id])
+  record.proxied == true
+  record.ttl == 1
+}
+
+public_dns_naranjo_exact if {
+  account_id := variable_value("cloudflare_account_id")
+  naranjo_zone := variable_value("cloudflare_naranjo_online_zone_id")
+  tunnel_id := variable_value("pi_websites_tunnel_id")
+  valid_account_id(account_id)
+  valid_account_id(naranjo_zone)
+  valid_uuid(tunnel_id)
+  account_id != naranjo_zone
+  valid_contract_hash(variable_value("verified_public_edge_contract_sha256"))
+
+  naranjo := change_after("cloudflare_dns_record.naranjo_online")
+  exact_dns_record(naranjo, canonical_naranjo_online_hostname, naranjo_zone, tunnel_id)
+  has_exact_reference("cloudflare_dns_record.naranjo_online", "zone_id", "var.cloudflare_naranjo_online_zone_id")
+  has_exact_reference("cloudflare_dns_record.naranjo_online", "content", "var.pi_websites_tunnel_id")
+}
+
+public_dns_lidersea_exact if {
+  account_id := variable_value("cloudflare_account_id")
+  lidersea_zone := variable_value("cloudflare_lidersea_com_zone_id")
+  tunnel_id := variable_value("pi_websites_tunnel_id")
+  valid_account_id(account_id)
+  valid_account_id(lidersea_zone)
+  valid_uuid(tunnel_id)
+  account_id != lidersea_zone
+  valid_contract_hash(variable_value("verified_public_edge_contract_sha256"))
+
+  lidersea := change_after("cloudflare_dns_record.lidersea_com")
+  exact_dns_record(lidersea, canonical_lidersea_com_hostname, lidersea_zone, tunnel_id)
+  has_exact_reference("cloudflare_dns_record.lidersea_com", "zone_id", "var.cloudflare_lidersea_com_zone_id")
+  has_exact_reference("cloudflare_dns_record.lidersea_com", "content", "var.pi_websites_tunnel_id")
+}
+
+phase_contract_exact if {
+  phase == "admin-tunnel"
+  admin_tunnel_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-policies"
+  admin_policies_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-route"
+  admin_route_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-api"
+  admin_api_exact
+}
+
+phase_contract_exact if {
+  phase == "public-edge"
+  public_edge_exact
+}
+
+phase_contract_exact if {
+  phase == "public-dns-naranjo"
+  public_dns_naranjo_exact
+}
+
+phase_contract_exact if {
+  phase == "public-dns-lidersea"
+  public_dns_lidersea_exact
+}
+
+deny contains "missing or unknown Cloudflare phase contract" if {
+  not phase in valid_phases
 }
 
 deny contains msg if {
-  some resource in cloudflare_data_configuration
-  msg := sprintf("Cloudflare data sources are forbidden in configuration: %s", [resource.address])
+  phase in valid_phases
+  expected := object.keys(expected_types[phase])
+  actual_addresses != expected
+  msg := sprintf("%s managed graph must exactly equal %v", [phase, expected])
 }
 
 deny contains msg if {
+  phase in valid_phases
+  expected := object.keys(expected_types[phase])
+  configured_addresses != expected
+  msg := sprintf("%s configuration graph must exactly equal %v", [phase, expected])
+}
+
+deny contains msg if {
+  phase in valid_phases
   some change in managed_changes
-  not change.type in allowed_types
-  msg := sprintf("resource type is not allowed: %s", [change.type])
+  change.type != expected_types[phase][change.address]
+  msg := sprintf("resource type/address mismatch: %s", [change.address])
+}
+
+deny contains msg if {
+  phase in valid_phases
+  some resource in configured_managed
+  resource.type != expected_types[phase][resource.address]
+  msg := sprintf("configured type/address mismatch: %s", [resource.address])
+}
+
+deny contains msg if {
+  phase in valid_phases
+  some resource in configured_managed
+  object.keys(object.get(resource, "expressions", {})) != expected_expression_fields[resource.address]
+  msg := sprintf("configured argument fields are not exact: %s", [resource.address])
 }
 
 deny contains msg if {
@@ -221,62 +495,73 @@ deny contains msg if {
 }
 
 deny contains msg if {
-  count(managed_changes) != 8
-  msg := sprintf("the plan must contain exactly eight managed instances, found %d", [count(managed_changes)])
+  some change in object.get(input, "resource_changes", [])
+  object.get(change, "mode", "managed") != "managed"
+  msg := sprintf("non-managed plan objects are forbidden: %s", [change.address])
 }
 
 deny contains msg if {
-  actual_addresses != expected_addresses
-  msg := sprintf("managed addresses must exactly match the eight-resource contract: %v", [actual_addresses])
+  some resource in object.get(root_configuration, "resources", [])
+  object.get(resource, "mode", "managed") != "managed"
+  msg := sprintf("non-managed configuration objects are forbidden: %s", [resource.address])
 }
 
 deny contains msg if {
-  count(cloudflare_configuration_resources) != 8
-  msg := sprintf("configuration must contain exactly eight managed Cloudflare resources, found %d", [count(cloudflare_configuration_resources)])
+  some change in managed_changes
+  change.change.actions != ["create"]
+  msg := sprintf("initial activation plans must contain create actions only: %s", [change.address])
 }
 
 deny contains msg if {
-  actual_configuration_addresses != expected_configuration_addresses
-  msg := "Cloudflare configuration must exactly declare the eight-resource contract"
+  some change in managed_changes
+  object.get(change.change, "before", null) != null
+  msg := sprintf("initial activation plans must have no prior object: %s", [change.address])
 }
 
 deny contains msg if {
-  some address in account_scoped_configuration_addresses
-  not has_exact_reference(address, "account_id", "var.cloudflare_account_id")
-  msg := sprintf("account-scoped resource must reference only var.cloudflare_account_id: %s", [address])
+  some change in planned_data
+  msg := sprintf("all data sources are forbidden in closed Cloudflare roots: %s", [change.address])
 }
 
 deny contains msg if {
-  some address, expected_reference in zone_scoped_configuration_targets
-  not has_exact_reference(address, "zone_id", expected_reference)
-  msg := sprintf("zone-scoped resource has a missing, literal, or cross-wired zone variable: %s", [address])
+  some resource in configured_data
+  msg := sprintf("all data sources are forbidden in closed Cloudflare configuration: %s", [resource.address])
+}
+
+deny contains "module calls are forbidden in closed Cloudflare roots" if {
+  count(configured_module_calls) != 0
 }
 
 deny contains msg if {
-  count(account_target_ids) != 1
-  msg := "all account-scoped resources must resolve to one exact account ID"
+  some resource in configured_managed
+  count(object.get(resource, "provisioners", [])) != 0
+  msg := sprintf("provisioners are forbidden in closed Cloudflare roots: %s", [resource.address])
+}
+
+deny contains "Cloudflare provider configuration is not the one empty environment-authenticated provider" if {
+  count(configured_providers) != 1
+}
+
+deny contains "Cloudflare provider configuration is not the one empty environment-authenticated provider" if {
+  some name, provider in configured_providers
+  name != "cloudflare"
+}
+
+deny contains "Cloudflare provider configuration is not the one empty environment-authenticated provider" if {
+  some provider_name, provider in configured_providers
+  object.get(provider, "full_name", "") != "registry.opentofu.org/cloudflare/cloudflare"
+}
+
+deny contains "Cloudflare provider configuration is not the one empty environment-authenticated provider" if {
+  some provider_name, provider in configured_providers
+  count(object.get(provider, "expressions", {})) != 0
 }
 
 deny contains msg if {
-  some identifier in account_target_ids
-  not valid_target_id(identifier)
-  msg := "every account-scoped resource must expose a known 32-character account ID"
-}
-
-deny contains msg if {
-  count(zone_target_ids) != 2
-  msg := "the two DNS records must resolve to two distinct exact zone IDs"
-}
-
-deny contains msg if {
-  some identifier in zone_target_ids
-  not valid_target_id(identifier)
-  msg := "every zone-scoped resource must expose a known 32-character zone ID"
-}
-
-deny contains msg if {
-  count(zone_target_ids & account_target_ids) != 0
-  msg := "a zone target must not equal the account target"
+  phase in valid_phases
+  approval_name := approval_variables[phase]
+  object.get(object.get(object.get(input, "variables", {}), approval_name, {}), "value", false) != true
+  msg := sprintf("phase acknowledgement must be true: %s", [approval_name])
 }
 
 deny contains msg if {
@@ -286,292 +571,8 @@ deny contains msg if {
   msg := sprintf("critical field is unknown for %s: %s", [change.address, field])
 }
 
-tunnels := [change |
-  some change in managed_changes
-  change.type == "cloudflare_zero_trust_tunnel_cloudflared"
-]
-
 deny contains msg if {
-  some change in tunnels
-  expected_name := {
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_admin[0]": "pi-admin",
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites[0]": "pi-websites",
-  }[change.address]
-  object.get(change.change.after, "name", "") != expected_name
-  msg := sprintf("tunnel name/address mismatch: %s", [change.address])
-}
-
-deny contains msg if {
-  some change in tunnels
-  object.get(change.change.after, "config_src", "") != "cloudflare"
-  msg := sprintf("tunnel must be remotely managed: %s", [change.address])
-}
-
-deny contains msg if {
-  some change in tunnels
-  object.get(change.change.after, "tunnel_secret", null) != null
-  msg := sprintf("tunnel secret must not enter state: %s", [change.address])
-}
-
-routes := [change |
-  some change in managed_changes
-  change.address == "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin[0]"
-]
-
-deny contains msg if {
-  route := routes[0]
-  not private_ipv4_32(route.change.after.network)
-  msg := "pi-admin route must be one RFC1918 IPv4 /32"
-}
-
-deny contains msg if {
-  routes[0].change.after.comment != "Pi host only; no LAN subnet"
-  msg := "pi-admin route comment must preserve the exact /32-only intent"
-}
-
-deny contains msg if {
-  not has_only_reference_tree(
-    "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
-    "tunnel_id",
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_admin",
-  )
-  msg := "the private route must reference only the pi-admin tunnel"
-}
-
-configs := [change |
-  some change in managed_changes
-  change.address == "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites[0]"
-]
-
-deny contains msg if {
-  not has_only_reference_tree(
-    "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
-    "tunnel_id",
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
-  )
-  msg := "the public config must reference only the pi-websites tunnel"
-}
-
-deny contains msg if {
-  config := configs[0]
-  config.change.after.source != "cloudflare"
-  msg := "pi-websites config must be remotely managed"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  count(ingress) != 3
-  msg := "pi-websites must have two ordered hostname routes and one catch-all"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  object.get(ingress[0], "hostname", "") != canonical_naranjo_online_hostname
-  msg := "the public ingress hostname must be exactly naranjo.online"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  ingress[0].service != canonical_naranjo_online_origin
-  msg := "public hostname origin must be the naranjo-online ClusterIP Service"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  object.get(ingress[1], "hostname", "") != canonical_lidersea_com_hostname
-  msg := "the second public ingress hostname must be exactly lidersea.com"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  ingress[1].service != canonical_lidersea_com_origin
-  msg := "lidersea.com origin must be the lidersea-com ClusterIP Service"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  ingress[2].service != "http_status:404"
-  msg := "the final tunnel ingress rule must be http_status:404"
-}
-
-deny contains msg if {
-  config := configs[0]
-  ingress := config.change.after.config.ingress
-  object.get(ingress[2], "hostname", null) != null
-  msg := "the final tunnel ingress rule must be an unqualified catch-all"
-}
-
-dns_records := [change |
-  some change in managed_changes
-  change.type == "cloudflare_dns_record"
-]
-
-deny contains msg if {
-  some record in dns_records
-  dns := record.change.after
-  not exact_dns(dns)
-  msg := sprintf("public DNS must be a proxied automatic-TTL CNAME: %s", [record.address])
-}
-
-naranjo_online_dns_records := [change |
-  some change in managed_changes
-  change.address == "cloudflare_dns_record.naranjo_online[0]"
-]
-
-lidersea_com_dns_records := [change |
-  some change in managed_changes
-  change.address == "cloudflare_dns_record.lidersea_com[0]"
-]
-
-deny contains msg if {
-  dns := naranjo_online_dns_records[0].change.after
-  ingress := configs[0].change.after.config.ingress
-  dns.name != ingress[0].hostname
-  msg := "naranjo.online DNS and tunnel ingress hostnames must match exactly"
-}
-
-deny contains msg if {
-  dns := naranjo_online_dns_records[0].change.after
-  dns.name != canonical_naranjo_online_hostname
-  msg := "public DNS must be exactly naranjo.online"
-}
-
-deny contains msg if {
-  dns := lidersea_com_dns_records[0].change.after
-  ingress := configs[0].change.after.config.ingress
-  dns.name != ingress[1].hostname
-  msg := "lidersea.com DNS and tunnel ingress hostnames must match exactly"
-}
-
-deny contains msg if {
-  dns := lidersea_com_dns_records[0].change.after
-  dns.name != canonical_lidersea_com_hostname
-  msg := "public DNS must be exactly lidersea.com"
-}
-
-deny contains msg if {
-  some address in object.keys(zone_scoped_configuration_targets)
-  not has_only_reference_tree(
-    address,
-    "content",
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
-  )
-  msg := sprintf("public CNAME must reference only the one pi-websites tunnel: %s", [address])
-}
-
-deny contains msg if {
-  not has_exact_reference(
-    "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
-    "network",
-    "var.pi_admin_cidr",
-  )
-  msg := "the private route network must reference only var.pi_admin_cidr"
-}
-
-deny contains msg if {
-  not has_exact_reference(
-    "cloudflare_zero_trust_gateway_policy.pi_admin_allow",
-    "identity",
-    "var.admin_email",
-  )
-  msg := "the allow identity must reference only var.admin_email"
-}
-
-deny contains msg if {
-  not has_exact_reference(
-    "cloudflare_zero_trust_gateway_policy.pi_admin_allow",
-    "device_posture",
-    "var.admin_device_posture_check_id",
-  )
-  msg := "the allow posture must reference only var.admin_device_posture_check_id"
-}
-
-deny contains msg if {
-  not has_exact_reference(
-    "cloudflare_zero_trust_gateway_policy.pi_admin_allow",
-    "traffic",
-    "var.pi_admin_cidr",
-  )
-  msg := "the allow traffic must reference only var.pi_admin_cidr"
-}
-
-deny contains msg if {
-  not has_exact_reference(
-    "cloudflare_zero_trust_gateway_policy.pi_admin_block",
-    "traffic",
-    "var.pi_admin_cidr",
-  )
-  msg := "the block traffic must reference only var.pi_admin_cidr"
-}
-
-gateway_policies := [change |
-  some change in managed_changes
-  change.type == "cloudflare_zero_trust_gateway_policy"
-]
-
-allow_policies := [change.change.after |
-  some change in gateway_policies
-  change.address == "cloudflare_zero_trust_gateway_policy.pi_admin_allow[0]"
-]
-
-block_policies := [change.change.after |
-  some change in gateway_policies
-  change.address == "cloudflare_zero_trust_gateway_policy.pi_admin_block[0]"
-]
-
-deny contains msg if {
-  allow := allow_policies[0]
-  not exact_allow_metadata(allow)
-  msg := "pi-admin-allow must be enabled and use the exact name/action"
-}
-
-deny contains msg if {
-  block := block_policies[0]
-  not exact_block_metadata(block)
-  msg := "pi-admin-block must be enabled and use the exact name/action"
-}
-
-deny contains msg if {
-  some policy in array.concat(allow_policies, block_policies)
-  policy.filters != ["l4"]
-  msg := "both Gateway policies must use only the l4 filter"
-}
-
-deny contains msg if {
-  network := routes[0].change.after.network
-  allow := allow_policies[0]
-  allow.traffic != sprintf(`net.dst.ip in {%s} and net.protocol == "tcp" and net.dst.port in {22 6443}`, [network])
-  msg := "pi-admin-allow traffic must exactly match the /32 and TCP ports 22/6443"
-}
-
-deny contains msg if {
-  network := routes[0].change.after.network
-  block := block_policies[0]
-  block.traffic != sprintf("net.dst.ip in {%s}", [network])
-  msg := "pi-admin-block must exactly match every Gateway flow to the /32"
-}
-
-deny contains msg if {
-  allow := allow_policies[0]
-  not regex.match(`^identity[.]email == "[^"[:space:]]+@[^"[:space:]]+[.][^"[:space:]]+"$`, allow.identity)
-  msg := "pi-admin-allow identity must contain exactly one email equality"
-}
-
-deny contains msg if {
-  allow := allow_policies[0]
-  not regex.match(`^any[(]device_posture[.]checks[.]passed\[\*\] in \{"[A-Za-z0-9_-]+"\}[)]$`, allow.device_posture)
-  msg := "pi-admin-allow posture must contain exactly one required check"
-}
-
-deny contains msg if {
-  allow := allow_policies[0]
-  block := block_policies[0]
-  allow.precedence >= block.precedence
-  msg := "pi-admin exact allow must evaluate before the final block"
+  phase in valid_phases
+  not phase_contract_exact
+  msg := sprintf("%s values or references violate the exact phase contract", [phase])
 }

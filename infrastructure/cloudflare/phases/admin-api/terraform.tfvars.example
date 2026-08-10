@@ -1,0 +1,15 @@
+enable_kubernetes_api_access = false
+
+cloudflare_account_id                 = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+pi_admin_tunnel_id                    = "REPLACE_WITH_PI_ADMIN_TUNNEL_UUID"
+pi_admin_cidr                         = "REPLACE_WITH_EXACT_PRIVATE_IPV4/32"
+admin_email                           = "REPLACE_WITH_EXACT_ADMIN_IDENTITY"
+admin_device_posture_check_id         = "REPLACE_WITH_DISCOVERED_POSTURE_CHECK_ID"
+verified_admin_posture_contract_sha256 = "REPLACE_WITH_APPROVED_POSTURE_CONTRACT_SHA256"
+pi_admin_ssh_allow_precedence         = 100
+pi_admin_api_allow_precedence         = 200
+pi_admin_block_precedence             = 1000
+admin_session_freshness               = "300s"
+verified_admin_route_contract_sha256  = "REPLACE_WITH_64_HEX_AUDIT_CONTRACT_HASH"
+verified_admin_policies_contract_sha256 = "REPLACE_WITH_FULL_POLICIES_AUDIT_CONTRACT_HASH"
+verified_admin_api_inputs_contract_sha256 = "REPLACE_WITH_API_INPUTS_AUDIT_CONTRACT_HASH"

@@ -1,0 +1,69 @@
+{
+  "schema": "cloudflare-preapply-manual-v1",
+  "phase": "admin-tunnel",
+  "evidence_role": "reviewed-manual-preapply-authorization",
+  "generated_utc": "2026-08-09T12:00:00Z",
+  "expires_utc": "2026-08-09T12:05:00Z",
+  "bindings": {
+    "repository_commit_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "workspace_attestation_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "saved_plan_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "predecessor_audit_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "provider_lock_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "state_binding_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "entitlement": {
+    "verified_at": "2026-08-09T11:59:00Z",
+    "active_zone_count": 2,
+    "active_zone_names": [
+      "lidersea.com",
+      "naranjo.online"
+    ],
+    "all_zones_on_free_plan": true,
+    "zero_trust_on_free_plan": true,
+    "paid_products_active": true,
+    "trials_active": false,
+    "unknown_billing_or_entitlement": false,
+    "authorized_infrastructure_usd_monthly": 0,
+    "registrar_renewals_are_only_exception": true
+  },
+  "account_security": {
+    "verified_at": "2026-08-09T11:59:00Z",
+    "member_inventory_reviewed": true,
+    "administrator_mfa_verified": true,
+    "api_token_inventory_reviewed": true,
+    "unexpected_admin_or_token_authority": false
+  },
+  "jit_token": {
+    "token_id_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+    "resource_scope": "exact-account",
+    "scope_binding_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "permissions": [
+      "Cloudflare One Connector: cloudflared Write"
+    ],
+    "unavoidable_reach": [
+      "all-cloudflared-connectors-and-tunnels-in-account"
+    ],
+    "source_ip_restricted": true,
+    "source_ip_policy_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "issued_at": "2026-08-09T11:50:00Z",
+    "expires_at": "2026-08-09T12:20:00Z",
+    "active_status_verified": true,
+    "only_write_token_live": true,
+    "plaintext_persisted": false,
+    "plaintext_shared": false
+  },
+  "operator_recovery": {
+    "verified_at": "2026-08-09T11:59:00Z",
+    "physical_or_trusted_lan_recovery": true,
+    "two_retained_sessions": true,
+    "fresh_third_login": true,
+    "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "review": {
+    "approved": true,
+    "approved_at": "2026-08-09T12:00:00Z",
+    "reviewer_role": "account-owner",
+    "approval_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

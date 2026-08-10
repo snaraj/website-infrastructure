@@ -1,0 +1,25 @@
+{
+  "codex_contract": {"phase": "public-dns-lidersea"},
+  "variables": {
+    "enable_public_dns_lidersea_activation": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "cloudflare_lidersea_com_zone_id": {"value": "0123456789abcdef0123456789abcdef"},
+    "pi_websites_tunnel_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "verified_public_edge_contract_sha256": {"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+  },
+  "resource_changes": [{
+    "address": "cloudflare_dns_record.lidersea_com",
+    "mode": "managed",
+    "type": "cloudflare_dns_record",
+    "change": {"actions": ["create"], "after": {"zone_id": "0123456789abcdef0123456789abcdef", "name": "lidersea.com", "type": "CNAME", "content": "00000000-0000-0000-0000-000000000000.cfargotunnel.com", "proxied": true, "ttl": 1}, "after_unknown": {}}
+  }],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [{
+    "address": "cloudflare_dns_record.lidersea_com",
+    "mode": "managed",
+    "type": "cloudflare_dns_record",
+    "expressions": {
+      "zone_id": {"references": ["var.cloudflare_lidersea_com_zone_id"]}, "name": {}, "type": {},
+      "content": {"references": ["var.pi_websites_tunnel_id"]}, "proxied": {}, "ttl": {}
+    }
+  }]}}
+}

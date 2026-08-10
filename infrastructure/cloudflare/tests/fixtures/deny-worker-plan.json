@@ -1,6 +1,0 @@
-{
-  "format_version": "1.2",
-  "resource_changes": [
-    {"address":"cloudflare_workers_script.forbidden","mode":"managed","type":"cloudflare_workers_script","change":{"actions":["create"],"after":{"name":"forbidden"}}}
-  ]
-}

@@ -338,7 +338,7 @@ run_static_gate() {
   if [[ "$mode" == '--release' ]]; then
     assert_clean_commit
   fi
-  "$PYTHON_BIN" "${REPO_ROOT}/scripts/validate_repository.py" all
+  "$PYTHON_BIN" -B "${REPO_ROOT}/scripts/validate_repository.py" all
   bash "${REPO_ROOT}/scripts/render-manifests.sh" "$mode"
   assert_storage_disabled
   if [[ "$mode" == '--release' ]]; then

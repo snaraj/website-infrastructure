@@ -16,7 +16,7 @@ else
   printf 'Python 3 is required for repository policy validation\n' >&2
   exit 2
 fi
-"${python_command}" "${repo_root}/scripts/validate_repository.py" layout privacy secrets workflows kubernetes cloudflare
+"${python_command}" -B "${repo_root}/scripts/validate_repository.py" layout privacy secrets workflows kubernetes cloudflare
 bash "${repo_root}/scripts/test-policy-fixtures.sh"
 
 # Kyverno CLI fixtures verify runtime admission semantics beyond static YAML;

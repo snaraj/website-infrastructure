@@ -1,0 +1,25 @@
+{
+  "codex_contract": {"phase": "public-dns-naranjo"},
+  "variables": {
+    "enable_public_dns_naranjo_activation": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "cloudflare_naranjo_online_zone_id": {"value": "22222222222222222222222222222222"},
+    "pi_websites_tunnel_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "verified_public_edge_contract_sha256": {"value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+  },
+  "resource_changes": [{
+    "address": "cloudflare_dns_record.naranjo_online",
+    "mode": "managed",
+    "type": "cloudflare_dns_record",
+    "change": {"actions": ["create"], "after": {"zone_id": "22222222222222222222222222222222", "name": "naranjo.online", "type": "CNAME", "content": "00000000-0000-0000-0000-000000000000.cfargotunnel.com", "proxied": true, "ttl": 1}, "after_unknown": {}}
+  }],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [{
+    "address": "cloudflare_dns_record.naranjo_online",
+    "mode": "managed",
+    "type": "cloudflare_dns_record",
+    "expressions": {
+      "zone_id": {"references": ["var.cloudflare_naranjo_online_zone_id"]}, "name": {}, "type": {},
+      "content": {"references": ["var.pi_websites_tunnel_id"]}, "proxied": {}, "ttl": {}
+    }
+  }]}}
+}

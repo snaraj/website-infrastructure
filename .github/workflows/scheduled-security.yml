@@ -23,7 +23,7 @@ jobs:
       - name: Validate accepted authorization boundary
         # The path-scoped Trivy exception is safe only while the complete Flux
         # ServiceAccount, Role, and RoleBinding file matches its reviewed digest.
-        run: python3 scripts/validate_repository.py kubernetes
+        run: python3 -B scripts/validate_repository.py kubernetes
       - name: Scan Git history for secrets
         run: gitleaks git --no-banner --redact --config policies/gitleaks.toml .
       - name: Scan dependencies and full-tree secrets

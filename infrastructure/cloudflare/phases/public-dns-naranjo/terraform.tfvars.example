@@ -1,0 +1,5 @@
+enable_public_dns_naranjo_activation = false
+cloudflare_account_id                = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+cloudflare_naranjo_online_zone_id    = "REPLACE_WITH_NARANJO_ONLINE_32_HEX_ZONE_ID"
+pi_websites_tunnel_id                = "REPLACE_WITH_PROTECTED_PUBLIC_EDGE_TUNNEL_UUID"
+verified_public_edge_contract_sha256 = "REPLACE_WITH_FRESH_AUDIT_SHA256"

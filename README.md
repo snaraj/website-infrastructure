@@ -23,7 +23,9 @@ read-only Pi and Cloudflare discovery followed by explicit review.
   host network, Ingress controller, or public administrative hostname.
 - Flux reads this public repository anonymously and has no Git write credential.
 - Kubernetes Secret manifests committed to Git are SOPS ciphertext. The age
-  private identity never enters Git, CI, documentation, logs, or chat.
+  private identity never enters Git, CI, documentation, logs, or chat. CI
+  validates ciphertext structure only; protected offline decryption must
+  authenticate the SOPS MAC and the plaintext credential identity before merge.
 - Images are deployed only by immutable digest after review.
 - Any pre-existing protected host services, VPN/tunnel interfaces, firewall,
   and policy-routing state are discovered read-only and left unchanged until
@@ -41,7 +43,14 @@ read-only Pi and Cloudflare discovery followed by explicit review.
 See [architecture](docs/architecture/overview.md), [kubeadm decision](docs/adr/0011-kubeadm-on-pi.md),
 [legacy archive decision](docs/adr/0013-protected-legacy-archive.md),
 [security controls](docs/security/security-control-matrix.md), and the
-[Cloudflare zero-spend ADR](docs/adr/0006-cloudflare-zero-spend.md).
+[Cloudflare zero-spend ADR](docs/adr/0006-cloudflare-zero-spend.md). Credential
+work on Windows follows the
+[protected workstation ceremony](docs/runbooks/windows-credential-ceremony.md),
+and every authenticated OpenTofu operation follows the
+[Cloudflare state-custody runbook](docs/runbooks/cloudflare-state-custody.md).
+Secret-bearing age/SOPS and kubectl work follows the separate
+[protected Linux Flux ceremony](bootstrap/flux/README.md); a Windows-local
+attestation hash is not portable authorization for it.
 
 ## Layout
 
@@ -95,9 +104,10 @@ the production runtime or a substitute for kubeadm/Pi acceptance.
 
 | Gate | State |
 | --- | --- |
-| Repository and policies | Local scaffold only |
-| Pi discovery | Not run |
-| Protected legacy archive | Policy accepted; local inventory/retirement evidence not run |
+| Repository and policies | Credential-free scaffold and negative-policy tests implemented; live evidence remains absent |
+| Pi discovery | Read-only discovery completed; current private evidence remains outside Git |
+| Independent recovery + simultaneous two-session gate | Not proven; all host/network/cluster mutation blocked |
+| Protected legacy archive | Local root-private archive exists; independent encrypted off-device restore proof remains absent |
 | Media storage/profile | Disabled; SSD/filesystem/backup evidence not collected |
 | Public heavy-media delivery | NO-GO under current zero-spend Cloudflare boundary |
 | Cloudflare subscription audit | Not run |

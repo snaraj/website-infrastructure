@@ -196,16 +196,115 @@ class PublishWorkflowContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.pull_request)
 
+    def test_pull_request_scans_the_server_bound_immutable_commit_range(self):
+        """Fork PRs use the merge ref only to authenticate exact base/head OIDs."""
+
+        required_fragments = (
+            "permissions: {}",
+            "contents: read",
+            "persist-credentials: false",
+            "fetch-depth: 0",
+            "if: github.event_name == 'pull_request'",
+            "PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}",
+            "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+            "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+            '[[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]]',
+            '[[ "${GITHUB_SHA}" =~ ${oid_pattern} ]]',
+            '[[ "${checked_out_sha}" == "${GITHUB_SHA}" ]]',
+            'git rev-list --parents -n 1 "${checked_out_sha}"',
+            '[[ "${merge_record[0]}" == "${checked_out_sha}" ]]',
+            '[[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]]',
+            '[[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]]',
+            "validate_publication_history.py \\",
+            '--pull-request "${PR_BASE_SHA}" "${PR_HEAD_SHA}"',
+            "gitleaks git \\",
+            "--ignore-gitleaks-allow",
+            "--gitleaks-ignore-path=",
+            '--log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}"',
+            '[[ ! -e "${empty_ignore}" ]]',
+            "trap - EXIT HUP INT TERM",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.pull_request)
+        self.assertNotIn("pull_request_target:", self.pull_request)
+        self.assertNotIn("contents: write", self.pull_request)
+        self.assertNotIn("PR_MERGE_SHA", self.pull_request)
+        self.assertNotIn("github.event.pull_request.merge_commit_sha", self.pull_request)
+        self.assertNotIn(
+            "github.event.pull_request.head.repo.full_name", self.pull_request
+        )
+        self.assertLess(
+            self.pull_request.index("fetch-depth: 0"),
+            self.pull_request.index("validate_publication_history.py"),
+        )
+        self.assertLess(
+            self.pull_request.index("validate_publication_history.py"),
+            self.pull_request.index("gitleaks git"),
+        )
+
+    def test_pull_request_keeps_python_bytecode_out_of_full_tree_scans(self):
+        """Generated caches must not become unreviewed secret-scan inputs."""
+
+        for fragment in (
+            'PYTHONDONTWRITEBYTECODE: "1"',
+            "python3 -I -B - <<'PY'",
+            'compile(path.read_bytes(), str(path), "exec", dont_inherit=True)',
+            "python3 -B -m unittest discover",
+            "python3 -B scripts/validate_repository.py all",
+            "ambient_python_artifact=",
+            "-name '__pycache__'",
+            "-name '*.pyc'",
+            "-name '*.pyo'",
+            "-name '*.pyd'",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.pull_request)
+        self.assertNotIn("python3 -m py_compile", self.pull_request)
+        self.assertLess(
+            self.pull_request.index("ambient_python_artifact="),
+            self.pull_request.index("gitleaks dir"),
+        )
+
+    def test_release_shell_callers_disable_python_bytecode(self):
+        """Clean child environments must not repopulate ignored caches."""
+
+        for relative in ("scripts/render-manifests.sh", "scripts/test-kind.sh"):
+            text = REPO_ROOT.joinpath(relative).read_text(encoding="utf-8")
+            calls = [
+                line.strip()
+                for line in text.splitlines()
+                if "python3" in line and "validate_release_" in line
+            ]
+            with self.subTest(relative=relative):
+                self.assertTrue(calls)
+                self.assertTrue(all("python3 -B" in line for line in calls))
+
+        for relative in (
+            "scripts/release-gate.sh",
+            "scripts/validate-cloudflare-iac.sh",
+            "scripts/validate-security.sh",
+        ):
+            text = REPO_ROOT.joinpath(relative).read_text(encoding="utf-8")
+            calls = [
+                line.strip()
+                for line in text.splitlines()
+                if "validate_repository.py" in line
+            ]
+            with self.subTest(relative=relative):
+                self.assertTrue(calls)
+                self.assertTrue(all(" -B " in line for line in calls))
+
     def test_pull_request_uses_one_strict_release_transition_selector(self):
         """CI must pass the classifier's exact safe mode to the renderer."""
 
         self.assertIn(
-            'release_mode="$(python3 scripts/validate_release_transition.py select-mode)"',
+            'release_mode="$(python3 -B scripts/validate_release_transition.py select-mode)"',
             self.pull_request,
         )
         self.assertEqual(
             self.pull_request.count(
-                "python3 scripts/validate_release_transition.py select-mode"
+                "python3 -B scripts/validate_release_transition.py select-mode"
             ),
             1,
         )
@@ -216,10 +315,10 @@ class PublishWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("all-helm-suspended", self.pull_request)
         self.assertNotIn("grep -Eq", self.pull_request)
         state_check = self.pull_request.index(
-            "python3 scripts/validate_release_transition.py select-mode"
+            "python3 -B scripts/validate_release_transition.py select-mode"
         )
         repository_check = self.pull_request.index(
-            "python3 scripts/validate_repository.py all"
+            "python3 -B scripts/validate_repository.py all"
         )
         exact_render = self.pull_request.index(
             './scripts/render-kubernetes.sh "--${release_mode}"'

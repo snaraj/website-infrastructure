@@ -12,6 +12,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 VALID = (ROOT / "bootstrap" / "pi" / "encryption-config.yaml.example").read_text(encoding="utf-8")
+VALID = VALID.replace("REPLACE_KEY_NAME", "key-2026-08")
 VALID = VALID.replace("REPLACE_BASE64_32_BYTE_KEY", base64.b64encode(b"a" * 32).decode("ascii"))
 
 
@@ -25,11 +26,11 @@ class EncryptionConfigTests(unittest.TestCase):
 
     def test_rejects_identity_first(self):
         identity_first = VALID.replace(
-            "      - secretbox:\n          keys:\n            - name: key-2026-01\n"
+            "      - secretbox:\n          keys:\n            - name: key-2026-08\n"
             "              secret: " + base64.b64encode(b"a" * 32).decode("ascii") + "\n"
             "      - identity: {}",
             "      - identity: {}\n"
-            "      - secretbox:\n          keys:\n            - name: key-2026-01\n"
+            "      - secretbox:\n          keys:\n            - name: key-2026-08\n"
             "              secret: " + base64.b64encode(b"a" * 32).decode("ascii"),
         )
         self.assert_rejected(identity_first, "secretbox first")

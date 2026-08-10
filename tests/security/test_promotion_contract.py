@@ -1,5 +1,6 @@
 """Keep digest promotion exact while sharing its verification machinery."""
 
+import importlib.util
 import re
 import unittest
 from pathlib import Path
@@ -7,6 +8,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMOTION = REPO_ROOT / "scripts" / "promote-image.sh"
+TRANSITION_SCRIPT = REPO_ROOT / "scripts" / "validate_release_transition.py"
+TRANSITION_SPEC = importlib.util.spec_from_file_location(
+    "validate_release_transition_for_promotion", TRANSITION_SCRIPT
+)
+if TRANSITION_SPEC is None or TRANSITION_SPEC.loader is None:
+    raise RuntimeError("release transition validator could not be loaded")
+TRANSITION = importlib.util.module_from_spec(TRANSITION_SPEC)
+TRANSITION_SPEC.loader.exec_module(TRANSITION)
 
 
 class PromotionContractTests(unittest.TestCase):
@@ -151,20 +160,26 @@ class PromotionContractTests(unittest.TestCase):
             self.script,
         )
         self.assertIn('declare -A initial_state_fingerprints=()', self.script)
-        for relative_path in (
-            "infrastructure/cloudflare/dns.tf",
-            "infrastructure/cloudflare/locals.tf",
-            "infrastructure/cloudflare/outputs.tf",
-            "infrastructure/cloudflare/private-routing.tf",
-            "infrastructure/cloudflare/providers.tf",
-            "infrastructure/cloudflare/security.tf",
-            "infrastructure/cloudflare/tunnels.tf",
-            "infrastructure/cloudflare/variables.tf",
-            "infrastructure/cloudflare/versions.tf",
-            "infrastructure/cloudflare/zero-trust.tf",
-        ):
-            with self.subTest(relative_path=relative_path):
-                self.assertIn("'{}'".format(relative_path), self.script)
+        inventory_match = re.search(
+            r"(?ms)^declare -a release_state_paths=\(\n(?P<body>.*?)^\)\n",
+            self.script,
+        )
+        self.assertIsNotNone(inventory_match)
+        cloudflare_review_paths = tuple(
+            path
+            for path in re.findall(
+                r"(?m)^  '([^']+)'$", inventory_match.group("body")
+            )
+            if path.startswith("infrastructure/cloudflare/")
+        )
+        expected_cloudflare_review_paths = tuple(
+            path.as_posix()
+            for path in sorted(TRANSITION.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
+        )
+        self.assertEqual(
+            cloudflare_review_paths,
+            expected_cloudflare_review_paths,
+        )
         self.assertIn('require_transition_snapshots_unchanged', self.script)
         self.assertEqual(
             self.script.count('require_transition_snapshots_unchanged'), 3

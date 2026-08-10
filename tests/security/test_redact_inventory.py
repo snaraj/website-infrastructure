@@ -32,6 +32,61 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("[REDACTED_UUID]", output)
         self.assertIn("[REDACTED_IPv4]", output)
 
+    def test_redacts_age_identity_families_and_cloudflare_token_formats(self):
+        """Redaction keeps pace with native PQ age and prefixed Cloudflare tokens."""
+
+        secrets = (
+            "AGE-" + "SECRET-KEY-1" + ("A" * 58),
+            "AGE-" + "SECRET-KEY-PQ-1" + ("A" * 128),
+            "cfk_" + ("A" * 40) + "deadbeef",
+            "cfut_" + ("B" * 40) + "cafebabe",
+            "cfat_" + ("C" * 40) + "0123abcd",
+        )
+        legacy = "L" * 40
+        output = self.redact(
+            "\n".join(secrets)
+            + "\ncloudflare_api_token='"
+            + legacy
+            + "'\n"
+        )
+        for value in secrets + (legacy,):
+            with self.subTest(prefix=value[:16]):
+                self.assertNotIn(value, output)
+        self.assertEqual(output.count("[REDACTED_AGE_IDENTITY]"), 2)
+        self.assertEqual(output.count("[REDACTED_CLOUDFLARE_TOKEN]"), 3)
+        self.assertIn("cloudflare_api_token='[REDACTED]'", output)
+
+    def test_redacts_cloudflare_contexts_and_complete_private_key_blocks(self):
+        legacy = "L" * 40
+        bearer = "B" * 40
+        tunnel = "eyJ" + ("T" * 96)
+        private_body = "VERY-SENSITIVE-PRIVATE-MATERIAL"
+        output = self.redact(
+            "cloudflare_api_token: " + legacy + "\n"
+            "Authorization: Bearer " + bearer + "\n"
+            "tunnel_token=" + tunnel + "\n"
+            "-----BEGIN ENCRYPTED " + "PRIVATE KEY-----\n"
+            + private_body + "\n"
+            "-----END ENCRYPTED " + "PRIVATE KEY-----\n"
+            "after=public\n"
+        )
+        for value in (legacy, bearer, tunnel, private_body):
+            self.assertNotIn(value, output)
+        self.assertIn("cloudflare_api_token: [REDACTED]", output)
+        self.assertIn("Authorization: Bearer [REDACTED]", output)
+        self.assertIn("tunnel_token=[REDACTED]", output)
+        self.assertIn("[REDACTED_PRIVATE_KEY_BLOCK]", output)
+        self.assertIn("after=public", output)
+
+    def test_redactor_preserves_public_age_recipient_and_token_near_miss(self):
+        """Public recipients and malformed token-like text remain useful evidence."""
+
+        public_recipient = "age1pq1" + ("q" * 128)
+        near_miss = "cfut_" + ("A" * 39) + "deadbeef"
+        output = self.redact(public_recipient + "\n" + near_miss + "\n")
+        self.assertIn(public_recipient, output)
+        self.assertIn(near_miss, output)
+
     def test_redacts_legacy_wallet_anonymity_rpc_and_vpn_shapes(self):
         """Defense-in-depth strips common crown-jewel shapes if a probe regresses."""
 

@@ -1,6 +1,381 @@
 schemaVersion: 1
+architectureContractVersion: 3
 defaultDecision: deny
 infrastructureCostUsd: 0
+
+phaseArchitecture:
+  requiredIndependentRootCount: 7
+  requiredRootsInCeremonyOrder:
+    - admin-tunnel
+    - admin-policies
+    - admin-route
+    - admin-api
+    - public-edge
+    - public-dns-naranjo
+    - public-dns-lidersea
+  finalActivationPhase: public-dns-lidersea
+  baseManagedResourceCount: 8
+  optionalAdminApiResourceCount: 1
+  maximumManagedResourceCount: 9
+  combinedRoot: forbidden
+  sharedState: forbidden
+  sharedApplyToken: forbidden
+  concurrentWriteTokens: forbidden
+  crossPhaseResourceAddress: reject
+  globalEnableCountGate: forbidden
+  acknowledgementMechanism: lifecycle-precondition
+  falseAcknowledgementOutcome: plan-failure-without-destroy-intent
+  deleteAction: reject
+  replacementAction: reject
+  initialOnboardingAction: create-only
+  initialOnboardingPriorObject: absent
+  importOrReconciliationPlan: separate-future-gate-required
+  unknownSecurityCriticalValue: reject
+  providerConfiguration:
+    exactCount: 1
+    exactName: cloudflare
+    configurationArguments: none
+    authentication: environment-only
+  moduleCalls: forbidden
+  dataSources: forbidden
+  provisioners: forbidden
+  nonManagedModes: forbidden
+  ignoredOrExtraPhaseFiles: forbidden
+
+credentialReach:
+  planIntentIsTokenBoundary: false
+  exactTunnelApiTokenScope: unsupported
+  exactGatewayPolicyApiTokenScope: unsupported
+  exactPrivateRouteApiTokenScope: unsupported
+  exactDnsRecordApiTokenScope: unsupported
+  accountPermissionsReachSelectedAccountResourceClass: true
+  zoneDnsWriteReachesAllRecordsInSelectedZone: true
+  writePermissionIncludesCreateUpdateDeleteList: true
+  unavoidableResidualReachDecision: accept-only-with-all-compensating-controls
+  requiredCompensatingControls:
+    - one-new-jit-token-per-phase
+    - only-one-write-token-live
+    - one-selected-account-or-zone
+    - minimum-current-permission-group
+    - short-explicit-token-ttl
+    - trusted-source-ip-filter
+    - exact-protected-saved-plan-hash
+    - phase-specific-plan-and-audit-gates
+    - exact-resource-address-type-count-and-field-allowlist
+    - prevent-destroy-on-every-resource
+    - deny-delete-and-replacement
+    - complete-affected-resource-class-or-zone-post-audit
+    - immediate-revocation-and-verification
+    - redacted-revocation-receipt
+
+phaseContracts:
+  admin-tunnel:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_tunnel_cloudflared.pi_admin
+    forbiddenResourceTypes:
+      - cloudflare_zero_trust_gateway_policy
+      - cloudflare_zero_trust_tunnel_cloudflared_route
+      - cloudflare_zero_trust_tunnel_cloudflared_config
+      - cloudflare_dns_record
+    requiredBeforeExit:
+      - complete-selected-account-tunnel-audit
+      - no-unrelated-tunnel-change
+      - admin-tunnel-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: applicable-connectors-across-selected-account
+    exactPlanIntent: pi-admin-tunnel-only
+
+  admin-policies:
+    required: true
+    exactResourceCount: 2
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_gateway_policy.pi_admin_block
+      - cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow
+    forbiddenResourceTypes:
+      - cloudflare_zero_trust_tunnel_cloudflared
+      - cloudflare_zero_trust_tunnel_cloudflared_route
+      - cloudflare_zero_trust_tunnel_cloudflared_config
+      - cloudflare_dns_record
+    requiredInputContracts:
+      - admin-tunnel-contract-sha256
+      - independently-approved-admin-posture-contract-sha256
+      - admin-policy-inputs-contract-sha256
+    requiredBeforeExit:
+      - exact-pi-catch-all-block-enabled
+      - exact-tcp-22-identity-device-allow-enabled
+      - ssh-allow-precedence-lower-than-block
+      - complete-relevant-policy-audit
+      - no-unrelated-policy-change
+      - admin-policies-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: applicable-gateway-policies-across-selected-account
+    exactPlanIntent:
+      - pi-admin-block
+      - pi-admin-ssh-allow
+
+  admin-route:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin
+    requiredInputContracts:
+      - admin-posture-contract-sha256
+      - admin-policies-contract-sha256
+    exactNetworkShape: one-rfc1918-ipv4-32
+    exactTunnel: pi-admin
+    requiredRecoveryEvidence:
+      schema: admin-recovery-session-v1
+      maximumAgeSeconds: 300
+      physicalConsoleChallenge: required
+      simultaneousDistinctRetainedSessions: 2
+      separateFreshLoginChallenge: required
+      gateEvidenceRole: operator-attestation-not-connectivity-proof
+    requiredBeforeExit:
+      - complete-relevant-route-audit
+      - no-unrelated-route-change
+      - admin-route-contract-sha256
+      - admin-api-inputs-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: applicable-private-routes-across-selected-account
+    exactPlanIntent: one-pi-32-through-pi-admin
+
+  admin-api:
+    required: false
+    defaultOff: true
+    separateApproval: required
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_gateway_policy.pi_admin_api_allow
+    requiredInputContracts:
+      - admin-posture-contract-sha256
+      - admin-policies-contract-sha256
+      - admin-route-contract-sha256
+      - admin-api-inputs-contract-sha256
+    requiredRecoveryEvidence:
+      schema: admin-recovery-session-v1
+      maximumAgeSeconds: 300
+      physicalConsoleChallenge: required
+      simultaneousDistinctRetainedSessions: 2
+      separateFreshLoginChallenge: required
+      gateEvidenceRole: operator-attestation-not-connectivity-proof
+    exactTraffic:
+      protocol: tcp
+      destinationPorts:
+        - 6443
+    requiredPrecedence:
+      after: pi-admin-ssh-allow
+      before: pi-admin-block
+    requiredBeforeExit:
+      - complete-relevant-policy-audit
+      - no-unrelated-policy-change
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: applicable-gateway-policies-across-selected-account
+    exactPlanIntent: pi-admin-api-allow-only
+
+  public-edge:
+    required: true
+    exactResourceCount: 2
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_tunnel_cloudflared.pi_websites
+      - cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites
+    exactTunnel: pi-websites
+    requiredPreflightAuditPhase: public-edge-preflight
+    requiredPreservedAdminContracts:
+      - healthy-admin-tunnel-contract-sha256
+      - exact-admin-posture-contract-sha256
+      - complete-admin-policies-contract-sha256
+      - exact-admin-route-contract-sha256
+      - complete-gateway-policy-inventory-two-with-api-absent-or-three-with-api-exact
+    exactIngressOrder:
+      - hostname: naranjo.online
+        service: http://naranjo-online.naranjo-online.svc.cluster.local:8080
+      - hostname: lidersea.com
+        service: http://lidersea-com.lidersea-com.svc.cluster.local:8080
+      - terminalService: http_status:404
+    requiredBeforeExit:
+      - complete-selected-account-tunnel-and-config-audit
+      - no-unrelated-tunnel-or-config-change
+      - exact-ordered-ingress-audited
+      - terminal-404-audited
+      - public-edge-contract-sha256
+      - verified-token-revocation-receipt
+    requiredPreflightApexState:
+      naranjo.online: absent
+      lidersea.com: absent
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: applicable-connectors-and-configs-across-selected-account
+    exactPlanIntent: pi-websites-tunnel-and-config-only
+
+  public-dns-naranjo:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_dns_record.naranjo_online
+    requiredInputContract: public-edge-contract-sha256
+    exactRecord:
+      zone: naranjo.online
+      name: naranjo.online
+      type: CNAME
+      proxied: true
+      ttl: 1
+      targetTunnel: pi-websites
+    apexRecordConflict: reject
+    requiredPreApplyApexState:
+      naranjo.online: absent
+      lidersea.com: absent
+    requiredPostApplyApexState:
+      naranjo.online: exact
+      lidersea.com: absent
+    requiredBeforeExit:
+      - complete-naranjo-online-zone-audit
+      - no-unrelated-dns-record-change
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-naranjo-online-zone
+    unavoidableWriteReach: every-dns-record-in-naranjo-online-zone
+    exactPlanIntent: naranjo-online-apex-cname-only
+
+  public-dns-lidersea:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_dns_record.lidersea_com
+    requiredInputContract: public-edge-contract-sha256
+    priorNaranjoZoneAuditAndRevocationReceipt: required
+    exactRecord:
+      zone: lidersea.com
+      name: lidersea.com
+      type: CNAME
+      proxied: true
+      ttl: 1
+      targetTunnel: pi-websites
+    apexRecordConflict: reject
+    requiredPreApplyApexState:
+      naranjo.online: exact
+      lidersea.com: absent
+    requiredPostApplyApexState:
+      naranjo.online: exact
+      lidersea.com: exact
+    requiredBeforeExit:
+      - complete-lidersea-com-zone-audit
+      - no-unrelated-dns-record-change
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-lidersea-com-zone
+    unavoidableWriteReach: every-dns-record-in-lidersea-com-zone
+    exactPlanIntent: lidersea-com-apex-cname-only
+
+phaseCustody:
+  state:
+    oneEncryptedProtectedPathPerRoot: required
+    expectedIndependentStateCount: 7
+    parsedLocalBackendMetadataAndExactPath: required
+    currentPhaseStateStableHandleAndSha256: required-when-present
+    unchangedParentAndAbsentLeafProof: required-for-first-create-absence
+    canonicalNineLineStateEvidenceReceiptBinding: required
+    tokenReceiptExplicitStateModeAndDerivedBinding: required
+    absentTokenReceiptStateSha256: null
+    presentTokenReceiptStateSha256: required-nonzero
+    callerAssertedLineageOrSerial: forbidden
+    repositoryAdjacentState: forbidden
+    crossPhaseRemoteStateRead: forbidden
+    stateInGitEvenEncrypted: forbidden
+    stateBackupInGit: forbidden
+  plans:
+    protectedStorage: required
+    oneReviewedPlanHashPerPhase: required
+    applyOnlySavedPlan: required
+    planOrPlanJsonInGit: forbidden
+    exactPhaseAndPolicyDirectoryInventory: required
+    ignoredOverridesAndCaches: forbidden
+    protectedInputAndPolicySnapshots: required
+    perArtifactWindowsAclReparseHardLinkAndSameHandleValidation: required
+    boundedFreshProtectedFileSetAttestation: required
+    sourceAndRepositoryRecheckBeforePass: required
+  manualPreapplyAttestation:
+    closedSchema: cloudflare-preapply-manual-v1
+    protectedStableHandle: required
+    maximumValiditySeconds: 300
+    freeZeroPaidMfaJitScopeIpTtlAndRecoveryReview: required
+    substitutesForLiveTokenPreflight: false
+    applyAuthorization: false
+  credentials:
+    oneShortLivedApplyTokenPerPhase: required
+    expectedDistinctWriteTokenCountForAllSevenPhases: 7
+    applyTokenReuseAcrossPhases: forbidden
+    simultaneousWriteTokens: forbidden
+    readOnlyAuditTokenSeparate: required
+    piAdminRuntimeTokenSeparate: required
+    piWebsitesRuntimeTokenSeparate: required
+    providerAuthenticationSource: CLOUDFLARE_API_TOKEN
+    providerDataSourceForRuntimeTokens: forbidden
+    plaintextCredentialInTerraformVariable: forbidden
+    decryptedSopsMaterialInGitOrLogs: forbidden
+    shortExplicitTtl: required
+    trustedSourceIpRestriction: required
+    immediatePostWindowRevocation: required
+    revocationVerification: required
+    receiptMayContainTokenValue: false
+    requiredReceiptFields:
+      - phase
+      - token-id
+      - permission-groups
+      - account-or-zone-selector
+      - source-ip-restriction
+      - issue-time
+      - expiry-time
+      - plan-sha256
+      - explicit-state-mode
+      - derived-state-binding-sha256
+      - pre-operation-audit-sha256
+      - distinct-post-operation-audit-sha256
+      - revocation-time
+      - revocation-verification-result
+
+tunnelSeparation:
+  exactTunnelCount: 2
+  adminTunnel:
+    name: pi-admin
+    owningRoot: admin-tunnel
+    publicIngress: forbidden
+    publicDns: forbidden
+    allowedPrivateRoutes:
+      - exact-pi-rfc1918-ipv4-32
+  publicTunnel:
+    name: pi-websites
+    owningRoot: public-edge
+    privateRoute: forbidden
+    allowedPublicHostnames:
+      - naranjo.online
+      - lidersea.com
+  tunnelIdEquality: forbidden
+
+hostSafetyBoundary:
+  cloudflarePhaseMayMutateUfw: false
+  cloudflarePhaseMayMutateWireGuardOrWarpEnrollment: false
+  cloudflarePhaseMayMutateSsh: false
+  cloudflarePhaseMayMutateTor: false
+  recoveryAndTwoSessionsRequiredBeforeRouteOrHostNetworkMutation: true
+
+deploymentStatus:
+  decision: blocked
+  policyPassIsApplyAuthorization: false
+  unresolvedLiveBlockers:
+    - strict-current-phase-token-preflight-authorization-receipt
+    - child-process-only-provider-token-launcher
+    - distinct-post-apply-closure-gate
+    - full-broad-token-resource-class-before-after-digests
+    - connector-and-config-inventory-delta-closure
+    - all-zero-trust-writable-surface-delta-closure
+    - private-virtual-network-delta-closure
+    - token-id-attributed-cloudflare-audit-log-delta
+    - absolute-path-sha256-tool-provenance
+    - read-only-live-api-schema-and-normalization-confirmation
+
 zonePlanBoundary:
   expectedActiveZoneCount: 2
   authorizedPlan: free
@@ -15,15 +390,18 @@ zonePlanBoundary:
     annualCommitment: 40
     monthToMonth: 50
   freshOfficialPriceAuditRequiredBeforeAnyDecision: true
+
 authorizedCharges:
   - product: registrar-domain-renewal
     classification: separate-from-infrastructure
+
 allowedResourceTypes:
   - cloudflare_dns_record
   - cloudflare_zero_trust_gateway_policy
   - cloudflare_zero_trust_tunnel_cloudflared
   - cloudflare_zero_trust_tunnel_cloudflared_config
   - cloudflare_zero_trust_tunnel_cloudflared_route
+
 allowedProducts:
   - exactly-two-active-free-domain-zones
   - existing-free-zone
@@ -32,6 +410,7 @@ allowedProducts:
   - universal-ssl
   - cloudflare-tunnel
   - zero-trust-free-verified-at-plan-time
+
 forbiddenProducts:
   - workers
   - pages-functions
@@ -61,11 +440,17 @@ forbiddenProducts:
   - subscription-mutations
   - plan-upgrades
   - unknown-products
+
 requiredControls:
   unknownEntitlement: reject
+  unknownPrice: reject
+  nonzeroInfrastructurePrice: reject
   billingWritePermission: forbidden
   registrarWritePermission: forbidden
   automaticPaidFallback: forbidden
   preAndPostSubscriptionAudit: required
+  completeAffectedResourceClassOrZoneAudit: required
+  matchingPhaseAuditContract: required-when-dependent
   reviewedPlanHash: required
   explicitHumanApproval: required
+  largeMediaDelivery: forbidden

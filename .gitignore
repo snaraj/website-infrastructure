@@ -15,10 +15,37 @@ known_hosts*
 *.kubeconfig
 *.dec.*
 *.plaintext.*
+*.age
+*.7z
+*.asc
+*.bin
+*.blob
+*.bz2
+*.enc
+*.encrypted
+*.gpg
+*.pgp
+*.rar
+*.tar
+*.tar.*
+*.tgz
+*.token
+*.xz
+*.zip
+*.zst
+*.sops.json
+*.sops.env
+*.sops.ini
 cloudflared-token*
+pi-admin.token
 kubeconfig*
+*cloudflare*receipt*.json
+*receipt*cloudflare*.json
+PowerShell_transcript.*.txt
+*.transcript.txt
 bootstrap/pi/kubeadm-config.yaml.local
-bootstrap/pi/encryption-config.yaml.local
+api-encryption-config.yaml
+encryption-config.yaml.local
 bootstrap/pi/decisions.env.local
 bootstrap/pi/protected-services.env.local
 bootstrap/pi/protected-legacy-runtime-evidence.local
@@ -31,6 +58,9 @@ bootstrap/pi/cni-manifest.local.yaml
 *.tfstate
 *.tfstate.*
 *.tfplan
+*.tfplan.json
+*.tfbackend
+*.backend.hcl
 terraform.tfvars
 terraform.tfvars.json
 *.auto.tfvars
@@ -41,6 +71,8 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+terraform.rc
+.terraformrc
 
 # Generated validation artifacts
 .artifacts/
@@ -69,5 +101,8 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+*.bak
+*.tmp
+*~
 
 # Keep SOPS ciphertext tracked. Do not add *.sops.yaml here.

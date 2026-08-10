@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      # Keep ignored bytecode out of the checkout. Binary caches are neither
+      # reviewed source nor an acceptable input to later full-tree scanners.
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,27 +28,133 @@ jobs:
           fetch-depth: 0
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
+      - name: Scan immutable pull-request history
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            printf 'FAIL immutable pull-request history validation.\n' >&2
+            exit 1
+          }
+
+          readonly oid_pattern='^([0-9a-f]{40}|[0-9a-f]{64})$'
+          [[ "${GITHUB_EVENT_NAME}" == pull_request ]] || fail
+          [[ "${GITHUB_REPOSITORY}" == "${PR_BASE_REPOSITORY}" ]] || fail
+          [[ "${PR_BASE_REF}" == main ]] || fail
+          [[ "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] || fail
+          [[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]] || fail
+          [[ "${PR_BASE_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "${PR_HEAD_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "${GITHUB_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "$(git rev-parse --is-shallow-repository)" == false ]] || fail
+
+          checked_out_sha="$(git rev-parse --verify 'HEAD^{commit}')" || fail
+          [[ "${checked_out_sha}" == "${GITHUB_SHA}" ]] || fail
+          merge_record_text="$(git rev-list --parents -n 1 "${checked_out_sha}")" || fail
+          read -r -a merge_record <<< "${merge_record_text}"
+          [[ "${#merge_record[@]}" -eq 3 ]] || fail
+          [[ "${merge_record[0]}" == "${checked_out_sha}" ]] || fail
+          [[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]] || fail
+          [[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]] || fail
+          [[ "$(git rev-parse --verify "${PR_BASE_SHA}^{commit}")" == "${PR_BASE_SHA}" ]] || fail
+          [[ "$(git rev-parse --verify "${PR_HEAD_SHA}^{commit}")" == "${PR_HEAD_SHA}" ]] || fail
+
+          python3 -I -B scripts/validate_publication_history.py \
+            --pull-request "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || fail
+
+          expected_version="$(awk -F= '
+            $1 == "GITLEAKS_VERSION" && $2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {
+              count += 1; value = $2
+            }
+            END { if (count == 1) print value }
+          ' versions.env)" || fail
+          [[ -n "${expected_version}" ]] || fail
+          actual_version="$(gitleaks version 2>/dev/null | tr -d '\r\n')" || fail
+          [[ "${actual_version}" == "${expected_version}" || "v${actual_version}" == "${expected_version}" ]] || fail
+
+          old_umask="$(umask)"
+          umask 077
+          empty_ignore="$(mktemp "${RUNNER_TEMP}/pull-request-gitleaks-ignore.XXXXXX")" || fail
+          umask "${old_umask}"
+          cleanup() {
+            rm -f -- "${empty_ignore}"
+          }
+          abort() {
+            trap - EXIT HUP INT TERM
+            cleanup
+            exit 1
+          }
+          trap cleanup EXIT
+          trap abort HUP INT TERM
+          [[ -f "${empty_ignore}" && ! -L "${empty_ignore}" && ! -s "${empty_ignore}" ]] || fail
+
+          gitleaks git \
+            --no-banner \
+            --no-color \
+            --redact \
+            --ignore-gitleaks-allow \
+            --gitleaks-ignore-path="${empty_ignore}" \
+            --max-archive-depth=1 \
+            --max-decode-depth=1 \
+            --max-target-megabytes=2 \
+            --timeout=120 \
+            --config policies/gitleaks.toml \
+            --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}" \
+            . || fail
+
+          [[ -f "${empty_ignore}" && ! -L "${empty_ignore}" && ! -s "${empty_ignore}" ]] || fail
+          cleanup || fail
+          [[ ! -e "${empty_ignore}" ]] || fail
+          trap - EXIT HUP INT TERM
       - name: Validate workflows
         run: actionlint
       - name: Validate Python policy tooling
         run: |
-          python3 -m py_compile scripts/validate_repository.py scripts/validate_image_release.py scripts/validate_release_state.py scripts/validate_release_transition.py scripts/validate_frontend_dist.py scripts/redact_inventory.py
-          python3 -m unittest discover -s tests -p 'test_*.py' -v
-          python3 scripts/validate_repository.py all
+          python3 -I -B - <<'PY'
+          from pathlib import Path
+
+          for relative in (
+              "scripts/validate_repository.py",
+              "scripts/validate_image_release.py",
+              "scripts/validate_release_state.py",
+              "scripts/validate_release_transition.py",
+              "scripts/validate_frontend_dist.py",
+              "scripts/redact_inventory.py",
+          ):
+              path = Path(relative)
+              compile(path.read_bytes(), str(path), "exec", dont_inherit=True)
+          PY
+          python3 -B -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -B scripts/validate_repository.py all
       - name: Require independent version bumps for changed release inputs
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 scripts/validate_image_release.py changed --base "${BASE_SHA}"
+        run: python3 -B scripts/validate_image_release.py changed --base "${BASE_SHA}"
       - name: Check shell
         run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
       - name: Check Dockerfile
         run: hadolint websites/naranjo.online/Dockerfile websites/lidersea.com/Dockerfile
       - name: Scan current tree for secrets
-        run: gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
+        run: |
+          ambient_python_artifact="$(
+            find . \( -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) \) -print -quit
+          )"
+          if [ -n "${ambient_python_artifact}" ]; then
+            printf 'Generated Python artifact remained in the checkout: %s\n' "${ambient_python_artifact}" >&2
+            exit 1
+          fi
+          gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
       - name: Render and validate Helm and Kubernetes
         run: |
-          release_mode="$(python3 scripts/validate_release_transition.py select-mode)"
+          release_mode="$(python3 -B scripts/validate_release_transition.py select-mode)"
           case "${release_mode}" in
             scaffold|transition|release) ;;
             *) printf 'Unsafe release transition mode.\n' >&2; exit 1 ;;
@@ -56,13 +166,7 @@ jobs:
       - name: Test staged Kyverno policies
         run: kyverno test tests/kubernetes/kyverno
       - name: Validate OpenTofu without credentials
-        run: |
-          tofu -chdir=infrastructure/cloudflare fmt -check -recursive
-          tofu -chdir=infrastructure/cloudflare init -backend=false
-          tofu -chdir=infrastructure/cloudflare validate
-          test -f infrastructure/cloudflare/.terraform.lock.hcl
-          test -z "$(git status --porcelain -- infrastructure/cloudflare/.terraform.lock.hcl)"
-          ./scripts/test-cloudflare-policy.sh
+        run: ./scripts/validate-cloudflare-iac.sh
       - name: Scan dependencies and full-tree secrets
         run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,secret --severity HIGH,CRITICAL .
       - name: Scan IaC and configuration

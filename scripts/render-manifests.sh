@@ -63,7 +63,7 @@ done
 mode_name="${MODE#--}"
 release_plan=''
 if ! release_plan="$(
-  python3 "${REPO_ROOT}/scripts/validate_release_transition.py" plan \
+  python3 -B "${REPO_ROOT}/scripts/validate_release_transition.py" plan \
     --expect-mode "$mode_name"
 )"; then
   die "authoritative release state does not permit ${MODE}"
@@ -220,7 +220,7 @@ for row in "${CHART_ROWS[@]}"; do
   if [[ "$MODE" != '--scaffold' ]]; then
     release_values="$(mktemp "${TMPDIR:-/tmp}/website-infra-release-values.${release_name}.XXXXXX")"
     temporary_values+=("$release_values")
-    python3 "${REPO_ROOT}/scripts/validate_release_state.py" emit-values \
+    python3 -B "${REPO_ROOT}/scripts/validate_release_state.py" emit-values \
       --release "$release_name" >"$release_values"
     [[ -s "$release_values" ]] || die "effective HelmRelease values are empty for ${release_name}"
     helm_values_args=(--values "$release_values")
