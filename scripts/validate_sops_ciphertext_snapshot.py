@@ -302,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
 
     arguments = sys.argv[1:] if argv is None else argv
     try:
-        if arguments or sys.flags.isolated != 1:
+        if (
+            arguments
+            or sys.flags.isolated != 1
+            or sys.flags.dont_write_bytecode != 1
+        ):
             raise SnapshotError()
         validate()
     except Exception:

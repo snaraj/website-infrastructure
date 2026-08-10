@@ -41,8 +41,8 @@ class TrivyScanContractTests(unittest.TestCase):
             "--scanners vuln,secret --severity HIGH,CRITICAL ."
         )
         compensating_validators = {
-            PULL_REQUEST: "python3 scripts/validate_repository.py all",
-            SCHEDULED: "python3 scripts/validate_repository.py kubernetes",
+            PULL_REQUEST: "python3 -B scripts/validate_repository.py all",
+            SCHEDULED: "python3 -B scripts/validate_repository.py kubernetes",
         }
         for path, validator in compensating_validators.items():
             workflow = path.read_text(encoding="utf-8")

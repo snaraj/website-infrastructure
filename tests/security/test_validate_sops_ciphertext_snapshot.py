@@ -298,6 +298,7 @@ class SopsCiphertextSnapshotCliTests(unittest.TestCase):
         ciphertext: Path | None,
         *arguments: str,
         isolated: bool = True,
+        bytecode_disabled: bool = True,
     ):
         environment = os.environ.copy()
         for name, path in (
@@ -311,6 +312,8 @@ class SopsCiphertextSnapshotCliTests(unittest.TestCase):
         command = [sys.executable]
         if isolated:
             command.append("-I")
+        if bytecode_disabled:
+            command.append("-B")
         command.append(str(SCRIPT))
         command.extend(arguments)
         return subprocess.run(
@@ -346,6 +349,18 @@ class SopsCiphertextSnapshotCliTests(unittest.TestCase):
             self.assertEqual(nonisolated.stdout, "")
             self.assertEqual(
                 nonisolated.stderr,
+                "FAIL SOPS ciphertext snapshot validation.\n",
+            )
+
+            cache_writing = self.run_cli(
+                config,
+                ciphertext,
+                bytecode_disabled=False,
+            )
+            self.assertEqual(cache_writing.returncode, 1)
+            self.assertEqual(cache_writing.stdout, "")
+            self.assertEqual(
+                cache_writing.stderr,
                 "FAIL SOPS ciphertext snapshot validation.\n",
             )
 
@@ -403,6 +418,7 @@ class SopsCiphertextSnapshotCliTests(unittest.TestCase):
             MODULE, "validate", side_effect=RuntimeError("protected-value")
         ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             flags.isolated = 1
+            flags.dont_write_bytecode = 1
             result = MODULE.main([])
         self.assertEqual(result, 1)
         self.assertEqual(stdout.getvalue(), "")
@@ -450,6 +466,7 @@ class SopsCiphertextSnapshotCliTests(unittest.TestCase):
             'SOPS_CONFIG_SNAPSHOT_ENV = "SOPS_CONFIG_SNAPSHOT_FILE"',
             'SOPS_CIPHERTEXT_SNAPSHOT_ENV = "SOPS_CIPHERTEXT_SNAPSHOT_FILE"',
             "sys.flags.isolated != 1",
+            "sys.flags.dont_write_bytecode != 1",
             "spec_from_file_location",
             "O_NOFOLLOW",
             "st_nlink != 1",

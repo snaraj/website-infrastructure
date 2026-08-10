@@ -76,7 +76,7 @@ file_sha256() {
   printf '%s' "${digest}"
 }
 
-"${python_command}" "${repo_root}/scripts/validate_repository.py" cloudflare
+"${python_command}" -B "${repo_root}/scripts/validate_repository.py" cloudflare
 tofu -chdir="${cloudflare_root}" fmt -check -recursive
 
 for phase in "${phases[@]}"; do

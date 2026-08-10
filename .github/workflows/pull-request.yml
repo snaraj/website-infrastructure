@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      # Keep ignored bytecode out of the checkout. Binary caches are neither
+      # reviewed source nor an acceptable input to later full-tree scanners.
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,23 +117,44 @@ jobs:
         run: actionlint
       - name: Validate Python policy tooling
         run: |
-          python3 -m py_compile scripts/validate_repository.py scripts/validate_image_release.py scripts/validate_release_state.py scripts/validate_release_transition.py scripts/validate_frontend_dist.py scripts/redact_inventory.py
-          python3 -m unittest discover -s tests -p 'test_*.py' -v
-          python3 scripts/validate_repository.py all
+          python3 -I -B - <<'PY'
+          from pathlib import Path
+
+          for relative in (
+              "scripts/validate_repository.py",
+              "scripts/validate_image_release.py",
+              "scripts/validate_release_state.py",
+              "scripts/validate_release_transition.py",
+              "scripts/validate_frontend_dist.py",
+              "scripts/redact_inventory.py",
+          ):
+              path = Path(relative)
+              compile(path.read_bytes(), str(path), "exec", dont_inherit=True)
+          PY
+          python3 -B -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -B scripts/validate_repository.py all
       - name: Require independent version bumps for changed release inputs
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 scripts/validate_image_release.py changed --base "${BASE_SHA}"
+        run: python3 -B scripts/validate_image_release.py changed --base "${BASE_SHA}"
       - name: Check shell
         run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
       - name: Check Dockerfile
         run: hadolint websites/naranjo.online/Dockerfile websites/lidersea.com/Dockerfile
       - name: Scan current tree for secrets
-        run: gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
+        run: |
+          ambient_python_artifact="$(
+            find . \( -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) \) -print -quit
+          )"
+          if [ -n "${ambient_python_artifact}" ]; then
+            printf 'Generated Python artifact remained in the checkout: %s\n' "${ambient_python_artifact}" >&2
+            exit 1
+          fi
+          gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
       - name: Render and validate Helm and Kubernetes
         run: |
-          release_mode="$(python3 scripts/validate_release_transition.py select-mode)"
+          release_mode="$(python3 -B scripts/validate_release_transition.py select-mode)"
           case "${release_mode}" in
             scaffold|transition|release) ;;
             *) printf 'Unsafe release transition mode.\n' >&2; exit 1 ;;

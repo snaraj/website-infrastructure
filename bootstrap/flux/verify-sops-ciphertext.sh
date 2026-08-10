@@ -287,7 +287,7 @@ recipient="${recipient_lines[0]}"
 
 SOPS_CONFIG_SNAPSHOT_FILE="${config}" \
 SOPS_CIPHERTEXT_SNAPSHOT_FILE="${ciphertext}" \
-  "${python3_binary}" -I "${validator_directory}/validate_sops_ciphertext_snapshot.py" \
+  "${python3_binary}" -I -B "${validator_directory}/validate_sops_ciphertext_snapshot.py" \
   >/dev/null || fail
 ciphertext_digest="$(sha256sum -- "${ciphertext}" | awk '{print $1}')" || fail
 [[ "${ciphertext_digest}" =~ ^[0-9a-f]{64}$ ]] || fail

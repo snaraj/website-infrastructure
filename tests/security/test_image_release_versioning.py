@@ -533,7 +533,7 @@ class ImageReleaseVersionTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", PULL_REQUEST)
         self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", PULL_REQUEST)
         self.assertIn(
-            'python3 scripts/validate_image_release.py changed --base "${BASE_SHA}"',
+            'python3 -B scripts/validate_image_release.py changed --base "${BASE_SHA}"',
             PULL_REQUEST,
         )
         self.assertNotIn("pull_request_target:", PULL_REQUEST)

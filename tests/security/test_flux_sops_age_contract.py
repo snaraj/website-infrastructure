@@ -207,6 +207,7 @@ class FluxSopsAgeStaticContractTests(unittest.TestCase):
             "EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256",
             "EXPECTED_CLOUDFLARE_TUNNEL_ID_SHA256",
             "validate_sops_ciphertext_snapshot.py",
+            '"${python3_binary}" -I -B "${validator_directory}/validate_sops_ciphertext_snapshot.py"',
             "validate_cloudflared_tunnel_token.py",
             "SOPS_AGE_KEY_FILE=\"${identity}\"",
             "unshare --user --map-current-user --net",

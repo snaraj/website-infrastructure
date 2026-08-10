@@ -457,21 +457,21 @@ render_local_artifacts() {
     # readiness/digest path from CI, release-gate, or the production controller.
     new_temp_file naranjo-online-release-values.yaml
     naranjo_release_values_path="${new_temp_path}"
-    python3 "${repo_root}/scripts/validate_release_state.py" emit-values \
+    python3 -B "${repo_root}/scripts/validate_release_state.py" emit-values \
       --release naranjo-online >"${naranjo_release_values_path}"
     [[ -s "${naranjo_release_values_path}" ]] || die 'naranjo.online effective release values are empty'
     naranjo_helm_values_args=(--values "${naranjo_release_values_path}")
 
     new_temp_file lidersea-com-release-values.yaml
     lidersea_release_values_path="${new_temp_path}"
-    python3 "${repo_root}/scripts/validate_release_state.py" emit-values \
+    python3 -B "${repo_root}/scripts/validate_release_state.py" emit-values \
       --release lidersea-com >"${lidersea_release_values_path}"
     [[ -s "${lidersea_release_values_path}" ]] || die 'lidersea.com effective release values are empty'
     lidersea_helm_values_args=(--values "${lidersea_release_values_path}")
 
     new_temp_file cloudflare-public-release-values.yaml
     cloudflare_release_values_path="${new_temp_path}"
-    python3 "${repo_root}/scripts/validate_release_state.py" emit-values \
+    python3 -B "${repo_root}/scripts/validate_release_state.py" emit-values \
       --release cloudflare-public >"${cloudflare_release_values_path}"
     [[ -s "${cloudflare_release_values_path}" ]] || die 'cloudflare-public effective release values are empty'
     cloudflare_helm_values_args=(--values "${cloudflare_release_values_path}")
@@ -598,7 +598,7 @@ detect_repository_release_mode() {
 
   if [[ -n "$transition_runtime_site" ]]; then
     if ! transition_plan="$(
-      python3 "${repo_root}/scripts/validate_release_transition.py" plan \
+      python3 -B "${repo_root}/scripts/validate_release_transition.py" plan \
         --expect-mode transition
     )"; then
       die 'authoritative release state does not permit transition runtime evidence'
@@ -870,7 +870,7 @@ render_transition_runtime_site() {
 
   new_temp_file "${transition_runtime_site}-transition-release-values.yaml"
   transition_release_values_path="$new_temp_path"
-  python3 "${repo_root}/scripts/validate_release_state.py" emit-values \
+  python3 -B "${repo_root}/scripts/validate_release_state.py" emit-values \
     --release "$transition_runtime_site" >"$transition_release_values_path"
   [[ -s "$transition_release_values_path" ]] || \
     die "${transition_runtime_site} effective transition values are empty"
@@ -1107,7 +1107,7 @@ revalidate_transition_runtime_state() {
 
   detect_repository_release_mode
   if ! current_values="$(
-    python3 "${repo_root}/scripts/validate_release_state.py" emit-values \
+    python3 -B "${repo_root}/scripts/validate_release_state.py" emit-values \
       --release "$transition_runtime_site"
   )"; then
     die "could not re-read ${transition_runtime_site} effective values"
