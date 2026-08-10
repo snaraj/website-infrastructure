@@ -1,5 +1,13 @@
 # website-infrastructure
 
+[![Pull request](https://github.com/snaraj/website-infrastructure/actions/workflows/pull-request.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/pull-request.yml)
+[![CodeQL](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml)
+[![Scheduled security](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml)
+
+Per-site Go and frontend coverage percentages are reported in each pull
+request run's job summary (badge links above); everything stays on
+GitHub-native, zero-spend tooling.
+
 GitOps source for a single Raspberry Pi 5 running upstream Kubernetes,
 bootstrapped with kubeadm on containerd, and two independently released
 websites built with Svelte frontends, Go services, and Helm charts. The intended
