@@ -1,0 +1,2 @@
+approve_admin_tunnel_phase = false
+cloudflare_account_id      = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"

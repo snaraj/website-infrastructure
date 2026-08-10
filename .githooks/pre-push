@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Git supplies the immutable ref update on stdin. Accept one non-delete branch
+# update only, then bind the security scan to the exact object Git will upload.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+remote_name="${1:-}"
+remote_url="${2:-}"
+[[ "${remote_name}" == origin ]] || exit 1
+github_ssh_url='git'
+github_ssh_url+='@'
+github_ssh_url+='github.com:snaraj/website-infrastructure.git'
+case "${remote_url}" in
+  https://github.com/snaraj/website-infrastructure.git|"${github_ssh_url}") ;;
+  *) exit 1 ;;
+esac
+updates=0
+candidate=''
+baseline=''
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  remote_sha="${remote_sha%$'\r'}"
+  updates=$((updates + 1))
+  [[ "${local_ref}" == refs/heads/* ]] || exit 1
+  [[ "${remote_ref}" == refs/heads/* ]] || exit 1
+  [[ "${local_ref}" == "${remote_ref}" ]] || exit 1
+  [[ ! "${local_sha}" =~ ^0{40}$ && ! "${local_sha}" =~ ^0{64}$ ]] || exit 1
+  [[ "${local_sha}" =~ ^[0-9a-f]{40,64}$ ]] || exit 1
+  if [[ ! "${remote_sha}" =~ ^0{40}$ && ! "${remote_sha}" =~ ^0{64}$ ]]; then
+    [[ "${remote_sha}" =~ ^[0-9a-f]{40,64}$ ]] || exit 1
+    git -C "${repo_root}" cat-file -e "${remote_sha}^{commit}" 2>/dev/null || exit 1
+    git -C "${repo_root}" merge-base --is-ancestor "${remote_sha}" "${local_sha}" || exit 1
+    baseline="${remote_sha}"
+  else
+    # A local tracking ref is mutable and cannot prove the remote's baseline
+    # for a first push. Resolve the one advertised main ref from the exact
+    # already-approved remote URL, then require that immutable object locally.
+    advertised_main="$(
+      git -C "${repo_root}" ls-remote --exit-code "${remote_url}" \
+        refs/heads/main 2>/dev/null
+    )" || exit 1
+    [[ "${advertised_main}" != *$'\n'* ]] || exit 1
+    IFS=$'\t' read -r baseline advertised_ref extra <<< "${advertised_main}"
+    [[ "${advertised_ref}" == refs/heads/main && -z "${extra:-}" ]] || exit 1
+    [[ "${baseline}" =~ ^[0-9a-f]{40,64}$ ]] || exit 1
+    git -C "${repo_root}" cat-file -e "${baseline}^{commit}" 2>/dev/null || exit 1
+    git -C "${repo_root}" merge-base --is-ancestor "${baseline}" "${local_sha}" || exit 1
+  fi
+  candidate="${local_sha}"
+done
+
+[[ "${updates}" -eq 1 && -n "${candidate}" && -n "${baseline}" ]] || exit 1
+[[ "${baseline}" != "${candidate}" ]] || exit 1
+exec bash "${repo_root}/scripts/pre-push-security.sh" "${baseline}" "${candidate}"

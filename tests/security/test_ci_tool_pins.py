@@ -9,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSIONS = REPO_ROOT / "versions.env"
 INSTALLER = REPO_ROOT / "scripts" / "ci" / "install-tools.sh"
 SCHEDULED_SECURITY = REPO_ROOT / ".github" / "workflows" / "scheduled-security.yml"
+GITLEAKS_POLICY = REPO_ROOT / "policies" / "gitleaks.toml"
 
 
 def version_values():
@@ -93,6 +94,19 @@ class CiToolPinTests(unittest.TestCase):
         self.assertIn("grep -Eqv '^[d-]'", self.installer)
         self.assertNotIn("tar -tf \"${archive}\" | grep", self.installer)
 
+    def test_github_actions_tools_stay_outside_the_scanned_checkout(self):
+        """Downloaded scanners must never become inputs to later repo scans."""
+
+        self.assertIn('"${GITHUB_ACTIONS:-}" == true', self.installer)
+        self.assertIn("RUNNER_TEMP:?GitHub Actions must provide RUNNER_TEMP", self.installer)
+        self.assertIn('"${repo_root}/"*', self.installer)
+        self.assertIn(
+            'mktemp -d "${tool_parent%/}/website-infrastructure-tools.XXXXXX"',
+            self.installer,
+        )
+        self.assertIn('tool_parent_input="${TMPDIR:-/tmp}"', self.installer)
+        self.assertNotIn("${repo_root}/.artifacts/bin", self.installer)
+
     def test_full_history_scan_uses_the_repository_secret_rules(self):
         """Scheduled history scanning must include the same custom detectors."""
 
@@ -101,6 +115,19 @@ class CiToolPinTests(unittest.TestCase):
             "gitleaks git --no-banner --redact --config policies/gitleaks.toml .",
             workflow,
         )
+
+    def test_gitleaks_scans_local_only_paths_and_current_credential_families(self):
+        """Force-added custody paths and newly scannable credentials stay covered."""
+
+        policy = GITLEAKS_POLICY.read_text(encoding="utf-8")
+        allowlist = policy.split("[[rules]]", 1)[0]
+        self.assertNotIn("\\.artifacts", allowlist)
+        self.assertNotIn("\\.terraform", allowlist)
+        self.assertIn("AGE-SECRET-KEY-(?:PQ-)?1", policy)
+        for prefix in ("cfk_", "cfut_", "cfat_"):
+            with self.subTest(prefix=prefix):
+                self.assertIn(prefix, policy)
+        self.assertIn("cloudflare_api_token", policy)
 
 
 if __name__ == "__main__":

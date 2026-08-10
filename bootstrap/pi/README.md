@@ -43,9 +43,25 @@ behavior, firewall, and policy routing unchanged.
    identities. Follow the
    [legacy archive runbook](../../docs/runbooks/protected-legacy-archive.md)
    before treating that capacity as available.
-2. Copy `decisions.env.example` to ignored `decisions.env.local`,
-   `kubeadm-config.yaml.example` to ignored `kubeadm-config.yaml.local`, and
-   `encryption-config.yaml.example` to ignored `encryption-config.yaml.local`.
+2. Copy `decisions.env.example` to ignored `decisions.env.local` and
+   `kubeadm-config.yaml.example` to ignored `kubeadm-config.yaml.local`.
+   Do not hand-edit `encryption-config.yaml.example` and do not invoke
+   `generate-encryption-config.sh` yet. Its latent no-display implementation is
+   reviewable, but the entrypoint is code-blocked before key generation because
+   an already-running mutable Bash file cannot attest its own stage-zero trust.
+   Reopening it requires a separately installed reviewed-blob launcher that
+   enters through a clean environment, extracts exact reviewed commit blobs
+   into protected custody, and holds stable file handles. Until that launcher
+   and its adversarial tests exist, do not supply secret-bearing environment
+   variables and do not generate the production API-encryption key. You may
+   prepare the separate Linux AMD64 LUKS-backed credential volume, disable swap,
+   core dumps, cloud sync, and session recording, and prepare two independent
+   encrypted backup destinations, but no key ceremony is authorized.
+   After the blocker is resolved, the fixed mode-`0600`
+   `api-encryption-config.yaml` must remain outside the repository, be supplied
+   as `ENCRYPTION_CONFIG_PATH` only for the reviewed preflight/bootstrap
+   session, and have two independently restore-tested encrypted backups before
+   `ENCRYPTION_KEY_BACKUP_PROVEN=yes` is set.
    Copy `images.lock.example` to ignored `images.lock.local` only after exact
    image import. Resolve only verified values and keep encryption key material
    out of Git, logs, terminals, and chat.

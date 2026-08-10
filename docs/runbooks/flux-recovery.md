@@ -1,16 +1,32 @@
 # Flux recovery — Draft / unverified
 
+Current status is `NO-GO`. Every live/secret-aware command named below is
+code-blocked before protected-file access because the separately installed
+reviewed-blob launcher does not exist. The raw-etcd canary also lacks a reviewed
+installed-`etcdctl` executable digest pin. These steps are the future recovery
+acceptance contract only; do not bypass a guard with ad-hoc `sudo`, a manual
+copy, or environment changes.
+
 1. Keep public routing disabled. Confirm the Kubernetes API, stacked etcd,
    CoreDNS, node readiness, Secret encryption, audit, and namespaces before
-   touching Flux.
+   touching Flux. A configured encryption-provider flag is insufficient: run
+   the gated disposable raw-etcd canary and require the encrypted-storage prefix,
+   plaintext absence, exact cleanup, and metadata-only audit evidence.
 2. Compare installed controller images to the reviewed generated manifest and
-   immutable digests. Apply only `gotk-components.yaml` with the recovery
-   kubeconfig if controllers are absent/corrupt.
+   immutable digests. Use the protected Linux AMD64 tool/kubeconfig ceremony and
+   `bootstrap/flux/bootstrap.sh --apply-controllers` at an exact reviewed `main`
+   commit if controllers are absent/corrupt; do not invoke bare kubectl against
+   a mutable default context.
 3. Wait for source, kustomize, and helm controllers. Confirm cross-namespace
    references and remote bases remain disabled.
-4. Confirm the out-of-band `sops-age` Secret exists without reading it. Restore
-   it only from a user-controlled tested backup using `--from-file`.
-5. Apply `gotk-sync.yaml`. Prove the GitRepository has no `secretRef`, fetches
+4. The future recovery flow confirms the out-of-band `sops-age` Secret through
+   `verify-sops-age-secret.sh`, which compares the exact live bytes, UID,
+   resourceVersion, annotations, and closed security metadata with protected
+   identity snapshots through the protected target. It restores only from a
+   user-controlled tested backup using `install-sops-age-secret.sh`; both the
+   create/replace response and a fresh live read must contain the intended
+   private bytes. Never use a raw `--from-file` command.
+5. Use `bootstrap/flux/bootstrap.sh --apply-sync`. Prove the GitRepository has no `secretRef`, fetches
    public `main`, and tenant Kustomizations use explicit ServiceAccounts.
 6. Inspect Flux events/status. Prefer a Git revert for bad desired state; do not
    patch Flux-owned resources as ordinary recovery.

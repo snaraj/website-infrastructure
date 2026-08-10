@@ -1,0 +1,25 @@
+{
+  "codex_contract": {"phase": "public-edge"},
+  "variables": {
+    "approve_public_edge_phase": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"}
+  },
+  "resource_changes": [
+    {
+      "address": "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_tunnel_cloudflared",
+      "change": {"actions": ["create"], "after": {"id": "00000000-0000-0000-0000-000000000000", "account_id": "11111111111111111111111111111111", "name": "pi-websites", "config_src": "cloudflare"}, "after_unknown": {}}
+    },
+    {
+      "address": "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_tunnel_cloudflared_config",
+      "change": {"actions": ["create"], "after": {"account_id": "11111111111111111111111111111111", "tunnel_id": "00000000-0000-0000-0000-000000000000", "source": "cloudflare", "config": {"ingress": [{"hostname": "naranjo.online", "service": "http://naranjo-online.naranjo-online.svc.cluster.local:8080"}, {"hostname": "lidersea.com", "service": "http://lidersea-com.lidersea-com.svc.cluster.local:8080"}, {"service": "http_status:404"}]}}, "after_unknown": {}}
+    }
+  ],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [
+    {"address": "cloudflare_zero_trust_tunnel_cloudflared.pi_websites", "mode": "managed", "type": "cloudflare_zero_trust_tunnel_cloudflared", "expressions": {"account_id": {"references": ["var.cloudflare_account_id"]}, "name": {}, "config_src": {}}},
+    {"address": "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites", "mode": "managed", "type": "cloudflare_zero_trust_tunnel_cloudflared_config", "expressions": {"account_id": {"references": ["var.cloudflare_account_id"]}, "tunnel_id": {"references": ["cloudflare_zero_trust_tunnel_cloudflared.pi_websites", "cloudflare_zero_trust_tunnel_cloudflared.pi_websites.id"]}, "source": {}, "config": {}}}
+  ]}}
+}

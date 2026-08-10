@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
-# Install the exact ephemeral validators used by GitHub Actions into a repository-
-# owned directory, with every network download authenticated by SHA-256.
+# Install the exact ephemeral validators used by GitHub Actions, with every
+# network download authenticated by SHA-256. CI binaries stay outside the
+# checkout so subsequent whole-tree secret and vulnerability scans cannot scan
+# the downloaded scanners themselves.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-# Installed binaries are gitignored build artifacts; downloads use a private
-# temporary directory that is removed even when verification fails.
-install_root="${repo_root}/.artifacts/bin"
-download_root="$(mktemp -d)"
+# Every caller receives a fresh private tool directory outside the checkout.
+# This prevents later whole-tree scanners from treating downloaded scanner
+# binaries as repository content. GitHub Actions supplies RUNNER_TEMP; local
+# callers use an already-existing absolute TMPDIR (or /tmp).
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  : "${RUNNER_TEMP:?GitHub Actions must provide RUNNER_TEMP}"
+  tool_parent_input="${RUNNER_TEMP}"
+else
+  tool_parent_input="${TMPDIR:-/tmp}"
+fi
+[[ "${tool_parent_input}" == /* && -d "${tool_parent_input}" && ! -L "${tool_parent_input}" ]] || {
+  printf 'tool temporary root is not a safe absolute directory.\n' >&2
+  exit 1
+}
+tool_parent="$(cd "${tool_parent_input}" && pwd -P)"
+case "${tool_parent}/" in
+  "${repo_root}/"*)
+    printf 'tool custody must remain outside the checkout.\n' >&2
+    exit 1
+    ;;
+esac
+install_root="$(mktemp -d "${tool_parent%/}/website-infrastructure-tools.XXXXXX")"
+
+# Downloads use a separate private temporary directory that is removed even
+# when verification fails.
+download_root="$(mktemp -d "${tool_parent%/}/website-infrastructure-downloads.XXXXXX")"
 trap 'rm -rf -- "${download_root}"' EXIT
-mkdir -p "${install_root}"
 
 # fetch refuses redirects away from HTTPS/TLS 1.2+ and verifies bytes before any
 # archive is extracted or executable is installed.
@@ -144,8 +167,9 @@ fetch \
   "${hadolint_file}"
 install -m 0755 "${hadolint_file}" "${install_root}/hadolint"
 
-# GitHub Actions receives the path through its command file; local callers get
-# an explicit instruction instead of this script mutating their parent shell.
+# GitHub Actions receives the external path through its command file; local
+# callers get an explicit instruction instead of this script mutating their
+# parent shell.
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "${install_root}" >> "${GITHUB_PATH}"
 else

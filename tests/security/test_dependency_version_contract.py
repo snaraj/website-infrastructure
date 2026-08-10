@@ -9,6 +9,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSIONS_FILE = REPO_ROOT / "versions.env"
 SITES = ("naranjo.online", "lidersea.com")
+CLOUDFLARE_PHASES = (
+    "admin-api",
+    "admin-policies",
+    "admin-route",
+    "admin-tunnel",
+    "public-dns-lidersea",
+    "public-dns-naranjo",
+    "public-edge",
+)
 FRONTEND_PINS = {
     "@sveltejs/vite-plugin-svelte": "SVELTE_VITE_PLUGIN_VERSION",
     "svelte": "SVELTE_VERSION",
@@ -163,30 +172,41 @@ class DependencyVersionContractTests(unittest.TestCase):
                 self.assertIn(npm_check, dockerfile)
 
     def test_cloudflare_manifest_and_lock_match_versions_registry(self):
-        """Provider updates must keep canonical, manifest, and lock pins atomic."""
+        """Every isolated phase must keep manifest and lock pins atomic."""
 
-        infrastructure = REPO_ROOT / "infrastructure" / "cloudflare"
-        manifest = (infrastructure / "versions.tf").read_text(encoding="utf-8")
-        lock = (infrastructure / ".terraform.lock.hcl").read_text(encoding="utf-8")
+        phases = REPO_ROOT / "infrastructure" / "cloudflare" / "phases"
         tofu = self.versions["OPENTOFU_VERSION"].lstrip("v")
         provider = self.versions["CLOUDFLARE_PROVIDER_VERSION"]
 
-        self.assertRegex(
-            manifest,
-            r'(?m)^\s*required_version\s*=\s*"= {}"$'.format(re.escape(tofu)),
+        self.assertEqual(
+            tuple(path.name for path in sorted(phases.iterdir()) if path.is_dir()),
+            CLOUDFLARE_PHASES,
         )
-        self.assertRegex(
-            manifest,
-            r'(?m)^\s*version\s*=\s*"{}"$'.format(re.escape(provider)),
-        )
-        self.assertRegex(
-            lock,
-            r'(?m)^\s*version\s*=\s*"{}"$'.format(re.escape(provider)),
-        )
-        self.assertRegex(
-            lock,
-            r'(?m)^\s*constraints\s*=\s*"{}"$'.format(re.escape(provider)),
-        )
+        for phase in CLOUDFLARE_PHASES:
+            with self.subTest(phase=phase):
+                root = phases / phase
+                manifest = (root / "versions.tf").read_text(encoding="utf-8")
+                lock = (root / ".terraform.lock.hcl").read_text(encoding="utf-8")
+                self.assertRegex(
+                    manifest,
+                    r'(?m)^\s*required_version\s*=\s*"= {}"$'.format(
+                        re.escape(tofu)
+                    ),
+                )
+                self.assertRegex(
+                    manifest,
+                    r'(?m)^\s*version\s*=\s*"{}"$'.format(re.escape(provider)),
+                )
+                self.assertRegex(
+                    lock,
+                    r'(?m)^\s*version\s*=\s*"{}"$'.format(re.escape(provider)),
+                )
+                self.assertRegex(
+                    lock,
+                    r'(?m)^\s*constraints\s*=\s*"{}"$'.format(
+                        re.escape(provider)
+                    ),
+                )
 
     def test_frontend_experience_validation_is_mandatory_everywhere(self):
         """No site or container build may silently skip source or dist checks."""

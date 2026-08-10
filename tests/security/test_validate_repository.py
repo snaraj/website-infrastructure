@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
+import base64
 import importlib.util
+import os
 import shutil
+import subprocess
 import tempfile
+import textwrap
 import types
 import unittest
 from pathlib import Path
@@ -27,11 +31,89 @@ ACTIVATION_FIXTURE_FILES = (
     "websites/lidersea.com/chart/values.yaml",
 ) + tuple(
     path.as_posix()
-    for path in sorted(MODULE.CLOUDFLARE_TERRAFORM_SOURCE_FILES)
+    for path in sorted(MODULE.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
 )
-SYNTHETIC_RECIPIENT = (
-    "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
+SYNTHETIC_RECIPIENT = "age1pq1" + ("q" * 80)
+
+
+def synthetic_sops_envelope(payload):
+    return "ENC[AES256_GCM,data:{},iv:{},tag:{},type:str]".format(
+        base64.b64encode(payload).decode("ascii"),
+        base64.b64encode(b"i" * 12).decode("ascii"),
+        base64.b64encode(b"t" * 16).decode("ascii"),
+    )
+
+
+SYNTHETIC_TOKEN_ENVELOPE = synthetic_sops_envelope(b"synthetic encrypted token")
+SYNTHETIC_MAC_ENVELOPE = synthetic_sops_envelope(b"synthetic authenticated mac")
+SYNTHETIC_AGE_BODY = "\n".join(
+    "        " + line
+    for line in textwrap.wrap(
+        base64.b64encode(
+            b"age-encryption.org/v1\n-> X25519 synthetic\n"
+            b"c3ludGhldGlj\n--- synthetic-mac\nciphertext\n"
+        ).decode("ascii"),
+        64,
+    )
 )
+
+
+def synthetic_sops_metadata(recipient=SYNTHETIC_RECIPIENT):
+    return (
+        "sops:\n"
+        "  age:\n"
+        "    - recipient: {}\n"
+        "      enc: |\n"
+        "        -----BEGIN AGE ENCRYPTED FILE-----\n"
+        "{}\n"
+        "        -----END AGE ENCRYPTED FILE-----\n"
+        "  lastmodified: \"2026-08-09T00:00:00Z\"\n"
+        "  mac: {}\n"
+        "  encrypted_regex: ^(data|stringData)$\n"
+        "  version: 3.13.3\n"
+    ).format(recipient, SYNTHETIC_AGE_BODY, SYNTHETIC_MAC_ENVELOPE)
+
+
+def synthetic_tunnel_secret(recipient=SYNTHETIC_RECIPIENT):
+    return (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: pi-websites-tunnel-token\n"
+        "  namespace: cloudflare-public\n"
+        "type: Opaque\n"
+        "stringData:\n"
+        "  token: {}\n"
+        + synthetic_sops_metadata(recipient)
+    ).format(SYNTHETIC_TOKEN_ENVELOPE)
+
+
+def synthetic_api_encryption_configuration(secret):
+    return (
+        "apiVersion: apiserver.config.k8s.io/v1\n"
+        "kind: EncryptionConfiguration\n"
+        "resources:\n"
+        "  - resources:\n"
+        "      - secrets\n"
+        "    providers:\n"
+        "      - secretbox:\n"
+        "          keys:\n"
+        "            - name: key-2026-08\n"
+        "              secret: " + secret + "\n"
+        "      - identity: {}\n"
+    )
+
+
+def init_git_repository(root):
+    """Create an index-only fixture without requiring commit identity."""
+
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
 
 
 def copy_activation_fixture(root):
@@ -72,26 +154,7 @@ def configure_cloudflare_fixture(root):
         "      - {}\n".format(SYNTHETIC_RECIPIENT)
     ).encode("utf-8"))
     secret = root / "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
-    secret.write_bytes((
-        "apiVersion: v1\n"
-        "kind: Secret\n"
-        "metadata:\n"
-        "  name: pi-websites-tunnel-token\n"
-        "  namespace: cloudflare-public\n"
-        "type: Opaque\n"
-        "data:\n"
-        "  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n"
-        "sops:\n"
-        "  age:\n"
-        "    - recipient: {}\n"
-        "      enc: |\n"
-        "        -----BEGIN AGE ENCRYPTED FILE-----\n"
-        "        synthetic-test-ciphertext\n"
-        "        -----END AGE ENCRYPTED FILE-----\n"
-        "  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n".format(
-            SYNTHETIC_RECIPIENT
-        )
-    ).encode("utf-8"))
+    secret.write_bytes(synthetic_tunnel_secret().encode("utf-8"))
 
 
 def write_site_release(root, slug, *, suspended=True, ready=False, digest=None):
@@ -275,6 +338,410 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertTrue(any("age private identity" in error for error in errors))
             self.assertTrue(any("private key block" in error for error in errors))
 
+    def test_secret_scan_rejects_classical_and_post_quantum_age_identities(self):
+        """Both native age identity families are crown-jewel material."""
+
+        identities = (
+            "AGE-" + "SECRET-KEY-1" + ("A" * 58),
+            "AGE-" + "SECRET-KEY-PQ-1" + ("A" * 128),
+        )
+        for identity in identities:
+            with self.subTest(prefix=identity[:24]):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    root.joinpath("identity.txt").write_text(
+                        identity + "\n", encoding="utf-8"
+                    )
+                    errors = MODULE.check_secrets(root)
+                    self.assertTrue(
+                        any("age private identity" in error for error in errors)
+                    )
+
+    def test_secret_scan_rejects_current_and_contextual_legacy_cloudflare_tokens(self):
+        """Prefixed credentials need no context; legacy values still do."""
+
+        for prefix in ("cfk_", "cfut_", "cfat_"):
+            with self.subTest(prefix=prefix):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    root.joinpath("credential.txt").write_text(
+                        prefix + ("A" * 40) + "deadbeef\n",
+                        encoding="utf-8",
+                    )
+                    errors = MODULE.check_secrets(root)
+                    self.assertTrue(any(
+                        "prefixed Cloudflare API credential" in error
+                        for error in errors
+                    ))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.joinpath("legacy.txt").write_text(
+                "cloudflare_api_token = \"" + ("L" * 40) + "\"\n",
+                encoding="utf-8",
+            )
+            errors = MODULE.check_secrets(root)
+            self.assertTrue(
+                any("literal Cloudflare API token" in error for error in errors)
+            )
+
+    def test_secret_scan_rejects_all_contextual_cloudflare_credential_forms(self):
+        """Colon, bearer, and Tunnel runtime forms cannot bypass the scanner."""
+
+        values = {
+            "colon.txt": "cloudflare_api_token: " + ("L" * 40),
+            "bearer.txt": "Authorization: Bearer " + ("B" * 40),
+            "tunnel.txt": "tunnel_token=" + "eyJ" + ("T" * 96),
+            "encrypted-key.pem.txt": (
+                "-----BEGIN ENCRYPTED " + "PRIVATE KEY-----"
+            ),
+            "dsa-key.pem.txt": "-----BEGIN DSA " + "PRIVATE KEY-----",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, value in values.items():
+                root.joinpath(name).write_text(value + "\n", encoding="utf-8")
+            errors = MODULE.check_secrets(root)
+        for label in (
+            "literal Cloudflare API token",
+            "Cloudflare bearer credential",
+            "Cloudflare Tunnel runtime token",
+            "private key block",
+        ):
+            with self.subTest(label=label):
+                self.assertTrue(any(label in error for error in errors), errors)
+
+    def test_secret_scan_rejects_credential_in_empty_git_pathname(self):
+        """A secret-shaped staged filename is itself public data."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            token = "cfut_" + ("A" * 40) + "deadbeef"
+            root.joinpath(token).write_bytes(b"")
+            subprocess.run(["git", "add", token], cwd=root, check=True)
+            errors = MODULE.check_secrets(root)
+        self.assertTrue(any(
+            "prefixed Cloudflare API credential" in error for error in errors
+        ))
+
+    def test_secret_scan_allows_public_age_recipients_and_token_near_misses(self):
+        """Public recipients and malformed prefixes must not create false alarms."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.joinpath("public-values.txt").write_text(
+                "age1pq1" + ("q" * 128) + "\n"
+                "cfut_" + ("A" * 39) + "deadbeef\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(MODULE.check_secrets(root), [])
+
+    def test_git_visible_gate_rejects_force_added_local_only_directories(self):
+        """Ignore rules cannot exempt tracked state or artifact content."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            root.joinpath(".gitignore").write_text(
+                "\n".join((
+                    ".artifacts/", ".cache/", ".terraform/", "__pycache__/",
+                    "coverage/", "dist/", "local-evidence/", "node_modules/",
+                    "",
+                )),
+                encoding="utf-8",
+            )
+            forced = [
+                root / ".artifacts" / "forced.txt",
+                root / ".cache" / "forced.txt",
+                root / ".terraform" / "forced.txt",
+                root / "__pycache__" / "forced.txt",
+                root / "coverage" / "forced.txt",
+                root / "dist" / "forced.txt",
+                root / "local-evidence" / "forced.txt",
+                root / "node_modules" / "forced.txt",
+            ]
+            for path in forced:
+                path.parent.mkdir()
+                path.write_text(
+                    "cfut_" + ("A" * 40) + "deadbeef\n",
+                    encoding="utf-8",
+                )
+            subprocess.run(
+                ["git", "add", ".gitignore"], cwd=root, check=True
+            )
+            subprocess.run(
+                [
+                    "git", "add", "--force",
+                    *(path.relative_to(root).as_posix() for path in forced),
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            layout_errors = MODULE.check_layout(root)
+            self.assertEqual(
+                sum("local-only directory content is Git-visible" in error for error in layout_errors),
+                len(forced),
+            )
+            secret_errors = MODULE.check_secrets(root)
+            self.assertEqual(
+                sum("prefixed Cloudflare API credential" in error for error in secret_errors),
+                len(forced),
+            )
+
+    def test_git_visible_gate_allows_only_the_two_dist_placeholders(self):
+        """Generated dist trees expose no Git exception beyond exact .gitkeep files."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            root.joinpath(".gitignore").write_text("dist/\n", encoding="utf-8")
+            placeholders = [root / relative for relative in MODULE.ALLOWED_DIST_PATHS]
+            for path in placeholders:
+                path.parent.mkdir(parents=True)
+                path.write_text("", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", ".gitignore"], cwd=root, check=True
+            )
+            subprocess.run(
+                [
+                    "git", "add", "--force",
+                    *(path.relative_to(root).as_posix() for path in placeholders),
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            local_only_errors = [
+                error for error in MODULE.check_layout(root)
+                if "local-only directory content is Git-visible" in error
+            ]
+            self.assertEqual(local_only_errors, [])
+
+    def test_git_visible_gate_rejects_force_added_credential_and_state_files(self):
+        """Binary credentials and private tool files fail before content heuristics."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            root.joinpath(".gitignore").write_text(
+                "*\n!.env.example\n", encoding="utf-8"
+            )
+            forbidden = [
+                root / ".env",
+                root / "operator.p12",
+                root / "cluster.agekey",
+                root / "terraform.tfstate.backup",
+                root / "admin.tfplan.json",
+                root / "cloudflare-admin-receipt.json",
+                root / "kubeconfig-private",
+                root / "api-encryption-config.yaml",
+                root / "copied" / "encryption-config.yaml.local",
+                root / "PowerShell_transcript.fixture.txt",
+                root / "bootstrap" / "pi" / "decisions.env.local",
+            ]
+            allowed = root / ".env.example"
+            for path in [*forbidden, allowed]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic\x00binary\n")
+            subprocess.run(
+                [
+                    "git", "add", "--force",
+                    *(path.relative_to(root).as_posix() for path in [*forbidden, allowed]),
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            local_only_errors = [
+                error for error in MODULE.check_layout(root)
+                if "local-only directory content is Git-visible" in error
+            ]
+            self.assertEqual(len(local_only_errors), len(forbidden))
+            self.assertFalse(any(".env.example" in error for error in local_only_errors))
+
+    def test_generated_api_encryption_basenames_are_ignored_everywhere(self):
+        ignored = {
+            line.strip()
+            for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        }
+        self.assertIn("api-encryption-config.yaml", ignored)
+        self.assertIn("encryption-config.yaml.local", ignored)
+
+    def test_secret_gate_rejects_renamed_cloudflare_token_receipt(self):
+        """Receipt custody follows its schema even when the filename is generic."""
+
+        for version in ("v1", "v2"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                init_git_repository(root)
+                receipt = root / "evidence.json"
+                receipt.write_text(
+                    '{"schema":"cloudflare-phase-token-receipt-'
+                    + version
+                    + '"}\n',
+                    encoding="utf-8",
+                )
+                subprocess.run(["git", "add", "evidence.json"], cwd=root, check=True)
+
+                self.assertTrue(any(
+                    "local Cloudflare token receipt" in error
+                    for error in MODULE.check_secrets(root)
+                ))
+
+    def test_validators_never_open_ignored_owner_only_files(self):
+        """Local custody material is excluded before any content read occurs."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            root.joinpath(".gitignore").write_text(
+                ".artifacts/\n.terraform/\n", encoding="utf-8"
+            )
+            root.joinpath("public.txt").write_text("public\n", encoding="utf-8")
+            ignored = {
+                root / ".artifacts" / "owner-only.txt",
+                root / ".terraform" / "terraform.tfstate",
+            }
+            for path in ignored:
+                path.parent.mkdir()
+                path.write_text(
+                    "cfk_" + ("A" * 40) + "deadbeef\n", encoding="utf-8"
+                )
+            subprocess.run(
+                ["git", "add", ".gitignore", "public.txt"], cwd=root, check=True
+            )
+
+            original_open = Path.open
+
+            def guarded_open(path, *args, **kwargs):
+                if path in ignored:
+                    raise AssertionError("ignored owner-only file was opened")
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", guarded_open):
+                self.assertEqual(MODULE.check_secrets(root), [])
+                self.assertEqual(MODULE.check_privacy(root), [])
+                MODULE.check_media(root)
+                MODULE.check_layout(root)
+
+    def test_secret_scan_reads_exact_staged_blob_not_safe_worktree_substitute(self):
+        """A secret staged then overwritten locally must still block the push."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            candidate = root / "candidate.txt"
+            staged_secret = "cfut_" + ("A" * 40) + "deadbeef"
+            candidate.write_text(staged_secret + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "candidate.txt"], cwd=root, check=True)
+            candidate.write_text("safe working tree\n", encoding="utf-8")
+
+            errors = MODULE.check_secrets(root)
+            self.assertTrue(any(
+                "prefixed Cloudflare API credential found in candidate.txt" in error
+                for error in errors
+            ))
+
+    def test_secret_scan_does_not_skip_staged_binary_bytes(self):
+        """NUL and invalid UTF-8 cannot hide an otherwise literal staged token."""
+
+        for suffix in (b"\x00", b"\xff"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                init_git_repository(root)
+                candidate = root / "candidate.bin"
+                staged_secret = b"cfut_" + (b"A" * 40) + b"deadbeef"
+                candidate.write_bytes(staged_secret + suffix)
+                subprocess.run(["git", "add", "candidate.bin"], cwd=root, check=True)
+                candidate.write_bytes(b"safe working tree\n")
+
+                errors = MODULE.check_secrets(root)
+                self.assertTrue(any(
+                    "prefixed Cloudflare API credential found in candidate.bin" in error
+                    for error in errors
+                ))
+
+    def test_exact_index_rejects_symbolic_mode_hidden_by_regular_worktree(self):
+        """A regular worktree file cannot conceal a staged symbolic entry."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            blob = subprocess.run(
+                ["git", "hash-object", "-w", "--stdin"],
+                cwd=root,
+                input=b"synthetic-target\n",
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.decode("ascii").strip()
+            subprocess.run(
+                ["git", "update-index", "--add", "--cacheinfo", "120000", blob,
+                 "candidate.txt"],
+                cwd=root,
+                check=True,
+            )
+            (root / "candidate.txt").write_text(
+                "safe working tree\n", encoding="utf-8"
+            )
+
+            errors = MODULE.check_secrets(root)
+            self.assertIn(
+                "symbolic Git index entry is forbidden: candidate.txt", errors
+            )
+
+    def test_exact_index_enforces_aggregate_byte_ceiling_while_streaming(self):
+        """Many small blobs cannot make exact-index scanning unbounded."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            for index in range(3):
+                root.joinpath("candidate-{}.txt".format(index)).write_text(
+                    "x" * 8, encoding="utf-8"
+                )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            with mock.patch.object(MODULE, "MAX_PUBLIC_REPOSITORY_BYTES", 16):
+                _, errors = MODULE._git_index_text_documents(root)
+        self.assertIn("Git index exceeds the aggregate byte ceiling", errors)
+
+    def test_worktree_scanners_reject_hardlinked_public_file(self):
+        """A Git-visible hardlink cannot proxy content from another custody path."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "custody-source.txt"
+            public = root / "public.txt"
+            source.write_text("synthetic\n", encoding="utf-8")
+            try:
+                os.link(source, public)
+            except OSError as error:
+                self.skipTest("hardlinks unavailable: {}".format(error))
+            secret_errors = MODULE.check_secrets(root)
+            media_errors = MODULE.check_media(root)
+        self.assertTrue(any("unsafe or unstable" in error for error in secret_errors))
+        self.assertTrue(any("unsafe or unstable" in error for error in media_errors))
+
+    def test_privacy_scan_reads_exact_staged_blob_not_safe_worktree_substitute(self):
+        """Private staged inventory cannot hide behind a sanitized worktree file."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            candidate = root / "inventory.txt"
+            candidate.write_text(
+                "operator@" + "private.example\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "add", "inventory.txt"], cwd=root, check=True)
+            candidate.write_text("safe working tree\n", encoding="utf-8")
+
+            errors = MODULE.check_privacy(root)
+            self.assertTrue(any(
+                "non-synthetic email address found in inventory.txt" in error
+                for error in errors
+            ))
+
     def test_privacy_rejects_host_ips_and_uuid_identifiers(self):
         """Real-looking network and machine identities remain local-only."""
 
@@ -432,6 +899,27 @@ class RepositoryPolicyTests(unittest.TestCase):
             errors = MODULE.check_layout(root)
             self.assertTrue(any("apps" in error for error in errors))
 
+    def test_layout_rejects_force_added_tokens_archives_and_opaque_ciphertext(self):
+        for name in ("pi-admin.token", "review.zip", "review.enc", "review.gpg"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / name).write_text("synthetic\n", encoding="utf-8")
+                self.assertTrue(any(
+                    "local-only" in error for error in MODULE.check_layout(root)
+                ))
+
+    def test_media_rejects_renamed_archive_and_encrypted_magic(self):
+        for prefix in (b"PK\x03\x04", b"\x1f\x8b", b"Salted__"):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "docs" / "review.txt"
+                target.parent.mkdir(parents=True)
+                target.write_bytes(prefix + b"synthetic")
+                self.assertTrue(any(
+                    "opaque archive or encrypted artifact" in error
+                    for error in MODULE.check_media(root)
+                ))
+
     def test_rejects_plaintext_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -456,64 +944,221 @@ class RepositoryPolicyTests(unittest.TestCase):
             errors = MODULE.check_secrets(root)
             self.assertTrue(any("unencrypted Kubernetes Secret" in error for error in errors))
 
+    def test_rejects_renamed_api_encryption_config_from_exact_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            target = root / "notes" / "review.txt"
+            target.parent.mkdir(parents=True)
+            synthetic_key = base64.b64encode(bytes(range(32))).decode("ascii")
+            target.write_text(
+                synthetic_api_encryption_configuration(synthetic_key),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "notes/review.txt"], cwd=root, check=True)
+            target.write_text(
+                synthetic_api_encryption_configuration(
+                    MODULE.ENCRYPTION_CONFIGURATION_SENTINEL
+                ),
+                encoding="utf-8",
+            )
+
+            errors = MODULE.check_secrets(root)
+
+            self.assertTrue(any(
+                "plaintext Kubernetes API encryption configuration" in error
+                for error in errors
+            ))
+            self.assertFalse(any(synthetic_key in error for error in errors))
+
+    def test_allows_only_the_api_encryption_sentinel_example(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.joinpath("review.example").write_text(
+                synthetic_api_encryption_configuration(
+                    MODULE.ENCRYPTION_CONFIGURATION_SENTINEL
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(MODULE.check_secrets(root), [])
+
+    def test_secret_scan_rejects_bare_tunnel_tokens_and_inline_suppressions(self):
+        candidates = (
+            "eyJ" + ("A" * 100),
+            "gitleaks" + ":allow",
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate[:8]), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "review.txt").write_text(candidate + "\n", encoding="utf-8")
+                self.assertTrue(MODULE.check_secrets(root))
+
     def test_rejects_mixed_plaintext_sops_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            target = root / "kubernetes" / "site"
+            recipient = "age1pq1" + ("q" * 80)
+            root.joinpath(".sops.yaml").write_text(
+                "creation_rules:\n"
+                "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
+                "    encrypted_regex: ^(data|stringData)$\n"
+                "    age:\n"
+                "      - {}\n".format(recipient),
+                encoding="utf-8",
+            )
+            target = root / "kubernetes/platform/cloudflare-public/release"
             target.mkdir(parents=True)
-            (target / "secret.sops.yaml").write_text(
-                """apiVersion: v1
-kind: Secret
-stringData:
-  encrypted: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-  plaintext: forbidden
-sops:
-  age:
-    - recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal
-      enc: |
-        -----BEGIN AGE ENCRYPTED FILE-----
-  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-""",
+            (target / "tunnel-token.sops.yaml").write_text(
+                synthetic_tunnel_secret(recipient).replace(
+                    "  token: {}\n".format(SYNTHETIC_TOKEN_ENVELOPE),
+                    "  token: {}\n  plaintext: forbidden\n".format(
+                        SYNTHETIC_TOKEN_ENVELOPE
+                    ),
+                ),
                 encoding="utf-8",
             )
             errors = MODULE.check_secrets(root)
-            self.assertTrue(any("plaintext or malformed" in error for error in errors))
+            self.assertTrue(any(
+                "payload" in error or "only the token key" in error
+                for error in errors
+            ))
+
+    def test_rejects_unapproved_sops_secret_path(self):
+        for relative_path in (
+            "kubernetes/site/secret.sops.yaml",
+            "docs/opaque-archive.sops.yaml",
+        ):
+            with self.subTest(path=relative_path), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / relative_path
+                target.parent.mkdir(parents=True)
+                target.write_text("synthetic\n", encoding="utf-8")
+                self.assertIn(
+                    "unapproved SOPS Secret path: " + relative_path,
+                    MODULE.check_secrets(root),
+                )
 
     def test_accepts_structurally_encrypted_sops_secret(self):
-        text = """apiVersion: v1
-kind: Secret
-data:
-  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-sops:
-  age:
-    - recipient: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal
-      enc: |
-        -----BEGIN AGE ENCRYPTED FILE-----
-  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-"""
+        recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
+        text = (
+            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE
+            )
+            + synthetic_sops_metadata(recipient)
+        )
         self.assertEqual(MODULE.sops_secret_errors(text), [])
 
-    def test_tunnel_secret_requires_exact_identity_namespace_key_and_recipient(self):
+    def test_sops_requires_real_envelopes_complete_metadata_and_age_armor(self):
+        valid = (
+            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE
+            )
+            + synthetic_sops_metadata()
+        )
+        mutations = (
+            valid.replace(SYNTHETIC_TOKEN_ENVELOPE, "ENC[not-ciphertext]", 1),
+            valid.replace("  lastmodified: \"2026-08-09T00:00:00Z\"\n", ""),
+            valid.replace(SYNTHETIC_AGE_BODY, "        synthetic-test-ciphertext"),
+            valid.replace(SYNTHETIC_MAC_ENVELOPE, "ENC[not-a-mac]"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation[-80:]):
+                self.assertTrue(MODULE.sops_secret_errors(mutation))
+
+    def test_sops_rejects_hidden_recipient_and_alternate_key_backends(self):
+        """Only one canonically spelled age master-key backend is permitted."""
+
         recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
-        valid = """apiVersion: v1
-kind: Secret
-metadata:
-  name: pi-websites-tunnel-token
-  namespace: cloudflare-public
-type: Opaque
-data:
-  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-sops:
-  age:
-    - recipient: {recipient}
-      enc: |
-        -----BEGIN AGE ENCRYPTED FILE-----
-  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]
-""".format(recipient=recipient)
+        base = (
+            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE
+            )
+            + synthetic_sops_metadata(recipient)
+        )
+        for before, after in (
+            (
+                "    - recipient: {}\n".format(recipient),
+                "    - recipient: {}\n    - \"recipient\": {}\n".format(
+                    recipient, recipient
+                ),
+            ),
+            (
+                "  lastmodified:",
+                "  pgp:\n    - fp: {}\n  lastmodified:".format("A" * 40),
+            ),
+            ("  lastmodified:", '  "age": []\n  lastmodified:'),
+            ("  lastmodified:", "  key_groups:\n    - age: []\n  lastmodified:"),
+        ):
+            with self.subTest(after=after):
+                errors = MODULE.sops_secret_errors(base.replace(before, after, 1))
+                self.assertTrue(errors)
+                self.assertTrue(any(
+                    marker in error
+                    for error in errors
+                    for marker in (
+                        "canonical", "ambiguous", "unapproved",
+                        "duplicate", "malformed", "complete",
+                    )
+                ))
+
+    def test_sops_rejects_extra_age_recipient_controls(self):
+        text = (
+            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE
+            )
+            + synthetic_sops_metadata().replace(
+                "      enc: |\n",
+                "      enc: |\n      created_at: now\n",
+                1,
+            )
+        )
+        self.assertTrue(MODULE.sops_secret_errors(text))
+
+    def test_sops_rejects_nested_or_noncanonical_scalar_metadata(self):
+        base = (
+            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE
+            )
+            + synthetic_sops_metadata()
+        )
+        for before, after in (
+            (
+                '  lastmodified: "2026-08-09T00:00:00Z"',
+                "  lastmodified:\n    pgp: hidden",
+            ),
+            ('  lastmodified: "2026-08-09T00:00:00Z"', "  lastmodified: yesterday"),
+            ("  encrypted_regex: ^(data|stringData)$", "  encrypted_regex: .*"),
+            ("  version: 3.13.3", "  version: 3.12.0"),
+        ):
+            with self.subTest(after=after):
+                self.assertTrue(MODULE.sops_secret_errors(base.replace(before, after, 1)))
+
+    def test_sops_rejects_nested_ciphertext_bait_and_flow_plaintext(self):
+        text = (
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: synthetic\n"
+            "  annotations:\n    data:\n      bait: {}\n"
+            "stringData: {{password: plaintext}}\n".format(SYNTHETIC_TOKEN_ENVELOPE)
+            + synthetic_sops_metadata()
+        )
+        errors = MODULE.sops_secret_errors(text)
+        self.assertTrue(any("top-level data/stringData" in error for error in errors))
+        self.assertTrue(any("no encrypted data/stringData" in error for error in errors))
+
+    def test_secret_detection_rejects_tagged_aliased_and_escaped_kind(self):
+        for text in (
+            "apiVersion: v1\nkind: !!str Secret\n",
+            "apiVersion: v1\nsecretKind: &secret Secret\nkind: *secret\n",
+            'apiVersion: v1\nkind: "\\x53ecret"\n',
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(MODULE.contains_secret_document(text))
+
+    def test_tunnel_secret_requires_exact_identity_namespace_key_and_recipient(self):
+        recipient = "age1pq1" + ("q" * 80)
+        valid = synthetic_tunnel_secret(recipient)
         self.assertEqual(MODULE.tunnel_secret_errors(valid, recipient), [])
         invalid = valid.replace("namespace: cloudflare-public", "namespace: default").replace(
-            "  token: ENC[", "  token: ENC["
-            "  extra: plaintext\n  ignored: ENC["
+            "  token: {}\n".format(SYNTHETIC_TOKEN_ENVELOPE),
+            "  token: {}\n  extra: plaintext\n".format(SYNTHETIC_TOKEN_ENVELOPE),
         )
         errors = MODULE.tunnel_secret_errors(invalid, recipient)
         self.assertTrue(any("namespace" in error for error in errors))
@@ -617,23 +1262,25 @@ sops:
             errors = MODULE.check_cloudflare(root)
             self.assertTrue(any("data source is forbidden" in error for error in errors))
 
-    def test_cloudflare_default_off_contract_rejects_local_bypass(self):
+    def test_cloudflare_phase_contract_rejects_guard_bypass(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copytree(
                 REPO_ROOT / "infrastructure" / "cloudflare",
                 root / "infrastructure" / "cloudflare",
             )
-            locals_file = root / "infrastructure/cloudflare/locals.tf"
-            locals_file.write_text(
-                locals_file.read_text(encoding="utf-8").replace(
-                    "  enabled = var.enable_cloudflare_resources ? 1 : 0\n",
-                    "  enabled = 1\n",
+            variables_file = root / (
+                "infrastructure/cloudflare/phases/admin-tunnel/variables.tf"
+            )
+            variables_file.write_text(
+                variables_file.read_text(encoding="utf-8").replace(
+                    "  default     = false\n",
+                    "  default     = true\n",
                 ),
                 encoding="utf-8",
             )
             errors = MODULE.check_cloudflare(root)
-            self.assertTrue(any("default-off contract" in error for error in errors))
+            self.assertTrue(any("phase contract" in error for error in errors))
 
     def test_git_visible_terraform_inputs_and_json_configuration_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -656,7 +1303,7 @@ sops:
 
     def test_ignored_local_terraform_inputs_are_excluded_by_git_visibility(self):
         expected = {
-            path.as_posix() for path in MODULE.CLOUDFLARE_TERRAFORM_SOURCE_FILES
+            path.as_posix() for path in MODULE.CLOUDFLARE_TERRAFORM_REVIEW_FILES
         }
         with mock.patch.object(
             MODULE,
@@ -1020,13 +1667,13 @@ sops:
             with mock.patch.object(MODULE, "check_release", return_value=[error]):
                 self.assertEqual(MODULE.check_activation(root), [error])
 
-    def test_cloudflare_default_true_fails_the_integrated_activation_gate(self):
+    def test_cloudflare_phase_guard_true_fails_the_integrated_activation_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             copy_activation_fixture(root)
             replace_once(
                 root,
-                "infrastructure/cloudflare/variables.tf",
+                "infrastructure/cloudflare/phases/admin-tunnel/variables.tf",
                 "  default     = false\n",
                 "  default     = true\n",
             )

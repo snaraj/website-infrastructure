@@ -1,10 +1,12 @@
 """Exercise safe mixed GitOps release-state transitions."""
 
+import base64
 import contextlib
 import importlib.util
 import io
 import shutil
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -29,10 +31,30 @@ RELEASE_FILES = (
     "kubernetes/reconciliation/admission.yaml",
 ) + tuple(
     path.as_posix()
-    for path in sorted(TRANSITION.CLOUDFLARE_TERRAFORM_SOURCE_FILES)
+    for path in sorted(TRANSITION.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
 )
-SYNTHETIC_RECIPIENT = (
-    "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
+SYNTHETIC_RECIPIENT = "age1pq1" + ("q" * 80)
+
+
+def synthetic_sops_envelope(payload):
+    return "ENC[AES256_GCM,data:{},iv:{},tag:{},type:str]".format(
+        base64.b64encode(payload).decode("ascii"),
+        base64.b64encode(b"i" * 12).decode("ascii"),
+        base64.b64encode(b"t" * 16).decode("ascii"),
+    )
+
+
+SYNTHETIC_TOKEN_ENVELOPE = synthetic_sops_envelope(b"synthetic encrypted token")
+SYNTHETIC_MAC_ENVELOPE = synthetic_sops_envelope(b"synthetic authenticated mac")
+SYNTHETIC_AGE_BODY = "\n".join(
+    "        " + line
+    for line in textwrap.wrap(
+        base64.b64encode(
+            b"age-encryption.org/v1\n-> X25519 synthetic\n"
+            b"c3ludGhldGlj\n--- synthetic-mac\nciphertext\n"
+        ).decode("ascii"),
+        64,
+    )
 )
 SITE_FILES = {
     "naranjo-online": (
@@ -116,16 +138,24 @@ class ReleaseTransitionTests(unittest.TestCase):
             "  name: pi-websites-tunnel-token\n"
             "  namespace: cloudflare-public\n"
             "type: Opaque\n"
-            "data:\n"
-            "  token: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n"
+            "stringData:\n"
+            "  token: {}\n"
             "sops:\n"
             "  age:\n"
             "    - recipient: {}\n"
             "      enc: |\n"
             "        -----BEGIN AGE ENCRYPTED FILE-----\n"
-            "        synthetic-test-ciphertext\n"
+            "{}\n"
             "        -----END AGE ENCRYPTED FILE-----\n"
-            "  mac: ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]\n".format(recipient)
+            "  lastmodified: \"2026-08-09T00:00:00Z\"\n"
+            "  mac: {}\n"
+            "  encrypted_regex: ^(data|stringData)$\n"
+            "  version: 3.13.3\n".format(
+                SYNTHETIC_TOKEN_ENVELOPE,
+                recipient,
+                SYNTHETIC_AGE_BODY,
+                SYNTHETIC_MAC_ENVELOPE,
+            )
         ).encode("utf-8"))
         if listed:
             self.replace_once(
@@ -287,13 +317,21 @@ class ReleaseTransitionTests(unittest.TestCase):
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
+    def test_classical_age_recipient_is_rejected_even_when_ciphertext_matches(self):
+        self.configure_cloudflare_revision()
+        self.write_cloudflare_secret(
+            recipient="age1" + ("q" * 80)
+        )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
     def test_tunnel_secret_token_must_remain_sops_ciphertext(self):
         self.configure_cloudflare_revision()
         self.write_cloudflare_secret()
         secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
         secret.write_bytes(
             secret.read_bytes().replace(
-                b"ENC[AES256_GCM,data:x,iv:y,tag:z,type:str]",
+                SYNTHETIC_TOKEN_ENVELOPE.encode("ascii"),
                 b"plaintext-token",
                 1,
             )
@@ -330,41 +368,42 @@ class ReleaseTransitionTests(unittest.TestCase):
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
-    def test_cloudflare_resource_switch_must_remain_exactly_false(self):
+    def test_cloudflare_phase_guard_must_remain_exactly_false(self):
         self.replace_once(
-            TRANSITION.CLOUDFLARE_VARIABLES,
+            "infrastructure/cloudflare/phases/admin-tunnel/variables.tf",
             "  default     = false\n",
             "  default     = true\n",
         )
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
-    def test_cloudflare_local_switch_must_remain_exactly_wired(self):
-        self.replace_once(
-            TRANSITION.CLOUDFLARE_LOCALS,
-            "  enabled = var.enable_cloudflare_resources ? 1 : 0\n",
-            "  enabled = 1\n",
-        )
+    def test_cloudflare_phase_file_inventory_is_closed(self):
+        path = self.root / "infrastructure/cloudflare/phases/admin-tunnel/override.tf"
+        path.write_text("\n", encoding="utf-8")
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
-    def test_every_cloudflare_resource_must_use_the_default_off_switch(self):
+    def test_every_cloudflare_resource_must_use_its_phase_guard(self):
         self.replace_once(
-            "infrastructure/cloudflare/dns.tf",
-            'resource "cloudflare_zero_trust_tunnel_cloudflared_config" "pi_websites" {\n'
-            "  count = local.enabled\n",
-            'resource "cloudflare_zero_trust_tunnel_cloudflared_config" "pi_websites" {\n'
-            "  count = 1\n",
+            "infrastructure/cloudflare/phases/admin-tunnel/main.tf",
+            "      condition     = var.approve_admin_tunnel_phase\n",
+            "      condition     = true\n",
         )
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
     def test_cloudflare_resource_identity_inventory_is_closed(self):
-        path = self.root / "infrastructure/cloudflare/dns.tf"
+        path = self.root / "infrastructure/cloudflare/phases/admin-tunnel/main.tf"
         with path.open("a", encoding="utf-8", newline="\n") as output:
             output.write(
                 '\nresource "cloudflare_dns_record" "unexpected" {\n'
-                "  count = local.enabled\n"
+                "  lifecycle {\n"
+                "    prevent_destroy = true\n"
+                "    precondition {\n"
+                "      condition     = var.approve_admin_tunnel_phase\n"
+                '      error_message = "synthetic"\n'
+                "    }\n"
+                "  }\n"
                 "}\n"
             )
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):

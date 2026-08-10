@@ -18,8 +18,9 @@ controlled.
 | GitHub takeover or malicious merge | Passkey/MFA, protected main, least privilege, signed review path | audit log, CI, Flux revision | revoke sessions, revert commit, rotate affected values |
 | Compromised Action/PR | full-SHA pins, read-only PR token, no infra secrets, GitHub runners | dependency review, action policy, CodeQL/scans | pin/revert, invalidate artifacts |
 | Flux privilege escalation | explicit SAs, no cross-namespace refs/remote bases, no Git credential | RBAC/policy tests, audit metadata | suspend/revert, rotate age identity if exposed |
-| Stolen age identity | offline encrypted backups, restricted file, never CI/chat | unexpected decrypt access is hard to prove; monitor host access | new identity, re-encrypt, rotate every exposed credential |
-| Tunnel token leak | tunnel-specific token, SOPS, no API token, separate tunnels | connector inventory/logs | revoke/rotate one tunnel; verify the other unchanged |
+| Stolen cluster age identity | hybrid-PQ identity, two operator-wrapped restore-tested backups, private key only in `flux-system`, never CI/chat | unexpected decrypt access is hard to prove; monitor workstation/cluster access | new identity, re-encrypt, rotate every credential exposed through repository history |
+| Stolen operator-wrapping identity or OpenTofu state | separate identity on BitLocker/ACL workspace, opaque age archives, phase-separated state, never Pi/Git/CI | workspace access evidence, lineage/serial/hash receipts, exact-index/history gates | replace wrapping identity, re-encrypt archives, rotate retained bearer credentials; treat topology/state disclosure as permanent |
+| Tunnel token leak or wrong-Tunnel substitution | tunnel-specific token, SOPS, no API token, separate tunnels, independent account/Tunnel-ID digests | protected MAC/plaintext-identity proof, active systemd credential equality/redaction, connector inventory | revoke/rotate one tunnel, force-disconnect on compromise, verify the other unchanged |
 | Stolen Pi/SSD | disk/physical controls, Kubernetes API encryption at rest | inventory/availability alert | revoke tokens/keys, rebuild, restore tested backup |
 | Accidental legacy workload reactivation | separate must-inactive unit contract, every activation edge disabled, no installer/update/restore path | indexed unit active/enabled checks plus process/listener and reboot evidence | suspend platform mutation, restore hash-bound inactive state without starting the workload |
 | Legacy wallet, anonymity identity, or topology disclosure | no content in Git/chat/catalog, operator encryption and separate off-device restore proof, minimized indexed diagnostics | repository privacy tests and owner-reported restore result | isolate host, revoke/rotate affected network credentials or identities where possible, reassess archive trust |
@@ -35,7 +36,7 @@ controlled.
 | Accidental Flux prune | scoped paths/SAs, review, health checks | Flux events/diff | Git revert; restore persistent data separately |
 | kubeadm/stacked-etcd loss | SSD preflight, compatible pins, snapshots, protected PKI/encryption backup | snapshot, certificate-expiry, and disk-health checks | compatible-version restore drill then reconcile Git |
 | Host-network conflict | discovery-gated CNI/kube-proxy, conflict-free CIDRs, no automatic firewall/VPN edits | route, nftables/iptables, VPN/tunnel-interface, policy-routing, and connectivity tests | retain LAN/physical access; restore reviewed host/network state |
-| Cloudflare takeover | passkey/MFA, minimal admins/tokens | audit log, read-only inventory | revoke, re-establish tunnels/DNS from reviewed state |
+| Cloudflare takeover | passkey/MFA, minimal admins, JIT/IP-bounded audit/apply tokens, separate phase state | audit log, token-policy/revocation receipts, read-only inventory | revoke, re-establish tunnels/DNS from reviewed state one phase at a time |
 | Paid feature activation | strict resource/product allowlist, no Billing Write, plan gate | pre/post subscription audit and budget alert | stop change, preserve evidence, disable if safe, dispute/escalate |
 
 ## Acceptance

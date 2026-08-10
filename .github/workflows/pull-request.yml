@@ -24,6 +24,93 @@ jobs:
           fetch-depth: 0
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
+      - name: Scan immutable pull-request history
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            printf 'FAIL immutable pull-request history validation.\n' >&2
+            exit 1
+          }
+
+          readonly oid_pattern='^([0-9a-f]{40}|[0-9a-f]{64})$'
+          [[ "${GITHUB_EVENT_NAME}" == pull_request ]] || fail
+          [[ "${GITHUB_REPOSITORY}" == "${PR_BASE_REPOSITORY}" ]] || fail
+          [[ "${PR_BASE_REF}" == main ]] || fail
+          [[ "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] || fail
+          [[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]] || fail
+          [[ "${PR_BASE_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "${PR_HEAD_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "${PR_MERGE_SHA}" =~ ${oid_pattern} ]] || fail
+          [[ "${GITHUB_SHA}" == "${PR_MERGE_SHA}" ]] || fail
+          [[ "$(git rev-parse --is-shallow-repository)" == false ]] || fail
+
+          checked_out_sha="$(git rev-parse --verify 'HEAD^{commit}')" || fail
+          [[ "${checked_out_sha}" == "${PR_MERGE_SHA}" ]] || fail
+          merge_record_text="$(git rev-list --parents -n 1 "${PR_MERGE_SHA}")" || fail
+          read -r -a merge_record <<< "${merge_record_text}"
+          [[ "${#merge_record[@]}" -eq 3 ]] || fail
+          [[ "${merge_record[0]}" == "${PR_MERGE_SHA}" ]] || fail
+          [[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]] || fail
+          [[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]] || fail
+          [[ "$(git rev-parse --verify "${PR_BASE_SHA}^{commit}")" == "${PR_BASE_SHA}" ]] || fail
+          [[ "$(git rev-parse --verify "${PR_HEAD_SHA}^{commit}")" == "${PR_HEAD_SHA}" ]] || fail
+
+          python3 -I -B scripts/validate_publication_history.py \
+            --pull-request "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || fail
+
+          expected_version="$(awk -F= '
+            $1 == "GITLEAKS_VERSION" && $2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {
+              count += 1; value = $2
+            }
+            END { if (count == 1) print value }
+          ' versions.env)" || fail
+          [[ -n "${expected_version}" ]] || fail
+          actual_version="$(gitleaks version 2>/dev/null | tr -d '\r\n')" || fail
+          [[ "${actual_version}" == "${expected_version}" || "v${actual_version}" == "${expected_version}" ]] || fail
+
+          old_umask="$(umask)"
+          umask 077
+          empty_ignore="$(mktemp "${RUNNER_TEMP}/pull-request-gitleaks-ignore.XXXXXX")" || fail
+          umask "${old_umask}"
+          cleanup() {
+            rm -f -- "${empty_ignore}"
+          }
+          abort() {
+            trap - EXIT HUP INT TERM
+            cleanup
+            exit 1
+          }
+          trap cleanup EXIT
+          trap abort HUP INT TERM
+          [[ -f "${empty_ignore}" && ! -L "${empty_ignore}" && ! -s "${empty_ignore}" ]] || fail
+
+          gitleaks git \
+            --no-banner \
+            --no-color \
+            --redact \
+            --ignore-gitleaks-allow \
+            --gitleaks-ignore-path="${empty_ignore}" \
+            --max-archive-depth=1 \
+            --max-decode-depth=1 \
+            --max-target-megabytes=2 \
+            --timeout=120 \
+            --config policies/gitleaks.toml \
+            --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}" \
+            . || fail
+
+          [[ -f "${empty_ignore}" && ! -L "${empty_ignore}" && ! -s "${empty_ignore}" ]] || fail
+          cleanup || fail
+          [[ ! -e "${empty_ignore}" ]] || fail
+          trap - EXIT HUP INT TERM
       - name: Validate workflows
         run: actionlint
       - name: Validate Python policy tooling
@@ -56,13 +143,7 @@ jobs:
       - name: Test staged Kyverno policies
         run: kyverno test tests/kubernetes/kyverno
       - name: Validate OpenTofu without credentials
-        run: |
-          tofu -chdir=infrastructure/cloudflare fmt -check -recursive
-          tofu -chdir=infrastructure/cloudflare init -backend=false
-          tofu -chdir=infrastructure/cloudflare validate
-          test -f infrastructure/cloudflare/.terraform.lock.hcl
-          test -z "$(git status --porcelain -- infrastructure/cloudflare/.terraform.lock.hcl)"
-          ./scripts/test-cloudflare-policy.sh
+        run: ./scripts/validate-cloudflare-iac.sh
       - name: Scan dependencies and full-tree secrets
         run: trivy fs --exit-code 1 --ignore-unfixed --scanners vuln,secret --severity HIGH,CRITICAL .
       - name: Scan IaC and configuration

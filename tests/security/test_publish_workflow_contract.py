@@ -185,6 +185,48 @@ class PublishWorkflowContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.pull_request)
 
+    def test_pull_request_scans_the_server_bound_immutable_commit_range(self):
+        """Fork PRs use the merge ref only to authenticate exact base/head OIDs."""
+
+        required_fragments = (
+            "permissions: {}",
+            "contents: read",
+            "persist-credentials: false",
+            "fetch-depth: 0",
+            "if: github.event_name == 'pull_request'",
+            "PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}",
+            "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+            "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+            "PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}",
+            '[[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]]',
+            '[[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]]',
+            '[[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]]',
+            "validate_publication_history.py \\",
+            '--pull-request "${PR_BASE_SHA}" "${PR_HEAD_SHA}"',
+            "gitleaks git \\",
+            "--ignore-gitleaks-allow",
+            "--gitleaks-ignore-path=",
+            '--log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}"',
+            '[[ ! -e "${empty_ignore}" ]]',
+            "trap - EXIT HUP INT TERM",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.pull_request)
+        self.assertNotIn("pull_request_target:", self.pull_request)
+        self.assertNotIn("contents: write", self.pull_request)
+        self.assertNotIn(
+            "github.event.pull_request.head.repo.full_name", self.pull_request
+        )
+        self.assertLess(
+            self.pull_request.index("fetch-depth: 0"),
+            self.pull_request.index("validate_publication_history.py"),
+        )
+        self.assertLess(
+            self.pull_request.index("validate_publication_history.py"),
+            self.pull_request.index("gitleaks git"),
+        )
+
     def test_pull_request_uses_one_strict_release_transition_selector(self):
         """CI must pass the classifier's exact safe mode to the renderer."""
 

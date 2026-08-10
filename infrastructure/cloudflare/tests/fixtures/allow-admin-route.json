@@ -1,0 +1,33 @@
+{
+  "codex_contract": {"phase": "admin-route"},
+  "variables": {
+    "approve_admin_route_phase": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "pi_admin_tunnel_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "pi_admin_cidr": {"value": "192.168.50.10/32"},
+    "admin_email": {"value": "admin@example.invalid"},
+    "admin_device_posture_check_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "verified_admin_posture_contract_sha256": {"value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "pi_admin_ssh_allow_precedence": {"value": 100},
+    "pi_admin_block_precedence": {"value": 1000},
+    "admin_session_freshness": {"value": "300s"},
+    "verified_admin_policies_contract_sha256": {"value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+  },
+  "resource_changes": [{
+    "address": "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
+    "mode": "managed",
+    "type": "cloudflare_zero_trust_tunnel_cloudflared_route",
+    "change": {"actions": ["create"], "after": {"account_id": "11111111111111111111111111111111", "tunnel_id": "00000000-0000-0000-0000-000000000000", "network": "192.168.50.10/32", "comment": "Pi host only; verified block and SSH-only allow required"}, "after_unknown": {}}
+  }],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [{
+    "address": "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin",
+    "mode": "managed",
+    "type": "cloudflare_zero_trust_tunnel_cloudflared_route",
+    "expressions": {
+      "account_id": {"references": ["var.cloudflare_account_id"]},
+      "tunnel_id": {"references": ["var.pi_admin_tunnel_id"]},
+      "network": {"references": ["var.pi_admin_cidr"]},
+      "comment": {}
+    }
+  }]}}
+}

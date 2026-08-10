@@ -16,6 +16,7 @@ TimeoutStopSec=30s
 
 AmbientCapabilities=
 CapabilityBoundingSet=
+KeyringMode=private
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes
@@ -28,6 +29,7 @@ ProtectHostname=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
+ProtectProc=invisible
 ProtectSystem=strict
 RemoveIPC=yes
 RestrictAddressFamilies=AF_INET AF_INET6
