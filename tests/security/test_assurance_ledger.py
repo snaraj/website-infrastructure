@@ -56,6 +56,11 @@ class AssuranceLedgerContractTests(unittest.TestCase):
                 valid_record(
                     time_utc="2026-08-10T19:20:01Z", command_id="second-record"
                 ),
+                valid_record(
+                    time_utc="2026-08-10T19:20:02Z",
+                    command_id="house-prefix-record",
+                    branch="fable5/platform-kubernetes-policy-audit",
+                ),
             ]
         )
         self.assertEqual(MODULE.ledger_errors(self.path), [])

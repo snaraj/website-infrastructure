@@ -29,7 +29,7 @@ REQUIRED_FIELDS = (
 )
 TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-BRANCH_RE = re.compile(r"^fable/platform-[a-z0-9-]+$")
+BRANCH_RE = re.compile(r"^fable5?/platform-[a-z0-9-]+$")
 PHASE_RE = re.compile(r"^[A-G]$")
 CONTROL_RE = re.compile(r"^PLAT-[A-Z0-9]+-[0-9]{3}$")
 COMMAND_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
