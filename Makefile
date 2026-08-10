@@ -14,7 +14,8 @@ help:
 	  'pre-push-security Rehearse the origin/main..HEAD publication gate' \
 	  'check-privacy    Reject private workstation, identity, and host context' \
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
-	  'check-cloudflare Validate OpenTofu formatting and plan fixtures'
+	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
+	  'check-determinism Prove two scaffold renders are byte-identical'
 
 check: check-fast check-gitleaks check-shell check-workflows check-kubernetes check-cloudflare
 
@@ -56,6 +57,9 @@ check-kubernetes:
 
 check-cloudflare:
 	@./scripts/validate-cloudflare-iac.sh
+
+check-determinism:
+	@./scripts/ci/verify-render-determinism.sh
 
 check-tofu: check-cloudflare
 
