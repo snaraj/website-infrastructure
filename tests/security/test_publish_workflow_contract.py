@@ -208,8 +208,11 @@ class PublishWorkflowContractTests(unittest.TestCase):
             "PR_BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}",
             "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
             "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
-            "PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}",
             '[[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]]',
+            '[[ "${GITHUB_SHA}" =~ ${oid_pattern} ]]',
+            '[[ "${checked_out_sha}" == "${GITHUB_SHA}" ]]',
+            'git rev-list --parents -n 1 "${checked_out_sha}"',
+            '[[ "${merge_record[0]}" == "${checked_out_sha}" ]]',
             '[[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]]',
             '[[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]]',
             "validate_publication_history.py \\",
@@ -226,6 +229,8 @@ class PublishWorkflowContractTests(unittest.TestCase):
                 self.assertIn(fragment, self.pull_request)
         self.assertNotIn("pull_request_target:", self.pull_request)
         self.assertNotIn("contents: write", self.pull_request)
+        self.assertNotIn("PR_MERGE_SHA", self.pull_request)
+        self.assertNotIn("github.event.pull_request.merge_commit_sha", self.pull_request)
         self.assertNotIn(
             "github.event.pull_request.head.repo.full_name", self.pull_request
         )
