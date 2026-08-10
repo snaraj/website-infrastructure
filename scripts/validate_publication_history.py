@@ -77,6 +77,17 @@ ALLOWED_DIST_PATHS = {
 APPROVED_SOPS_PATH = (
     "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
 )
+# This one inert, non-rendered manifest documents only the Secret shape that a
+# later SOPS ceremony must produce.  Pinning both path and bytes avoids a broad
+# examples/placeholder exemption: a copy, edit, alternate token, or newly added
+# plaintext Secret remains a publication failure.
+STRUCTURAL_SECRET_EXAMPLE_PATH = (
+    "kubernetes/platform/cloudflare-public/examples/"
+    "tunnel-token.invalid-example.yaml"
+)
+STRUCTURAL_SECRET_EXAMPLE_SHA256 = (
+    "9338ed72189de69f2949db74f34cacd5147dc8a60487826933adb1ac8e3366f1"
+)
 
 SECRET_PATTERNS = {
     "age private identity": re.compile(r"AGE-SECRET-KEY-(?:PQ-)?1[A-Z0-9]+"),
@@ -639,6 +650,13 @@ def _contains_secret_document(text):
     )
 
 
+def _is_pinned_structural_secret_example(relative_path, data):
+    return (
+        relative_path.casefold() == STRUCTURAL_SECRET_EXAMPLE_PATH
+        and hashlib.sha256(data).hexdigest() == STRUCTURAL_SECRET_EXAMPLE_SHA256
+    )
+
+
 def _canonical_base64_bytes(value):
     try:
         decoded = base64.b64decode(value, validate=True)
@@ -1080,6 +1098,7 @@ def validate(root, baseline, candidate):
                 and relative_path.casefold().endswith((".yaml", ".yml"))
                 and _contains_secret_document(text)
                 and relative_path.casefold() != APPROVED_SOPS_PATH
+                and not _is_pinned_structural_secret_example(relative_path, data)
             ):
                 findings.add("unencrypted Kubernetes Secret manifest", commit, raw_path)
             if (

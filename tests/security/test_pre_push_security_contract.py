@@ -416,6 +416,47 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_allows_only_the_exact_inert_tunnel_token_structural_example(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository, baseline = initialize_history_repository(directory)
+            relative = Path(
+                "kubernetes/platform/cloudflare-public/examples/"
+                "tunnel-token.invalid-example.yaml"
+            )
+            path = repository / relative
+            path.parent.mkdir(parents=True)
+            source = ROOT / relative
+            exact_bytes = source.read_bytes()
+            path.write_bytes(exact_bytes)
+            run_git(repository, "add", relative.as_posix())
+            run_git(repository, "commit", "-m", "exact structural example")
+            exact_candidate = run_git(
+                repository, "rev-parse", "HEAD", text=True
+            ).stdout.strip()
+
+            exact_result = run_history_validator(
+                repository, baseline, exact_candidate
+            )
+
+            self.assertEqual(exact_result.returncode, 0, exact_result.stderr)
+
+            path.write_bytes(exact_bytes.replace(b"INTENTIONALLY_UNUSABLE", b"MUTATED"))
+            run_git(repository, "add", relative.as_posix())
+            run_git(repository, "commit", "-m", "mutated structural example")
+            mutated_candidate = run_git(
+                repository, "rev-parse", "HEAD", text=True
+            ).stdout.strip()
+
+            mutated_result = run_history_validator(
+                repository, baseline, mutated_candidate
+            )
+
+            self.assertNotEqual(mutated_result.returncode, 0)
+            self.assertIn(
+                "unencrypted Kubernetes Secret manifest", mutated_result.stderr
+            )
+            self.assertNotIn(relative.name, mutated_result.stderr)
+
     def test_rejects_a_secret_added_then_deleted_without_echoing_it(self):
         with tempfile.TemporaryDirectory() as directory:
             repository, baseline = initialize_history_repository(directory)
