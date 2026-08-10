@@ -10,9 +10,16 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 ALLOWED_ACTIONS = ("Audit", "Enforce")
+# Publisher identities live in the standalone site repositories and are
+# tag-triggered: the certificate identity ends in @refs/tags/v* rather
+# than a branch ref.
 SIGNATURE_CONTRACTS = {
-    "naranjo-online": "publish-naranjo-online-image.yml",
-    "lidersea-com": "publish-lidersea-com-image.yml",
+    "naranjo-online": "release-publisher.yml",
+    "lidersea-com": "release-publisher.yml",
+}
+SIGNATURE_REPOSITORIES = {
+    "naranjo-online": "naranjo.online",
+    "lidersea-com": "lidersea.com",
 }
 SIGNATURE_DESCRIPTIONS = {
     "naranjo-online": "Verify the exact GitHub workflow signature and SLSA provenance bundle.",
@@ -134,9 +141,11 @@ def expected_policy_body(slug, workflow, action):
     if action not in ALLOWED_ACTIONS:
         raise ValueError("signature policy action is not Audit or Enforce")
     subject = (
-        "https://github.com/snaraj/website-infrastructure/.github/workflows/"
+        "https://github.com/snaraj/"
+        + SIGNATURE_REPOSITORIES[slug]
+        + "/.github/workflows/"
         + workflow
-        + "@refs/heads/main"
+        + "@refs/tags/v*"
     )
     description = SIGNATURE_DESCRIPTIONS[slug]
     return """apiVersion: kyverno.io/v1

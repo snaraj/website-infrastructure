@@ -15,14 +15,20 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
     def setUpClass(cls):
         cls.script = RENDER.read_text(encoding="utf-8")
 
-    def test_closed_chart_rows_cover_both_sites_and_cloudflare(self):
-        for row in (
-            "naranjo-online|naranjo-online|websites/naranjo.online/chart",
-            "lidersea-com|lidersea-com|websites/lidersea.com/chart",
+    def test_closed_chart_rows_cover_only_the_platform_chart(self):
+        """Site charts render in their own repositories; only the platform
+        cloudflare-public chart remains a local render target."""
+
+        self.assertIn(
             "cloudflare-public|cloudflare-public|kubernetes/platform/cloudflare-public/chart",
+            self.script,
+        )
+        for removed in (
+            "websites/naranjo.online/chart",
+            "websites/lidersea.com/chart",
         ):
-            with self.subTest(row=row):
-                self.assertIn(row, self.script)
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, self.script)
 
     def test_transition_and_release_use_exact_helmrelease_values(self):
         mode_gate = self.script.index("if [[ \"$MODE\" != '--scaffold' ]]")

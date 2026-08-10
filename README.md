@@ -68,15 +68,14 @@ policies/              Conftest and Kyverno controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
 tests/                 allow/deny fixtures and 700+ repository tests
-websites/              the two sites (moving to their own repos — see below)
 ```
 
-The two sites are graduating into standalone repositories
+The two sites live in their own repositories
 ([naranjo.online](https://github.com/snaraj/naranjo.online),
-[lidersea.com](https://github.com/snaraj/lidersea.com)) with their own CI and
-signed releases; this repository is becoming application-agnostic — it will
-consume their images by digest and stop caring what framework they use.
-Per-site Go and frontend coverage is reported in each PR run's job summary.
+[lidersea.com](https://github.com/snaraj/lidersea.com)) with independent CI
+and signed releases; this repository is application-agnostic — it consumes
+their signed images and charts by immutable digest through per-site Flux
+sources, and no site source code exists here.
 
 ## Working locally
 
@@ -89,8 +88,6 @@ make pre-push-security # rehearse the exact publication gate before pushing
 `make check-fast` needs only Python and Git. Tool pins live in
 `versions.env`; macOS notes live in
 [the local development runbook](docs/runbooks/local-macos-development.md).
-The optional [Kind harness](docs/runbooks/local-kind.md) exercises rendered
-manifests on a disposable local cluster — it is never mistaken for the Pi.
 
 ## Start here, depending on who you are
 

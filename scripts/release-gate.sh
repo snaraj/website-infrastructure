@@ -2197,7 +2197,15 @@ assert_no_live_routes() {
   log 'PASS production has no Ingress or Gateway API route objects'
 }
 
+# The retained body below the fail-closed die is the successor's template;
+# unreachable-command notes are expected until the post-cutover lane lands.
+# shellcheck disable=SC2317
 run_live_gate() {
+  # PENDING SUCCESSOR: the site charts and their runtime evidence moved to
+  # the standalone site repositories; the local Kind runtime stage was
+  # retired with the embedded sources. This lane fails closed until the
+  # post-cutover live gate (platform + remote-chart evidence) replaces it.
+  die 'live gate is PENDING its post-cutover successor: site runtime evidence no longer renders locally'
   require_live_tools
   run_static_gate --release
   new_temp_root
@@ -2212,7 +2220,6 @@ run_live_gate() {
   ADMISSION_RUNTIME_IMAGE="$(desired_deployment_image "${REPO_ROOT}/.artifacts/rendered/kubernetes-platform-admission.yaml" 'reg\.kyverno\.io/kyverno/[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+' kyverno-admission-controller kyverno)"
 
   validate_production_context
-  bash "${REPO_ROOT}/scripts/test-kind.sh" --runtime "$KIND_ACK"
   assert_clean_commit
   capture_desired_security_policy_state
   capture_production_state
@@ -2265,9 +2272,7 @@ case "${1:---check}" in
       *) die 'transition runtime site must be naranjo-online or lidersea-com' ;;
     esac
     [[ "$3" == "$KIND_ACK" ]] || die "exact acknowledgement is required: ${KIND_ACK}"
-    require_static_tools
-    bash "${REPO_ROOT}/scripts/test-kind.sh" --transition-runtime "$2" "$KIND_ACK"
-    log "PASS bounded local transition runtime evidence for staged $2; production remains untouched"
+    die 'transition runtime evidence is PENDING its post-cutover successor: the local Kind stage was retired with the embedded site sources'
     ;;
   --live)
     (($# == 4)) || { usage >&2; exit 2; }

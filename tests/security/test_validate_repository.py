@@ -27,8 +27,6 @@ ACTIVATION_FIXTURE_FILES = (
     "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
     "kubernetes/reconciliation/platform-services.yaml",
     "kubernetes/reconciliation/admission.yaml",
-    "websites/naranjo.online/chart/values.yaml",
-    "websites/lidersea.com/chart/values.yaml",
 ) + tuple(
     path.as_posix()
     for path in sorted(MODULE.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
@@ -186,7 +184,7 @@ def write_site_release(root, slug, *, suspended=True, ready=False, digest=None):
         "    mode: enabled\n"
         "  chart:\n"
         "    spec:\n"
-        "      chart: ./websites/{domain}/chart\n"
+        "      chart: ./chart\n"
         "      reconcileStrategy: Revision\n"
         "      sourceRef:\n"
         "        kind: GitRepository\n"
@@ -272,7 +270,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_local_identity_and_opaque_identifiers(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "docs"
             target.mkdir()
             target.joinpath("private.md").write_text(
@@ -288,7 +286,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_accepts_deliberately_synthetic_privacy_fixtures(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "tests" / "fixtures"
             target.mkdir(parents=True)
             target.joinpath("synthetic.txt").write_text(
@@ -301,7 +299,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Every public text file must sit inside the same privacy boundary."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("terraform.tfvars.example").write_text(
                 "path = '" + "C:" + "\\\\Users\\\\person\\\\config'\n",
                 encoding="utf-8",
@@ -325,7 +323,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Deployment text cannot evade secret scanning through its suffix."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("connector.service").write_text(
                 "Environment=KEY=AGE-" + "SECRET-KEY-1SYNTHETIC\n",
                 encoding="utf-8",
@@ -348,7 +346,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         for identity in identities:
             with self.subTest(prefix=identity[:24]):
                 with tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve()
                     root.joinpath("identity.txt").write_text(
                         identity + "\n", encoding="utf-8"
                     )
@@ -363,7 +361,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         for prefix in ("cfk_", "cfut_", "cfat_"):
             with self.subTest(prefix=prefix):
                 with tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve()
                     root.joinpath("credential.txt").write_text(
                         prefix + ("A" * 40) + "deadbeef\n",
                         encoding="utf-8",
@@ -375,7 +373,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                     ))
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("legacy.txt").write_text(
                 "cloudflare_api_token = \"" + ("L" * 40) + "\"\n",
                 encoding="utf-8",
@@ -398,7 +396,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "dsa-key.pem.txt": "-----BEGIN DSA " + "PRIVATE KEY-----",
         }
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for name, value in values.items():
                 root.joinpath(name).write_text(value + "\n", encoding="utf-8")
             errors = MODULE.check_secrets(root)
@@ -415,7 +413,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """A secret-shaped staged filename is itself public data."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             token = "cfut_" + ("A" * 40) + "deadbeef"
             root.joinpath(token).write_bytes(b"")
@@ -429,7 +427,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Public recipients and malformed prefixes must not create false alarms."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("public-values.txt").write_text(
                 "age1pq1" + ("q" * 128) + "\n"
                 "cfut_" + ("A" * 39) + "deadbeef\n",
@@ -441,7 +439,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Ignore rules cannot exempt tracked state or artifact content."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             root.joinpath(".gitignore").write_text(
                 "\n".join((
@@ -490,25 +488,23 @@ class RepositoryPolicyTests(unittest.TestCase):
                 len(forced),
             )
 
-    def test_git_visible_gate_allows_only_the_two_dist_placeholders(self):
-        """Generated dist trees expose no Git exception beyond exact .gitkeep files."""
+    def test_git_visible_gate_allows_no_dist_content_at_all(self):
+        """Frontend output moved to the site repositories; no generated dist
+        tree (or placeholder for it) may become Git-visible here."""
 
+        self.assertEqual(MODULE.ALLOWED_DIST_PATHS, set())
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             root.joinpath(".gitignore").write_text("dist/\n", encoding="utf-8")
-            placeholders = [root / relative for relative in MODULE.ALLOWED_DIST_PATHS]
-            for path in placeholders:
-                path.parent.mkdir(parents=True)
-                path.write_text("", encoding="utf-8")
+            placeholder = root / "frontend" / "dist" / ".gitkeep"
+            placeholder.parent.mkdir(parents=True)
+            placeholder.write_text("", encoding="utf-8")
             subprocess.run(
                 ["git", "add", ".gitignore"], cwd=root, check=True
             )
             subprocess.run(
-                [
-                    "git", "add", "--force",
-                    *(path.relative_to(root).as_posix() for path in placeholders),
-                ],
+                ["git", "add", "--force", "frontend/dist/.gitkeep"],
                 cwd=root,
                 check=True,
             )
@@ -517,13 +513,19 @@ class RepositoryPolicyTests(unittest.TestCase):
                 error for error in MODULE.check_layout(root)
                 if "local-only directory content is Git-visible" in error
             ]
-            self.assertEqual(local_only_errors, [])
+            self.assertEqual(
+                local_only_errors,
+                [
+                    "local-only directory content is Git-visible: "
+                    "frontend/dist/.gitkeep"
+                ],
+            )
 
     def test_git_visible_gate_rejects_force_added_credential_and_state_files(self):
         """Binary credentials and private tool files fail before content heuristics."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             root.joinpath(".gitignore").write_text(
                 "*\n!.env.example\n", encoding="utf-8"
@@ -574,7 +576,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
         for version in ("v1", "v2"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 init_git_repository(root)
                 receipt = root / "evidence.json"
                 receipt.write_text(
@@ -594,7 +596,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Local custody material is excluded before any content read occurs."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             root.joinpath(".gitignore").write_text(
                 ".artifacts/\n.terraform/\n", encoding="utf-8"
@@ -630,7 +632,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """A secret staged then overwritten locally must still block the push."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             candidate = root / "candidate.txt"
             staged_secret = "cfut_" + ("A" * 40) + "deadbeef"
@@ -649,7 +651,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
         for suffix in (b"\x00", b"\xff"):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 init_git_repository(root)
                 candidate = root / "candidate.bin"
                 staged_secret = b"cfut_" + (b"A" * 40) + b"deadbeef"
@@ -667,7 +669,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """A regular worktree file cannot conceal a staged symbolic entry."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             blob = subprocess.run(
                 ["git", "hash-object", "-w", "--stdin"],
@@ -695,7 +697,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Many small blobs cannot make exact-index scanning unbounded."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             for index in range(3):
                 root.joinpath("candidate-{}.txt".format(index)).write_text(
@@ -710,7 +712,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """A Git-visible hardlink cannot proxy content from another custody path."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "custody-source.txt"
             public = root / "public.txt"
             source.write_text("synthetic\n", encoding="utf-8")
@@ -727,7 +729,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Private staged inventory cannot hide behind a sanitized worktree file."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             candidate = root / "inventory.txt"
             candidate.write_text(
@@ -746,7 +748,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Real-looking network and machine identities remain local-only."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("inventory.txt").write_text(
                 "host=" + "198.18.0." + "1\n"
                 "v6=" + "fd00:" + ":1234\n"
@@ -762,39 +764,40 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Policy CIDRs and standards-reserved examples stay documentable."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("networking.txt").write_text(
                 "bind=127.0.0.1 docs=192.0.2.10 v6=2001:db8::10\n",
                 encoding="utf-8",
             )
             self.assertEqual(MODULE.check_privacy(root), [])
 
-    def test_media_gate_rejects_binaries_outside_assets_and_large_ui_assets(self):
+    def test_media_gate_rejects_media_content_everywhere(self):
+        """The platform tree carries no application asset trees at all, so any
+        media content anywhere in it is a violation."""
+
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            outside = root / "websites" / "example.invalid" / "media"
+            root = Path(directory).resolve()
+            outside = root / "docs" / "media"
             outside.mkdir(parents=True)
             outside.joinpath("source.mp4").write_bytes(b"tiny")
-            assets = (
+            former_assets = (
                 root / "websites" / "example.invalid" / "frontend" / "src"
                 / "assets" / "images"
             )
-            assets.mkdir(parents=True)
-            # Lower the in-memory policy constant so this boundary test never
-            # creates the kind of synthetic large file the repository forbids.
-            original_ceiling = MODULE.MAX_UI_ASSET_BYTES
-            MODULE.MAX_UI_ASSET_BYTES = 3
-            try:
-                assets.joinpath("oversized.png").write_bytes(b"tiny")
-                errors = MODULE.check_media(root)
-            finally:
-                MODULE.MAX_UI_ASSET_BYTES = original_ceiling
-            self.assertTrue(any("outside the small frontend asset tree" in error for error in errors))
-            self.assertTrue(any("exceeds the small-asset ceiling" in error for error in errors))
+            former_assets.mkdir(parents=True)
+            former_assets.joinpath("logo.png").write_bytes(b"tiny")
+            errors = MODULE.check_media(root)
+            self.assertEqual(
+                sum(
+                    "outside the small frontend asset tree" in error
+                    for error in errors
+                ),
+                2,
+            )
 
     def test_media_gate_rejects_persistent_storage_before_discovery(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "storage"
             target.mkdir(parents=True)
             target.joinpath("pv.yaml").write_text(
@@ -808,7 +811,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_media_gate_scans_the_whole_repository_and_binary_magic(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             docs = root / "docs"
             docs.mkdir()
             docs.joinpath("video.mp4").write_bytes(b"tiny")
@@ -824,27 +827,9 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertTrue(any("renamed media content" in error for error in errors))
             self.assertTrue(any("public repository size ceiling" in error for error in errors))
 
-    def test_media_gate_rejects_split_asset_aggregate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            assets = (
-                root / "websites" / "example.invalid" / "frontend" / "src"
-                / "assets" / "images"
-            )
-            assets.mkdir(parents=True)
-            assets.joinpath("one.png").write_bytes(b"1234")
-            assets.joinpath("two.png").write_bytes(b"5678")
-            original_ceiling = MODULE.MAX_ASSET_TREE_BYTES
-            MODULE.MAX_ASSET_TREE_BYTES = 6
-            try:
-                errors = MODULE.check_media(root)
-            finally:
-                MODULE.MAX_ASSET_TREE_BYTES = original_ceiling
-            self.assertTrue(any("aggregate media ceiling" in error for error in errors))
-
     def test_media_gate_rejects_split_repository_aggregate(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             docs = root / "docs"
             docs.mkdir()
             docs.joinpath("part-one.bin").write_bytes(b"1234")
@@ -859,7 +844,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_media_gate_rejects_large_or_binary_kubernetes_data_objects(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "site"
             target.mkdir(parents=True)
             target.joinpath("config.yaml").write_text(
@@ -879,7 +864,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_media_gate_requires_narrow_flux_artifacts_without_override(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "kubernetes" / "site"
             source.mkdir(parents=True)
             source.joinpath("source.yaml").write_text(
@@ -894,7 +879,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_forbidden_layout(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "apps").mkdir()
             errors = MODULE.check_layout(root)
             self.assertTrue(any("apps" in error for error in errors))
@@ -902,7 +887,7 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_layout_rejects_force_added_tokens_archives_and_opaque_ciphertext(self):
         for name in ("pi-admin.token", "review.zip", "review.enc", "review.gpg"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 (root / name).write_text("synthetic\n", encoding="utf-8")
                 self.assertTrue(any(
                     "local-only" in error for error in MODULE.check_layout(root)
@@ -911,7 +896,7 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_media_rejects_renamed_archive_and_encrypted_magic(self):
         for prefix in (b"PK\x03\x04", b"\x1f\x8b", b"Salted__"):
             with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 target = root / "docs" / "review.txt"
                 target.parent.mkdir(parents=True)
                 target.write_bytes(prefix + b"synthetic")
@@ -922,7 +907,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_plaintext_secret(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "site"
             target.mkdir(parents=True)
             (target / "secret.yaml").write_text(
@@ -934,7 +919,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_plaintext_secret_with_quoted_kind_key(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "site"
             target.mkdir(parents=True)
             (target / "secret.yaml").write_text(
@@ -946,7 +931,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_renamed_api_encryption_config_from_exact_index(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             init_git_repository(root)
             target = root / "notes" / "review.txt"
             target.parent.mkdir(parents=True)
@@ -973,7 +958,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_allows_only_the_api_encryption_sentinel_example(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("review.example").write_text(
                 synthetic_api_encryption_configuration(
                     MODULE.ENCRYPTION_CONFIGURATION_SENTINEL
@@ -989,13 +974,13 @@ class RepositoryPolicyTests(unittest.TestCase):
         )
         for candidate in candidates:
             with self.subTest(candidate=candidate[:8]), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 (root / "review.txt").write_text(candidate + "\n", encoding="utf-8")
                 self.assertTrue(MODULE.check_secrets(root))
 
     def test_rejects_mixed_plaintext_sops_secret(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             recipient = "age1pq1" + ("q" * 80)
             root.joinpath(".sops.yaml").write_text(
                 "creation_rules:\n"
@@ -1028,7 +1013,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "docs/opaque-archive.sops.yaml",
         ):
             with self.subTest(path=relative_path), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 target = root / relative_path
                 target.parent.mkdir(parents=True)
                 target.write_text("synthetic\n", encoding="utf-8")
@@ -1181,7 +1166,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_mutable_image_and_public_service(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "site"
             target.mkdir(parents=True)
             (target / "bad.yaml").write_text(
@@ -1194,7 +1179,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_generated_flux_components_match_pinned_three_controller_export(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             root.joinpath("versions.env").write_text(
                 "FLUX_VERSION=v2.9.3\n"
                 "FLUX_SOURCE_CONTROLLER_IMAGE=example.invalid/source:v1@sha256:" + ("1" * 64) + "\n"
@@ -1230,7 +1215,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_helm_values_image_map_is_not_misread_as_image_reference(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "kubernetes" / "chart"
             target.mkdir(parents=True)
             (target / "values.yaml").write_text(
@@ -1241,7 +1226,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_unpinned_action(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / ".github" / "workflows"
             target.mkdir(parents=True)
             (target / "bad.yml").write_text(
@@ -1253,7 +1238,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_rejects_cloudflare_data_sources(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "infrastructure" / "cloudflare"
             target.mkdir(parents=True)
             (target / "data.tf").write_text(
@@ -1264,7 +1249,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_cloudflare_phase_contract_rejects_guard_bypass(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             shutil.copytree(
                 REPO_ROOT / "infrastructure" / "cloudflare",
                 root / "infrastructure" / "cloudflare",
@@ -1284,7 +1269,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_git_visible_terraform_inputs_and_json_configuration_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             shutil.copytree(
                 REPO_ROOT / "infrastructure" / "cloudflare",
                 root / "infrastructure" / "cloudflare",
@@ -1314,7 +1299,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_release_gate_requires_reconciled_admission_controller(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             errors = MODULE.signature_admission_install_errors(root)
             self.assertTrue(any(
                 "admission reconciliation is not active from the Flux root" in error
@@ -1374,7 +1359,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             ).format(namespace=namespace, evidence=digit * 64)
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             prerequisites = root / "kubernetes/platform/prerequisites"
             prerequisites.mkdir(parents=True)
             prerequisites.joinpath("kustomization.yaml").write_bytes(
@@ -1419,7 +1404,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             for signal in ("release", "signature"):
                 with self.subTest(domain=domain, signal=signal):
                     with tempfile.TemporaryDirectory() as directory:
-                        root = Path(directory)
+                        root = Path(directory).resolve()
                         release = write_site_release(root, slug)
                         policy = (
                             root / "policies" / "kyverno"
@@ -1452,7 +1437,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         for _, slug, _ in MODULE.SITE_RELEASE_CONTRACTS:
             with self.subTest(slug=slug):
                 with tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
+                    root = Path(directory).resolve()
                     write_site_release(
                         root,
                         slug,
@@ -1462,41 +1447,9 @@ class RepositoryPolicyTests(unittest.TestCase):
                     self.assertTrue(MODULE.load_helm_release(slug, root).suspended)
                     self.assertFalse(MODULE.activation_requested(root))
 
-    def test_transition_activation_keeps_chart_defaults_inert(self):
-        """A staged override cannot hide a live digest in chart defaults."""
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            copy_activation_fixture(root)
-            self.assertEqual(MODULE.check_activation(root), [])
-
-            release = "kubernetes/websites/naranjo-online/release.yaml"
-            replace_once(
-                root, release,
-                "    deploymentReady: false\n",
-                "    deploymentReady: true\n",
-            )
-            replace_once(
-                root, release,
-                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
-                "      digest: sha256:{}\n".format("a" * 64),
-            )
-            self.assertEqual(MODULE.check_activation(root), [])
-
-            replace_once(
-                root,
-                "websites/naranjo.online/chart/values.yaml",
-                "deploymentReady: false\n",
-                "deploymentReady: true\n",
-            )
-            self.assertIn(
-                "naranjo.online chart default must remain deploymentReady false",
-                MODULE.check_activation(root),
-            )
-
     def test_transition_activation_rejects_ambiguous_dependency_state(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
@@ -1517,7 +1470,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         # fails cleanup with "Directory not empty: 'pack'" on CI runners. The
         # assertions above the cleanup are unaffected; ignore cleanup races.
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             for relative in (
                 "kubernetes/reconciliation/admission.yaml",
@@ -1571,7 +1524,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """Desired child suspension is not observation while its parent is live."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             for relative in (
                 "kubernetes/reconciliation/admission.yaml",
@@ -1601,7 +1554,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_fully_suspended_staged_site_can_filter_its_inert_signature(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             for relative in (
                 "kubernetes/reconciliation/admission.yaml",
@@ -1629,7 +1582,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_configured_connector_without_secret_fails_before_filtering(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
@@ -1644,7 +1597,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_initial_connector_rejects_latent_secret_resource_listing(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
@@ -1659,7 +1612,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_staged_connector_never_filters_invalid_secret_contract(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             configure_cloudflare_fixture(root)
             for relative in (
@@ -1673,7 +1626,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_cloudflare_phase_guard_true_fails_the_integrated_activation_gate(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
@@ -1689,7 +1642,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_scaffold_signature_enforcement_is_not_an_orphaned_signal(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             policy = root / "policies/kyverno/require-signed-naranjo-online.yaml"
             policy.parent.mkdir(parents=True)
@@ -1704,7 +1657,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_staged_signature_signal_invokes_shared_release_checks(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
@@ -1734,7 +1687,7 @@ class RepositoryPolicyTests(unittest.TestCase):
 
     def test_active_connector_never_filters_its_sops_failure(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             copy_activation_fixture(root)
             for relative in (
                 "kubernetes/reconciliation/admission.yaml",
@@ -1759,7 +1712,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         """A text decoy cannot turn a live or ambiguous gate into inert state."""
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             release = write_site_release(root, "naranjo-online")
             release.write_bytes(
                 release.read_bytes().replace(
@@ -1769,41 +1722,35 @@ class RepositoryPolicyTests(unittest.TestCase):
             )
             self.assertTrue(MODULE.activation_requested(root))
 
-    def test_release_values_use_helm_override_and_keep_chart_inert(self):
-        """Production checks follow Flux's effective values, not chart defaults."""
+    def test_release_values_use_the_authoritative_helm_override(self):
+        """Production checks follow Flux's effective values; chart defaults now
+        live (and are enforced) in the standalone site repositories."""
 
-        zero_digest = "sha256:" + ("0" * 64)
-        chart = {
-            ("deploymentReady",): "false",
-            ("image", "digest"): zero_digest,
-        }
-        release = types.SimpleNamespace(
+        promoted = types.SimpleNamespace(
             values={
                 ("deploymentReady",): "true",
                 ("image", "digest"): "sha256:" + ("a" * 64),
             }
         )
         self.assertEqual(
-            MODULE.site_release_value_errors("example.invalid", chart, release),
+            MODULE.site_release_override_errors("example.invalid", promoted),
             [],
         )
 
-        errors = MODULE.site_release_value_errors(
-            "example.invalid",
-            {
-                ("deploymentReady",): "true",
-                ("image", "digest"): "sha256:" + ("b" * 64),
-            },
-            types.SimpleNamespace(
-                values={
-                    ("deploymentReady",): "false",
-                    ("image", "digest"): zero_digest,
-                }
-            ),
+        staged = types.SimpleNamespace(
+            values={
+                ("deploymentReady",): "false",
+                ("image", "digest"): MODULE.ZERO_DIGEST,
+            }
         )
-        self.assertEqual(len(errors), 4)
-        self.assertTrue(any("chart default" in error for error in errors))
-        self.assertTrue(any("HelmRelease override" in error for error in errors))
+        errors = MODULE.site_release_override_errors("example.invalid", staged)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(any(
+            "must contain one nonzero image digest" in error for error in errors
+        ))
+        self.assertTrue(any(
+            "is not deploymentReady" in error for error in errors
+        ))
 
 
 if __name__ == "__main__":

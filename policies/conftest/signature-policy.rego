@@ -8,12 +8,14 @@ import rego.v1
 signature_policy_contracts := {
   "require-signed-naranjo-online": {
     "slug": "naranjo-online",
-    "workflow": "publish-naranjo-online-image.yml",
+    "repository": "naranjo.online",
+    "workflow": "release-publisher.yml",
     "description": "Verify the exact GitHub workflow signature and SLSA provenance bundle.",
   },
   "require-signed-lidersea-com": {
     "slug": "lidersea-com",
-    "workflow": "publish-lidersea-com-image.yml",
+    "repository": "lidersea.com",
+    "workflow": "release-publisher.yml",
     "description": "Verify the exact lidersea.com workflow signature and SLSA provenance bundle.",
   },
 }
@@ -22,8 +24,8 @@ signature_policy_actions := {"Audit", "Enforce"}
 
 signature_keyless(contract) := {
   "subject": sprintf(
-    "https://github.com/snaraj/website-infrastructure/.github/workflows/%s@refs/heads/main",
-    [contract.workflow],
+    "https://github.com/snaraj/%s/.github/workflows/%s@refs/tags/v*",
+    [contract.repository, contract.workflow],
   ),
   "issuer": "https://token.actions.githubusercontent.com",
   "rekor": {"url": "https://rekor.sigstore.dev"},

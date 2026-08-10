@@ -19,7 +19,7 @@ RELATIVE = "kubernetes/websites/naranjo-online/release.yaml"
 class ReleasePatchTests(unittest.TestCase):
     def test_patch_applies_only_the_closed_release_path(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / RELATIVE
             target.parent.mkdir(parents=True)
             target.write_bytes(b"digest: old\n")
@@ -50,7 +50,7 @@ class ReleasePatchTests(unittest.TestCase):
 
     def test_rejects_noop_unsafe_path_and_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "original.yaml"
             candidate = root / "candidate.yaml"
             output = root / "review.patch"
@@ -70,7 +70,7 @@ class ReleasePatchTests(unittest.TestCase):
 
     def test_rejects_non_lf_oversized_and_symlink_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "original.yaml"
             candidate = root / "candidate.yaml"
             original.write_bytes(b"value: old\r\n")

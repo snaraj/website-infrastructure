@@ -14,7 +14,7 @@ spec:
     mode: enabled
   chart:
     spec:
-      chart: ./websites/naranjo.online/chart
+      chart: ./chart
       reconcileStrategy: Revision
       sourceRef:
         kind: GitRepository

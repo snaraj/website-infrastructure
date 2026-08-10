@@ -14,7 +14,7 @@ spec:
     mode: enabled
   chart:
     spec:
-      chart: ./websites/lidersea.com/chart
+      chart: ./chart
       reconcileStrategy: Revision
       sourceRef:
         kind: GitRepository

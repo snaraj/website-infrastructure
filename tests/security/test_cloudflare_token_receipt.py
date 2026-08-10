@@ -597,15 +597,16 @@ class CloudflareTokenReceiptTests(unittest.TestCase):
                 inside_repo.unlink()
 
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "receipt.json"
-            alias = Path(directory) / "receipt-hardlink.json"
+            resolved = Path(directory).resolve()
+            source = resolved / "receipt.json"
+            alias = resolved / "receipt-hardlink.json"
             source.write_bytes(b"{}")
             if os.name == "posix":
                 source.chmod(0o600)
-            self.assertEqual(MODULE.read_receipt(str(source), directory), b"{}")
+            self.assertEqual(MODULE.read_receipt(str(source), str(resolved)), b"{}")
             os.link(source, alias)
             with self.assertRaises(MODULE.ReceiptError):
-                MODULE.read_receipt(str(source), directory)
+                MODULE.read_receipt(str(source), str(resolved))
 
     def test_reader_requires_receipt_inside_explicit_protected_root(self):
         with tempfile.TemporaryDirectory() as protected_directory, \

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Canonical offline render gate for every desired-state root. This proves
 # source/schema/policy properties only; runtime admission/readiness is supplied
-# separately by test-kind.sh and release-gate.sh.
+# separately by release-gate.sh.
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ARTIFACT_ROOT="${REPO_ROOT}/.artifacts/rendered"
@@ -87,17 +87,9 @@ any_website_active="${BASH_REMATCH[1]}"
   die 'workload activation summary is invalid'
 any_workload_active="${BASH_REMATCH[1]}"
 
-# Keep the established chart-schema negative control on the canonical path.
-unsafe_naranjo_values="${REPO_ROOT}/tests/kubernetes/helm/naranjo-online-unsafe-resources.yaml"
-[[ -f "$unsafe_naranjo_values" ]] || die "missing unsafe values fixture: ${unsafe_naranjo_values}"
-if unsafe_lint_output="$(helm lint "${REPO_ROOT}/websites/naranjo.online/chart" \
-  --values "$unsafe_naranjo_values" 2>&1)"; then
-  die 'unsafe naranjo.online resource values unexpectedly passed Helm schema validation'
-fi
-for rejected_path in /resources/requests/cpu /resources/limits/memory; do
-  grep -Fq -- "$rejected_path" <<<"$unsafe_lint_output" || \
-    die "unsafe values fixture failed without the expected schema error for ${rejected_path}"
-done
+# The site charts (and their schema negative controls) live in the
+# standalone site repositories and are validated by their own CI; this
+# renderer covers the platform chart and the platform's Flux objects.
 
 POLICY_KUSTOMIZATION="${REPO_ROOT}/policies/kyverno/kustomization.yaml"
 [[ -f "$POLICY_KUSTOMIZATION" ]] || die "missing Kyverno policy kustomization: ${POLICY_KUSTOMIZATION}"
@@ -190,8 +182,6 @@ for signature_row in "${SIGNATURE_POLICY_ROWS[@]}"; do
 done
 
 declare -a CHART_ROWS=(
-  "naranjo-online|naranjo-online|websites/naranjo.online/chart"
-  "lidersea-com|lidersea-com|websites/lidersea.com/chart"
   "cloudflare-public|cloudflare-public|kubernetes/platform/cloudflare-public/chart"
 )
 declare -a KUSTOMIZE_TARGETS=(

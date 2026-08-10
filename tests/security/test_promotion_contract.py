@@ -31,13 +31,17 @@ class PromotionContractTests(unittest.TestCase):
                 "ghcr.io/snaraj/naranjo-online",
                 "kubernetes/websites/naranjo-online/release.yaml",
                 "kubernetes/reconciliation/naranjo-online.yaml",
-                "publish-naranjo-online-image.yml@refs/heads/main",
+                "https://github.com/snaraj/naranjo.online/.github/workflows/"
+                "release-publisher.yml@refs/tags/",
+                "oci://ghcr.io/snaraj/charts/naranjo-online",
             ),
             "lidersea-com": (
                 "ghcr.io/snaraj/lidersea-com",
                 "kubernetes/websites/lidersea-com/release.yaml",
                 "kubernetes/reconciliation/lidersea-com.yaml",
-                "publish-lidersea-com-image.yml@refs/heads/main",
+                "https://github.com/snaraj/lidersea.com/.github/workflows/"
+                "release-publisher.yml@refs/tags/",
+                "oci://ghcr.io/snaraj/charts/lidersea-com",
             ),
         }
         for site, fragments in tuples.items():

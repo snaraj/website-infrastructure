@@ -4,18 +4,14 @@ metadata:
   name: naranjo-online-source
   namespace: naranjo-online
 spec:
-  # This source may archive only the reviewed naranjo.online chart subtree.
+  # This source may archive only the released naranjo.online chart subtree.
   ignore: |
     /*
-    !/websites
-    /websites/*
-    !/websites/naranjo.online
-    /websites/naranjo.online/*
-    !/websites/naranjo.online/chart
+    !/chart
   interval: 10m0s
   ref:
     branch: main
   sparseCheckout:
-    - websites/naranjo.online/chart
+    - chart
   timeout: 60s
-  url: https://github.com/snaraj/website-infrastructure.git
+  url: https://github.com/snaraj/naranjo.online.git

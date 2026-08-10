@@ -30,7 +30,7 @@ def release_text(ready="false", digest=ZERO):
 class ReleaseCandidateTests(unittest.TestCase):
     def test_initial_candidate_changes_only_digest_and_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "original.yaml"
             output = root / "candidate.yaml"
             original.write_bytes(release_text())
@@ -39,7 +39,7 @@ class ReleaseCandidateTests(unittest.TestCase):
 
     def test_promoted_candidate_preserves_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "original.yaml"
             output = root / "candidate.yaml"
             original.write_bytes(release_text("true", "sha256:" + ("b" * 64)))
@@ -48,7 +48,7 @@ class ReleaseCandidateTests(unittest.TestCase):
 
     def test_rejects_duplicate_targets_existing_output_and_symlink_input(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "original.yaml"
             output = root / "candidate.yaml"
             original.write_bytes(release_text() + release_text())

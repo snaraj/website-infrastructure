@@ -125,7 +125,6 @@ jobs:
               "scripts/validate_image_release.py",
               "scripts/validate_release_state.py",
               "scripts/validate_release_transition.py",
-              "scripts/validate_frontend_dist.py",
               "scripts/redact_inventory.py",
           ):
               path = Path(relative)
@@ -133,15 +132,8 @@ jobs:
           PY
           python3 -B -m unittest discover -s tests -p 'test_*.py' -v
           python3 -B scripts/validate_repository.py all
-      - name: Require independent version bumps for changed release inputs
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 -B scripts/validate_image_release.py changed --base "${BASE_SHA}"
       - name: Check shell
         run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
-      - name: Check Dockerfile
-        run: hadolint websites/naranjo.online/Dockerfile websites/lidersea.com/Dockerfile
       - name: Scan current tree for secrets
         run: |
           ambient_python_artifact="$(
@@ -179,130 +171,7 @@ jobs:
           --scanners misconfig
           --severity HIGH,CRITICAL .
 
-  application:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        site:
-          - naranjo.online
-          - lidersea.com
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.19.0'
-          check-latest: false
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.5'
-          check-latest: false
-          # Both Go applications currently use only the standard library, so
-          # they intentionally have no go.sum dependency graph to cache.
-          cache: false
-      - name: Verify application toolchain
-        # setup-node selects Node, but npm is bundled independently. Checking
-        # both prevents a base/runtime bump from silently changing lock behavior.
-        run: |
-          test "$(node --version)" = "v24.19.0"
-          test "$(npm --version)" = "11.17.0"
-          test "$(go env GOVERSION)" = "go1.26.5"
-      - name: Build and check Svelte
-        working-directory: websites/${{ matrix.site }}/frontend
-        run: |
-          test -f package-lock.json
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run check
-          npm test
-          npm run build
-          python3 ../../../scripts/validate_frontend_dist.py --site "${{ matrix.site }}"
-          python3 ../../../scripts/validate_repository.py media
-      - name: Test Go service and embedded website experience
-        working-directory: websites/${{ matrix.site }}
-        env:
-          GOTOOLCHAIN: local
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "${unformatted}" ]; then
-            printf 'gofmt is required for:\n%s\n' "${unformatted}" >&2
-            exit 1
-          fi
-          go vet ./...
-          CGO_ENABLED=0 go test ./...
-          go test -race ./...
-      - name: Report Go test coverage
-        working-directory: websites/${{ matrix.site }}
-        env:
-          GOTOOLCHAIN: local
-        # Coverage is stdlib-only: no new dependencies, no external service.
-        # The per-run percentage lands in the job summary; the badge row in
-        # the README links here.
-        run: |
-          CGO_ENABLED=0 go test -covermode=atomic \
-            -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...
-          {
-            printf '### Go coverage — %s\n\n```\n' "${{ matrix.site }}"
-            go tool cover -func="${RUNNER_TEMP}/site.cover.out" | tail -n 8
-            printf '```\n'
-          } >> "${GITHUB_STEP_SUMMARY}"
-      - name: Report frontend test coverage
-        working-directory: websites/${{ matrix.site }}/frontend
-        # Node's built-in coverage reporter: still no new dependencies.
-        run: |
-          {
-            printf '### Frontend coverage — %s\n\n```\n' "${{ matrix.site }}"
-            node --test --experimental-test-coverage tests/*.test.mjs | tail -n 14
-            printf '```\n'
-          } >> "${GITHUB_STEP_SUMMARY}"
 
-  container:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - site: naranjo.online
-            artifact: naranjo-online
-          - site: lidersea.com
-            artifact: lidersea-com
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install checksum-verified scanners and OCI client
-        run: ./scripts/ci/install-tools.sh
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Build both production architectures once without publishing
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: websites/${{ matrix.site }}
-          platforms: linux/amd64,linux/arm64
-          outputs: type=oci,dest=${{ runner.temp }}/${{ matrix.artifact }}.oci.tar
-          push: false
-          provenance: mode=max
-          sbom: true
-      - name: Verify and scan exact per-platform views
-        env:
-          ARTIFACT_NAME: ${{ matrix.artifact }}
-          MAX_APPLICATION_LAYER_BYTES: 16777216
-          OCI_ARCHIVE: ${{ runner.temp }}/${{ matrix.artifact }}.oci.tar
-          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
-          EVIDENCE_DIR: ${{ runner.temp }}/${{ matrix.artifact }}-evidence
-        run: ./scripts/ci/verify-oci-artifact.sh
 
   dependency-review:
     if: github.event_name == 'pull_request'

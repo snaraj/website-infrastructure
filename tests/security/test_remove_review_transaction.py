@@ -17,7 +17,7 @@ SPEC.loader.exec_module(MODULE)
 class ReviewTransactionCleanupTests(unittest.TestCase):
     def test_removes_only_exact_owned_transaction(self):
         with tempfile.TemporaryDirectory() as directory:
-            artifact = Path(directory) / ".artifacts"
+            artifact = Path(directory).resolve() / ".artifacts"
             transaction = artifact / "promotion.naranjo-online.A1b2C3"
             transaction.mkdir(parents=True)
             (transaction / "partial.env").write_bytes(b"partial\n")
