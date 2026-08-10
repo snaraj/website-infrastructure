@@ -6,7 +6,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
   - package-ecosystem: terraform
-    directory: /infrastructure/cloudflare
+    # Dependabot does not recurse: each phase root holds its own lockfile-free
+    # module, so the glob must name the parents of the actual *.tf files.
+    directories:
+      - /infrastructure/cloudflare/phases/*
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
