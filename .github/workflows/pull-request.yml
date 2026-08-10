@@ -160,6 +160,7 @@ jobs:
           ./scripts/ci/verify-render-determinism.sh
           python3 -B scripts/validate_assurance_ledger.py docs/assurance/evidence-ledger.jsonl
           python3 -B scripts/validate_no_security_toggles.py .
+          python3 -B scripts/validate_attack_surface_manifest.py docs/assurance/attack-surface-manifest.json
       - name: Test staged Kyverno policies
         run: kyverno test tests/kubernetes/kyverno
       - name: Validate OpenTofu without credentials

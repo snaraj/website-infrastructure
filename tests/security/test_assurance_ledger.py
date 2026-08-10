@@ -95,7 +95,7 @@ class AssuranceLedgerContractTests(unittest.TestCase):
             ("schema", "assurance/v2"),
             ("base_commit", "main"),
             ("branch", "feature/quick-fix"),
-            ("phase", "H"),
+            ("phase", "I"),
             ("control", "FINDING-1"),
             ("command_id", "X"),
             ("result", "MAYBE"),

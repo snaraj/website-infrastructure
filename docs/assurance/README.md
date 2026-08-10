@@ -38,6 +38,7 @@ successors can hold the work to it.
 | E | Recovery/upgrade/disaster validation on fake hosts | none — active |
 | F | Post-stable reconciliation | `CODEX_PLATFORM_STABLE` signal, exact 4-field form |
 | G | Approved live acceptance (read-only default) | stable signal + explicit owner authorization per mutation |
+| H | Offensive / adversarial validation — red-team the cluster, host, and the internet-facing WG/Proton interfaces (owner-directed) | static contract now; live probes need stable signal + owner authorization + integrator coordination, non-destructive only |
 
 The stable-base signal is accepted only in its exact sanitized form
 (`commit=` 40-hex, `contract=platform.snaraj.dev/v1alpha1`, `stage_sha256=`
