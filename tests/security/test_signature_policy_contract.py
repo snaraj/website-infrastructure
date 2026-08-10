@@ -117,7 +117,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
             "attestors removed": ("          attestors:\n", "          authorities:\n"),
             "zero threshold": ("            - count: 1\n", "            - count: 0\n"),
             "subject regex": (
-                "                    subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main\n",
+                "                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*\n",
                 "                    subjectRegExp: https://github.com/.+\n",
             ),
             "wrong issuer": (
@@ -380,7 +380,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
 
     def test_fast_kubernetes_gate_rejects_a_weakened_audit_policy(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             policy_root = root / "policies/kyverno"
             policy_root.mkdir(parents=True)
             admission_root = root / "kubernetes/platform/admission"

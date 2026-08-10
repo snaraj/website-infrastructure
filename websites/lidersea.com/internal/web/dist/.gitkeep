@@ -1,3 +1,0 @@
-# Replaced by the Svelte build. Keeping the directory lets Go tooling resolve
-# the embed pattern before the browser bundle is generated; the server still
-# refuses to start successfully without a real index.html.

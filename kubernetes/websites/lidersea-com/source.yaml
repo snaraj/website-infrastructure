@@ -7,18 +7,14 @@ metadata:
   name: lidersea-com-source
   namespace: lidersea-com
 spec:
-  # This source may archive only the reviewed lidersea.com chart subtree.
+  # This source may archive only the released lidersea.com chart subtree.
   ignore: |
     /*
-    !/websites
-    /websites/*
-    !/websites/lidersea.com
-    /websites/lidersea.com/*
-    !/websites/lidersea.com/chart
+    !/chart
   interval: 10m0s
   ref:
     branch: main
   sparseCheckout:
-    - websites/lidersea.com/chart
+    - chart
   timeout: 60s
-  url: https://github.com/snaraj/website-infrastructure.git
+  url: https://github.com/snaraj/lidersea.com.git

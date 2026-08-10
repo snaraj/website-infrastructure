@@ -21,8 +21,10 @@ umask 077
   printf 'GITHUB_SHA is not one full Git commit\n' >&2
   exit 2
 }
-[[ "${WORKFLOW_IDENTITY}" =~ ^https://github\.com/snaraj/website-infrastructure/\.github/workflows/[a-z0-9-]+\.yml@refs/heads/main$ ]] || {
-  printf 'WORKFLOW_IDENTITY is outside the protected-main trust boundary\n' >&2
+# Site releases are published by each standalone repository from immutable
+# version tags; the trust boundary is the exact tag-triggered publisher.
+[[ "${WORKFLOW_IDENTITY}" =~ ^https://github\.com/snaraj/(naranjo\.online|lidersea\.com)/\.github/workflows/release-publisher\.yml@refs/tags/v\*$ ]] || {
+  printf 'WORKFLOW_IDENTITY is outside the tagged-publisher trust boundary\n' >&2
   exit 2
 }
 for command_name in cosign oras; do

@@ -31,8 +31,8 @@ case "${site}" in
     parent_relative='kubernetes/reconciliation/naranjo-online.yaml'
     values="${repo_root}/kubernetes/websites/naranjo-online/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/naranjo-online.yaml"
-    identity='https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main'
-    chart="${repo_root}/websites/naranjo.online/chart"
+    identity="https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    chart_oci='oci://ghcr.io/snaraj/charts/naranjo-online'
     release='naranjo-online'
     namespace='naranjo-online'
     ;;
@@ -42,8 +42,8 @@ case "${site}" in
     parent_relative='kubernetes/reconciliation/lidersea-com.yaml'
     values="${repo_root}/kubernetes/websites/lidersea-com/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/lidersea-com.yaml"
-    identity='https://github.com/snaraj/website-infrastructure/.github/workflows/publish-lidersea-com-image.yml@refs/heads/main'
-    chart="${repo_root}/websites/lidersea.com/chart"
+    identity="https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    chart_oci='oci://ghcr.io/snaraj/charts/lidersea-com'
     release='lidersea-com'
     namespace='lidersea-com'
     ;;
@@ -513,9 +513,21 @@ python3 -B "${repo_root}/scripts/validate_release_state.py" \
     --normalize-crlf --output "${effective_values}"
 [[ -s "${effective_values}" ]] || { printf 'candidate effective values are empty\n' >&2; exit 1; }
 if command -v helm >/dev/null 2>&1; then
-  helm lint "${chart}" --values "${effective_values}"
-  helm template "${release}" "${chart}" --namespace "${namespace}" \
+  # The chart ships from the site repository as a signed OCI artifact at the
+  # same version as the image; pull that exact release and render with the
+  # candidate effective values.
+  chart_pull_dir="$(mktemp -d)"
+  helm pull "${chart_oci}" --version "${release_version}" \
+    --destination "${chart_pull_dir}"
+  chart_archive="${chart_pull_dir}/${release}-${release_version}.tgz"
+  [[ -f "${chart_archive}" ]] || {
+    printf 'released chart %s@%s could not be pulled\n' "${chart_oci}" "${release_version}" >&2
+    exit 1
+  }
+  helm lint "${chart_archive}" --values "${effective_values}"
+  helm template "${release}" "${chart_archive}" --namespace "${namespace}" \
     --values "${effective_values}" >/dev/null
+  rm -rf -- "${chart_pull_dir}"
 else
   printf 'PENDING Helm render: helm is unavailable. Do not apply the patch until CI passes.\n'
 fi

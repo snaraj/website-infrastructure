@@ -69,7 +69,7 @@ def website_release_text(
         "    mode: enabled\n"
         "  chart:\n"
         "    spec:\n"
-        "      chart: ./websites/{domain}/chart\n"
+        "      chart: ./chart\n"
         "      reconcileStrategy: Revision\n"
         "      sourceRef:\n"
         "        kind: GitRepository\n"
@@ -214,7 +214,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_complete_temporary_states_distinguish_initial_promoted_and_mixed(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             self.assertEqual(MODULE.site_phase("naranjo-online", root), "initial")
 
@@ -260,7 +260,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_duplicate_critical_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -301,7 +301,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_block_scalar_suspend_decoy_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             release.write_bytes(
@@ -316,7 +316,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_duplicate_values_and_mapping_decoys_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -359,7 +359,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_non_lf_controls_unicode_separators_and_non_utf8_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -387,7 +387,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_document_markers_are_rejected_everywhere(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -407,7 +407,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_closed_helm_release_rejects_external_inputs_and_identity_drift(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -422,9 +422,12 @@ class StrictReleaseStateTests(unittest.TestCase):
                     b"  serviceAccountName: default\n",
                     1,
                 ),
-                "chart": canonical.replace(
-                    b"      chart: ./websites/naranjo.online/chart\n",
-                    b"      chart: ./websites/lidersea.com/chart\n",
+                # Cross-site chart paths are structurally identical now
+                # (./chart); the equivalent modern bypass is pointing one
+                # site's release at the OTHER site's Flux source.
+                "cross-site-source": canonical.replace(
+                    b"        name: naranjo-online-source\n",
+                    b"        name: lidersea-com-source\n",
                     1,
                 ),
                 "source-kind": canonical.replace(
@@ -481,7 +484,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_closed_parent_rejects_transforms_and_identity_drift(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             parent = parent_path(root, "naranjo-online")
             canonical = parent.read_bytes()
@@ -538,7 +541,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_wrong_identity_namespace_and_repository_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             canonical = release.read_bytes()
@@ -568,7 +571,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_comments_are_allowed_without_expanding_the_manifest_shape(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "naranjo-online")
             release.write_bytes(
@@ -582,7 +585,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_token_revision_requires_a_canonical_non_magic_string(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             release = release_path(root, "cloudflare-public")
             for token in (
@@ -624,7 +627,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_reader_rejects_non_regular_and_oversized_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             non_regular = root / "directory.yaml"
             non_regular.mkdir()
             with self.assertRaises(MODULE.CanonicalYamlError):
@@ -639,7 +642,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_reader_rejects_symlink_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "target.yaml"
             link = root / "link.yaml"
             write_lf(target, "key: value\n")
@@ -652,7 +655,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_all_helm_suspended_checks_each_closed_release(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             self.assertTrue(MODULE.all_helm_releases_suspended(root))
             stdout = io.StringIO()
@@ -692,7 +695,7 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_emit_values_is_exact_for_the_closed_inline_values(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             write_complete_tree(root)
             write_lf(
                 release_path(root, "naranjo-online"),
@@ -725,11 +728,11 @@ class StrictReleaseStateTests(unittest.TestCase):
 
     def test_relative_path_scalar_is_accepted_by_complete_mapping_parser(self):
         with tempfile.TemporaryDirectory() as directory:
-            values = Path(directory) / "values.yaml"
+            values = Path(directory).resolve() / "values.yaml"
             write_lf(
                 values,
                 "chart:\n"
-                "  path: ./websites/naranjo.online/chart\n"
+                "  path: ./chart\n"
                 "reconciliation:\n"
                 "  path: ./kubernetes/websites/naranjo-online\n",
             )
@@ -737,7 +740,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                 MODULE.load_simple_mapping_file(values),
                 {
                     ("chart",): None,
-                    ("chart", "path"): "./websites/naranjo.online/chart",
+                    ("chart", "path"): "./chart",
                     ("reconciliation",): None,
                     (
                         "reconciliation",

@@ -1,4 +1,4 @@
-"""Ensure CodeQL captures both independent Go services."""
+"""Ensure CodeQL still analyzes the platform's own code after site extraction."""
 
 import unittest
 from pathlib import Path
@@ -9,32 +9,23 @@ WORKFLOW = ROOT / ".github" / "workflows" / "codeql.yml"
 
 
 class CodeQlContractTests(unittest.TestCase):
-    """Prevent one site from falling outside manual Go build tracing."""
+    """The platform repository carries only Python; site repos scan their own code."""
 
-    def test_go_toolchain_is_selected_before_codeql_tracing(self):
-        """setup-go must not replace the compiler wrapper installed by CodeQL."""
-
+    def test_python_analysis_is_the_single_matrix_entry(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        setup_go = workflow.index("- name: Set up Go")
-        initialize_codeql = workflow.index("- name: Initialize CodeQL")
-        self.assertLess(setup_go, initialize_codeql)
-        self.assertIn("cache: false", workflow[setup_go:initialize_codeql])
-
-    def test_manual_go_build_captures_every_site_module(self):
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("language: go", workflow)
-        self.assertIn("build-mode: manual", workflow)
-        for site in ("naranjo.online", "lidersea.com"):
-            with self.subTest(site=site):
-                self.assertIn(
-                    "(cd websites/{} && go build ./...)".format(site), workflow
-                )
-
-    def test_javascript_analysis_does_not_build_only_one_frontend(self):
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("language: javascript-typescript", workflow)
+        self.assertIn("language: python", workflow)
         self.assertIn("build-mode: none", workflow)
-        self.assertNotIn("working-directory: websites/", workflow)
+        self.assertIn("- name: Initialize CodeQL", workflow)
+        self.assertIn("- name: Analyze", workflow)
+
+    def test_site_language_lanes_left_with_the_site_repositories(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("language: go", workflow)
+        self.assertNotIn("language: javascript-typescript", workflow)
+        self.assertNotIn("build-mode: manual", workflow)
+        self.assertNotIn("- name: Set up Go", workflow)
+        self.assertNotIn("go build", workflow)
+        self.assertNotIn("websites/", workflow)
 
 
 if __name__ == "__main__":

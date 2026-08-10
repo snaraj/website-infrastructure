@@ -28,7 +28,7 @@ spec:
             - count: 1
               entries:
                 - keyless:
-                    subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main
+                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
                     issuer: https://token.actions.githubusercontent.com
                     rekor:
                       url: https://rekor.sigstore.dev
@@ -42,7 +42,7 @@ spec:
         - imageReferences: ["ghcr.io/snaraj/naranjo-online@sha256:*"]
           type: SigstoreBundle
           mutateDigest: false
-          required: true
+          required: false
           verifyDigest: true
           attestations:
             - type: https://slsa.dev/provenance/v1
@@ -50,7 +50,7 @@ spec:
                 - count: 1
                   entries:
                     - keyless:
-                        subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main
+                        subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
                         issuer: https://token.actions.githubusercontent.com
                         rekor:
                           url: https://rekor.sigstore.dev

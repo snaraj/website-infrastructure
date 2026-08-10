@@ -1,5 +1,3 @@
-# Staged only. The release gate requires Audit to become Enforce after an
-# actual-cluster soak with public GHCR pulls and failure-mode recovery tests.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -30,7 +28,7 @@ spec:
             - count: 1
               entries:
                 - keyless:
-                    subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main
+                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
                     issuer: https://token.actions.githubusercontent.com
                     rekor:
                       url: https://rekor.sigstore.dev
@@ -52,7 +50,7 @@ spec:
                 - count: 1
                   entries:
                     - keyless:
-                        subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-naranjo-online-image.yml@refs/heads/main
+                        subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
                         issuer: https://token.actions.githubusercontent.com
                         rekor:
                           url: https://rekor.sigstore.dev

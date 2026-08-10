@@ -121,8 +121,8 @@ tenant_source_names := {
 
 tenant_chart_paths := {
   "cloudflare-public": "./kubernetes/platform/cloudflare-public/chart",
-  "naranjo-online": "./websites/naranjo.online/chart",
-  "lidersea-com": "./websites/lidersea.com/chart",
+  "naranjo-online": "./chart",
+  "lidersea-com": "./chart",
 }
 
 approved_git_source_scopes := {
@@ -135,13 +135,22 @@ approved_git_source_scopes := {
     "sparseCheckout": ["kubernetes/platform/cloudflare-public/chart"],
   },
   "naranjo-online/naranjo-online-source": {
-    "ignore": "/*\n!/websites\n/websites/*\n!/websites/naranjo.online\n/websites/naranjo.online/*\n!/websites/naranjo.online/chart\n",
-    "sparseCheckout": ["websites/naranjo.online/chart"],
+    "ignore": "/*\n!/chart\n",
+    "sparseCheckout": ["chart"],
   },
   "lidersea-com/lidersea-com-source": {
-    "ignore": "/*\n!/websites\n/websites/*\n!/websites/lidersea.com\n/websites/lidersea.com/*\n!/websites/lidersea.com/chart\n",
-    "sparseCheckout": ["websites/lidersea.com/chart"],
+    "ignore": "/*\n!/chart\n",
+    "sparseCheckout": ["chart"],
   },
+}
+
+# Each tenant source pulls its own standalone public repository; the
+# platform sources keep pulling this repository.
+approved_git_source_urls := {
+  "flux-system/flux-system": "https://github.com/snaraj/website-infrastructure.git",
+  "cloudflare-public/cloudflare-public-source": "https://github.com/snaraj/website-infrastructure.git",
+  "naranjo-online/naranjo-online-source": "https://github.com/snaraj/naranjo.online.git",
+  "lidersea-com/lidersea-com-source": "https://github.com/snaraj/lidersea.com.git",
 }
 
 valid_site_ingress_policy if {
@@ -545,7 +554,8 @@ deny contains msg if {
   input.kind == "GitRepository"
   input.apiVersion == "source.toolkit.fluxcd.io/v1"
   input.metadata.namespace in tenant_namespaces
-  object.get(input.spec, "url", "") != "https://github.com/snaraj/website-infrastructure.git"
+  key := sprintf("%s/%s", [input.metadata.namespace, input.metadata.name])
+  object.get(input.spec, "url", "") != object.get(approved_git_source_urls, key, "https://github.com/snaraj/website-infrastructure.git")
   msg := sprintf("GitRepository %s/%s must use the canonical anonymous public URL", [input.metadata.namespace, input.metadata.name])
 }
 
@@ -554,7 +564,7 @@ deny contains msg if {
   input.apiVersion == "source.toolkit.fluxcd.io/v1"
   key := sprintf("%s/%s", [input.metadata.namespace, input.metadata.name])
   key in object.keys(approved_git_source_scopes)
-  object.get(input.spec, "url", "") != "https://github.com/snaraj/website-infrastructure.git"
+  object.get(input.spec, "url", "") != object.get(approved_git_source_urls, key, "")
   msg := sprintf("GitRepository %s must use the canonical anonymous public URL", [key])
 }
 

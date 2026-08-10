@@ -1,5 +1,3 @@
-# Staged only. The tenant HelmRelease remains suspended and the release gate
-# requires this policy to become Enforce after real public-artifact verification.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -30,7 +28,7 @@ spec:
             - count: 1
               entries:
                 - keyless:
-                    subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-lidersea-com-image.yml@refs/heads/main
+                    subject: https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/v*
                     issuer: https://token.actions.githubusercontent.com
                     rekor:
                       url: https://rekor.sigstore.dev
@@ -52,7 +50,7 @@ spec:
                 - count: 1
                   entries:
                     - keyless:
-                        subject: https://github.com/snaraj/website-infrastructure/.github/workflows/publish-lidersea-com-image.yml@refs/heads/main
+                        subject: https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/v*
                         issuer: https://token.actions.githubusercontent.com
                         rekor:
                           url: https://rekor.sigstore.dev

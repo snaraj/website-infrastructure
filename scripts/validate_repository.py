@@ -88,12 +88,9 @@ FORBIDDEN_LOCAL_ONLY_EXACT_NAMES = {
     "bootstrap/pi/protected-legacy-runtime-evidence.local",
     "bootstrap/pi/protected-services.env.local",
 }
-# Generated frontend output is local-only too. The two empty placeholders are
-# the sole exception and keep the intended directory shape in a fresh clone.
-ALLOWED_DIST_PATHS = {
-    "websites/lidersea.com/internal/web/dist/.gitkeep",
-    "websites/naranjo.online/internal/web/dist/.gitkeep",
-}
+# Website source now lives in the standalone site repositories; no generated
+# frontend output (or placeholder for it) is permitted anywhere in this tree.
+ALLOWED_DIST_PATHS = set()
 ALLOWED_DIST_DIRECTORIES = {
     path.rsplit("/", 1)[0] for path in ALLOWED_DIST_PATHS
 }
@@ -145,9 +142,11 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 # One closed tuple drives every site-specific release check so adding a site
 # cannot silently leave image publication, admission, or activation asymmetric.
+# The third element is the publisher workflow inside each STANDALONE site
+# repository (tag-triggered); it feeds the pinned signature identities.
 SITE_RELEASE_CONTRACTS = (
-    ("naranjo.online", "naranjo-online", "publish-naranjo-online-image.yml"),
-    ("lidersea.com", "lidersea-com", "publish-lidersea-com-image.yml"),
+    ("naranjo.online", "naranjo-online", "release-publisher.yml"),
+    ("lidersea.com", "lidersea-com", "release-publisher.yml"),
 )
 
 # This literal digest couples Trivy's path-scoped AVD-KSV-0056 acceptance to
@@ -711,8 +710,7 @@ def check_layout(root):
             errors.append("forbidden kubernetes/homelab layout: " + relative(path, root))
     required = [
         "AGENTS.md", "SECURITY.md", "versions.env", "release-policy.env",
-        "kubernetes", "websites", "scripts/validate_image_release.py",
-        "websites/naranjo.online/VERSION", "websites/lidersea.com/VERSION",
+        "kubernetes", "scripts/validate_image_release.py",
         "policies/gitleaks.toml",
     ]
     for name in required:
@@ -841,7 +839,6 @@ def check_media(root):
     """Keep heavyweight media and unresolved storage out of public desired state."""
 
     errors = []
-    websites_root = root / "websites"
     asset_totals = {}
     repository_total = 0
     public_paths = _public_candidate_paths(root)
@@ -871,17 +868,9 @@ def check_media(root):
             errors.append("unsafe or unstable public repository path: " + rel)
             continue
 
+        # The platform repository carries no application asset trees at all;
+        # any media content anywhere in it is a violation.
         asset_scope = None
-        if websites_root.exists():
-            try:
-                parts = path.relative_to(websites_root).parts
-            except ValueError:
-                parts = ()
-            if len(parts) >= 5 and parts[1:4] == ("frontend", "src", "assets"):
-                asset_scope = (parts[0], "source")
-            elif len(parts) >= 6 and parts[1:5] == ("internal", "web", "dist", "assets"):
-                asset_scope = (parts[0], "generated")
-
         suffix = path.suffix.lower()
         prefix = data[:64]
         media_magic = has_media_magic(prefix)
@@ -919,8 +908,6 @@ def check_media(root):
         "/*",
         "!/kubernetes/",
         "!/policies/kyverno/",
-        "!/websites/naranjo.online/chart/",
-        "!/websites/lidersea.com/chart/",
     )
     if not sourceignore.is_file():
         errors.append("Flux source artifact boundary is missing: .sourceignore")
@@ -930,11 +917,7 @@ def check_media(root):
             if fragment not in source_text:
                 errors.append("Flux source artifact allowlist is missing: " + fragment)
 
-    chart_templates = [
-        path for path in public_paths
-        if path.match("websites/*/chart/templates/*.yaml")
-    ]
-    for path in list(live_kubernetes_files(root)) + chart_templates:
+    for path in live_kubernetes_files(root):
         text = read(path)
         rel = relative(path, root)
         forbidden = {
@@ -971,25 +954,16 @@ def check_media(root):
             ):
                 errors.append("media-shaped Kubernetes data key is forbidden in " + rel)
 
-    values = root / "websites/naranjo.online/chart/values.yaml"
-    schema = root / "websites/naranjo.online/chart/values.schema.json"
-    deployment = root / "websites/naranjo.online/chart/templates/deployment.yaml"
-    required_fragments = {
-        values: ["media:", "  enabled: false", "  profile: UNRESOLVED_PI_MEDIA_STORAGE"],
-        schema: ['"enabled": {"type": "boolean", "const": false}',
-                 '"profile": {"type": "string", "const": "UNRESOLVED_PI_MEDIA_STORAGE"}'],
-        deployment: ["name: MEDIA_ENABLED", "value: {{ .Values.media.enabled | quote }}"],
-    }
-    for path, fragments in required_fragments.items():
-        if not path.is_file():
-            errors.append("media fail-closed contract is missing: " + relative(path, root))
-            continue
-        text = read(path)
-        for fragment in fragments:
-            if fragment not in text:
-                errors.append("media fail-closed fragment missing from {}: {}".format(
-                    relative(path, root), fragment
-                ))
+    # The media fail-closed chart contract (media.enabled=false behind the
+    # UNRESOLVED_PI_MEDIA_STORAGE sentinel) moved with the charts into the
+    # standalone site repositories; each site's own CI enforces it there,
+    # and the platform's HelmRelease values must not re-enable it here.
+    for release in sorted((root / "kubernetes" / "websites").glob("*/release.yaml")):
+        text = read(release)
+        if re.search(r"(?m)^\s*media:\s*$[\s\S]{0,120}?^\s*enabled:\s*true", text):
+            errors.append(
+                "platform values re-enable site media: " + relative(release, root)
+            )
     return errors
 
 
@@ -1153,13 +1127,10 @@ def check_kubernetes(root):
                 )]
                 if len(matches) != 1:
                     errors.append("exact ingress+egress default-deny missing for " + namespace)
+        # The per-site ingress policies (cloudflared-to-<site>) ship inside
+        # the standalone site charts and arrive through the remote sources;
+        # the platform keeps requiring its own egress side toward each site.
         required_network_templates = {
-            "websites/naranjo.online/chart/templates/network-policy.yaml": [
-                "cloudflared-to-naranjo-online",
-            ],
-            "websites/lidersea.com/chart/templates/network-policy.yaml": [
-                "cloudflared-to-lidersea-com",
-            ],
             "kubernetes/platform/cloudflare-public/chart/templates/network-policies.yaml": [
                 "cloudflared-dns", "cloudflared-edge", "cloudflared-naranjo-online",
                 "cloudflared-lidersea-com",
@@ -1404,30 +1375,6 @@ def signature_admission_install_errors(root):
     return errors
 
 
-def site_chart_default_errors(domain, website_values):
-    """Keep every chart inert even while Flux supplies reviewed overrides."""
-
-    errors = []
-    slug = next(
-        (candidate for candidate_domain, candidate, _ in SITE_RELEASE_CONTRACTS
-         if candidate_domain == domain),
-        None,
-    )
-    expected_repository = (
-        RELEASE_CONTRACTS[slug]["repository"] if slug is not None else None
-    )
-    if (
-        expected_repository is not None
-        and website_values.get(("image", "repository")) != expected_repository
-    ):
-        errors.append("{} chart default image repository is not canonical".format(domain))
-    if website_values.get(("image", "digest")) != ZERO_DIGEST:
-        errors.append("{} chart default must retain the all-zero digest".format(domain))
-    if website_values.get(("deploymentReady",)) != "false":
-        errors.append("{} chart default must remain deploymentReady false".format(domain))
-    return errors
-
-
 def site_release_override_errors(domain, release_state):
     """Validate the authoritative production values of one HelmRelease."""
 
@@ -1441,31 +1388,6 @@ def site_release_override_errors(domain, release_state):
         )
     if release_state.values.get(("deploymentReady",)) != "true":
         errors.append("{} HelmRelease override is not deploymentReady".format(domain))
-    return errors
-
-
-def site_release_value_errors(domain, website_values, release_state):
-    """Validate inert chart defaults and the authoritative Flux overrides."""
-
-    return (
-        site_chart_default_errors(domain, website_values)
-        + site_release_override_errors(domain, release_state)
-    )
-
-
-def all_site_chart_default_errors(root):
-    """Validate inert chart defaults in scaffold, transition, and release."""
-
-    errors = []
-    for domain, _, _ in SITE_RELEASE_CONTRACTS:
-        try:
-            values = load_simple_mapping_file(
-                root / "websites" / domain / "chart" / "values.yaml"
-            )
-        except (CanonicalYamlError, OSError, UnicodeError):
-            errors.append("{} chart defaults are unavailable or non-canonical".format(domain))
-            continue
-        errors.extend(site_chart_default_errors(domain, values))
     return errors
 
 
@@ -1609,8 +1531,6 @@ def check_release(root):
     if re.search(r"(?m)^[A-Z0-9_]+=UNRESOLVED$", versions):
         errors.append("versions.env still contains UNRESOLVED pins")
     required_generated = [
-        "websites/naranjo.online/frontend/package-lock.json",
-        "websites/lidersea.com/frontend/package-lock.json",
         "kubernetes/flux-system/controllers/gotk-components.yaml",
         "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
         "kubernetes/platform/admission/kyverno/controllers.yaml",
@@ -1632,14 +1552,11 @@ def check_release(root):
 
     for domain, slug, _ in SITE_RELEASE_CONTRACTS:
         try:
-            website_values = load_simple_mapping_file(
-                root / "websites" / domain / "chart" / "values.yaml"
-            )
             release_state = load_helm_release(slug, root)
         except (CanonicalYamlError, OSError, UnicodeError):
             errors.append("{} release state is unavailable or non-canonical".format(domain))
             continue
-        errors.extend(site_release_value_errors(domain, website_values, release_state))
+        errors.extend(site_release_override_errors(domain, release_state))
         if release_state.suspended:
             errors.append("HelmRelease remains suspended: " + slug)
         try:
@@ -1773,7 +1690,6 @@ def _allowed_transition_release_errors(plan):
         allowed.update({
             "HelmRelease remains suspended: " + slug,
             "parent Kustomization remains suspended: " + slug,
-            "required reviewed/generated file missing: websites/{}/frontend/package-lock.json".format(domain),
         })
         # A suspended child is not yet proven inert while its outer Flux
         # Kustomization remains active. Keep signature enforcement mandatory
@@ -1841,7 +1757,7 @@ def check_activation(root):
     if plan.mode == "release":
         return check_release(root)
 
-    errors = all_site_chart_default_errors(root)
+    errors = []
     try:
         activation_signal = activation_requested(root)
     except (CanonicalYamlError, OSError, RuntimeError, UnicodeError):

@@ -18,7 +18,7 @@ SPEC.loader.exec_module(MODULE)
 class ReviewArtifactWriterTests(unittest.TestCase):
     def test_exclusive_regular_write(self):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "evidence.env"
+            output = Path(directory).resolve() / "evidence.env"
             MODULE.write_exclusive(output, b"SCHEMA=review-v1\n")
             self.assertEqual(output.read_bytes(), b"SCHEMA=review-v1\n")
             self.assertTrue(stat.S_ISREG(output.stat().st_mode))
@@ -27,7 +27,7 @@ class ReviewArtifactWriterTests(unittest.TestCase):
 
     def test_rejects_existing_file_and_symlink_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             output = root / "evidence.env"
             output.write_bytes(b"keep\n")
             with self.assertRaises(MODULE.ArtifactError):
@@ -46,7 +46,7 @@ class ReviewArtifactWriterTests(unittest.TestCase):
 
     def test_bounded_file_copy_rejects_symlink_input(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source.yaml"
             source.write_bytes(b"value: safe\n")
             self.assertEqual(MODULE.read_bounded_file(source), b"value: safe\n")

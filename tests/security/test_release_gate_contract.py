@@ -1019,8 +1019,19 @@ class ReleaseGateContractTests(unittest.TestCase):
         self.assertIn("status_output=", self.clean_commit)
         self.assertIn("release worktree status could not be read", self.clean_commit)
         self.assertIn("RELEASE_GIT_COMMIT", self.clean_commit)
-        kind = self.live.index('test-kind.sh" --runtime')
-        first_recheck = self.live.index("assert_clean_commit", kind)
+        # The local Kind runtime stage retired with the embedded site sources;
+        # the live lane must die fail-closed before any production read until
+        # its post-cutover successor lands.
+        self.assertNotIn("test-kind.sh", self.script)
+        self.assertIn(
+            "transition runtime evidence is PENDING its post-cutover successor",
+            self.script,
+        )
+        pending = self.live.index(
+            "live gate is PENDING its post-cutover successor"
+        )
+        self.assertLess(pending, self.live.index("require_live_tools"))
+        first_recheck = self.live.index("assert_clean_commit", pending)
         desired = self.live.index(
             "capture_desired_security_policy_state", first_recheck
         )
@@ -1033,7 +1044,7 @@ class ReleaseGateContractTests(unittest.TestCase):
         final_global_validation = self.live.rindex("assert_global_runtime_inventory")
         final_recheck = self.live.rindex("assert_clean_commit")
         go = self.live.index("GO:")
-        self.assertLess(kind, first_recheck)
+        self.assertLess(pending, first_recheck)
         self.assertLess(first_recheck, desired)
         self.assertLess(desired, capture)
         self.assertLess(first_recheck, capture)
