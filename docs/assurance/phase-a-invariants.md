@@ -36,6 +36,10 @@ the platform contract; S3 = drift that misleads operators.
 | PLAT-EXP-002 | Tenant namespaces: default-deny with exactly the nine closed NetworkPolicy identities | conftest rendered-object rules; kyverno `require-exact-tenant-networking` (endport-widening deny fixture) | CI PASS | S1 | Fable lane |
 | PLAT-EXP-003 | Workloads restricted: non-root, no privilege escalation, dropped capabilities, no host namespaces/paths, exact ServiceAccounts | kyverno `require-restricted-workloads` + `disallow-undiscovered-storage` allow/deny suites | CI PASS | S1 | Fable lane |
 | PLAT-EXP-004 | No storage activation before discovery: no PV/PVC/StorageClass/CSI/hostPath/disk-pressure tolerations | kyverno `disallow-undiscovered-storage`, release-gate `assert_storage_disabled` (platform roots), `validate_repository.py` media checks | CI PASS | S1 | Fable lane |
+| PLAT-EXP-005 | WireGuard admin plane is the ONLY inbound-from-internet listener and is cryptographically gated (PSK per peer, scoped AllowedIPs, silent to non-handshake packets) | Pi-local config review + Phase H external-vantage scan (owner-scheduled); attack-surface manifest | design + live | S1 | Fable lane |
+| PLAT-EXP-006 | Compromised pods cannot reach the control plane (API/etcd/kubelet) | conftest/kyverno network rules + Phase H live canary; attack-surface manifest `reachability` | policy + live | S1 | Fable lane |
+| PLAT-EXP-007 | Admin plane is host-SSH-only, isolated from workloads and from the cluster API (PLAT-DEC-001) | Pi-local design + Phase H live canary; attack-surface manifest | design + live | S1 | Fable lane |
+| PLAT-EGR-001 | Proton egress leaks nothing: no DNS/IPv6 leak, kill-switch fails closed, only designed exemptions; the WG reply-path exemption is not a general bypass | Pi-local config review + Phase H live leak tests (owner-authorized) | design + live | S1 | Fable lane |
 
 ## Secrets and privacy
 

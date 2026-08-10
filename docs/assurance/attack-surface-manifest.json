@@ -1,0 +1,38 @@
+{
+  "schema": "attack-surface/v1",
+  "note": "Declarative contract the owner-authorized live harness asserts reality against. Surfaces and endpoints are named by CLASS and ORDINAL only; no private address, port number, key, route, or peer identity appears here by construction. Expected results use a closed vocabulary. The harness is the executor (post-stable, owner-authorized, integrator-coordinated); this file plus its validator is the offline contract.",
+  "expected_vocabulary": [
+    "no-response",
+    "wireguard-handshake-only",
+    "denied",
+    "allowed-to-class",
+    "fail-closed"
+  ],
+  "inbound_wan": [
+    {"surface": "wireguard-admin-udp", "expected": "wireguard-handshake-only", "control": "PLAT-EXP-005"},
+    {"surface": "ssh-service", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "kubernetes-api", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "etcd", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "kubelet", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "http-plaintext", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "https-origin", "expected": "no-response", "control": "PLAT-EXP-001"},
+    {"surface": "all-other-ports", "expected": "no-response", "control": "PLAT-EXP-001"}
+  ],
+  "reachability": [
+    {"from": "tenant-pod", "to": "other-tenant-pod", "expected": "denied", "control": "PLAT-EXP-002"},
+    {"from": "tenant-pod", "to": "kubernetes-api", "expected": "denied", "control": "PLAT-EXP-006"},
+    {"from": "tenant-pod", "to": "etcd", "expected": "denied", "control": "PLAT-EXP-006"},
+    {"from": "tenant-pod", "to": "kubelet", "expected": "denied", "control": "PLAT-EXP-006"},
+    {"from": "tenant-pod", "to": "node-host", "expected": "denied", "control": "PLAT-EXP-003"},
+    {"from": "tenant-pod", "to": "admin-plane-subnet", "expected": "denied", "control": "PLAT-EXP-007"},
+    {"from": "admin-peer", "to": "host-ssh", "expected": "allowed-to-class", "control": "PLAT-EXP-007"},
+    {"from": "admin-peer", "to": "kubernetes-api", "expected": "denied", "control": "PLAT-EXP-007"}
+  ],
+  "egress": [
+    {"from": "tenant-pod", "to": "arbitrary-internet", "expected": "denied", "control": "PLAT-EXP-002"},
+    {"from": "host", "to": "dns-outside-proton", "expected": "denied", "control": "PLAT-EGR-001"},
+    {"from": "host", "to": "ipv6-outside-proton", "expected": "denied", "control": "PLAT-EGR-001"},
+    {"from": "host", "to": "arbitrary-internet-on-proton-drop", "expected": "fail-closed", "control": "PLAT-EGR-001"},
+    {"from": "host", "to": "approved-exemption-class", "expected": "allowed-to-class", "control": "PLAT-EGR-001"}
+  ]
+}
