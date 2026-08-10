@@ -1512,7 +1512,11 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_transition_filters_only_errors_for_proven_inert_releases(self):
         """An active parent keeps its suspended child's safety envelope."""
 
-        with tempfile.TemporaryDirectory() as directory:
+        # A detached git housekeeping process can still be writing under the
+        # fixture's object store when this context exits, which intermittently
+        # fails cleanup with "Directory not empty: 'pack'" on CI runners. The
+        # assertions above the cleanup are unaffected; ignore cleanup races.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             copy_activation_fixture(root)
             for relative in (
