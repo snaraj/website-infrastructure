@@ -20,9 +20,13 @@ help:
 
 check: check-fast check-gitleaks check-shell check-workflows check-container check-kubernetes check-cloudflare website-test
 
+# Bytecode caches from a plain run would poison the later pre-push gate's
+# ambient-artifact check; a macOS TMPDIR under the /var symlink trips the
+# suite's own link-traversal guards, so both are normalized here.
+check-fast: export PYTHONDONTWRITEBYTECODE = 1
 check-fast:
-	@$(PYTHON) scripts/validate_repository.py all
-	@$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+	@TMPDIR="$$(realpath "$${TMPDIR:-/tmp}")" $(PYTHON) scripts/validate_repository.py all
+	@TMPDIR="$$(realpath "$${TMPDIR:-/tmp}")" $(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
 
 release-check:
 	@$(PYTHON) scripts/validate_repository.py release

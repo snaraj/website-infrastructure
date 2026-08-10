@@ -237,6 +237,30 @@ jobs:
           go vet ./...
           CGO_ENABLED=0 go test ./...
           go test -race ./...
+      - name: Report Go test coverage
+        working-directory: websites/${{ matrix.site }}
+        env:
+          GOTOOLCHAIN: local
+        # Coverage is stdlib-only: no new dependencies, no external service.
+        # The per-run percentage lands in the job summary; the badge row in
+        # the README links here.
+        run: |
+          CGO_ENABLED=0 go test -covermode=atomic \
+            -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...
+          {
+            printf '### Go coverage — %s\n\n```\n' "${{ matrix.site }}"
+            go tool cover -func="${RUNNER_TEMP}/site.cover.out" | tail -n 8
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Report frontend test coverage
+        working-directory: websites/${{ matrix.site }}/frontend
+        # Node's built-in coverage reporter: still no new dependencies.
+        run: |
+          {
+            printf '### Frontend coverage — %s\n\n```\n' "${{ matrix.site }}"
+            node --test --experimental-test-coverage tests/*.test.mjs | tail -n 14
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   container:
     runs-on: ubuntu-24.04
