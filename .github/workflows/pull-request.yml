@@ -155,6 +155,10 @@ jobs:
           if [ "${release_mode}" = scaffold ]; then
             printf 'PENDING release-state policy: releases remain deliberately suspended.\n'
           fi
+      - name: Prove render determinism and validate the assurance ledger
+        run: |
+          ./scripts/ci/verify-render-determinism.sh
+          python3 -B scripts/validate_assurance_ledger.py docs/assurance/evidence-ledger.jsonl
       - name: Test staged Kyverno policies
         run: kyverno test tests/kubernetes/kyverno
       - name: Validate OpenTofu without credentials

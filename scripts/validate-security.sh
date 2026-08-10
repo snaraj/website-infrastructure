@@ -18,6 +18,7 @@ else
 fi
 "${python_command}" -B "${repo_root}/scripts/validate_repository.py" layout privacy secrets workflows kubernetes cloudflare
 bash "${repo_root}/scripts/test-policy-fixtures.sh"
+"${python_command}" -B "${repo_root}/scripts/validate_assurance_ledger.py" "${repo_root}/docs/assurance/evidence-ledger.jsonl"
 
 # Kyverno CLI fixtures verify runtime admission semantics beyond static YAML;
 # missing tooling is surfaced as pending so it cannot be mistaken for a pass.
