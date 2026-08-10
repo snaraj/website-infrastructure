@@ -650,6 +650,7 @@ class ArchiveBindingV3Tests(unittest.TestCase):
         read_mountinfo.assert_not_called()
 
     @unittest.skipUnless(os.name == "posix", "directory-fd metadata is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_top_level_sentinel_is_bounded_nonempty_and_change_sensitive(self):
         """Immediate metadata proves retained data exists without reading contents."""
 
@@ -708,6 +709,7 @@ class ArchiveBindingV3Tests(unittest.TestCase):
             self.assertIsNone(fingerprint())
 
     @unittest.skipUnless(os.name == "posix", "live binding metadata is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_binding_rechecks_mount_topology_and_root_device(self):
         """A mount replacement during fingerprinting cannot yield a binding."""
 
