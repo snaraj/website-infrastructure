@@ -198,6 +198,7 @@ class PromotionBehaviorTests(unittest.TestCase):
             check=False,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_success_retains_review_patch_and_never_changes_worktree(self):
         self._write_oras()
         release = self.root / "kubernetes/websites/naranjo-online/release.yaml"
@@ -260,6 +261,7 @@ class PromotionBehaviorTests(unittest.TestCase):
             check=True,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_late_registry_failure_cleans_artifacts_without_worktree_change(self):
         self._write_oras(fail_resolve=4)
         release = self.root / "kubernetes/websites/naranjo-online/release.yaml"
@@ -280,6 +282,7 @@ class PromotionBehaviorTests(unittest.TestCase):
             "",
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_late_patch_tampering_fails_and_cleans_without_worktree_change(self):
         self._write_oras(tamper_patch_resolve=4)
         release = self.root / "kubernetes/websites/naranjo-online/release.yaml"
@@ -325,6 +328,7 @@ class PromotionBehaviorTests(unittest.TestCase):
             "",
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_oras_partial_output_failure_is_not_accepted(self):
         self._write_oras(fail_after_output_resolve=4)
         release = self.root / "kubernetes/websites/naranjo-online/release.yaml"

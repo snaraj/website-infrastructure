@@ -8,6 +8,7 @@ import io
 import os
 import stat
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -296,6 +297,7 @@ class ProtectedRuntimeEvidenceTests(unittest.TestCase):
         os.name == "posix" and hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
         "nonblocking no-follow path walking is POSIX-only",
     )
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_secure_read_rejects_regular_file_to_fifo_substitution(self):
         """A lookup race cannot turn the bounded read into a blocking FIFO open."""
 
@@ -327,6 +329,7 @@ class ProtectedRuntimeEvidenceTests(unittest.TestCase):
             self.assertNotIn(str(path), "\n".join(errors))
 
     @unittest.skipUnless(os.name == "posix", "no-follow path walking is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_secure_read_rejects_parent_rename_to_same_inode_symlink_race(self):
         """The retained parent cannot be renamed and reached through a new symlink."""
 
@@ -357,6 +360,7 @@ class ProtectedRuntimeEvidenceTests(unittest.TestCase):
             self.assertNotIn(str(path), "\n".join(errors))
 
     @unittest.skipUnless(os.name == "posix", "no-follow path walking is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_secure_read_rejects_ancestor_rename_to_same_inode_symlink_race(self):
         """A swapped ancestor is caught even when the retained parent stays stable."""
 

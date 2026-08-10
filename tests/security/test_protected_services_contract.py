@@ -4,6 +4,7 @@ import importlib.util
 import os
 import re
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -403,6 +404,7 @@ class ProtectedServicesContractTests(unittest.TestCase):
         self.assertTrue(any("binding SHA-256" in error for error in missing_errors))
 
     @unittest.skipUnless(os.name == "posix", "POSIX modes and symlinks are Linux contracts")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_live_archive_root_rejects_group_world_access_and_symlinks(self):
         """Live metadata checks protect roots with a bounded retained-data sentinel."""
 
@@ -459,6 +461,7 @@ class ProtectedServicesContractTests(unittest.TestCase):
             self.assertTrue(any("symbolic link" in item for item in MODULE.archive_root_issues(str(link))))
 
     @unittest.skipUnless(os.name == "posix", "mode-0600 is a Linux file contract")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_contract_file_rejects_wrong_mode_without_echoing_path(self):
         """File-level validation remains generic even for a private location."""
 
@@ -472,6 +475,7 @@ class ProtectedServicesContractTests(unittest.TestCase):
             self.assertNotIn(str(path), output)
 
     @unittest.skipUnless(os.name == "posix", "no-follow path walking is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_contract_file_rejects_hardlinks_and_symlink_components(self):
         """Every contract path component and the opened inode fail closed."""
 
@@ -496,6 +500,7 @@ class ProtectedServicesContractTests(unittest.TestCase):
             self.assertTrue(any("hard link" in item for item in hardlink_errors))
 
     @unittest.skipUnless(os.name == "posix", "no-follow path walking is POSIX-only")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "exercises Linux-only filesystem/procfs semantics")
     def test_contract_file_rejects_parent_rename_to_same_inode_symlink_race(self):
         """A parent path cannot become a symlink while the opened file stays valid."""
 
