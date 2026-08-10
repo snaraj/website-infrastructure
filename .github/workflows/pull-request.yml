@@ -161,6 +161,8 @@ jobs:
           python3 -B scripts/validate_assurance_ledger.py docs/assurance/evidence-ledger.jsonl
           python3 -B scripts/validate_no_security_toggles.py .
           python3 -B scripts/validate_attack_surface_manifest.py docs/assurance/attack-surface-manifest.json
+          python3 -B scripts/validate_ingress_guard.py repo
+          python3 -B scripts/validate_admin_ingress_contract.py EXAMPLE bootstrap/pi/ingress-guard/admin-ingress.env.example
       - name: Test staged Kyverno policies
         run: kyverno test tests/kubernetes/kyverno
       - name: Validate OpenTofu without credentials
