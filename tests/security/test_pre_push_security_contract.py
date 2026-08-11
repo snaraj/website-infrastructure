@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import hermetic_git_environment
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "pre-push-security.sh"
@@ -28,41 +30,41 @@ if GITLEAKS is None:
 
 
 def run_git(repository, *arguments, **kwargs):
+    # Every fixture git invocation pins its own author/committer from the
+    # fixture repository's local config: ambient GIT_AUTHOR_*/GIT_COMMITTER_*
+    # exports override `git config` identity and would otherwise rewrite the
+    # very history a fixture is asserting on (see hermetic_git_environment).
     return subprocess.run(
         ["git", *arguments], cwd=repository, check=True,
-        capture_output=True, **kwargs
+        capture_output=True, env=hermetic_git_environment(repository), **kwargs
     )
 
 
 def initialize_history_repository(directory):
     repository = Path(directory) / "history-repo"
     repository.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Synthetic"], cwd=repository, check=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "synthetic@example.invalid"],
-        cwd=repository,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "core.autocrlf", "false"], cwd=repository, check=True
-    )
+    run_git(repository, "init", "-q")
+    run_git(repository, "config", "user.name", "Synthetic")
+    run_git(repository, "config", "user.email", "synthetic@example.invalid")
+    run_git(repository, "config", "core.autocrlf", "false")
     (repository / "README.md").write_text("synthetic history\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repository, check=True)
+    run_git(repository, "add", "README.md")
+    run_git(repository, "commit", "-qm", "baseline")
     baseline = run_git(repository, "rev-parse", "HEAD", text=True).stdout.strip()
     return repository, baseline
 
 
 def run_history_validator(repository, baseline, candidate, *options):
+    # The validator only observes history the fixtures already built, so no
+    # identity is pinned here; the scrub still keeps ambient GIT_DIR-style
+    # redirection from pointing its git subprocesses at a foreign repository.
     return subprocess.run(
         [sys.executable, "-I", str(HISTORY), *options, baseline, candidate],
         cwd=repository,
         capture_output=True,
         text=True,
         check=False,
+        env=hermetic_git_environment(),
     )
 
 
@@ -217,64 +219,40 @@ class PrePushSecurityContractTests(unittest.TestCase):
                     "printf '%s\\n' \"$@\" > \"${MOCK_GITLEAKS_LOG}\"\n"
                 )
             mock_binary.chmod(0o700)
-            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-            subprocess.run(["git", "config", "user.name", "Synthetic"], cwd=repo, check=True)
-            subprocess.run(
-                ["git", "config", "user.email", "synthetic@example.invalid"],
-                cwd=repo,
-                check=True,
-            )
-            subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
-            subprocess.run(["git", "add", "."], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-qm", "baseline fixture"], cwd=repo, check=True)
-            baseline = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
-                capture_output=True, text=True,
-            ).stdout.strip()
+            run_git(repo, "init", "-q")
+            run_git(repo, "config", "user.name", "Synthetic")
+            run_git(repo, "config", "user.email", "synthetic@example.invalid")
+            run_git(repo, "config", "core.autocrlf", "false")
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-qm", "baseline fixture")
+            baseline = run_git(repo, "rev-parse", "HEAD", text=True).stdout.strip()
             advertised_remote = base / "advertised.git"
-            subprocess.run(
-                ["git", "init", "--bare", "-q", str(advertised_remote)], check=True
-            )
-            subprocess.run(
-                [
-                    "git", "push", "-q", str(advertised_remote),
-                    baseline + ":refs/heads/main",
-                ],
-                cwd=repo,
-                check=True,
+            run_git(base, "init", "--bare", "-q", str(advertised_remote))
+            run_git(
+                repo, "push", "-q", str(advertised_remote),
+                baseline + ":refs/heads/main",
             )
             advertised_url = advertised_remote.resolve().as_uri()
             for exact_remote in (
                 "https://github.com/snaraj/website-infrastructure.git",
                 "git" + "@" + "github.com:snaraj/website-infrastructure.git",
             ):
-                subprocess.run(
-                    [
-                        "git", "config", "--add",
-                        "url." + advertised_url + ".insteadOf", exact_remote,
-                    ],
-                    cwd=repo,
-                    check=True,
+                run_git(
+                    repo, "config", "--add",
+                    "url." + advertised_url + ".insteadOf", exact_remote,
                 )
-            subprocess.run(
-                ["git", "update-ref", "refs/remotes/origin/main", baseline],
-                cwd=repo,
-                check=True,
-            )
+            run_git(repo, "update-ref", "refs/remotes/origin/main", baseline)
             (repo / "safe.txt").write_text("outgoing fixture\n", encoding="utf-8")
-            subprocess.run(["git", "add", "safe.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-qm", "outgoing fixture"], cwd=repo, check=True)
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
-                capture_output=True, text=True,
-            ).stdout.strip()
-            subprocess.run(
-                ["git", "update-ref", "refs/remotes/origin/main", commit],
-                cwd=repo,
-                check=True,
-            )
+            run_git(repo, "add", "safe.txt")
+            run_git(repo, "commit", "-qm", "outgoing fixture")
+            commit = run_git(repo, "rev-parse", "HEAD", text=True).stdout.strip()
+            run_git(repo, "update-ref", "refs/remotes/origin/main", commit)
             call_log = base / "gitleaks-arguments.txt"
-            environment = os.environ.copy()
+            # The hook run itself starts from the same scrubbed environment:
+            # its git plumbing must see the fixture repository, not whatever
+            # GIT_DIR/GIT_CONFIG_* the invoking shell happens to export. The
+            # deliberate additions below are layered on top of the scrub.
+            environment = hermetic_git_environment(repo)
             environment["PATH"] = str(binary_dir) + os.pathsep + environment["PATH"]
             # The exact GitHub URLs are rewritten to the disposable bare repo;
             # forbidding every non-file transport makes accidental network use

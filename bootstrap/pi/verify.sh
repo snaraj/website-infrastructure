@@ -17,7 +17,9 @@ kubeadm config validate --config /etc/kubernetes/kubeadm-config.yaml
 [[ "$(kubelet --version)" == "Kubernetes ${KUBERNETES_VERSION}" ]]
 containerd --version | grep -Fq "v${CONTAINERD_VERSION}"
 containerd config dump | grep -Eq 'SystemdCgroup[[:space:]]*=[[:space:]]*true'
-ctr plugins ls | grep -Eq '^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]].*[[:space:]]ok$'
+# containerd 2.x splits CRI into io.containerd.cri.v1 images+runtime; both rows must be ok.
+ctr plugins ls | grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+images[[:space:]].*[[:space:]]ok[[:space:]]*$'
+ctr plugins ls | grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+runtime[[:space:]].*[[:space:]]ok[[:space:]]*$'
 
 [[ "$(kubectl get node -o name | wc -l | tr -d ' ')" == 1 ]] || { printf 'FAIL expected exactly one node.\n' >&2; exit 1; }
 kubectl wait --for=condition=Ready node --all --timeout=2m
