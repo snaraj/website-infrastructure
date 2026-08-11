@@ -248,13 +248,13 @@ authority: the owner alone merges.
 
 The complete delivery loop, each step gated by the sections around it:
 
-1. **Check the lane.** Confirm every path you intend to touch is
-   delivery-lane (`tests/**`, `scripts/**`, `.github/workflows/**`,
-   `Makefile`, `README.md`, and `docs/**` EXCEPT the ADRs under
-   `docs/adr/` and the capacity documents, which are platform-lane along
-   with `bootstrap/**` and `versions.env`). This contract file itself is
-   editable from the delivery lane. Never edit the other lane's files;
-   reference platform decisions, never restate or reword them.
+1. **Check the lane.** Confirm every path you intend to touch belongs
+   to the delivery lane exactly as the Delivery lane section above
+   defines it — that definition is the sole authority on lane scope,
+   and this checklist deliberately does not restate it. This contract
+   file itself is editable from the delivery lane. Never edit the other
+   lane's files; reference platform decisions, never restate or reword
+   them.
 2. **Claim the work.** File (or take) the issue; state intent and
    constraints. Label it — including both agent labels — assign the
    owner, set a milestone.
@@ -402,10 +402,12 @@ is the consolidated command view:
   the release-transition mode the release-state policy selects, render
   determinism, the assurance-ledger / no-security-toggles /
   attack-surface-manifest / ingress-guard validators, Kyverno policy
-  tests, and credential-free OpenTofu validation.
-- **codeql.yml** — pull requests, `main` pushes, weekly cron.
-  **scheduled-security.yml** — weekly cron full-history scan. Nothing
-  else runs post-merge: what merges is what was gated.
+  tests, and credential-free OpenTofu validation — plus a separate
+  `dependency-review` job (pull requests only; fails on high severity).
+- **codeql.yml** — pull requests, `main` pushes, weekly cron, and
+  manual dispatch. **scheduled-security.yml** — weekly cron full-history
+  scan, plus manual dispatch. Nothing else runs post-merge: what merges
+  is what was gated.
 - **Zero-spend guardrails on the merge path.** The `tests/security`
   battery IS the guard: `test_actions_zero_spend_exposure.py` pins the
   workflows' exposure (secretless PRs, read-only default permissions,
