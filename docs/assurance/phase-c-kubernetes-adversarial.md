@@ -41,7 +41,7 @@ resources, exact ServiceAccounts) and `require-approved-images` (digest
 pins, canonical repos).
 Negative: `fixtures/deny/insecure.yaml`, `token-bypass.yaml`, and the
 `objective2-bypasses.yaml` matrix (host ports, capability re-add, digest
-drift, cross-site image, SA token mounts) — 52 kyverno cases total.
+drift, cross-site image, SA token mounts) — 44 kyverno cases total.
 Residual → G: kernel-level enforcement (seccomp actually applied) is
 behavioral by nature.
 
@@ -63,7 +63,7 @@ pin per-source URLs, chart-rooted sparse checkout, exact ignore rules;
 signature policies pin the two tag-form publisher identities; suspended
 sentinels assert inertness; the extracted evidence validators
 (`validate_flux_release_evidence.py`, `validate_runtime_inventory_evidence.py`)
-are executed by 25 unit tests over synthetic captured state — the successor
+are executed by 27 unit tests over synthetic captured state — the successor
 live gate's logic is proven today at policy level.
 Negative: cross-site source-name substitution, wrong-identity signature
 fixtures, canonical-URL denials, unsigned-artifact rejection paths.

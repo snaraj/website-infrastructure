@@ -47,6 +47,12 @@ These rules apply to every human and automated contributor.
     exact units, roots, identities, contents, and recovery evidence stay in the
     ignored local contract. Reactivation requires a new ADR and threat-model
     review.
+16. Keep the admin plane SSH-only (PLAT-DEC-001). Never widen admin-VPN
+    ingress toward 2379, 2380, 6443, or 10250, weaken the host-ingress guard
+    artifacts, or reintroduce kubectl-over-VPN paths in code, policy, or
+    docs; `make check-ingress-guard` and the terminal PR gate enforce the
+    denial and any change to it requires an owner decision superseding
+    PLAT-DEC-001.
 
 ## Change workflow
 
@@ -60,7 +66,14 @@ These rules apply to every human and automated contributor.
   modules, structs, fields, variables, constants, functions, and safety checks.
   Explain why they exist in this system instead of narrating syntax.
 - Before every push, review the exact staged index, run the repository privacy
-  gate and Gitleaks, and leave any ambiguous operational value unstaged.
+  gate and Gitleaks (`make pre-push-security` rehearses the full
+  origin/main..HEAD publication gate; `git config core.hooksPath .githooks`
+  makes it automatic), and leave any ambiguous operational value unstaged.
+- `make check-fast` needs only Python and Git; the full `make check` also
+  needs the pinned gitleaks/shellcheck/actionlint/helm/kubeconform/conftest
+  and OpenTofu toolchain from `versions.env`, and `make coverage` needs the
+  one hash-pinned `coverage` wheel from
+  `scripts/ci/requirements-coverage.txt`.
 - Do not install tools, authenticate, plan, apply, deploy, commit, push, or
   mutate the Pi/router/GitHub/Cloudflare without explicit authorization.
 - Use official upstream documentation to revalidate versions, schemas,
