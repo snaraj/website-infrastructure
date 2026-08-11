@@ -7,7 +7,10 @@ aimed at verification, signing, policy, scanning, gates, or checks, and
 insecure/no-verify CLI flags. Occurrences are legal only through the exact
 allowlist below, where every entry carries its justification and must still
 match (a stale allowlist entry is itself an error, so retired exemptions
-cannot linger). Everything else fails closed.
+cannot linger). Justifications are load-bearing at runtime: an entry whose
+justification is blank, whitespace, or shorter than the minimum substantive
+length is itself a hard failure naming the entry, so an exemption can never
+outlive its argument. Everything else fails closed.
 
 The patterns are assembled from fragments so this file does not flag
 itself; its unit tests build hostile fixtures the same way.
@@ -75,6 +78,13 @@ ALLOWLIST = (
         "pins the same invocation in the integration contract",
     ),
     (
+        "tests/security/test_no_security_toggles_cli.py",
+        "--skip-token-print",
+        "detector's own stale-allowlist regression names the security-positive "
+        "flag as fixture data to prove a removed justification fails closed; "
+        "not a third invocation pin",
+    ),
+    (
         "tests/security/test_trivy_scan_contract.py",
         "--skip-dirs ./tests/kubernetes/fixtures/deny",
         "pins the deny-fixture exemption as the ONLY allowed skip",
@@ -103,6 +113,30 @@ SELF_EXEMPT = {
     "tests/security/test_no_security_toggles.py": "runtime-assembled",
 }
 
+# A blanked or token justification would silently turn a reviewed
+# exception into an unconditional hole. Every allowlist entry must argue
+# for itself with at least this many characters of substantive (non-
+# whitespace-only) text, enforced on every run, or the scan fails closed.
+MIN_JUSTIFICATION_CHARACTERS = 20
+
+
+def justification_errors():
+    """Reject hollow allowlist justifications, naming each offending entry."""
+
+    errors = []
+    for path, fragment, justification in ALLOWLIST:
+        substantive = (
+            justification.strip() if isinstance(justification, str) else ""
+        )
+        if len(substantive) < MIN_JUSTIFICATION_CHARACTERS:
+            errors.append(
+                "allowlist entry justification is blank or too short "
+                "(needs {} substantive characters): {} :: {}".format(
+                    MIN_JUSTIFICATION_CHARACTERS, path, fragment
+                )
+            )
+    return errors
+
 
 def tracked_files():
     listing = subprocess.run(
@@ -114,7 +148,9 @@ def tracked_files():
 
 
 def toggle_errors(root):
-    errors = []
+    # Hollow justifications fail the scan even when every fragment still
+    # matches; the scan continues so all findings are reported together.
+    errors = justification_errors()
     used_entries = set()
     allow_by_path = {}
     for path, fragment, _justification in ALLOWLIST:

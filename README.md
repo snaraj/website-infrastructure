@@ -3,6 +3,7 @@
 [![Pull request](https://github.com/snaraj/website-infrastructure/actions/workflows/pull-request.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/pull-request.yml)
 [![CodeQL](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml)
 [![Scheduled security](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml)
+[![Coverage](docs/badges/coverage.svg)](docs/badges/coverage.json)
 
 Everything needed to run two real websites from one Raspberry Pi 5 at home —
 upstream Kubernetes bootstrapped with kubeadm, GitOps with Flux, and
@@ -83,7 +84,7 @@ kubernetes/            desired state for the single environment
 policies/              Conftest and Kyverno controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
-tests/                 allow/deny fixtures and 700+ repository tests
+tests/                 allow/deny fixtures and 780+ repository tests
 ```
 
 The two sites live in their own repositories
@@ -104,9 +105,15 @@ git config core.hooksPath .githooks
 
 ```sh
 make check-fast        # validators + the full test suite (Linux and macOS)
-make check             # everything, including render/policy/container checks
+make check             # everything: render, policy, shell, workflow, and guard checks
+make coverage          # measure suite coverage; enforce the floor and badge integrity
 make pre-push-security # rehearse the exact publication gate before pushing
 ```
+
+Coverage is measured inside the repository (no external coverage service):
+the committed badge is regenerated and byte-verified against
+[`docs/badges/coverage.json`](docs/badges/coverage.json) by CI, so the badge
+can never claim a number the gate did not measure.
 
 `make check-fast` needs only Python and Git. Tool pins live in
 `versions.env`; macOS notes live in

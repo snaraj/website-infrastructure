@@ -22,11 +22,11 @@ the platform contract; S3 = drift that misleads operators.
 
 | ID | Invariant | Checker | Evidence | Sev | Remediation |
 | --- | --- | --- | --- | --- | --- |
-| PLAT-SUP-001 | Workloads deploy by immutable digest only; version tags never move | `scripts/validate_image_release.py` (SemVer + graduation gates), `policies/conftest/kubernetes.rego` digest rules, kyverno `require-approved-images` | CI PASS + 52 kyverno tests | S1 | Fable lane |
+| PLAT-SUP-001 | Workloads deploy by immutable digest only; version tags never move | `scripts/validate_image_release.py` (SemVer + graduation gates), `policies/conftest/kubernetes.rego` digest rules, kyverno `require-approved-images` | CI PASS + 44 kyverno tests | S1 | Fable lane |
 | PLAT-SUP-002 | Only the two site tag-form publisher identities are trusted (`…/release-publisher.yml@refs/tags/v*`) | `scripts/validate_signature_policy.py` (closed contract), `policies/conftest/signature-policy.rego`, `scripts/ci/verify-existing-oci-release.sh` trust boundary, kyverno `require-signed-*` | CI PASS + allow/deny fixtures | S1 | Fable lane |
-| PLAT-SUP-003 | Flux pulls anonymously; site sources pin their standalone repos with chart-rooted sparse checkout; platform sources pin this repo | `approved_git_source_urls`/`approved_git_source_scopes` in `policies/conftest/kubernetes.rego` (deny rules on rendered objects) | conftest 532 tests | S1 | Fable lane |
+| PLAT-SUP-003 | Flux pulls anonymously; site sources pin their standalone repos with chart-rooted sparse checkout; platform sources pin this repo | `approved_git_source_urls`/`approved_git_source_scopes` in `policies/conftest/kubernetes.rego` (deny rules on rendered objects) | conftest deny/warn rule sweep over every rendered object (76 rules) | S1 | Fable lane |
 | PLAT-SUP-004 | Third-party Actions pinned to full SHAs; tools installed checksum-verified | `scripts/validate_repository.py` `check_workflows` (full-SHA pin law) + `scripts/ci/install-tools.sh` pinned hashes | CI PASS | S1 | Fable lane |
-| PLAT-SUP-005 | The retired live gate's evidence validators stay executable and tested for the successor | `tests/security/test_release_gate_contract.py` (25 executed tests over `validate_flux_release_evidence.py` / `validate_runtime_inventory_evidence.py`) | unittest PASS | S2 | Fable lane |
+| PLAT-SUP-005 | The retired live gate's evidence validators stay executable and tested for the successor | `tests/security/test_release_gate_contract.py` (27 executed tests over `validate_flux_release_evidence.py` / `validate_runtime_inventory_evidence.py`) | unittest PASS | S2 | Fable lane |
 
 ## Exposure and isolation
 
@@ -57,7 +57,7 @@ the platform contract; S3 = drift that misleads operators.
 | PLAT-REL-001 | Checked-in desired state stays inert: suspended Kustomizations/HelmReleases, Audit-staged policies, zero-capacity quotas | `render-manifests.sh --scaffold` negative controls (`expect_release_rejection` set) + `release-policy` conftest | CI PASS | S1 | Fable lane |
 | PLAT-REL-002 | Release promotion is a closed ceremony: three-way version lock, no skip flags, no manual dispatch, no tag reuse | site repos' publisher CI (their tests); platform side `validate_release_transition.py` classify/plan + `promote-image.sh` bound evidence | CI PASS both sides | S1 | Fable lane |
 | PLAT-REL-003 | Runtime lanes fail closed PENDING the successor; no silent bypass may resurrect them | `test_release_gate_contract.py` pins both PENDING dies, forbids retired machinery names, requires validators to refuse short argv | unittest PASS | S1 | Fable lane |
-| PLAT-REL-004 | No boolean/env/config may disable a security behavior (Coinkite law) | enforced by review + tests that make dangerous states unrepresentable; sweep is a Phase C deliverable (GAP: no single automated toggle-detector yet) | partial | S1 | Fable lane (Phase C) |
+| PLAT-REL-004 | No boolean/env/config may disable a security behavior (Coinkite law) | `scripts/validate_no_security_toggles.py` sweeps every tracked file for toggle idioms outside a justified allowlist; runs in the terminal PR gate and `validate-security.sh` (Phase C closed the former gap) | CI PASS + hostile-fixture CLI battery | S1 | Fable lane |
 
 ## Host and platform (Codex-owned surface, checker-only view)
 
@@ -69,11 +69,14 @@ the platform contract; S3 = drift that misleads operators.
 
 ## Identified gaps (Phase A findings)
 
-- PLAT-GAP-001 (S2): no automated detector proves "no security toggle"
-  repository-wide (PLAT-REL-004 relies on review); Phase C must add a
-  negative-fixture sweep for flag-gated control paths.
-- PLAT-GAP-002 (S2): ledger CI validation (schema/order/forbidden patterns)
-  does not exist yet; lands with `fable/platform-security-ci`.
+- PLAT-GAP-001 (S2): CLOSED by Phase C — `scripts/validate_no_security_toggles.py`
+  sweeps every tracked file for toggle idioms with a justified allowlist and a
+  stale-allowlist failure mode; it runs in the terminal PR gate and in
+  `scripts/validate-security.sh`, with a hostile-fixture CLI battery in
+  `tests/security/test_no_security_toggles_cli.py`.
+- PLAT-GAP-002 (S2): CLOSED — `scripts/validate_assurance_ledger.py` validates
+  the evidence ledger (schema/order/forbidden patterns) in the terminal PR
+  gate (`.github/workflows/pull-request.yml`) and `validate-security.sh`.
 - PLAT-GAP-003 (S3): PLAT-COST-003 has no executable probe by design
   (credential-free CI); owner billing audit is the accepted control.
 - PLAT-GAP-004 (S2): performance posture (owner third-order directive) has

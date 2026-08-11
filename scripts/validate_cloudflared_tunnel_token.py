@@ -36,6 +36,13 @@ def duplicate_safe_object(pairs):
     return result
 
 
+# One domain failure type parameterizes the shared no-follow walk helpers.
+# The four private-file validators carry byte-identical copies of the helper
+# family (pinned by tests/security/test_nofollow_helper_drift.py); fix any
+# defect in every copy in the same change.
+_WALK_ERROR = InvalidToken
+
+
 def _path_state(metadata: os.stat_result) -> tuple[int, ...]:
     """Bind a path entry and open descriptor to all stable custody metadata."""
 
@@ -70,7 +77,7 @@ def _path_chain(path: Path) -> tuple[tuple[str, tuple[int, ...]], ...]:
     for component in reversed((path, *path.parents)):
         metadata = component.lstat()
         if _is_link_or_reparse(metadata):
-            raise InvalidToken()
+            raise _WALK_ERROR()
         result.append((os.path.normcase(str(component)), _path_state(metadata)))
     return tuple(result)
 
@@ -122,14 +129,14 @@ def _open_posix_no_follow(path: Path, flags: int) -> tuple[int, int, str]:
         or not path.is_absolute()
         or not path.name
     ):
-        raise InvalidToken()
+        raise _WALK_ERROR()
     directory_flags = os.O_RDONLY | nofollow | directory
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
     parent_descriptor = os.open("/", directory_flags)
     try:
         for component in path.parts[1:-1]:
             if component in {"", ".", ".."}:
-                raise InvalidToken()
+                raise _WALK_ERROR()
             next_descriptor = os.open(
                 component,
                 directory_flags,

@@ -537,12 +537,23 @@ def parse_receipt(
     return LoadedReceipt(expected_phase, hashlib.sha256(raw).hexdigest())
 
 
+# One domain failure type parameterizes the shared no-follow walk helpers.
+# The four private-file validators carry byte-identical copies of the helper
+# family (pinned by tests/security/test_nofollow_helper_drift.py); fix any
+# defect in every copy in the same change.
+_WALK_ERROR = ReceiptError
+
+
 def _path_state(metadata: os.stat_result) -> tuple[int, ...]:
+    """Bind a path entry and open descriptor to all stable custody metadata."""
+
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_mode,
         metadata.st_nlink,
+        getattr(metadata, "st_uid", -1),
+        getattr(metadata, "st_gid", -1),
         metadata.st_size,
         metadata.st_mtime_ns,
         metadata.st_ctime_ns,
@@ -552,6 +563,8 @@ def _path_state(metadata: os.stat_result) -> tuple[int, ...]:
 
 
 def _is_link_or_reparse(metadata: os.stat_result) -> bool:
+    """Treat POSIX links and Windows reparse points as path indirection."""
+
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return stat.S_ISLNK(metadata.st_mode) or bool(
         getattr(metadata, "st_file_attributes", 0) & reparse_flag
@@ -559,12 +572,13 @@ def _is_link_or_reparse(metadata: os.stat_result) -> bool:
 
 
 def _path_chain(path: Path) -> tuple[tuple[str, tuple[int, ...]], ...]:
-    chain = tuple(reversed((path, *path.parents)))
+    """Snapshot every ancestor so directory replacement cannot pass silently."""
+
     result: list[tuple[str, tuple[int, ...]]] = []
-    for component in chain:
+    for component in reversed((path, *path.parents)):
         metadata = component.lstat()
         if _is_link_or_reparse(metadata):
-            raise ReceiptError("receipt path traverses a link or reparse point")
+            raise _WALK_ERROR()
         result.append((os.path.normcase(str(component)), _path_state(metadata)))
     return tuple(result)
 
@@ -579,7 +593,7 @@ def _within(candidate: Path, parent: Path) -> bool:
 
 
 def _open_posix_no_follow(path: Path, flags: int) -> tuple[int, int, str]:
-    """Open a POSIX path component by component while retaining its parent."""
+    """Traverse an absolute POSIX path through no-follow directory handles."""
 
     nofollow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
@@ -591,14 +605,14 @@ def _open_posix_no_follow(path: Path, flags: int) -> tuple[int, int, str]:
         or not path.is_absolute()
         or not path.name
     ):
-        raise OSError("secure component-wise opens are unavailable")
+        raise _WALK_ERROR()
     directory_flags = os.O_RDONLY | nofollow | directory
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
     parent_descriptor = os.open("/", directory_flags)
     try:
         for component in path.parts[1:-1]:
             if component in {"", ".", ".."}:
-                raise OSError("unsafe path component")
+                raise _WALK_ERROR()
             next_descriptor = os.open(
                 component,
                 directory_flags,

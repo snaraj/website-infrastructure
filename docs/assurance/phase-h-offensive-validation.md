@@ -100,7 +100,7 @@ H proves it adversarially with a canary "attacker" pod.
 | Inactive-service surface | bitcoind inactive+disabled, electrs absent, tor/cups posture reviewed; nothing extra listening | PLAT-HOST-002 | live (sentinel already tracks the listener set) |
 | CIS benchmark | kube-bench passes the applicable controls | PLAT-HOST-001 | live |
 
-## The admin-plane scope decision (owner input requested — a real security tradeoff)
+## The admin-plane scope decision (RESOLVED: PLAT-DEC-001 is decided SSH-only)
 
 Should the WireGuard admin plane be able to reach the **cluster API (6443)**,
 or only **host SSH**?
@@ -114,10 +114,13 @@ or only **host SSH**?
   `kubectl` works directly from the laptop. Wider surface; a compromised peer
   key reaches the API's authn/authz boundary directly.
 
-Recommendation: **SSH-only**, because it costs nothing in capability (kubectl
-still works, one hop away) and removes an entire class of exposure. Recorded
-as decision **PLAT-DEC-001** for the owner. The attack-surface manifest
-encodes the SSH-only expectation until the owner rules otherwise.
+Decision: **SSH-only is decided** as **PLAT-DEC-001** and is now enforced,
+not merely encoded as an expectation: the attack-surface manifest requires
+`admin-peer -> kubernetes-api = denied`, and the merged host-ingress guard
+(`scripts/validate_ingress_guard.py`, `bootstrap/pi/ingress-guard/`) renders
+and verifies the fail-closed nftables denial of 2379/2380/6443/10250 from
+the admin VPN. See `phase-h-ssh-only-ingress-guard.md` for the guard's
+contract and evidence.
 
 ## Executable artifact (now): the attack-surface manifest
 
@@ -148,7 +151,7 @@ validator, matching the program's contract-now / live-later pattern.
 
 | ID | Type | Item | Disposition |
 | --- | --- | --- | --- |
-| PLAT-DEC-001 | decision | Admin plane: SSH-only vs API-over-VPN | owner decision; manifest encodes SSH-only pending |
+| PLAT-DEC-001 | decision | Admin plane: SSH-only vs API-over-VPN | decided SSH-only; manifest requires the denial and the merged ingress guard enforces it |
 | PLAT-OFF-001 | finding-candidate | Passwordless sudo scope for automation | confirm scoped/justified during live host review |
 | PLAT-OFF-002 | gap | Kill-switch fail-closed behavior unproven until a bounded live leak test | post-stable, owner-authorized |
 | PLAT-DEC-002 | decision | External-vantage test scheduling (hotspot) | owner-scheduled (~1 month parked) |

@@ -256,7 +256,11 @@ class SopsCiphertextSnapshotReaderTests(unittest.TestCase):
             with self.assertRaises(MODULE.SnapshotError):
                 MODULE.read_snapshot(str(path.resolve()))
             path.chmod(0o600)
-            with mock.patch.object(MODULE.os, "getuid", return_value=os.getuid() + 1):
+            # The reader binds ownership to the *effective* uid (geteuid), the
+            # fail-closed choice if the validator ever runs setuid: a caller
+            # whose real uid still owns the file must not read it while acting
+            # under a different effective identity.
+            with mock.patch.object(MODULE.os, "geteuid", return_value=os.geteuid() + 1):
                 with self.assertRaises(MODULE.SnapshotError):
                     MODULE.read_snapshot(str(path.resolve()))
             fifo = root / "snapshot.fifo"
