@@ -445,9 +445,15 @@ main() {
   [[ "$(/usr/local/bin/crictl --version)" == "crictl version v${CRICTL_VERSION}" ]] || \
     die 'installed crictl version mismatch'
   /usr/local/bin/containerd config dump >/dev/null
+  # containerd 2.x splits the former io.containerd.grpc.v1 cri plugin into
+  # io.containerd.cri.v1 images and runtime rows; both must report ok, so a
+  # missing or errored half of the CRI surface fails closed.
   /usr/local/bin/ctr plugins ls | \
-    grep -Eq '^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]].*[[:space:]]ok$' || \
-    die 'containerd CRI plugin is not healthy'
+    grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+images[[:space:]].*[[:space:]]ok[[:space:]]*$' || \
+    die 'containerd CRI images plugin is not healthy'
+  /usr/local/bin/ctr plugins ls | \
+    grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+runtime[[:space:]].*[[:space:]]ok[[:space:]]*$' || \
+    die 'containerd CRI runtime plugin is not healthy'
   systemctl is-active --quiet containerd.service || die 'containerd service is not active'
   systemctl is-enabled --quiet containerd.service || die 'containerd service is not enabled'
   systemctl is-enabled --quiet kubelet.service || die 'kubelet service is not enabled'

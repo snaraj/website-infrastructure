@@ -378,7 +378,9 @@ elif [[ "${phase}" == init ]]; then
   [[ "$(kubelet --version 2>/dev/null || true)" == "Kubernetes ${KUBERNETES_VERSION}" ]] || fail 'kubelet version differs from versions.env'
   containerd --version 2>/dev/null | grep -Fq "v${CONTAINERD_VERSION}" || fail 'containerd version differs from versions.env'
   containerd config dump 2>/dev/null | grep -Eq 'SystemdCgroup[[:space:]]*=[[:space:]]*true' || fail 'containerd does not use systemd cgroups'
-  ctr plugins ls 2>/dev/null | grep -Eq '^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]].*[[:space:]]ok$' || fail 'containerd CRI v1 plugin is not healthy'
+  # containerd 2.x splits CRI into io.containerd.cri.v1 images+runtime; both rows must be ok.
+  ctr plugins ls 2>/dev/null | grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+images[[:space:]].*[[:space:]]ok[[:space:]]*$' || fail 'containerd CRI images plugin is not healthy'
+  ctr plugins ls 2>/dev/null | grep -Eq '^io[.]containerd[.]cri[.]v1[[:space:]]+runtime[[:space:]].*[[:space:]]ok[[:space:]]*$' || fail 'containerd CRI runtime plugin is not healthy'
   if systemctl is-active --quiet containerd.service; then
     pass 'containerd is active'
   else
