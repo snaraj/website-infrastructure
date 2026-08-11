@@ -117,19 +117,29 @@ jobs:
       - name: Validate workflows
         run: actionlint
       - name: Validate Python policy tooling
+        # The compile smoke previously named five scripts by hand and had
+        # drifted to 5 of 34; git ls-files enrolls every tracked
+        # scripts/**/*.py automatically and the count floor refuses a sweep
+        # that silently matches too little.
         run: |
-          python3 -I -B - <<'PY'
+          git ls-files -z -- 'scripts/*.py' > "${RUNNER_TEMP}/python-script-list"
+          python3 -I -B - "${RUNNER_TEMP}/python-script-list" <<'PY'
+          import sys
           from pathlib import Path
 
-          for relative in (
-              "scripts/validate_repository.py",
-              "scripts/validate_image_release.py",
-              "scripts/validate_release_state.py",
-              "scripts/validate_release_transition.py",
-              "scripts/redact_inventory.py",
-          ):
+          listing = Path(sys.argv[1]).read_bytes()
+          scripts = sorted(
+              entry.decode("utf-8") for entry in listing.split(b"\x00") if entry
+          )
+          if len(scripts) < 30:
+              raise SystemExit(
+                  "compile sweep found only {} tracked scripts/**/*.py files; "
+                  "the sweep itself is broken".format(len(scripts))
+              )
+          for relative in scripts:
               path = Path(relative)
               compile(path.read_bytes(), str(path), "exec", dont_inherit=True)
+          print("compiled {} tracked Python scripts".format(len(scripts)))
           PY
           python3 -B -m unittest discover -s tests -p 'test_*.py' -v
           python3 -B scripts/validate_repository.py all

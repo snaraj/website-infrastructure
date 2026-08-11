@@ -75,3 +75,21 @@ flowchart LR
     O --> P["Reviewed digest promotion"] --> G["Flux reconciliation"]
     G --> L["Explicit live acceptance"]
 ```
+
+## Adding a validator
+
+The invocation-parity suite (`tests/security/test_validator_invocation_parity.py`)
+fails any `validate_*.py` that appears on one of its surfaces but not the
+others — the drift class commit 3ad45c6 had to close by hand. A new
+validator therefore lands as one reviewed change touching every surface:
+
+1. the script itself under `scripts/`, with its battery in `tests/security/`
+   (the compile sweep in the pull-request workflow enrolls every tracked
+   `scripts/**/*.py` automatically — there is no compile list to forget);
+2. `scripts/validate-security.sh`, the local credential-free entry point —
+   or, when the validator cannot run there (event-scoped input, render-lane
+   coupling), a justified entry in the parity suite's CI-only allowlist
+   naming the tracked local surface that provides the equivalent run;
+3. the inline invocations in `.github/workflows/pull-request.yml`;
+4. the guide paragraph above — `tests/security/test_scripts_readme.py`
+   requires exactly one link per script.
