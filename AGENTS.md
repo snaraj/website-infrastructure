@@ -172,3 +172,24 @@ remains on the PR as the permanent record.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
+
+## GitHub conventions
+
+- **Issues first.** Substantive work is tracked as a labeled issue before or
+  alongside its PR; PRs declare `Closes #N` so merges close the record.
+  Feature intake lands as a `features`-labeled issue with the architectural
+  constraints stated, even when implementation waits.
+- **Labels.** One taxonomy, identical names/colors/meanings across all
+  three repositories: `production-readiness`, `conventions`, `security`,
+  `tests`, `ci`, `docs`, `release`, `fix`, `provider-neutrality`,
+  `delivery-lane`, `features`. New labels are added to all three at once.
+- **Milestones.** Every PR and issue carries one. Release milestones close
+  when the release ships; completed arcs close their milestone.
+- **Assignee.** The owner is assignee on every PR and issue (authorship is
+  already the owner's account by token identity).
+- **Linear history.** Merge commits are disabled in repository settings;
+  the owner merges by squash (or rebase). Branches auto-delete on merge;
+  stale local branches are pruned as work lands. History is append-only
+  and never rewritten.
+- **Commits.** Detailed bodies to the review protocol's evidence standard —
+  problem, mechanism, enumerated changes, evidence — signed per lane.
