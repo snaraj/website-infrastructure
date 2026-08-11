@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.security.support import hermetic_git_environment
 from tests.security.test_validate_kubeconfig_snapshot import document_bytes, valid_document
 
 
@@ -296,10 +297,17 @@ class FluxSopsAgeLinuxRuntimeTests(unittest.TestCase):
                 f"KUBECTL_LINUX_AMD64_SHA256={kubectl_digest}\n",
                 encoding="utf-8",
             )
+            # Ambient GIT_AUTHOR_*/GIT_COMMITTER_* exports override the -c
+            # identity below and GIT_DIR-style variables redirect the whole
+            # fixture repository, so every fixture git call runs with the
+            # scrubbed environment and the intended identity pinned in it.
+            git_environment = hermetic_git_environment(
+                identity=("Fixture", "fixture@example.invalid")
+            )
             subprocess.run(["git", "init", "-b", "main"], cwd=mini_repo, check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=git_environment)
             subprocess.run(["git", "add", "."], cwd=mini_repo, check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=git_environment)
             subprocess.run(
                 [
                     "git",
@@ -315,6 +323,7 @@ class FluxSopsAgeLinuxRuntimeTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_environment,
             )
             reviewed_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -322,6 +331,7 @@ class FluxSopsAgeLinuxRuntimeTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                env=git_environment,
             ).stdout.strip()
 
             environment = {
