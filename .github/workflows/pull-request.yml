@@ -13,6 +13,7 @@ concurrency:
 jobs:
   repository-and-infrastructure:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -132,6 +133,26 @@ jobs:
           PY
           python3 -B -m unittest discover -s tests -p 'test_*.py' -v
           python3 -B scripts/validate_repository.py all
+      - name: Enforce the self-hosted coverage contract
+        # Zero-third-party coverage: the one hash-pinned wheel is installed
+        # into a disposable venv outside the checkout, the suite re-runs
+        # instrumented (patch=subprocess so the fail-closed CLI executions
+        # count), and scripts/ci/coverage_gate.py enforces the floor, the
+        # ledger drift bound, and byte-exact badge regeneration. Nothing is
+        # uploaded anywhere; the badge cannot claim what CI did not measure.
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/coverage-venv"
+          venv_python="${RUNNER_TEMP}/coverage-venv/bin/python"
+          "${venv_python}" -m pip install --quiet --require-hashes \
+            --only-binary :all: -r scripts/ci/requirements-coverage.txt
+          coverage_data_root="$(mktemp -d "${RUNNER_TEMP}/coverage-data.XXXXXX")"
+          export COVERAGE_FILE="${coverage_data_root}/data"
+          export COVERAGE_RCFILE="${PWD}/scripts/ci/coveragerc"
+          export COVERAGE_SOURCE_ROOT="${PWD}/scripts"
+          "${venv_python}" -B -m coverage run -m unittest discover -s tests -p 'test_*.py'
+          "${venv_python}" -B -m coverage combine
+          "${venv_python}" -B scripts/ci/coverage_gate.py gate --data-file "${COVERAGE_FILE}"
       - name: Check shell
         run: find bootstrap scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
       - name: Scan current tree for secrets
@@ -184,6 +205,7 @@ jobs:
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:

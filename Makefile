@@ -4,7 +4,7 @@ SHELL := /usr/bin/env bash
 PYTHON ?= python3
 .DEFAULT_GOAL := help
 
-.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-tofu check-ingress-guard
+.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-tofu check-determinism check-ingress-guard coverage coverage-refresh
 
 help:
 	@printf '%s\n' \
@@ -12,11 +12,19 @@ help:
 	  'check-fast       Run repository checks requiring only Python and Git' \
 	  'release-check    Reject every deployment sentinel/suspension' \
 	  'pre-push-security Rehearse the origin/main..HEAD publication gate' \
+	  'check-layout     Reject local-only or forbidden repository layout content' \
 	  'check-privacy    Reject private workstation, identity, and host context' \
+	  'check-secrets    Reject committed secret material and plaintext config' \
+	  'check-gitleaks   Scan the working tree with the pinned gitleaks policy' \
+	  'check-shell      Shellcheck every tracked shell entry point' \
+	  'check-workflows  Actionlint the GitHub Actions workflows' \
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
+	  'check-tofu       Alias for check-cloudflare' \
 	  'check-determinism Prove two scaffold renders are byte-identical' \
-	  'check-ingress-guard Verify the SSH-only admin-ingress guard artifacts'
+	  'check-ingress-guard Verify the SSH-only admin-ingress guard artifacts' \
+	  'coverage         Measure suite coverage and enforce floor/drift/badge' \
+	  'coverage-refresh Re-measure and rewrite the committed coverage ledger/badge'
 
 check: check-fast check-gitleaks check-shell check-workflows check-kubernetes check-cloudflare check-ingress-guard
 
@@ -67,4 +75,25 @@ check-ingress-guard:
 	@$(PYTHON) scripts/validate_admin_ingress_contract.py EXAMPLE bootstrap/pi/ingress-guard/admin-ingress.env.example
 
 check-tofu: check-cloudflare
+
+# Coverage measurement writes its data outside the checkout (measurement
+# artifacts in the tree would trip the ambient-artifact checks) and needs the
+# one hash-pinned wheel installed first:
+#   pip install --require-hashes -r scripts/ci/requirements-coverage.txt
+# 'coverage' enforces the committed contract; 'coverage-refresh' re-measures
+# and rewrites docs/badges/ for committing after test changes.
+coverage: COVERAGE_GATE_MODE = gate
+coverage-refresh: COVERAGE_GATE_MODE = refresh
+coverage coverage-refresh: export PYTHONDONTWRITEBYTECODE = 1
+coverage coverage-refresh:
+	@set -euo pipefail; \
+	  tmp_root="$$(realpath "$${TMPDIR:-/tmp}")"; \
+	  data_dir="$$(mktemp -d "$${tmp_root}/website-infrastructure-coverage.XXXXXX")"; \
+	  trap 'rm -rf -- "$$data_dir"' EXIT; \
+	  export COVERAGE_FILE="$$data_dir/data"; \
+	  export COVERAGE_RCFILE="$$PWD/scripts/ci/coveragerc"; \
+	  export COVERAGE_SOURCE_ROOT="$$PWD/scripts"; \
+	  TMPDIR="$$tmp_root" $(PYTHON) -B -m coverage run -m unittest discover -s tests -p 'test_*.py'; \
+	  $(PYTHON) -B -m coverage combine >/dev/null; \
+	  $(PYTHON) -B scripts/ci/coverage_gate.py $(COVERAGE_GATE_MODE) --data-file "$$data_dir/data"
 

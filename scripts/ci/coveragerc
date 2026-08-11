@@ -1,0 +1,27 @@
+# Coverage configuration for the self-hosted coverage gate.
+#
+# parallel + patch=subprocess are required because roughly half of the test
+# suite executes validators as real subprocesses (their fail-closed CLI
+# contracts are part of what is measured); without subprocess patching those
+# executions would be invisible and the total would undercount exactly the
+# end-to-end paths this repository cares about.  The data file location is
+# supplied at run time through COVERAGE_FILE so measurement never writes
+# inside the checkout (bytecode/measurement artifacts in the tree would trip
+# the repository's own ambient-artifact checks).
+
+# COVERAGE_SOURCE_ROOT must be exported as the absolute path of scripts/ by
+# the caller (make targets and the CI step both do). Subprocess-patched test
+# children run from temporary working directories, so a relative source path
+# would silently measure nothing for exactly the CLI executions that matter.
+
+[run]
+parallel = True
+patch = subprocess
+source = ${COVERAGE_SOURCE_ROOT}
+
+[report]
+precision = 1
+show_missing = True
+
+[json]
+show_contexts = False

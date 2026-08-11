@@ -1,0 +1,8 @@
+# The one third-party wheel the coverage gate is allowed to install, pinned
+# by exact version and SHA-256 so CI can use --require-hashes and refuse any
+# substituted artifact.  The wheel hash is the cp312 manylinux build used by
+# ubuntu-24.04 runners; the sdist hash is listed for completeness but CI
+# installs with --only-binary :all: so no build backend is ever downloaded.
+coverage==7.15.4 \
+    --hash=sha256:899b9da30f3c6c336566e3707495bb23e8302d39d862f01fa78c48b99b9437e2 \
+    --hash=sha256:0548198fff07ccf4faf469520bce1c2eceb1ce3e62891921138dec10907f9d00

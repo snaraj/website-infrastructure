@@ -120,6 +120,23 @@ MEDIA_MAGIC_PREFIXES = (
     b"fLaC", b"ID3", b"\x1aE\xdf\xa3", b"\x00\x01\x00\x00", b"wOFF",
     b"wOF2", b"OTTO",
 )
+# The one deliberate exception to the no-media rule: the self-hosted coverage
+# badge. It stays reviewable because it must satisfy the strict text contract
+# below (ASCII only, tiny, fixed element set, no scripts/links/embedded data),
+# and the pull-request coverage gate additionally proves the committed bytes
+# equal a deterministic re-render of docs/badges/coverage.json. Anything that
+# misses either bar is rejected exactly like any other media file.
+APPROVED_TEXT_BADGE_PATHS = {"docs/badges/coverage.svg"}
+MAX_TEXT_BADGE_BYTES = 2048
+# The badge must open with this exact envelope; the namespace URI is the only
+# URL-shaped byte sequence permitted anywhere in the file, so the forbidden
+# fragment scan below runs on everything after this verbatim prefix.
+BADGE_REQUIRED_PREFIX = '<svg xmlns="http://www.w3.org/2000/svg" '
+BADGE_FORBIDDEN_FRAGMENTS = (
+    "base64", "data:", "script", "href", "xlink", "import", "foreignobject",
+    "<image", "<use", "url(", "&#", "http", "<!", "<?",
+)
+BADGE_ALLOWED_ELEMENTS = {"svg", "title", "g", "rect", "text"}
 OPAQUE_ARTIFACT_MAGIC_PREFIXES = (
     b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08", b"\x1f\x8b", b"7z\xbc\xaf\x27\x1c",
     b"Rar!\x1a\x07", b"\xfd7zXZ\x00", b"\x28\xb5\x2f\xfd", b"BZh", b"Salted__",
@@ -835,6 +852,43 @@ def check_privacy(root):
     return errors
 
 
+def approved_badge_errors(data, rel):
+    """Hold the one approved generated badge to a strict reviewable-text law.
+
+    Fail closed: any deviation reports the file as ordinary forbidden media
+    plus the precise reason, so this exception can never widen into a
+    general capability to commit SVG content.
+    """
+
+    def rejection(reason):
+        return (
+            "approved badge violates the strict text contract ({}): {}".format(
+                reason, rel
+            )
+        )
+
+    if len(data) > MAX_TEXT_BADGE_BYTES:
+        return [rejection("exceeds the {} byte ceiling".format(MAX_TEXT_BADGE_BYTES))]
+    try:
+        text = data.decode("ascii", "strict")
+    except UnicodeError:
+        return [rejection("contains non-ASCII bytes")]
+    problems = []
+    if any(ord(character) < 32 and character != "\n" for character in text):
+        problems.append(rejection("contains control characters"))
+    if not text.startswith(BADGE_REQUIRED_PREFIX) or not text.endswith("</svg>\n"):
+        problems.append(rejection("unexpected SVG envelope"))
+        return problems
+    remainder = text[len(BADGE_REQUIRED_PREFIX):].lower()
+    for fragment in BADGE_FORBIDDEN_FRAGMENTS:
+        if fragment in remainder:
+            problems.append(rejection("forbidden fragment " + repr(fragment)))
+    for element in re.findall(r"<\s*/?\s*([A-Za-z][A-Za-z0-9-]*)", text):
+        if element.lower() not in BADGE_ALLOWED_ELEMENTS:
+            problems.append(rejection("element outside the allowlist: " + element))
+    return problems
+
+
 def check_media(root):
     """Keep heavyweight media and unresolved storage out of public desired state."""
 
@@ -878,7 +932,14 @@ def check_media(root):
             errors.append("opaque archive or encrypted artifact is forbidden: " + rel)
         is_media = suffix in MEDIA_SUFFIXES
         if is_media or media_magic:
-            if asset_scope is None:
+            # The magic sniff intentionally recognizes the "<svg" text
+            # signature, so the approved badge necessarily arrives here; its
+            # strict text contract (exact envelope, ASCII-only, element
+            # allowlist, no embedded data) is what excludes renamed binary
+            # or active content, more precisely than the sniff could.
+            if rel in APPROVED_TEXT_BADGE_PATHS:
+                errors.extend(approved_badge_errors(data, rel))
+            elif asset_scope is None:
                 label = "media file" if is_media else "renamed media content"
                 errors.append("{} is outside the small frontend asset tree: {}".format(label, rel))
             else:
