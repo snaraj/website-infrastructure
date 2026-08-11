@@ -28,6 +28,11 @@ GATE_SPEC = importlib.util.spec_from_file_location(
 )
 GATE = importlib.util.module_from_spec(GATE_SPEC)
 GATE_SPEC.loader.exec_module(GATE)
+HISTORY_SPEC = importlib.util.spec_from_file_location(
+    "badge_publication_history", REPO_ROOT / "scripts" / "validate_publication_history.py"
+)
+HISTORY = importlib.util.module_from_spec(HISTORY_SPEC)
+HISTORY_SPEC.loader.exec_module(HISTORY)
 BADGE_REL = "docs/badges/coverage.svg"
 
 
@@ -116,6 +121,37 @@ class ApprovedBadgeContractTests(unittest.TestCase):
                 any(BADGE_REL in error for error in errors),
                 errors,
             )
+
+    def test_badge_law_is_identical_in_the_history_validator(self):
+        """The immutable-history gate carries a mirrored copy of the badge
+        law; its constants must stay byte-identical and its verdict must
+        agree with the working-tree validator on every probe, or one gate
+        would admit what the other rejects."""
+
+        for name in (
+            "APPROVED_TEXT_BADGE_PATHS",
+            "MAX_TEXT_BADGE_BYTES",
+            "BADGE_REQUIRED_PREFIX",
+            "BADGE_FORBIDDEN_FRAGMENTS",
+            "BADGE_ALLOWED_ELEMENTS",
+        ):
+            with self.subTest(constant=name):
+                self.assertEqual(getattr(MODULE, name), getattr(HISTORY, name))
+        probes = [
+            self.committed,
+            self.committed.replace(b"</svg>\n", b"<script>x</script></svg>\n"),
+            self.committed.replace(b"coverage", "cöverage".encode("utf-8"), 1),
+            b"\x89PNG\r\n\x1a\n" + b"\x00" * 64,
+            self.committed[:-1],
+            b"<svg>tiny</svg>\n",
+            self.committed[:-7] + b"<circle r=\"1\"/></svg>\n",
+        ]
+        for index, probe in enumerate(probes):
+            with self.subTest(probe=index):
+                self.assertEqual(
+                    bool(MODULE.approved_badge_errors(probe, BADGE_REL)),
+                    HISTORY._approved_badge_violation(probe),
+                )
 
     def test_hostile_badge_at_the_approved_path_fails_check_media(self):
         with tempfile.TemporaryDirectory() as directory:

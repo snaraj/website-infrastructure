@@ -186,6 +186,18 @@ MEDIA_SUFFIXES = {
 }
 MAX_UI_ASSET_BYTES = 1 * 1024 * 1024
 MAX_ASSET_TREE_BYTES = 2 * 1024 * 1024
+# The one deliberate exception to the history-wide no-media law: the
+# self-hosted coverage badge, admitted only in its strictest text form.
+# These four constants must stay byte-identical with their copies in
+# validate_repository.py (pinned by tests/security/test_approved_badge_contract.py).
+APPROVED_TEXT_BADGE_PATHS = {"docs/badges/coverage.svg"}
+MAX_TEXT_BADGE_BYTES = 2048
+BADGE_REQUIRED_PREFIX = '<svg xmlns="http://www.w3.org/2000/svg" '
+BADGE_FORBIDDEN_FRAGMENTS = (
+    "base64", "data:", "script", "href", "xlink", "import", "foreignobject",
+    "<image", "<use", "url(", "&#", "http", "<!", "<?",
+)
+BADGE_ALLOWED_ELEMENTS = {"svg", "title", "g", "rect", "text"}
 TEXT_SUFFIXES = {
     ".conf", ".css", ".env", ".example", ".go", ".hcl", ".html", ".js",
     ".json", ".lock", ".md", ".mjs", ".rego", ".service", ".sh",
@@ -476,6 +488,33 @@ def _contains_plaintext_encryption_configuration(text):
             if value and value != ENCRYPTION_CONFIGURATION_SENTINEL:
                 return True
     return False
+
+
+def _approved_badge_violation(data):
+    """True unless the bytes satisfy the strict reviewable badge contract.
+
+    Mirrors approved_badge_errors in validate_repository.py over the same
+    shared constants; the working-tree validator reports reasons while this
+    history checker stays content-neutral, so it answers only yes or no.
+    """
+
+    if len(data) > MAX_TEXT_BADGE_BYTES:
+        return True
+    try:
+        text = data.decode("ascii", "strict")
+    except UnicodeError:
+        return True
+    if any(ord(character) < 32 and character != "\n" for character in text):
+        return True
+    if not text.startswith(BADGE_REQUIRED_PREFIX) or not text.endswith("</svg>\n"):
+        return True
+    remainder = text[len(BADGE_REQUIRED_PREFIX):].lower()
+    if any(fragment in remainder for fragment in BADGE_FORBIDDEN_FRAGMENTS):
+        return True
+    return any(
+        element.lower() not in BADGE_ALLOWED_ELEMENTS
+        for element in re.findall(r"<\s*/?\s*([A-Za-z][A-Za-z0-9-]*)", text)
+    )
 
 
 def _media_magic_matches(data, suffix):
@@ -1083,7 +1122,14 @@ def validate(root, baseline, candidate):
             suffix = Path(relative_path).suffix.casefold()
             if suffix in MEDIA_SUFFIXES or _has_media_magic(data):
                 scope = _asset_scope(relative_path)
-                if scope is None:
+                if relative_path.casefold() in APPROVED_TEXT_BADGE_PATHS:
+                    if _approved_badge_violation(data):
+                        findings.add(
+                            "approved badge violates the strict text contract",
+                            commit,
+                            raw_path,
+                        )
+                elif scope is None:
                     findings.add("media outside approved frontend asset tree", commit, raw_path)
                 else:
                     asset_totals[scope] = asset_totals.get(scope, 0) + size
