@@ -46,6 +46,30 @@ turn into an unexpected success — a hard failure under ``python -m
 unittest`` — which forces removal of the marker and converts this note into
 an enforced deny row. The matrix therefore records the gap loudly instead
 of greenwashing it.
+
+NOTE — three-row platform contract vs the scripts' shipped two-row probe
+(issue #49). The platform lane states the healthy CRI surface as THREE
+rows: the two ``io.containerd.cri.v1`` split service rows above plus the
+CRI gRPC frontend row (``io.containerd.grpc.v1 cri``) that serves them.
+The shipped probes check images+runtime only, so a table with no frontend
+row still passes today. That second gap is recorded in the same two-sided
+style as the duplicate-row note: every ``ALLOW`` table now carries all
+three rows (the faithful healthy surface), the ``FRONTEND_MISSING`` group
+pins the current two-row tolerance green
+(``test_frontend_row_missing_is_currently_tolerated``), and the
+``test_pending_three_row_*_xfail`` cases assert the desired frontend deny
+rows under ``unittest.expectedFailure``. ``FRONTEND_PATTERN`` below is the
+matching probe, verified against these fixtures so the platform lane can
+lift it wholesale; no script ships it yet and nothing here changes what
+the scripts enforce. The flip is forced twice over: ``_SHIPPED`` also
+lifts ``grpc[.]v1`` frontend probes, and ``setUpClass`` binds the shipped
+set to exactly the two canonical patterns, so the moment a script ships a
+third probe this battery fails loudly for conscious conversion — the
+tolerated pins become enforced denies and the markers come off the xfails.
+The DUPLICATE tables carry the frontend row for the same reason: once the
+conjunction gains the frontend probe, they must keep isolating the
+">=1 vs exactly-one" question instead of failing for a missing frontend
+and greenwashing the duplicate ratchet.
 """
 
 import re
@@ -53,6 +77,8 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+
+from .support import required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,10 +97,19 @@ RUNTIME_PATTERN = (
     "^io[.]containerd[.]cri[.]v1[[:space:]]+runtime[[:space:]].*[[:space:]]ok[[:space:]]*$"
 )
 EXPECTED_PATTERNS = frozenset({IMAGES_PATTERN, RUNTIME_PATTERN})
-# Every ``grep -Eq '...'`` probe naming the split CRI plugin type; the
-# scripts embed the pattern inside the single quotes, so this lifts exactly
-# what ships rather than re-declaring it.
-_SHIPPED = re.compile(r"grep -Eq '(\^io\[\.\]containerd\[\.\]cri\[\.\]v1[^']*)'")
+# The CRI gRPC frontend probe the pending three-row platform contract will
+# need (second module NOTE). Documentation, not enforcement: no script ships
+# it yet — setUpClass proves that — and it is exercised here only so the
+# platform lane inherits a pattern already verified against these fixtures.
+FRONTEND_PATTERN = (
+    "^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]].*[[:space:]]ok[[:space:]]*$"
+)
+# Every ``grep -Eq '...'`` probe naming a CRI plugin type; the scripts embed
+# the pattern inside the single quotes, so this lifts exactly what ships
+# rather than re-declaring it. The alternation also lifts a future
+# ``grpc[.]v1`` frontend probe, so the exact-two binding in setUpClass trips
+# the moment the three-row implementation lands (second module NOTE).
+_SHIPPED = re.compile(r"grep -Eq '(\^io\[\.\]containerd\[\.\](?:cri|grpc)\[\.\]v1[^']*)'")
 GREP = shutil.which("grep")
 
 
@@ -92,6 +127,13 @@ def table(rows):
 HEADER = "TYPE                            ID           PLATFORMS      STATUS    "
 IMAGES_OK = "io.containerd.cri.v1            images       linux/arm64    ok        "
 RUNTIME_OK = "io.containerd.cri.v1            runtime      linux/arm64    ok        "
+# One row text, two readings (second module NOTE): on containerd 1.x this
+# was the ONLY CRI row — the retired surface the split-row fix rejects — and
+# on 2.x the SAME text is the CRI gRPC frontend row that accompanies the two
+# split service rows. Context (which rows appear beside it) is what
+# separates the dead 1.x table from a healthy three-row 2.x table, so both
+# fixture families share this constant instead of re-typing the row.
+FRONTEND_OK = "io.containerd.grpc.v1           cri          linux/arm64    ok        "
 OPT_OK = "io.containerd.internal.v1       opt          -              ok        "
 OVERLAY_OK = "io.containerd.snapshotter.v1    overlayfs    linux/arm64    ok        "
 BLOCK_SKIP = "io.containerd.snapshotter.v1    blockfile    linux/arm64    skip      "
@@ -116,29 +158,56 @@ OTHER_PLUGINS = (
 )
 
 # --- ALLOW: healthy tables the shipped probe must accept. ----------------
+# Every allow table carries the FULL three-row surface of the platform
+# contract (second module NOTE): the two split service rows plus the CRI
+# gRPC frontend row. The shipped probes only require the split pair, but a
+# two-row allow fixture would silently lock that partial shape in as "the
+# healthy table" — the two-row shape now lives in FRONTEND_MISSING below,
+# tolerated-today and pending-deny, so nothing green here understates the
+# contract the platform lane is implementing.
 ALLOW = {
-    # Canonical healthy 2.3.3 output: one images ok, one runtime ok, padded.
-    "canonical_healthy_padded": table((HEADER, OPT_OK, IMAGES_OK, RUNTIME_OK, BLOCK_SKIP)),
+    # Canonical healthy 2.3.3 output: one images ok, one runtime ok, one
+    # gRPC frontend ok, padded.
+    "canonical_healthy_padded": table(
+        (HEADER, OPT_OK, IMAGES_OK, RUNTIME_OK, FRONTEND_OK, BLOCK_SKIP)
+    ),
     # The same surface without tabwriter padding, so a pattern cannot pass by
     # matching only the trailing spaces.
     "canonical_healthy_unpadded": table(
         (
             "io.containerd.cri.v1   images   linux/arm64   ok",
             "io.containerd.cri.v1   runtime   linux/arm64   ok",
+            "io.containerd.grpc.v1   cri   linux/arm64   ok",
         )
     ),
-    # Many unrelated plugins present; the two CRI rows still healthy. Proves
-    # other plugins (including unhealthy skips and non-cri grpc.v1 rows) do
-    # not break the check.
-    "healthy_with_many_other_plugins": table((HEADER,) + OTHER_PLUGINS + (IMAGES_OK, RUNTIME_OK)),
+    # Many unrelated plugins present; the three CRI rows still healthy.
+    # Proves other plugins (including unhealthy skips and non-cri grpc.v1
+    # rows) do not break the check.
+    "healthy_with_many_other_plugins": table(
+        (HEADER,) + OTHER_PLUGINS + (IMAGES_OK, RUNTIME_OK, FRONTEND_OK)
+    ),
 }
 
 # --- DENY: every table the probe must fail closed on. --------------------
+# Every table here is a deny row under BOTH the shipped two-probe contract
+# and the pending three-row contract, so none of them moves when the
+# frontend probe lands.
 DENY = {
     # Missing rows: half a CRI surface, or none at all.
     "missing_images": table((HEADER, OPT_OK, RUNTIME_OK, BLOCK_SKIP)),
     "missing_runtime": table((HEADER, OPT_OK, IMAGES_OK, BLOCK_SKIP)),
     "both_missing": table((HEADER, OPT_OK, OVERLAY_OK, BLOCK_SKIP)),
+    # The same half-surfaces with the gRPC frontend row present: a healthy
+    # frontend row can never substitute for a missing split service row, so
+    # a probe loose enough to accept "any healthy CRI-ish row" fails here.
+    # These are the faithful 2.x partial-failure shapes (the frontend row
+    # renders even when a service beneath it is gone).
+    "missing_images_with_frontend_present": table(
+        (HEADER, OPT_OK, FRONTEND_OK, RUNTIME_OK, BLOCK_SKIP)
+    ),
+    "missing_runtime_with_frontend_present": table(
+        (HEADER, OPT_OK, IMAGES_OK, FRONTEND_OK, BLOCK_SKIP)
+    ),
     # Malformed rows: the TYPE loses its v1 suffix; the ID is truncated. The
     # anchored literal type/id can no longer match either row.
     "malformed_truncated_type": table(
@@ -190,24 +259,62 @@ DENY = {
             "io.containerd.cri.v1            runtime      linux/arm64              ",
         )
     ),
-    # The retired 1.x single-row surface must remain rejected on 2.3.3.
-    "legacy_v1_single_row": table(
-        (
-            HEADER,
-            OPT_OK,
-            OVERLAY_OK,
-            "io.containerd.grpc.v1           cri          linux/arm64    ok        ",
-        )
-    ),
+    # Two readings, one deny (see FRONTEND_OK): as the retired 1.x
+    # single-row surface this must remain rejected on 2.3.3, and as a 2.x
+    # frontend row standing alone it is a table missing BOTH split service
+    # rows. Deny under the shipped contract and the pending three-row
+    # contract alike.
+    "legacy_v1_single_row": table((HEADER, OPT_OK, OVERLAY_OK, FRONTEND_OK)),
     # Degenerate probe output.
     "empty_output": "",
     "header_only": table((HEADER,)),
 }
 
 # --- DUPLICATE: Codex "exactly one" vs the shipped ">=1"; see module NOTE.
+# The frontend row rides along so these tables isolate the duplication
+# question under BOTH contracts: without it, the pending three-row
+# conjunction would reject them for the missing frontend and the xfail pair
+# below would flip for the wrong reason (second module NOTE).
 DUPLICATE = {
-    "duplicate_images": table((HEADER, OPT_OK, IMAGES_OK, IMAGES_OK, RUNTIME_OK)),
-    "duplicate_runtime": table((HEADER, OPT_OK, IMAGES_OK, RUNTIME_OK, RUNTIME_OK)),
+    "duplicate_images": table(
+        (HEADER, OPT_OK, IMAGES_OK, IMAGES_OK, RUNTIME_OK, FRONTEND_OK)
+    ),
+    "duplicate_runtime": table(
+        (HEADER, OPT_OK, IMAGES_OK, RUNTIME_OK, RUNTIME_OK, FRONTEND_OK)
+    ),
+}
+
+# --- FRONTEND_MISSING: shipped two-row acceptance vs the pending three-row
+#     platform contract; see the second module NOTE. The first three tables
+#     are byte-for-byte the allow tables this battery carried before issue
+#     #49 — the split moved them here so the two-row shape stays covered as
+#     a documented tolerance instead of masquerading as the healthy
+#     contract.
+FRONTEND_MISSING = {
+    "frontend_missing_padded": table(
+        (HEADER, OPT_OK, IMAGES_OK, RUNTIME_OK, BLOCK_SKIP)
+    ),
+    "frontend_missing_unpadded": table(
+        (
+            "io.containerd.cri.v1   images   linux/arm64   ok",
+            "io.containerd.cri.v1   runtime   linux/arm64   ok",
+        )
+    ),
+    "frontend_missing_among_other_plugins": table(
+        (HEADER,) + OTHER_PLUGINS + (IMAGES_OK, RUNTIME_OK)
+    ),
+    # Frontend present but unhealthy: the split rows alone still satisfy
+    # the shipped probes, so an errored gRPC frontend — no CRI API for the
+    # kubelet even with both services ok — passes today.
+    "frontend_unhealthy_error": table(
+        (
+            HEADER,
+            OPT_OK,
+            IMAGES_OK,
+            RUNTIME_OK,
+            "io.containerd.grpc.v1           cri          linux/arm64    error     ",
+        )
+    ),
 }
 
 
@@ -231,11 +338,17 @@ class CriHealthContractMatrixTests(unittest.TestCase):
                 "patterns: %r" % (disagreeing,)
             )
         cls.patterns = tuple(sorted(EXPECTED_PATTERNS))
+        # Resolve the Optional grep once, before any argv exists: the
+        # class-level skip excludes grep-less hosts, and this fail-closed
+        # floor keeps a None out of subprocess argv if that guard is lost.
+        cls.grep = required_tool(
+            GREP, "an extended-regexp grep is required for the matrix"
+        )
 
     def _matches(self, pattern, data):
         return (
             subprocess.run(
-                [GREP, "-Eq", "--", pattern],
+                [self.grep, "-Eq", "--", pattern],
                 input=data,
                 capture_output=True,
                 text=True,
@@ -282,6 +395,54 @@ class CriHealthContractMatrixTests(unittest.TestCase):
         # Codex item 2: "exactly one split runtime service"; see the images
         # twin above. Xfail until the shipped probe enforces exactly-one.
         self.assertFalse(self.accepts(DUPLICATE["duplicate_runtime"]))
+
+    def test_frontend_row_missing_is_currently_tolerated(self):
+        # Records the shipped two-row reality (second module NOTE): the
+        # probes require only the split service pair, so a table with no
+        # healthy gRPC frontend row — or an errored one — still passes.
+        # Green today; these assertions go red the moment the shipped
+        # probe set grows the frontend probe, forcing conversion into
+        # enforced deny rows alongside the xfail pair below.
+        for label, data in FRONTEND_MISSING.items():
+            with self.subTest(pending=label):
+                self.assertTrue(self.accepts(data), label)
+
+    def test_documented_frontend_pattern_is_ready_for_the_three_row_contract(self):
+        # FRONTEND_PATTERN is documentation for the platform lane (second
+        # module NOTE), verified here against the fixtures BEFORE any
+        # script ships it: it must match the frontend row in every allow
+        # table and reject its absence and its unhealthy variant, in the
+        # same real-grep discipline as the shipped patterns.
+        for label, data in ALLOW.items():
+            with self.subTest(allow=label):
+                self.assertTrue(self._matches(FRONTEND_PATTERN, data), label)
+        for label in (
+            "frontend_missing_padded",
+            "frontend_missing_unpadded",
+            "frontend_missing_among_other_plugins",
+            "frontend_unhealthy_error",
+        ):
+            with self.subTest(pending=label):
+                self.assertFalse(
+                    self._matches(FRONTEND_PATTERN, FRONTEND_MISSING[label]), label
+                )
+
+    @unittest.expectedFailure
+    def test_pending_three_row_rejects_missing_frontend_xfail(self):
+        # Pending three-row contract (second module NOTE): a table without
+        # the CRI gRPC frontend row is only two thirds of the healthy
+        # surface. The shipped probes do not enforce it, so this
+        # desired-deny assertion is xfail; a platform-lane frontend probe
+        # turns it into an unexpected success — a hard suite failure —
+        # forcing the marker's removal.
+        self.assertFalse(self.accepts(FRONTEND_MISSING["frontend_missing_padded"]))
+
+    @unittest.expectedFailure
+    def test_pending_three_row_rejects_unhealthy_frontend_xfail(self):
+        # The unhealthy twin: a present-but-errored frontend row serves no
+        # CRI API and must fail the three-row contract. Xfail until the
+        # shipped probe set says so.
+        self.assertFalse(self.accepts(FRONTEND_MISSING["frontend_unhealthy_error"]))
 
 
 if __name__ == "__main__":

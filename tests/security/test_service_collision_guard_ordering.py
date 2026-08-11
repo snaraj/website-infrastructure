@@ -23,14 +23,18 @@ refuse any kubelet start that would sidestep the guard.
 These are textual pins in the style of test_shell_script_modes.py, not
 functional fake-injection probes: the collision gate sits inline in
 install-kubernetes.sh's main() behind the root, exact-confirmation, and
-payload-SHA gates, so no test harness can reach it without staging a full
-signed payload as root. A functional battery needs the platform lane to
-extract the gate into a named sourceable helper; until that lands, these
-pins hold the reviewed contract in place. The assertions bind the contract
-(which probes exist, what they refuse, and what must come before what) and
-not one exact control-flow shape, so a platform-lane restructuring that
-preserves the contract keeps passing while losing a probe, a refusal, or
-the pre-mutation placement fails.
+payload-SHA gates, so no test harness can execute the whole script without
+staging a full signed payload as root. The sibling battery
+test_kubelet_partial_init_state_matrix.py now drives both gates
+functionally anyway — it executes each gate's own extracted text under a
+fake-systemctl fixture set (issue #49), covering the partial-init kubelet
+states hermetically — while a platform-lane extraction into a named
+sourceable helper remains the path to whole-script functional coverage.
+These pins still hold the placement half of the reviewed contract: the
+assertions bind which probes exist, what they refuse, and what must come
+before what — not one exact control-flow shape — so a platform-lane
+restructuring that preserves the contract keeps passing while losing a
+probe, a refusal, or the pre-mutation placement fails.
 """
 
 import unittest
