@@ -9,12 +9,21 @@ window passed unnoticed. A fix applied to one copy must now land in every
 copy: this suite fails the moment any of the function bodies differ by a
 single byte, and separately proves the runtime behavior each copy must
 keep (domain-typed failure, ancestor-symlink rejection, uid/gid custody).
+
+The carrier sets below are deliberate, explicit allowlists — but they are
+enforced by discovery, not assumption: every tracked ``*.py`` under
+``scripts/`` is swept for definitions of the helper names, the set of
+files found must equal the pinned set exactly, and every found copy must
+be byte-identical to the canonical carrier's. A fifth tracked copy (or a
+divergent one) therefore fails by file name, and adding a legitimate new
+carrier is a conscious edit to the explicit sets in this file.
 """
 
 import ast
 import importlib.util
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,17 +52,34 @@ SIBLING_OPENER_FILES = (
     "scripts/validate_protected_runtime_evidence.py",
 )
 SIBLING_OPENER_NAME = "_open_absolute_file_no_follow"
+# Every discovered copy must equal this carrier's text, byte for byte.
+CANONICAL_CARRIER = "scripts/validate_cloudflared_tunnel_token.py"
 
 
 def _function_sources(relative):
     path = REPO_ROOT / relative
     source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=str(path))
     found = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             found[node.name] = ast.get_source_segment(source, node)
     return found
+
+
+def _tracked_python_files_under_scripts():
+    """Enumerate tracked scripts/**.py so no copy can hide from the sweep."""
+
+    listed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "scripts"],
+        check=True,
+        capture_output=True,
+    )
+    return sorted(
+        name
+        for name in listed.stdout.decode("utf-8").split("\0")
+        if name.endswith(".py")
+    )
 
 
 def _load_module(relative):
@@ -172,6 +198,81 @@ class NoFollowHelperDriftTests(unittest.TestCase):
                         module._open_posix_no_follow(
                             Path("relative/private.bin"), os.O_RDONLY
                         )
+
+    def test_helper_copies_are_discovered_never_assumed(self):
+        """Sweep every tracked scripts/*.py for the helper definitions. The
+        fixed carrier dict alone would silently ignore a fifth divergent
+        copy planted anywhere else under scripts/, letting it drift with
+        the very vulnerability this suite exists to pin down. Discovery
+        makes the pinned sets exhaustive: an unexpected or missing carrier
+        fails naming the file, and every discovered copy must match the
+        canonical carrier byte for byte."""
+
+        family_found = {}
+        sibling_found = {}
+        for relative in _tracked_python_files_under_scripts():
+            found = _function_sources(relative)
+            family_names = sorted(set(found) & set(FAMILY_FUNCTIONS))
+            if family_names:
+                family_found[relative] = {
+                    name: found[name] for name in family_names
+                }
+            if SIBLING_OPENER_NAME in found:
+                sibling_found[relative] = found[SIBLING_OPENER_NAME]
+
+        self.assertEqual(
+            sorted(family_found),
+            sorted(FAMILY_CARRIERS),
+            "files defining the no-follow helper family must be exactly "
+            "the pinned carriers; unexpected: {} missing: {}".format(
+                sorted(set(family_found) - set(FAMILY_CARRIERS)),
+                sorted(set(FAMILY_CARRIERS) - set(family_found)),
+            ),
+        )
+        self.assertEqual(
+            sorted(sibling_found),
+            sorted(SIBLING_OPENER_FILES),
+            "files defining {} must be exactly the pinned sibling pair; "
+            "unexpected: {} missing: {}".format(
+                SIBLING_OPENER_NAME,
+                sorted(set(sibling_found) - set(SIBLING_OPENER_FILES)),
+                sorted(set(SIBLING_OPENER_FILES) - set(sibling_found)),
+            ),
+        )
+
+        canonical = family_found[CANONICAL_CARRIER]
+        for name in FAMILY_FUNCTIONS:
+            self.assertIn(
+                name,
+                canonical,
+                "{} lost the canonical helper {}".format(
+                    CANONICAL_CARRIER, name
+                ),
+            )
+        for relative, sources in sorted(family_found.items()):
+            for name in FAMILY_FUNCTIONS:
+                with self.subTest(carrier=relative, helper=name):
+                    self.assertIn(
+                        name,
+                        sources,
+                        "{} no longer defines {}".format(relative, name),
+                    )
+                    self.assertEqual(
+                        sources[name],
+                        canonical[name],
+                        "{}: {} diverged from the canonical copy in "
+                        "{}".format(relative, name, CANONICAL_CARRIER),
+                    )
+        canonical_opener = sibling_found[SIBLING_OPENER_FILES[0]]
+        for relative, segment in sorted(sibling_found.items()):
+            with self.subTest(carrier=relative, helper=SIBLING_OPENER_NAME):
+                self.assertEqual(
+                    segment,
+                    canonical_opener,
+                    "{}: {} diverged from the copy in {}".format(
+                        relative, SIBLING_OPENER_NAME, SIBLING_OPENER_FILES[0]
+                    ),
+                )
 
     def test_sibling_openers_stay_byte_identical(self):
         """The protected-host pair carries the same opener under another
