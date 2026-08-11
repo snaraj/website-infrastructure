@@ -84,7 +84,7 @@ kubernetes/            desired state for the single environment
 policies/              Conftest and Kyverno controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
-tests/                 allow/deny fixtures and 780+ repository tests
+tests/                 allow/deny fixtures and 806 repository tests
 ```
 
 The two sites live in their own repositories
