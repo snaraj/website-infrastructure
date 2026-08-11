@@ -47,6 +47,18 @@ shipped as distroless multi-arch containers with Cosign-signed images and
 charts. The public URLs go live at platform cutover; until then the
 deployment-state table below is the honest source of truth.
 
+## Designed to expand
+
+The architecture is a castle built for growth: more Pis or a homelab
+tier, databases, operators, CRDs, and secrets tooling such as Vault are
+all possible later without changing its shape. None of that exists yet —
+**only the two websites above are production today**, and nothing else is
+promised, deployed, or implied.
+
+Two invariants hold at every stage of that growth: **zero spend on every
+platform**, and **security at the core** — fail-closed guards, and merge
+and mutation authority that stays with the owner alone.
+
 ## The rules the machines enforce
 
 These aren't aspirations — validators, CI, and admission policies reject
