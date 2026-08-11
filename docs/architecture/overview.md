@@ -34,7 +34,7 @@ flowchart LR
   Originals -. "offline derivative publication" .-> Delivery
   WARP -->|"private /32"| AdminTunnel
   AdminTunnel --> SSH
-  AdminTunnel --> API
+  AdminTunnel -. "denied (PLAT-DEC-001 SSH-only)" .-> API
   PublicTunnel -. "denied" .-> SSH
   PublicTunnel -. "denied" .-> API
   PublicTunnel -. "denied" .-> LegacyArchive

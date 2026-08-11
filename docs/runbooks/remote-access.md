@@ -42,12 +42,16 @@ not a direct-WAN exception.
    reauthentication behavior, and test expiry/revocation. Do not describe the
    Gateway network policy as per-SSH MFA; sshd still authenticates the
    self-managed key for each SSH connection.
-4. Apply the TCP 22/6443 allow followed by a lower-priority all-other-TCP/UDP
-   block. Keep host firewall default deny because Gateway does not prove ICMP or
-   all-protocol denial.
-5. From an external network, prove WARP-on SSH/kubectl succeeds, WARP-off fails,
-   unauthorized identity/device and an expired/revoked enrollment session fail,
-   and LAN recovery still works.
+4. Apply the TCP 22 allow followed by a lower-priority all-other-TCP/UDP
+   block. The admin plane is SSH-only (PLAT-DEC-001): 6443 and every other
+   control-plane listener stay terminally denied from the admin path, so no
+   6443 allow exists to apply. Keep host firewall default deny because
+   Gateway does not prove ICMP or all-protocol denial.
+5. From an external network, prove WARP-on SSH succeeds, WARP-off fails,
+   kubectl against the admin path is refused (PLAT-DEC-001 — cluster
+   administration happens on-host over SSH), unauthorized identity/device
+   and an expired/revoked enrollment session fail, and LAN recovery still
+   works.
 6. Only then run the recovery-gated SSH hardening script. Keep the old sessions
    open and prove a third login before logout.
 

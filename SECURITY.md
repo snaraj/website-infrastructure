@@ -4,8 +4,21 @@
 
 Do not open a public issue containing a credential, home address, account ID,
 zone ID, tunnel ID, private hostname, kubeconfig, or infrastructure plan. Revoke
-or isolate exposed material first, preserve minimal evidence, and use a private
-maintainer channel.
+or isolate exposed material first, preserve minimal evidence, and report through
+GitHub Private Vulnerability Reporting on this repository (Security tab →
+"Report a vulnerability"), which is the private maintainer channel. Reports are
+acknowledged on a best-effort basis, normally within 7 days; this is a
+single-operator project with no paid program and no bounty. Please allow up to
+90 days for remediation before any public disclosure, and never test against
+the live host, tunnels, or domains — every validator in this repository runs
+credential-free against fixtures, so findings are demonstrable offline.
+
+## Supported versions
+
+Only the current tip of `main` is supported. There are no maintained release
+branches; a finding fixed on `main` is fixed everywhere. Per-site production
+graduation state lives in [`release-policy.env`](release-policy.env) (both
+sites are pre-graduation while it reads `GRADUATED=no`).
 
 ## Production authority
 
@@ -19,6 +32,10 @@ Cloudflare and cluster mutations are manual, local, exit-gated operations.
 - MFA/passkeys on Cloudflare and GitHub; minimal administrator membership.
 - SSH keys only, no root or password authentication, applied only after a tested
   second session and physical/LAN recovery path exist.
+- SSH-only admin plane (PLAT-DEC-001): the admin VPN reaches host SSH and
+  nothing else; 2379/2380/6443/10250 are terminally denied from that path by
+  the fail-closed host-ingress guard (`make check-ingress-guard` verifies the
+  tracked artifacts).
 - Restricted Pod Security, non-root containers, read-only root filesystems,
   RuntimeDefault seccomp, all capabilities dropped, and no API token mounts.
 - Default-deny ingress and egress per workload namespace.
@@ -41,7 +58,8 @@ Cloudflare and cluster mutations are manual, local, exit-gated operations.
 Infrastructure spend is forbidden. Domain-registration renewals are separate
 and allowed. Budget alerts are delayed secondary detection, never enforcement.
 If entitlement, price, trial behavior, or plan state is unknown, the change is
-blocked. See `infrastructure/cloudflare/policy/` and the billing incident runbook.
+blocked. See `infrastructure/cloudflare/policy/` and
+[the billing incident runbook](docs/runbooks/unexpected-cloudflare-billing.md).
 Cacheability, cache BYPASS, Range support, or an origin load test never proves
 that a large-media traffic pattern is contractually authorized.
 
