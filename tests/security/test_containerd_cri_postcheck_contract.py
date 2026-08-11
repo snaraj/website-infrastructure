@@ -21,6 +21,16 @@ never pass on the pinned runtime. This battery keeps that regression dead:
   padding matches no real row at all. The battery therefore proves the
   patterns accept both padded and unpadded healthy tables and still reject
   ``error``, ``skip``, a missing row, an empty probe, and the 1.x table.
+
+Three-row hygiene (issue #49): the platform contract counts a THIRD healthy
+row beside the split pair — the CRI gRPC frontend, ``io.containerd.grpc.v1
+cri`` — so the healthy tables here carry all three rows and a dedicated
+case pins that the shipped patterns still accept a frontend-less table
+today. The pending-contract ratchet (tolerated-green plus expectedFailure
+deny rows, and the ready-to-lift ``FRONTEND_PATTERN``) lives in
+test_containerd_cri_health_contract_matrix.py; this battery only keeps its
+fixtures faithful to the three-row surface so the shipped-pattern pins can
+never silently lock the two-row shape in as "the healthy table".
 """
 
 import re
@@ -28,6 +38,8 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+
+from .support import required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,9 +54,12 @@ IMAGES_PATTERN = (
 RUNTIME_PATTERN = (
     "^io[.]containerd[.]cri[.]v1[[:space:]]+runtime[[:space:]].*[[:space:]]ok[[:space:]]*$"
 )
-# Any single-quoted extended pattern naming the split CRI plugin type; the
-# scripts embed the patterns inside grep -Eq '...' probes.
-SHIPPED_PATTERN = re.compile(r"'(\^io\[\.\]containerd\[\.\]cri\[\.\]v1[^']*)'")
+# Any single-quoted extended pattern naming a CRI plugin type; the scripts
+# embed the patterns inside grep -Eq '...' probes. The alternation also
+# lifts a future ``grpc[.]v1`` frontend probe (the pending three-row
+# contract, issue #49), so the exact-two assertions below fail loudly — for
+# conscious conversion — the moment the platform lane ships a third probe.
+SHIPPED_PATTERN = re.compile(r"'(\^io\[\.\]containerd\[\.\](?:cri|grpc)\[\.\]v1[^']*)'")
 GREP = shutil.which("grep")
 
 
@@ -54,12 +69,16 @@ def table(rows):
 
 # Column layout reproduced from ctr's tabwriter configuration (minwidth 4,
 # tabwidth 8, padding 4, trailing tab per row): STATUS carries trailing pad.
+# The healthy tables carry the full three-row CRI surface — split pair plus
+# gRPC frontend (module docstring) — so no allow fixture understates the
+# platform contract.
 HEALTHY_PADDED = table(
     [
         "TYPE                            ID           PLATFORMS      STATUS    ",
         "io.containerd.internal.v1       opt          -              ok        ",
         "io.containerd.cri.v1            images       linux/arm64    ok        ",
         "io.containerd.cri.v1            runtime      linux/arm64    ok        ",
+        "io.containerd.grpc.v1           cri          linux/arm64    ok        ",
         "io.containerd.snapshotter.v1    blockfile    linux/arm64    skip      ",
     ]
 )
@@ -67,6 +86,20 @@ HEALTHY_UNPADDED = table(
     [
         "io.containerd.cri.v1   images   linux/arm64   ok",
         "io.containerd.cri.v1   runtime   linux/arm64   ok",
+        "io.containerd.grpc.v1   cri   linux/arm64   ok",
+    ]
+)
+# The pre-#49 healthy shape: split pair present, frontend row absent. The
+# shipped patterns accept it (they probe only the split pair), and the
+# dedicated case below pins that tolerance so it converts consciously when
+# the three-row implementation lands.
+FRONTEND_MISSING = table(
+    [
+        "TYPE                            ID           PLATFORMS      STATUS    ",
+        "io.containerd.internal.v1       opt          -              ok        ",
+        "io.containerd.cri.v1            images       linux/arm64    ok        ",
+        "io.containerd.cri.v1            runtime      linux/arm64    ok        ",
+        "io.containerd.snapshotter.v1    blockfile    linux/arm64    skip      ",
     ]
 )
 RUNTIME_ERROR = HEALTHY_PADDED.replace(
@@ -84,6 +117,12 @@ IMAGES_MISSING = table(
         if "images" not in line
     ]
 )
+# Two readings, one deny: the retired 1.x single-row table, and — read
+# against 2.x — a gRPC frontend row standing alone with BOTH split service
+# rows missing. Rejected under the shipped contract and the pending
+# three-row contract alike; only the surrounding rows distinguish this
+# table from the healthy ones above, which is exactly why the healthy
+# fixtures must carry all three rows.
 V1_ERA_ONLY = table(
     [
         "io.containerd.grpc.v1           cri          linux/arm64    ok        ",
@@ -114,6 +153,14 @@ class SplitRowContractTests(unittest.TestCase):
         # naming the retired plugin type to document why the split rows are
         # required, but any non-comment reintroduction — escaped or plain —
         # fails here before it can resurrect the dead postcheck.
+        #
+        # Deliberate interplay with the pending three-row contract (issue
+        # #49): the frontend probe the platform lane will ship also names
+        # grpc.v1, so landing it trips this tripwire ON PURPOSE. That is
+        # ratchet behavior, not an accident — the same platform-lane change
+        # must consciously rescope this test to police the stale SINGLE-ROW
+        # postcheck (a grpc.v1 probe standing alone) rather than pre-weaken
+        # it here while no third probe exists.
         for name, text in self.texts.items():
             with self.subTest(script=name):
                 code = "\n".join(
@@ -139,10 +186,16 @@ class SplitRowPatternBatteryTests(unittest.TestCase):
             raise AssertionError(
                 "runtime scripts disagree on the shipped CRI patterns: %r" % (shipped,)
             )
+        # Resolve the Optional grep once, before any argv exists: the
+        # class-level skip excludes grep-less hosts, and this fail-closed
+        # floor keeps a None out of subprocess argv if that guard is lost.
+        cls.grep = required_tool(
+            GREP, "an extended-regexp grep is required for pattern battery"
+        )
 
     def probe(self, pattern, data):
         return subprocess.run(
-            [GREP, "-Eq", "--", pattern],
+            [self.grep, "-Eq", "--", pattern],
             input=data,
             capture_output=True,
             text=True,
@@ -159,6 +212,16 @@ class SplitRowPatternBatteryTests(unittest.TestCase):
 
     def test_healthy_unpadded_table_passes(self):
         self.assertTrue(self.check(HEALTHY_UNPADDED))
+
+    def test_frontend_row_missing_is_still_accepted_by_the_shipped_patterns(self):
+        # Pending three-row contract (module docstring): the shipped
+        # patterns probe only the split pair, so a table without the CRI
+        # gRPC frontend row passes today. Pinned green ON PURPOSE — when
+        # the platform lane ships the frontend probe, setUpClass's
+        # exact-two binding fails first and this tolerance converts into
+        # an enforced deny; the loud xfail ratchet for that flip lives in
+        # test_containerd_cri_health_contract_matrix.py.
+        self.assertTrue(self.check(FRONTEND_MISSING))
 
     def test_broken_tables_fail_closed(self):
         cases = {

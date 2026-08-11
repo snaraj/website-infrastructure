@@ -76,6 +76,26 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     return module
 
 
+def required_tool(resolved: str | None, description: str) -> str:
+    """Return a ``shutil.which`` result as a definite path, or fail loudly.
+
+    The hermetic batteries locate host executables with ``shutil.which`` at
+    module scope and gate their classes with ``unittest.skipUnless`` so a
+    host genuinely missing the tool skips with an explanation. That leaves
+    the module constant ``str | None``, and a ``None`` that slipped past a
+    lost or bypassed skip guard would otherwise ride silently into a
+    subprocess argv. This helper is the fail-closed floor under the skips:
+    call it where the argv is built, and a missing executable becomes an
+    immediate ``AssertionError`` naming the tool instead of a confusing
+    ``subprocess`` type error. A raise statement, not an ``assert``, so it
+    survives ``python -O`` (same discipline as ``load_script``).
+    """
+
+    if resolved is None:
+        raise AssertionError(description)
+    return resolved
+
+
 def run_script(script: Path, *argv: object) -> subprocess.CompletedProcess:
     """Run one ``scripts/`` CLI exactly as the common battery pattern does.
 

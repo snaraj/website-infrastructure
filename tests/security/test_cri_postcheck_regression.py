@@ -28,6 +28,18 @@ The battery reads the scripts' COMMITTED content (``git show HEAD:path``)
 rather than the working tree, in the spirit of test_shell_script_modes.py's
 index reads: this contract binds what the branch publishes, and in-flight
 edits sitting uncommitted in a shared checkout must not greenwash it.
+
+Three-row hygiene (issue #49): the platform contract counts a THIRD healthy
+row beside the split pair — the CRI gRPC frontend, whose row text is the
+same ``io.containerd.grpc.v1 cri`` line that stood alone in the 1.x era —
+so the healthy tables here carry all three rows and
+``test_frontend_row_missing_is_currently_accepted`` pins today's two-row
+tolerance. That pin is deliberately self-flipping: ``SHIPPED_PATTERN``
+lifts EVERY ``io[.]containerd`` probe a script ships, so the moment the
+platform lane adds the frontend probe the modeled conjunction gains it and
+the tolerance assertion goes red, forcing its conversion into the enforced
+frontend deny (the loud xfail ratchet pair for the same flip lives in
+test_containerd_cri_health_contract_matrix.py).
 """
 
 import re
@@ -111,6 +123,13 @@ def table(rows):
 HEADER = "TYPE                            ID           PLATFORMS      STATUS    "
 V2_IMAGES_ROW = "io.containerd.cri.v1            images       linux/arm64    ok        "
 V2_RUNTIME_ROW = "io.containerd.cri.v1            runtime      linux/arm64    ok        "
+# One row text, two readings (module docstring): on 1.x this was the ONLY
+# CRI row — the stale surface the fix retired — and on 2.x the same text is
+# the CRI gRPC frontend row accompanying the split pair. Context (which
+# rows appear beside it) separates the dead table from the healthy one, so
+# both fixture families share the constant instead of re-typing the row.
+V1_ROW = "io.containerd.grpc.v1           cri          linux/arm64    ok        "
+CRI_FRONTEND_ROW = V1_ROW
 NEUTRAL_ROWS = (
     "io.containerd.internal.v1       opt          -              ok        ",
     "io.containerd.snapshotter.v1    overlayfs    linux/arm64    ok        ",
@@ -118,21 +137,42 @@ NEUTRAL_ROWS = (
     # pattern satisfied by any grpc.v1 row would be satisfied here too.
     "io.containerd.grpc.v1           containers   -              ok        ",
 )
-V2_TABLE_PADDED = table((HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW, V2_RUNTIME_ROW))
-V2_TABLE_UNPADDED = table(
-    tuple(row.rstrip() for row in (HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW, V2_RUNTIME_ROW))
+# Healthy = the full three-row surface. The partial tables keep the
+# frontend row too — that is the faithful 2.x partial-failure shape, and it
+# proves a healthy frontend row can never stand in for a missing or
+# unhealthy split service row.
+V2_TABLE_PADDED = table(
+    (HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW, V2_RUNTIME_ROW, CRI_FRONTEND_ROW)
 )
-V2_TABLE_MISSING_RUNTIME = table((HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW,))
-V2_TABLE_MISSING_IMAGES = table((HEADER,) + NEUTRAL_ROWS + (V2_RUNTIME_ROW,))
+V2_TABLE_UNPADDED = table(
+    tuple(
+        row.rstrip()
+        for row in (HEADER,)
+        + NEUTRAL_ROWS
+        + (V2_IMAGES_ROW, V2_RUNTIME_ROW, CRI_FRONTEND_ROW)
+    )
+)
+V2_TABLE_MISSING_RUNTIME = table(
+    (HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW, CRI_FRONTEND_ROW)
+)
+V2_TABLE_MISSING_IMAGES = table(
+    (HEADER,) + NEUTRAL_ROWS + (V2_RUNTIME_ROW, CRI_FRONTEND_ROW)
+)
 V2_TABLE_RUNTIME_ERROR = table(
     (HEADER,)
     + NEUTRAL_ROWS
     + (
         V2_IMAGES_ROW,
         "io.containerd.cri.v1            runtime      linux/arm64    error     ",
+        CRI_FRONTEND_ROW,
     )
 )
-V1_ROW = "io.containerd.grpc.v1           cri          linux/arm64    ok        "
+# The pre-#49 healthy shape: split pair present, frontend row absent.
+# Accepted by the shipped two-probe conjunction today; see the module
+# docstring for the self-flipping tolerance pin bound to this table.
+V2_TABLE_FRONTEND_MISSING = table(
+    (HEADER,) + NEUTRAL_ROWS + (V2_IMAGES_ROW, V2_RUNTIME_ROW)
+)
 V1_TABLE_PADDED = table((HEADER,) + NEUTRAL_ROWS[:2] + (V1_ROW,))
 V1_TABLE_UNPADDED = table(
     tuple(row.rstrip() for row in (HEADER,) + NEUTRAL_ROWS[:2] + (V1_ROW,))
@@ -185,6 +225,19 @@ class CriV2PostcheckRegressionTests(unittest.TestCase):
                 postcheck_accepts(patterns, V2_TABLE_RUNTIME_ERROR), relative
             )
             self.assertFalse(postcheck_accepts(patterns, ""), relative)
+
+    def test_frontend_row_missing_is_currently_accepted(self):
+        # Pending three-row contract, pinned two ways on purpose (module
+        # docstring): today the committed scripts probe only the split
+        # pair, so the frontend-less table passes. Because SHIPPED_PATTERN
+        # lifts every io[.]containerd probe the scripts ship, a committed
+        # frontend probe joins the conjunction automatically and turns
+        # this assertion red — the conversion point into the enforced
+        # frontend deny row.
+        for relative, patterns in self.per_script():
+            self.assertTrue(
+                postcheck_accepts(patterns, V2_TABLE_FRONTEND_MISSING), relative
+            )
 
 
 if __name__ == "__main__":
