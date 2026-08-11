@@ -2,6 +2,27 @@
 
 These rules apply to every human and automated contributor.
 
+## Cold start — first-session checklist
+
+A new agent operates from this repository alone; nothing is relayed by
+the owner. In order:
+
+1. Read this file end to end — the safety invariants and the lane split
+   before anything else; CLAUDE.md only imports it.
+2. `git fetch origin` and work from `origin/main`. Never trust a local
+   `main`, a stale worktree, or another agent's summary of remote state —
+   verify remote facts directly (`gh pr view`, `git ls-remote`).
+3. Verify identity and tooling: `gh auth status` shows the owner's
+   account; commits carry the noreply identity per "Commit identity
+   mechanics"; `make check-fast` needs only Python and Git, and the full
+   `make check` needs the pinned toolchain from `versions.env`.
+4. Survey the live state yourself: `gh issue list`, `gh pr list` —
+   including the open-agent-PR count against the PR budget below.
+5. Establish which lane your task lives in (Delivery lane section) and
+   confirm every path you intend to touch belongs to it.
+6. Claim work through an issue, branch from `origin/main`, and follow
+   "Working a change end to end".
+
 ## Safety invariants
 
 1. Never commit plaintext secrets, base64-only Kubernetes secrets, private age
@@ -142,21 +163,26 @@ experiment, and removes the worktree afterward.
 **The review must:**
 
 1. Audit every claim in the PR body and commit messages against the
-   actual diffs. Overstatement is a finding even when the code is right.
+   actual diffs, reproducing every number the body cites. Overstatement
+   is a finding even when the code is right.
 2. Build a mutation kill matrix: for each guard or test the PR adds or
    changes, apply the exact regression it claims to prevent — the suite
    must go red. Revert between mutations. A surviving mutant is a
    finding.
-3. Probe for flakes: the full suite at least three times, plus the race
+3. Probe for vacuity: a guard that cannot fail is no guard. For each new
+   or changed assertion, demonstrate at least one input that turns it
+   red (the kill matrix usually supplies it); an assertion no input can
+   fail is decorative, and decorative checks are findings.
+4. Probe for flakes: the full suite at least three times, plus the race
    detector where the language has one. Any nondeterminism is a finding
    naming the test.
-4. Check hygiene: commit identity (owner noreply in BOTH author and
-   committer), signature conventions, no co-author trailers, secret scan
-   clean, out-of-lane paths untouched.
-5. Check doctrine: nothing weakened — every gate, validator, or test
+5. Check hygiene: commit identity (owner noreply in BOTH author and
+   committer), signature conventions and agent labels, no co-author
+   trailers, secret scan clean, out-of-lane paths untouched.
+6. Check doctrine: nothing weakened — every gate, validator, or test
    change is additive or strengthening; exceptions are narrow, named,
    and justified where the owner will read them.
-6. For CI-invisible paths (jobs that run only on pushes to main), demand
+7. For CI-invisible paths (jobs that run only on pushes to main), demand
    simulated evidence of both directions in the PR and treat the first
    post-merge run as part of the change under review.
 
@@ -165,10 +191,13 @@ owner see the identical record: APPROVE or REQUEST-CHANGES; numbered
 findings with severity and file:line; the mutation kill matrix; flake
 results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
 "no finding — checked X, Y, Z" statements so silence is never ambiguous;
-confirmation the scratch workspace was removed; the reviewing lane's
-signature. A PR flips from draft to ready only after an APPROVE verdict
-(or after findings are fixed and re-verified), and the evidence comment
-remains on the PR as the permanent record.
+confirmation the scratch workspace was removed; the reviewing agent's
+signature in the form `- <Agent> (adversarial reviewer)`, matching its
+agent label. A REQUEST-CHANGES verdict returns the work to the same
+branch owner — fixes land on the same branch and receive a delta
+re-review of the changed scope. A PR flips from draft to ready only
+after an APPROVE verdict (or after findings are fixed and re-verified),
+and the evidence comment remains on the PR as the permanent record.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
@@ -183,6 +212,27 @@ authority: the owner alone merges.
   three repositories: `production-readiness`, `conventions`, `security`,
   `tests`, `ci`, `docs`, `release`, `fix`, `provider-neutrality`,
   `delivery-lane`, `features`. New labels are added to all three at once.
+  This repository additionally retains two repo-local legacy labels from
+  the separation era (`platform`, `extraction`); the shared taxonomy
+  governs new work.
+- **Agent labels.** Every agent-created PR and issue carries TWO further
+  labels: the umbrella `agent-authored` AND the acting agent's own label —
+  `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
+  (Claude Opus 5), `opus4.8` (Claude Opus 4.8). The signature must match
+  the label (delivery-lane bodies ending `- Fable5` ↔ `fable5`;
+  Codex-lane titles ending " - Codex 5.6 Sol Ultra" ↔ `5.6-sol`), and
+  adversarial-review verdicts carry the same identity as
+  `- <Agent> (adversarial reviewer)`. These repositories are worked by
+  several frontier models in parallel lanes; labels plus signatures keep
+  authorship auditable with no owner relay. When a new model joins, its
+  label — description "Authored by <model>" — is created in ALL THREE
+  repositories before its first PR, per the one-taxonomy rule.
+- **PR budget.** At most 3 agent PRs open in this repository by default;
+  parallel pushes beyond that need explicit owner authorization first.
+- **Merge authority.** THE OWNER ALONE MERGES. Never merge, never
+  self-approve, never treat a peer approval or a green check as
+  authority, and never force-push a shared ref. Every PR opens as a
+  draft.
 - **Milestones.** Every PR and issue carries one. Release milestones close
   when the release ships; completed arcs close their milestone.
 - **Assignee.** The owner is assignee on every PR and issue (authorship is
@@ -193,3 +243,201 @@ authority: the owner alone merges.
   and never rewritten.
 - **Commits.** Detailed bodies to the review protocol's evidence standard —
   problem, mechanism, enumerated changes, evidence — signed per lane.
+
+## Working a change end to end
+
+The complete delivery loop, each step gated by the sections around it:
+
+1. **Check the lane.** Confirm every path you intend to touch is
+   delivery-lane (`tests/**`, `scripts/**`, `.github/workflows/**`,
+   `Makefile`, `README.md`, and `docs/**` EXCEPT the ADRs under
+   `docs/adr/` and the capacity documents, which are platform-lane along
+   with `bootstrap/**` and `versions.env`). This contract file itself is
+   editable from the delivery lane. Never edit the other lane's files;
+   reference platform decisions, never restate or reword them.
+2. **Claim the work.** File (or take) the issue; state intent and
+   constraints. Label it — including both agent labels — assign the
+   owner, set a milestone.
+3. **Branch from `origin/main`** after `git fetch origin`; branch names
+   are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
+   a branch that is not yours is a branch you never push to.
+4. **Build the change** inside the invariants, the Change workflow, and
+   the delivery-lane requirements above. Docs-only diffs still run the
+   gates.
+5. **Run the gates** ("Quality gates" below), review the exact staged
+   index, run `make pre-push-security`, and commit under the pinned
+   identity with a body to the evidence standard, ending with your
+   signature.
+6. **Push and open a DRAFT PR**: `Closes #N`, the same labels, owner as
+   assignee, a milestone, body signed. Every number in the body must be
+   reproducible — the adversarial review will reproduce it.
+7. **Adversarial review** per the protocol above; findings are fixed on
+   the same branch by the same writer and delta re-reviewed before the
+   flip to ready.
+8. **Owner comments** are handled per the owner review protocol below.
+9. **The owner merges.** Nothing you can do — approval, green checks,
+   ready state — substitutes for that.
+
+## Commit identity mechanics
+
+Delivery-lane requirement 3, made operational. The identity — BOTH
+author and committer, on every outgoing commit — is the owner's GitHub
+noreply identity: exactly the author identity already carried by every
+published commit on `origin/main`. This file cannot spell it out,
+deliberately: the repository privacy gate bans literal email addresses
+from tracked text (only commit METADATA may carry the noreply address —
+`validate_publication_history.py` accepts it there and nowhere else).
+Read it from published history and pin it per command:
+
+    identity_name="$(git log -1 --format='%an' origin/main)"
+    identity_email="$(git log -1 --format='%ae' origin/main)"
+
+- Pin it per command with environment variables, never with `git config`
+  (repository or global): configuration outlives the session, leaks into
+  unrelated work, and hides identity decisions from review.
+
+      GIT_AUTHOR_NAME="$identity_name" \
+      GIT_AUTHOR_EMAIL="$identity_email" \
+      GIT_COMMITTER_NAME="$identity_name" \
+      GIT_COMMITTER_EMAIL="$identity_email" \
+      git commit ...
+
+- EVERY history-writing command runs under the same pinned environment —
+  `commit`, `commit --amend`, `rebase`, `cherry-pick`. A rebase rewrites
+  the COMMITTER of every replayed commit, and the privacy gate checks
+  the committer field (`scripts/validate_publication_history.py`
+  enforces the closure over the whole outgoing range, in the pre-push
+  hook and again in PR CI), so an unpinned rebase silently reintroduces
+  the machine identity into otherwise-clean commits.
+- No `Co-Authored-By` trailers, ever. Signatures per lane (delivery-lane
+  requirement 4), matching the agent label.
+- Treat the Git index as public (safety invariant 12): no hostname, IP
+  address, machine or account identifier, username, workspace path,
+  token, or private operational fact enters any commit, message,
+  fixture, or doc — what reaches history cannot be unpublished.
+
+## Owner review protocol
+
+Comments the owner leaves on PRs ARE code reviews — address each
+promptly, reply IN-THREAD per comment describing the resolution, then
+notify the owner the PR is ready to re-check; never mark a PR ready
+with unaddressed owner comments.
+
+## Stacked pull requests
+
+Stacking is sanctioned for dependent work; these rules exist because a
+squash-merge repository punishes careless stacks:
+
+- The stacked PR's base is THE BRANCH IT STACKS ON, so its diff shows
+  only the increment.
+- A stacked PR STAYS DRAFT UNTIL ITS BASE MERGES. Squashing a stacked
+  PR before its base would duplicate the base's entire content into
+  `main`.
+- When the base merges: `git fetch --prune`; rebase the stacked branch
+  onto `main` under the pinned identity environment (the committer
+  rewrite above); re-run the gates on the rebased head; then
+  `git push --force-with-lease` to YOUR OWN single-writer branch — the
+  sole force-push an agent ever performs in this repository. GitHub
+  retargets the PR to `main` automatically; verify the retarget and the
+  residual diff yourself.
+- One writer per branch, always, and remote truth is checked directly —
+  `gh pr view`, `git ls-remote` — never assumed from another agent's
+  report.
+
+## Quality gates — exact commands and patterns
+
+The Change workflow above is canonical for the pre-push ceremony; this
+is the consolidated command view:
+
+    make check-fast          # Python + Git only: validators + full unittest battery
+    make check               # adds gitleaks/shellcheck/actionlint/helm/
+                             #   kubeconform/conftest/OpenTofu (versions.env pins)
+    make coverage            # floor + drift + byte-exact badge (hash-pinned wheel)
+    make pre-push-security   # rehearses the origin/main..HEAD publication gate
+    git config core.hooksPath .githooks   # makes the real gate automatic on push
+
+- **Coverage floor.** The committed contract in
+  `docs/badges/coverage.json`: floor 76.0%, drift tolerance 2.5%,
+  measured over `scripts/**` by the canonical suite recorded there
+  (80.8% at the last refresh). Ratchet only (delivery-lane
+  requirement 6): the floor may rise and never falls, and coverage moves
+  by adding tests, never by trimming the measured surface.
+  `make coverage-refresh` re-measures and rewrites the ledger/badge for
+  committing after test changes.
+- **Ratchet pairs.** When a stated requirement and shipped behavior
+  disagree across lanes, record the gap loudly instead of greenwashing
+  it: one green test pins current behavior, and a paired
+  `unittest.expectedFailure` twin asserts the pending contract — the day
+  a platform-lane change tightens the implementation, the xfail becomes
+  an unexpected success, the suite goes hard red, and removing the
+  marker converts the note into an enforced deny row. Canonical
+  exemplar: `tests/security/test_containerd_cri_health_contract_matrix.py`.
+- **Perf discipline.** The site repositories pin payload budgets as
+  tests; the analogous discipline here is byte-exactness — render
+  determinism (`make check-determinism`) and badge regeneration are
+  enforced comparisons, never judgments.
+- **Secret scan, both modes.** `make check-gitleaks` scans the working
+  tree with the pinned policy (`policies/gitleaks.toml`), and the
+  publication gate (`make pre-push-security` / the pre-push hook) scans
+  the exact outgoing history range. PR CI re-scans base..head with
+  `--ignore-gitleaks-allow` and a verified-empty ignore file, so NO
+  allowlist entry is ever honored on the merge path — this repository
+  keeps no `.gitleaksignore`; fix the content, never allowlist it.
+- **Flake probe.** Before a PR leaves draft the full suite has run at
+  least three times (author and reviewer independently); any
+  nondeterminism is a finding naming the test.
+
+## CI map
+
+- **pull-request.yml** — pull requests and manual dispatch ONLY; no job
+  runs on pushes to `main`. The battery: immutable-PR-history
+  validation (`validate_publication_history.py` over base..head —
+  noreply identity closure and linear, non-shallow history), gitleaks
+  over the exact PR range with the empty ignore file, actionlint, a
+  compile sweep of every tracked `scripts/**/*.py` with a count floor,
+  the full unittest battery plus `validate_repository.py all`, the
+  self-hosted coverage contract (hash-pinned wheel in a disposable
+  venv; floor + drift + byte-exact badge), shellcheck, `gitleaks dir`
+  plus the ambient-artifact check, Kubernetes render + validation in
+  the release-transition mode the release-state policy selects, render
+  determinism, the assurance-ledger / no-security-toggles /
+  attack-surface-manifest / ingress-guard validators, Kyverno policy
+  tests, and credential-free OpenTofu validation.
+- **codeql.yml** — pull requests, `main` pushes, weekly cron.
+  **scheduled-security.yml** — weekly cron full-history scan. Nothing
+  else runs post-merge: what merges is what was gated.
+- **Zero-spend guardrails on the merge path.** The `tests/security`
+  battery IS the guard: `test_actions_zero_spend_exposure.py` pins the
+  workflows' exposure (secretless PRs, read-only default permissions,
+  GitHub-hosted runners, pinned actions), and
+  `test_cloudflare_zero_spend_allowlist.py` pins the committed product
+  allowlist (safety invariant 4). The coverage gate is self-hosted so
+  no external processor ever receives repository content or
+  measurements.
+- **Pinning rules.** Every action at a full commit SHA with a version
+  comment; every tool version in `versions.env`, checksum-verified by
+  `scripts/ci/install-tools.sh`, and enforced by
+  `tests/security/test_ci_tool_pins.py`; GitHub-hosted `ubuntu-24.04`
+  runners only; PR workflows secretless with checkout credential
+  persistence disabled.
+
+## Docs conventions
+
+- **Truthful README.** The deployment-state table is the honest source
+  of truth — the repository is deliberately not deployable until the
+  fail-closed sentinels are replaced with reviewed evidence, and prose
+  never claims otherwise. Badge honesty is enforced: the coverage badge
+  is regenerated byte-exact by the gate and cannot claim what CI did
+  not measure.
+- **No CHANGELOG yet.** Releases are deliberately suspended
+  (`make release-check` rejects every deployment sentinel); release and
+  versioning ceremony arrives with the release-state policy, per
+  ADR 0014.
+- **Lane discipline in docs.** ADRs and the capacity documents are
+  platform-lane: cite them by number, never edit, restate, or reword
+  them from the delivery lane. Runbooks and assurance documents are
+  delivery-lane and follow the same evidence standard as PR bodies —
+  their cross-references are pinned by tests.
+- **Attribution.** No third-party creative assets exist here. Any that
+  ever arrive land with their reviewed license alongside the asset; the
+  site repositories carry their own asset-policy notices.
