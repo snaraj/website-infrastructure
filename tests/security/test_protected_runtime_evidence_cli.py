@@ -8,12 +8,25 @@ them only at the parse level or behind Linux-only skips. Every case here
 runs on macOS and Linux alike. The genuine boot-probe pass path stays
 Linux-gated because /proc does not exist elsewhere — asserted explicitly
 so the platform boundary is a documented decision, not an accident.
+
+The expected-digest shape check runs only after every other rejection has
+been cleared, so its test builds a fully explicit, currently-valid
+document and injects the validator's own ``boot_id_probe`` seam: the
+malformed binding is then the only defect, asserted identically on every
+platform. No assertion in this file may branch on the host platform to
+pick which diagnostic it expects — that pattern let a defective fixture
+pass on macOS (where the boot probe fails before the document is ever
+parsed) while Linux CI saw the fixture's real field defect instead of
+the digest-shape rejection.
 """
 
+import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +35,44 @@ from tests.security.test_protected_runtime_contract_integration import contract_
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_protected_runtime_evidence.py"
 EVIDENCE_NAME = "protected-legacy-runtime-evidence.local"
+SPEC = importlib.util.spec_from_file_location(
+    "validate_protected_runtime_evidence_for_cli_battery", str(VALIDATOR)
+)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+def explicit_evidence_document(boot_id_sha256, created_unix):
+    """Write the complete canonical document field by field, literally.
+
+    Nothing here is derived from the validator's constants, from probed
+    tools, or from the host platform: the same fifteen lines are produced
+    on every machine, so a schema change must break this fixture loudly
+    instead of the fixture silently following it.
+    """
+
+    return (
+        "\n".join(
+            (
+                "RUNTIME_EVIDENCE_SCHEMA=protected-legacy-host-review-v2",
+                "BOOT_ID_SHA256=" + boot_id_sha256,
+                "CREATED_UNIX=" + str(created_unix),
+                "LEGACY_ARCHIVES_PRESENT=yes",
+                "ARCHIVE_INVENTORY_STATUS=PASS",
+                "SYSTEM_MANAGER_UNITS_STATUS=PASS",
+                "USER_MANAGER_UNITS_STATUS=PASS",
+                "CONTAINERS_STATUS=PASS",
+                "PACKAGE_ACTIVATION_STATUS=PASS",
+                "SCHEDULERS_AUTOSTART_STATUS=PASS",
+                "PROCESSES_STATUS=PASS",
+                "CGROUPS_STATUS=PASS",
+                "OPEN_FILES_STATUS=PASS",
+                "LISTENERS_STATUS=PASS",
+                "PRODUCT_EXECUTION_STATUS=PASS",
+            )
+        )
+        + "\n"
+    ).encode("ascii")
 
 
 def run_validator(contract, *extra):
@@ -124,20 +175,59 @@ class ProtectedRuntimeEvidenceCliTests(unittest.TestCase):
         self.assert_error(completed, "runtime evidence file is stale")
 
     def test_expected_sha256_must_be_lowercase_hex(self):
-        # The malformed binding must never validate. On Linux the specific
-        # digest-shape rejection is observable; elsewhere the boot probe
-        # fails first — either way the CLI exits 1 and blesses nothing.
-        self.write_evidence()
-        completed = run_validator(
-            self.contract, "--expected-sha256", "NOT-A-DIGEST"
+        # The digest-shape rejection fires only once everything else is
+        # valid, so build a fully explicit document, bind it to a synthetic
+        # boot through the validator's own boot_id_probe seam, and leave
+        # the malformed binding as the single defect. The identical exact
+        # assertions run on every platform; no branch picks a diagnostic.
+        boot_sha256 = hashlib.sha256(b"cli-battery-synthetic-boot").hexdigest()
+        document = explicit_evidence_document(boot_sha256, int(time.time()))
+        self.write_evidence(payload=document)
+        digest = hashlib.sha256(document).hexdigest()
+
+        # Positive control: the same fixture with a well-formed lowercase
+        # binding validates cleanly, proving it carries no other defect
+        # that could mask (or stand in for) the digest-shape rejection.
+        loaded, errors = MODULE.validate_runtime_evidence(
+            self.contract,
+            digest,
+            expected_archives_present=True,
+            boot_id_probe=lambda: boot_sha256,
         )
-        if sys.platform.startswith("linux"):
-            self.assert_error(
-                completed,
-                "expected runtime evidence binding is not a lowercase SHA-256",
-            )
-        else:
-            self.assert_error(completed, "current boot identity is unavailable")
+        self.assertEqual(errors, [])
+        self.assertEqual(loaded.sha256, digest)
+
+        malformed_bindings = (
+            digest.upper(),  # the uppercase digest this test is named for
+            "NOT-A-DIGEST",
+            digest[:-1],
+            digest + "0",
+        )
+        for malformed in malformed_bindings:
+            with self.subTest(malformed=malformed):
+                loaded, errors = MODULE.validate_runtime_evidence(
+                    self.contract,
+                    malformed,
+                    expected_archives_present=True,
+                    boot_id_probe=lambda: boot_sha256,
+                )
+                self.assertIsNone(loaded)
+                self.assertEqual(
+                    errors,
+                    [
+                        "expected runtime evidence binding is not a "
+                        "lowercase SHA-256"
+                    ],
+                )
+
+        # The CLI wrapper (which cannot inject a probe) must still refuse
+        # the uppercase binding and bless nothing — on every platform.
+        completed = run_validator(
+            self.contract, "--expected-sha256", digest.upper()
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("ERROR ", completed.stderr)
+        self.assertNotIn("PASS", completed.stdout)
 
     def test_emit_and_expected_are_mutually_exclusive(self):
         completed = run_validator(
