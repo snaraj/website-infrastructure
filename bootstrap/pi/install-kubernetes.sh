@@ -264,8 +264,10 @@ main() {
   local kubeadm_binary="${artifact_dir}/kubeadm"
   local kubelet_binary="${artifact_dir}/kubelet"
   local kubectl_binary="${artifact_dir}/kubectl"
+  local guard_dropin_source="${repo_root}/bootstrap/pi/ingress-guard/systemd/kubelet.service.d/50-website-infrastructure-ingress-guard.conf"
+  local guard_dropin_target='/etc/systemd/system/kubelet.service.d/50-website-infrastructure-ingress-guard.conf'
   local staged_artifacts staged_containerd_archive staged_cni_archive staged_crictl_archive staged_payload
-  local path name index directory
+  local path name index directory fragment_path dropin_paths dropin_entries guard_dropin_hash
   local -a extracted_containerd_files=()
   local -a extracted_cni_files=()
   local -a required_containerd=(containerd containerd-shim-runc-v2 ctr)
@@ -401,12 +403,40 @@ main() {
   for path in "${target_destinations[@]}"; do
     assert_target_vacant "${path}"
   done
+  # PLAT-DEC-001 installs the SSH-only ingress guard BEFORE this runtime
+  # installation, and the guard ships exactly one additive kubelet drop-in
+  # (Requires=/After= on the guard unit) that therefore legitimately exists
+  # before kubelet.service itself does. Only that state is tolerated here,
+  # and only when it is byte-identical to the tracked source under root-owned
+  # 0644 custody with nothing else beside it. Any kubelet unit file anywhere
+  # in the systemd search path, any other drop-in, any activation state, and
+  # any containerd.service state at all still refuses fail-closed, so the
+  # gate keeps rejecting foreign runtime state without breaking the
+  # sanctioned guard-then-runtime install ordering.
   for name in containerd.service kubelet.service; do
-    if systemctl cat "${name}" >/dev/null 2>&1 \
-      || systemctl is-active --quiet "${name}" 2>/dev/null \
+    if systemctl is-active --quiet "${name}" 2>/dev/null \
       || systemctl is-enabled --quiet "${name}" 2>/dev/null; then
       die "refusing to replace or alter existing systemd service state: ${name}"
     fi
+    systemctl cat "${name}" >/dev/null 2>&1 || continue
+    [[ "${name}" == kubelet.service ]] || \
+      die "refusing to replace or alter existing systemd service state: ${name}"
+    fragment_path="$(systemctl show -p FragmentPath --value kubelet.service 2>/dev/null)" || \
+      die 'refusing to replace or alter existing systemd service state: kubelet.service'
+    dropin_paths="$(systemctl show -p DropInPaths --value kubelet.service 2>/dev/null)" || \
+      die 'refusing to replace or alter existing systemd service state: kubelet.service'
+    [[ -z "${fragment_path}" && "${dropin_paths}" == "${guard_dropin_target}" ]] || \
+      die 'refusing to replace or alter existing systemd service state: kubelet.service'
+    dropin_entries="$(find "${guard_dropin_target%/*}" -mindepth 1 -maxdepth 1 -print 2>/dev/null | sort)" || \
+      die 'cannot enumerate the kubelet drop-in directory'
+    [[ "${dropin_entries}" == "${guard_dropin_target}" ]] || \
+      die 'unexpected content beside the tracked ingress-guard kubelet drop-in'
+    [[ "$(stat -c '%u:%g:%a' "${guard_dropin_target}" 2>/dev/null)" == '0:0:644' ]] || \
+      die 'ingress-guard kubelet drop-in custody is not root-owned mode 0644'
+    guard_dropin_hash="$(sha256sum -- "${guard_dropin_source}" | awk '{print $1}')" && \
+      [[ "${guard_dropin_hash}" =~ ^[0-9a-f]{64}$ ]] || \
+      die 'cannot hash the tracked ingress-guard kubelet drop-in source'
+    check_sha "${guard_dropin_hash}" "${guard_dropin_target}"
   done
 
   # Artifact staging and collision checks can consume most of the runtime

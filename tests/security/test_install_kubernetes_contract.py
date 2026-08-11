@@ -14,6 +14,15 @@ SCRIPT = ROOT / "bootstrap" / "pi" / "install-kubernetes.sh"
 CONTAINERD_UNIT = ROOT / "bootstrap" / "pi" / "systemd" / "containerd.service"
 KUBELET_UNIT = ROOT / "bootstrap" / "pi" / "systemd" / "kubelet.service"
 RECOVERY_NOTE = ROOT / "bootstrap" / "pi" / "INSTALL-RECOVERY.md"
+GUARD_DROPIN = (
+    ROOT
+    / "bootstrap"
+    / "pi"
+    / "ingress-guard"
+    / "systemd"
+    / "kubelet.service.d"
+    / "50-website-infrastructure-ingress-guard.conf"
+)
 BASH = shutil.which("bash")
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
@@ -129,6 +138,42 @@ class InstallerTransactionContractTests(unittest.TestCase):
             self.assertNotIn("LimitNOFILE=", unit)
             self.assertIn("LimitNPROC=65536", unit)
             self.assertIn("TasksMax=65536", unit)
+
+    def test_collision_gate_tolerates_only_the_tracked_ingress_guard_dropin(self):
+        # PLAT-DEC-001 installs the ingress guard before the runtime, so the
+        # guard's one additive kubelet drop-in legitimately predates
+        # kubelet.service itself. The collision gate may tolerate exactly that
+        # byte-verified state and nothing else; each fragment below is a
+        # load-bearing piece of that tolerance, so losing any of them either
+        # re-breaks the sanctioned guard-then-runtime ordering or widens the
+        # gate past the tracked drop-in.
+        self.assertTrue(GUARD_DROPIN.is_file())
+        for fragment in (
+            "'/etc/systemd/system/kubelet.service.d/50-website-infrastructure-ingress-guard.conf'",
+            "bootstrap/pi/ingress-guard/systemd/kubelet.service.d/50-website-infrastructure-ingress-guard.conf",
+            "systemctl show -p FragmentPath --value kubelet.service",
+            "systemctl show -p DropInPaths --value kubelet.service",
+            '[[ -z "${fragment_path}" && "${dropin_paths}" == "${guard_dropin_target}" ]]',
+            "unexpected content beside the tracked ingress-guard kubelet drop-in",
+            "'0:0:644'",
+            'check_sha "${guard_dropin_hash}" "${guard_dropin_target}"',
+        ):
+            self.assertIn(fragment, self.script)
+
+    def test_collision_gate_still_refuses_foreign_service_state(self):
+        # The drop-in tolerance must not relax the original refusals:
+        # activation state dies first for both units, a unit-state probe that
+        # finds anything for containerd.service falls through to the
+        # unconditional refusal, and only kubelet.service reaches the
+        # tracked-drop-in validation branch.
+        for fragment in (
+            'systemctl is-active --quiet "${name}" 2>/dev/null',
+            'systemctl is-enabled --quiet "${name}" 2>/dev/null',
+            'systemctl cat "${name}" >/dev/null 2>&1 || continue',
+            '[[ "${name}" == kubelet.service ]] ||',
+            "refusing to replace or alter existing systemd service state",
+        ):
+            self.assertIn(fragment, self.script)
 
     def test_kubelet_accepts_only_kubeadm_generated_runtime_flags(self):
         self.assertIn(
