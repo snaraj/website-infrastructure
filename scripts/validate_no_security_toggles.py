@@ -75,6 +75,13 @@ ALLOWLIST = (
         "pins the same invocation in the integration contract",
     ),
     (
+        "tests/security/test_no_security_toggles_cli.py",
+        "--skip-token-print",
+        "detector's own stale-allowlist regression names the security-positive "
+        "flag as fixture data to prove a removed justification fails closed; "
+        "not a third invocation pin",
+    ),
+    (
         "tests/security/test_trivy_scan_contract.py",
         "--skip-dirs ./tests/kubernetes/fixtures/deny",
         "pins the deny-fixture exemption as the ONLY allowed skip",
