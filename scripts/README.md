@@ -52,6 +52,19 @@ credential-free static proof of those exact effective values. The single-site
 Kind transition-runtime stage retired with the embedded site sources; that
 lane and the live gate both fail closed PENDING their post-cutover successor,
 which must re-establish runtime evidence against the standalone site charts.
+[`validate_admin_ingress_contract.py`](./validate_admin_ingress_contract.py)
+holds the public schema for the ignored root-owned admin-ingress contract
+(the reviewed administrative VPN ingress interfaces behind the SSH-only
+decision PLAT-DEC-001), rejecting duplicates, whitespace ambiguity, symlinks,
+hard links, non-root ownership, partial reads, and LAN/CNI interface classes
+with fixed value-free tokens; and
+[`validate_ingress_guard.py`](./validate_ingress_guard.py) is the semantic
+verifier, deterministic renderer, and tracked-artifact gate for the SSH-only
+host-ingress guard: it normalizes structured `nft -j` output against one
+closed expected model (TCP 22 preserved; 2379/2380/6443/10250 terminally
+denied per reviewed interface) and refuses sets, maps, inversions,
+wildcards, alternate families, decoy chains, and unknown grammar, so the
+guard's proof can never be widened or bypassed by rule indirection.
 
 ```mermaid
 flowchart LR

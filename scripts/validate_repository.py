@@ -83,6 +83,7 @@ FORBIDDEN_LOCAL_ONLY_EXACT_NAMES = {
     "bootstrap/pi/decisions.env.local",
     "bootstrap/pi/encryption-config.yaml.local",
     "bootstrap/pi/images.lock.local",
+    "bootstrap/pi/ingress-guard/admin-ingress.env.local",
     "bootstrap/pi/kubeadm-config.yaml.local",
     "bootstrap/pi/protected-legacy-runtime-evidence.local",
     "bootstrap/pi/protected-services.env.local",

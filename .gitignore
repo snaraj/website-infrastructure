@@ -47,6 +47,7 @@ bootstrap/pi/kubeadm-config.yaml.local
 api-encryption-config.yaml
 encryption-config.yaml.local
 bootstrap/pi/decisions.env.local
+bootstrap/pi/ingress-guard/admin-ingress.env.local
 bootstrap/pi/protected-services.env.local
 bootstrap/pi/protected-legacy-runtime-evidence.local
 bootstrap/pi/images.lock.local

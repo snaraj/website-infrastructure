@@ -11,7 +11,7 @@
 | Legacy archive operator | Preserve and verify an explicitly declared inactive archive through the protected local path | Runtime activation, public/Tunnel route, Kubernetes/Flux/CI access, broad filesystem operations, secret disclosure |
 | Flux source controller | Anonymous HTTPS Git fetch | Git write, deploy keys, cluster-wide tenant mutation |
 | Tenant reconciler | Named namespace resources | Other namespaces and cluster-scoped privilege |
-| Admin laptop | TCP 22/6443 after identity/device policy | Other Pi traffic and WARP-off remote access |
+| Admin laptop | TCP 22 after identity/device policy — SSH-only, PLAT-DEC-001; `kubectl` runs on the Pi | Kubernetes API 6443, etcd 2379/2380, kubelet 10250 (host-ingress guard), other Pi traffic, WARP-off remote access |
 | Cluster SOPS identity | Decrypt exact Git-tracked Kubernetes ciphertext in `flux-system` | Cloudflare API/state, Git/GitHub authority, operator archives, other clusters |
 | Operator-wrapping identity | Encrypt/decrypt protected local recovery and state archives | Pi/cluster runtime, Git/CI, Cloudflare API authority by itself |
 | Git publishing identity | Reviewed workstation commit/push through protected `main` workflow | Pi/Flux/CI storage, Cloudflare or cluster deployment authority |

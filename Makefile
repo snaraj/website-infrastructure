@@ -4,7 +4,7 @@ SHELL := /usr/bin/env bash
 PYTHON ?= python3
 .DEFAULT_GOAL := help
 
-.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-tofu
+.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-tofu check-ingress-guard
 
 help:
 	@printf '%s\n' \
@@ -15,9 +15,10 @@ help:
 	  'check-privacy    Reject private workstation, identity, and host context' \
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
-	  'check-determinism Prove two scaffold renders are byte-identical'
+	  'check-determinism Prove two scaffold renders are byte-identical' \
+	  'check-ingress-guard Verify the SSH-only admin-ingress guard artifacts'
 
-check: check-fast check-gitleaks check-shell check-workflows check-kubernetes check-cloudflare
+check: check-fast check-gitleaks check-shell check-workflows check-kubernetes check-cloudflare check-ingress-guard
 
 # Bytecode caches from a plain run would poison the later pre-push gate's
 # ambient-artifact check; a macOS TMPDIR under the /var symlink trips the
@@ -60,6 +61,10 @@ check-cloudflare:
 
 check-determinism:
 	@./scripts/ci/verify-render-determinism.sh
+
+check-ingress-guard:
+	@$(PYTHON) scripts/validate_ingress_guard.py repo
+	@$(PYTHON) scripts/validate_admin_ingress_contract.py EXAMPLE bootstrap/pi/ingress-guard/admin-ingress.env.example
 
 check-tofu: check-cloudflare
 
