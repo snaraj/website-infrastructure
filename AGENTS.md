@@ -82,3 +82,44 @@ These rules apply to every human and automated contributor.
 `kubeadm reset` is destructive, performs incomplete cleanup, and is never an
 upgrade or rollback procedure. If discovery finds stale K3s state, do not run
 its uninstall script; stop for a reviewed backup and migration decision.
+
+## Delivery lane
+
+This repository must be operable cold by any major frontier model: AGENTS.md
+is the canonical, vendor-agnostic agent contract, and no requirement may live
+only in a vendor-specific file or an agent's private memory. The delivery
+lane is the verification and documentation surface — `tests/**`, `scripts/**`,
+`.github/workflows/**`, `Makefile`, `README.md`, and `docs/**`. The platform
+lane — `bootstrap/pi/**`, `versions.env`, the ADRs, and the capacity
+documents — is owned separately: delivery-lane changes never edit
+platform-lane files, and platform decisions (the safety invariants above,
+including PLAT-DEC-001) are referenced from here, never restated or reworded.
+
+Delivery-lane requirements, explicit and numbered:
+
+1. Zero spend, no external processors: checks run with pinned local tools
+   and the GitHub-hosted runner only, and no third-party service ever
+   receives repository content, tokens, or measurements — the coverage gate
+   is self-hosted for exactly this reason.
+2. Owner-only merges, and no force-push: history published to origin is
+   immutable; corrections land as new commits on a branch behind a reviewed
+   pull request.
+3. Commit-metadata privacy: the GitHub noreply address appears in both the
+   author and the committer fields of every outgoing commit; the
+   immutable-history gate (`scripts/validate_publication_history.py`)
+   enforces this closure over the whole outgoing range.
+4. No co-author trailers: agent work is signed in the open, per lane —
+   delivery-lane commit bodies end with "- Fable5", and Codex-lane pull
+   request titles end with " - Codex 5.6 Sol Ultra".
+5. Fail-closed, never weaken: a delivery-lane change strengthens or
+   documents a check, never relaxes one, and every deliberate exception is
+   an explicit, load-bearing justification that the suite re-verifies (the
+   security-toggle allowlist and the validator-parity CI-only allowlist are
+   the models), so a stale justification fails exactly like a missing check.
+6. Ratchet-only coverage floor: `docs/badges/coverage.json` records the
+   enforced floor, which may rise and never falls; coverage moves by adding
+   tests, never by trimming the measured surface.
+7. Provider neutrality: Cloudflare is the current provider binding, chosen
+   and bounded by the platform lane (safety invariant 4 and its ADRs);
+   shared code and checks keep capability names generic so the binding
+   could change without rewriting this lane.
