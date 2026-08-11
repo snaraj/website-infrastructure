@@ -123,3 +123,52 @@ Delivery-lane requirements, explicit and numbered:
    and bounded by the platform lane (safety invariant 4 and its ADRs);
    shared code and checks keep capability names generic so the binding
    could change without rewriting this lane.
+
+## Adversarial review protocol
+
+Every substantive PR receives an independent adversarial review BEFORE it
+leaves draft. The mechanism is vendor-agnostic: any capable agent — or a
+human — runs it with git, a shell, and this repository's own gates; no
+step assumes a particular AI tool. (Claude sessions load this contract
+automatically through CLAUDE.md; other agents read AGENTS.md directly.
+Neither gets a different protocol.)
+
+**Reviewer independence.** The reviewer is a different agent or context
+than the author — a fresh session of the same vendor qualifies; a
+different lane is better. The reviewer works in a disposable worktree at
+the PR head, stays read-only toward the author's workspace, reverts every
+experiment, and removes the worktree afterward.
+
+**The review must:**
+
+1. Audit every claim in the PR body and commit messages against the
+   actual diffs. Overstatement is a finding even when the code is right.
+2. Build a mutation kill matrix: for each guard or test the PR adds or
+   changes, apply the exact regression it claims to prevent — the suite
+   must go red. Revert between mutations. A surviving mutant is a
+   finding.
+3. Probe for flakes: the full suite at least three times, plus the race
+   detector where the language has one. Any nondeterminism is a finding
+   naming the test.
+4. Check hygiene: commit identity (owner noreply in BOTH author and
+   committer), signature conventions, no co-author trailers, secret scan
+   clean, out-of-lane paths untouched.
+5. Check doctrine: nothing weakened — every gate, validator, or test
+   change is additive or strengthening; exceptions are narrow, named,
+   and justified where the owner will read them.
+6. For CI-invisible paths (jobs that run only on pushes to main), demand
+   simulated evidence of both directions in the PR and treat the first
+   post-merge run as part of the change under review.
+
+**Verdict format** — posted as a PR comment, so every vendor and the
+owner see the identical record: APPROVE or REQUEST-CHANGES; numbered
+findings with severity and file:line; the mutation kill matrix; flake
+results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
+"no finding — checked X, Y, Z" statements so silence is never ambiguous;
+confirmation the scratch workspace was removed; the reviewing lane's
+signature. A PR flips from draft to ready only after an APPROVE verdict
+(or after findings are fixed and re-verified), and the evidence comment
+remains on the PR as the permanent record.
+
+A green check, a peer approval, or a ready state is evidence, never
+authority: the owner alone merges.
