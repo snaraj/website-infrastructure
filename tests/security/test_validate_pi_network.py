@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import contextlib
 import copy
-import importlib.util
 import io
 import ipaddress
 import json
@@ -11,12 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "validate_pi_network.py"
-SPEC = importlib.util.spec_from_file_location("validate_pi_network", str(SCRIPT))
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_pi_network.py")
 
 FIXTURE = json.loads(
     (Path(__file__).with_name("fixtures_pi_network.json")).read_text(encoding="utf-8")

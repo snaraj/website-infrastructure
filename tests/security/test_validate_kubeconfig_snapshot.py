@@ -6,7 +6,6 @@ import ast
 import base64
 import contextlib
 import copy
-import importlib.util
 import io
 import json
 import os
@@ -17,13 +16,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "validate_kubeconfig_snapshot.py"
-SPEC = importlib.util.spec_from_file_location("validate_kubeconfig_snapshot", SCRIPT)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_kubeconfig_snapshot.py")
 
 
 def pem_blob(label: str, marker: int, length: int = 96) -> bytes:

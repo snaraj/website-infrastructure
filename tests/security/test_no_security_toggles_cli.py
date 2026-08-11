@@ -17,35 +17,29 @@ tracked justification turns this suite red by name.
 """
 
 import contextlib
-import importlib.util
 import io
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from .support import load_script, run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_no_security_toggles.py"
 PASS_LINE = "no-security-toggles: PASS no toggle idiom outside the justified allowlist"
 # A tracked, non-allowlisted text file to plant hostile lines into.
 PLANT_TARGET = "docs/assurance/README.md"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_no_security_toggles_for_cli_battery", str(VALIDATOR)
+MODULE = load_script(
+    "validate_no_security_toggles.py", module_name="validate_no_security_toggles_for_cli_battery"
 )
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
 JUSTIFICATION_DIAGNOSTIC = "allowlist entry justification is blank or too short"
 
 
 def run_scanner(root):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), str(root)],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, root)
 
 
 class NoSecurityTogglesCliTests(unittest.TestCase):

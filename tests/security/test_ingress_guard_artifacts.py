@@ -8,17 +8,15 @@ validators must stay wired into the Makefile and the pull-request gate so
 none of it can rot invisibly.
 """
 
-import importlib.util
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARD_DIR = REPO_ROOT / "bootstrap" / "pi" / "ingress-guard"
-SCRIPT = REPO_ROOT / "scripts" / "validate_ingress_guard.py"
 
-spec = importlib.util.spec_from_file_location("validate_ingress_guard", SCRIPT)
-MODULE = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(MODULE)
+MODULE = load_script("validate_ingress_guard.py")
 
 
 def read(relative):
@@ -175,9 +173,7 @@ class GateWiringTests(unittest.TestCase):
     def test_private_local_contract_is_ignored_and_layout_gated(self):
         self.assertIn(MODULE.LOCAL_CONTRACT_REL, read(".gitignore"))
         repository = REPO_ROOT / "scripts" / "validate_repository.py"
-        loaded = importlib.util.spec_from_file_location("vr_wiring", repository)
-        module = importlib.util.module_from_spec(loaded)
-        loaded.loader.exec_module(module)
+        module = load_script("validate_repository.py", module_name="vr_wiring")
         self.assertIn(
             MODULE.LOCAL_CONTRACT_REL, module.FORBIDDEN_LOCAL_ONLY_EXACT_NAMES
         )

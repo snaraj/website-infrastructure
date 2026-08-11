@@ -1,6 +1,5 @@
 """Keep private host identities local while proving active and archived state."""
 
-import importlib.util
 import os
 import re
 import tempfile
@@ -9,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREFLIGHT = REPO_ROOT / "bootstrap" / "pi" / "preflight.sh"
@@ -16,9 +17,7 @@ DISCOVERY = REPO_ROOT / "scripts" / "discover-pi.sh"
 EXAMPLE = REPO_ROOT / "bootstrap" / "pi" / "protected-services.env.example"
 VALIDATOR = REPO_ROOT / "scripts" / "validate_protected_host_contract.py"
 GITIGNORE = REPO_ROOT / ".gitignore"
-SPEC = importlib.util.spec_from_file_location("validate_protected_host_contract", VALIDATOR)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_protected_host_contract.py")
 
 
 def contract_text(

@@ -9,7 +9,6 @@ would aim the guard at loopback, the LAN recovery plane, or the pod
 network — and that no diagnostic can ever carry a private value.
 """
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -18,12 +17,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "validate_admin_ingress_contract.py"
 
-spec = importlib.util.spec_from_file_location("validate_admin_ingress_contract", SCRIPT)
-MODULE = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(MODULE)
+MODULE = load_script("validate_admin_ingress_contract.py")
 
 REVIEWED = "ADMIN_INGRESS_REVIEWED=yes"
 INTERFACE = "ADMIN_INGRESS_INTERFACE="

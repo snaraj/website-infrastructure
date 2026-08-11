@@ -10,11 +10,11 @@ foreign providers, sentinel leftovers — with the exact error line.
 """
 
 import base64
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from .support import run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_encryption_config.py"
@@ -34,11 +34,7 @@ VALID_CONFIG = (
 
 
 def run_validator(*argv):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), *argv],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, *argv)
 
 
 class EncryptionConfigCliTests(unittest.TestCase):

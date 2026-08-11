@@ -16,15 +16,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "validate_sops_ciphertext_snapshot.py"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_sops_ciphertext_snapshot", SCRIPT
-)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_sops_ciphertext_snapshot.py")
 
 SYNTHETIC_RECIPIENT = "age1" + "pq1" + ("q" * 80)
 OTHER_RECIPIENT = "age1" + "pq1" + ("m" * 80)

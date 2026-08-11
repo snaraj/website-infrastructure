@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import shutil
 import stat
@@ -10,6 +9,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from .support import load_script
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,15 +24,11 @@ if BASH is None and os.name == "nt":
     if candidate.is_file():
         BASH = str(candidate)
 
-SPEC = importlib.util.spec_from_file_location("generate_encryption_config", GENERATOR)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("generate_encryption_config.py")
 
-VALIDATOR_SPEC = importlib.util.spec_from_file_location("test_exact_encryption_validator", VALIDATOR)
-VALIDATOR_MODULE = importlib.util.module_from_spec(VALIDATOR_SPEC)
-assert VALIDATOR_SPEC.loader is not None
-VALIDATOR_SPEC.loader.exec_module(VALIDATOR_MODULE)
+VALIDATOR_MODULE = load_script(
+    "validate_encryption_config.py", module_name="test_exact_encryption_validator"
+)
 
 
 class EncryptionConfigGeneratorTests(unittest.TestCase):

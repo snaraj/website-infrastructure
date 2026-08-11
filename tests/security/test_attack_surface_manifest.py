@@ -1,16 +1,14 @@
-import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "validate_attack_surface_manifest.py"
 MANIFEST = REPO_ROOT / "docs" / "assurance" / "attack-surface-manifest.json"
 
-spec = importlib.util.spec_from_file_location("validate_attack_surface_manifest", SCRIPT)
-MODULE = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(MODULE)
+MODULE = load_script("validate_attack_surface_manifest.py")
 
 
 class AttackSurfaceManifestTests(unittest.TestCase):

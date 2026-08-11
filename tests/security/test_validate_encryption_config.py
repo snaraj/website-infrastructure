@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 import base64
-import importlib.util
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "validate_encryption_config.py"
-SPEC = importlib.util.spec_from_file_location("validate_encryption_config", str(SCRIPT))
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_encryption_config.py")
 
 VALID = (ROOT / "bootstrap" / "pi" / "encryption-config.yaml.example").read_text(encoding="utf-8")
 VALID = VALID.replace("REPLACE_KEY_NAME", "key-2026-08")

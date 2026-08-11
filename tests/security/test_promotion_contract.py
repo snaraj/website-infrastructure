@@ -1,21 +1,18 @@
 """Keep digest promotion exact while sharing its verification machinery."""
 
-import importlib.util
 import re
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMOTION = REPO_ROOT / "scripts" / "promote-image.sh"
-TRANSITION_SCRIPT = REPO_ROOT / "scripts" / "validate_release_transition.py"
-TRANSITION_SPEC = importlib.util.spec_from_file_location(
-    "validate_release_transition_for_promotion", TRANSITION_SCRIPT
+TRANSITION = load_script(
+    "validate_release_transition.py",
+    module_name="validate_release_transition_for_promotion",
 )
-if TRANSITION_SPEC is None or TRANSITION_SPEC.loader is None:
-    raise RuntimeError("release transition validator could not be loaded")
-TRANSITION = importlib.util.module_from_spec(TRANSITION_SPEC)
-TRANSITION_SPEC.loader.exec_module(TRANSITION)
 
 
 class PromotionContractTests(unittest.TestCase):

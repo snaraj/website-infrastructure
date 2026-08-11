@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 import shutil
@@ -16,6 +15,8 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CLOUDFLARED_DIR = ROOT / "bootstrap" / "pi" / "cloudflared"
@@ -23,13 +24,7 @@ INSTALLER = CLOUDFLARED_DIR / "install-host-binary.sh"
 TOKEN_INSTALLER = CLOUDFLARED_DIR / "install-host-token.sh"
 TOKEN_CANARY = CLOUDFLARED_DIR / "verify-host-token-redaction.sh"
 TOKEN_VALIDATOR = ROOT / "scripts" / "validate_cloudflared_tunnel_token.py"
-TOKEN_VALIDATOR_SPEC = importlib.util.spec_from_file_location(
-    "validate_cloudflared_tunnel_token", TOKEN_VALIDATOR
-)
-if TOKEN_VALIDATOR_SPEC is None or TOKEN_VALIDATOR_SPEC.loader is None:
-    raise RuntimeError("unable to load Tunnel-token validator")
-TOKEN_VALIDATOR_MODULE = importlib.util.module_from_spec(TOKEN_VALIDATOR_SPEC)
-TOKEN_VALIDATOR_SPEC.loader.exec_module(TOKEN_VALIDATOR_MODULE)
+TOKEN_VALIDATOR_MODULE = load_script("validate_cloudflared_tunnel_token.py")
 UNIT = CLOUDFLARED_DIR / "pi-admin.service"
 README = CLOUDFLARED_DIR / "README.md"
 ROTATION = ROOT / "docs" / "runbooks" / "tunnel-token-rotation.md"

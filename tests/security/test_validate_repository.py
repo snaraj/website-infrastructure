@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import base64
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -11,11 +10,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "validate_repository.py"
-SPEC = importlib.util.spec_from_file_location("validate_repository", str(SCRIPT))
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+
+MODULE = load_script("validate_repository.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ACTIVATION_FIXTURE_FILES = (
     ".sops.yaml",

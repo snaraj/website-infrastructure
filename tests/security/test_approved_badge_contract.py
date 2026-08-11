@@ -11,28 +11,22 @@ and separately must equal the deterministic render of the coverage ledger,
 so the exception admits only the artifact the gate generates.
 """
 
-import importlib.util
 import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts" / "validate_repository.py"
-SPEC = importlib.util.spec_from_file_location("badge_validate_repository", VALIDATOR)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
-GATE_SPEC = importlib.util.spec_from_file_location(
-    "badge_coverage_gate", REPO_ROOT / "scripts" / "ci" / "coverage_gate.py"
+MODULE = load_script(
+    "validate_repository.py", module_name="badge_validate_repository"
 )
-GATE = importlib.util.module_from_spec(GATE_SPEC)
-GATE_SPEC.loader.exec_module(GATE)
-HISTORY_SPEC = importlib.util.spec_from_file_location(
-    "badge_publication_history", REPO_ROOT / "scripts" / "validate_publication_history.py"
+GATE = load_script("ci/coverage_gate.py", module_name="badge_coverage_gate")
+HISTORY = load_script(
+    "validate_publication_history.py", module_name="badge_publication_history"
 )
-HISTORY = importlib.util.module_from_spec(HISTORY_SPEC)
-HISTORY_SPEC.loader.exec_module(HISTORY)
 BADGE_REL = "docs/badges/coverage.svg"
 
 

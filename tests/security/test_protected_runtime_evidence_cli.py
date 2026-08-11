@@ -21,9 +21,7 @@ the digest-shape rejection.
 """
 
 import hashlib
-import importlib.util
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -32,14 +30,14 @@ from pathlib import Path
 
 from tests.security.test_protected_runtime_contract_integration import contract_text
 
+from .support import load_script, run_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_protected_runtime_evidence.py"
 EVIDENCE_NAME = "protected-legacy-runtime-evidence.local"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_protected_runtime_evidence_for_cli_battery", str(VALIDATOR)
+MODULE = load_script(
+    "validate_protected_runtime_evidence.py", module_name="validate_protected_runtime_evidence_for_cli_battery"
 )
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
 
 
 def explicit_evidence_document(boot_id_sha256, created_unix):
@@ -76,11 +74,7 @@ def explicit_evidence_document(boot_id_sha256, created_unix):
 
 
 def run_validator(contract, *extra):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), str(contract), *extra],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, contract, *extra)
 
 
 class ProtectedRuntimeEvidenceCliTests(unittest.TestCase):

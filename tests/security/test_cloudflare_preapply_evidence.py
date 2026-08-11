@@ -6,21 +6,20 @@ import contextlib
 import copy
 import datetime as dt
 import hashlib
-import importlib.util
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "validate_cloudflare_preapply_evidence.py"
 FIXTURES = ROOT / "infrastructure" / "cloudflare" / "tests" / "fixtures"
-SPEC = importlib.util.spec_from_file_location("cloudflare_preapply_evidence", SCRIPT)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script(
+    "validate_cloudflare_preapply_evidence.py", module_name="cloudflare_preapply_evidence"
+)
 
 NOW = dt.datetime(2026, 8, 9, 12, 1, tzinfo=dt.timezone.utc)
 

@@ -13,11 +13,11 @@ before the cluster does.
 """
 
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from .support import run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_signature_policy.py"
@@ -28,11 +28,7 @@ PASS_LINE = "PASS closed Kyverno image-signature policy contract"
 
 
 def run_validator(*argv):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), *argv],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, *argv)
 
 
 def policy_args(file_path):

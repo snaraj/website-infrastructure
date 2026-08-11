@@ -2,7 +2,6 @@
 
 import base64
 import contextlib
-import importlib.util
 import io
 import shutil
 import tempfile
@@ -10,14 +9,11 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "validate_release_transition.py"
-SPEC = importlib.util.spec_from_file_location("validate_release_transition", SCRIPT)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("release transition validator could not be loaded")
-TRANSITION = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(TRANSITION)
+TRANSITION = load_script("validate_release_transition.py")
 
 RELEASE_FILES = (
     ".sops.yaml",

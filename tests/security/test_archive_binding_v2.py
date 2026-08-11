@@ -1,6 +1,5 @@
 """Prove protected archive bindings use stable, unambiguous mount identity."""
 
-import importlib.util
 import inspect
 import json
 import os
@@ -12,12 +11,13 @@ import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR = REPO_ROOT / "scripts" / "validate_protected_host_contract.py"
-SPEC = importlib.util.spec_from_file_location("validate_archive_binding_v3", VALIDATOR)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script(
+    "validate_protected_host_contract.py", module_name="validate_archive_binding_v3"
+)
 
 
 def findmnt_output(

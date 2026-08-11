@@ -3,7 +3,6 @@
 import ast
 import contextlib
 import hashlib
-import importlib.util
 import io
 import os
 import stat
@@ -14,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "validate_protected_runtime_evidence.py"
@@ -22,11 +23,7 @@ GITIGNORE = ROOT / ".gitignore"
 ADR = ROOT / "docs" / "adr" / "0013-protected-legacy-archive.md"
 RUNBOOK = ROOT / "docs" / "runbooks" / "protected-legacy-archive.md"
 SCRIPTS_README = ROOT / "scripts" / "README.md"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_protected_runtime_evidence", str(SCRIPT)
-)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("validate_protected_runtime_evidence.py")
 
 NOW = 1786250000
 BOOT_SHA256 = "a" * 64

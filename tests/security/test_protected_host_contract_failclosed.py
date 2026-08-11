@@ -13,24 +13,20 @@ pass this battery).
 """
 
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.security.test_protected_services_contract import contract_text
 
+from .support import run_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_protected_host_contract.py"
 
 
 def run_validator(target, *extra):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), str(target), *extra],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, target, *extra)
 
 
 class ProtectedHostContractFailClosedTests(unittest.TestCase):

@@ -1,7 +1,6 @@
 """Integrate fresh runtime evidence with the private protected-host contract."""
 
 import contextlib
-import importlib.util
 import io
 import sys
 import unittest
@@ -9,19 +8,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
-HOST_VALIDATOR = ROOT / "scripts" / "validate_protected_host_contract.py"
 RUNTIME_VALIDATOR = ROOT / "scripts" / "validate_protected_runtime_evidence.py"
 EXAMPLE = ROOT / "bootstrap" / "pi" / "protected-services.env.example"
 PREFLIGHT = ROOT / "bootstrap" / "pi" / "preflight.sh"
 INSTALL = ROOT / "bootstrap" / "pi" / "install-kubernetes.sh"
 INIT = ROOT / "bootstrap" / "pi" / "init-control-plane.sh"
-SPEC = importlib.util.spec_from_file_location(
-    "validate_protected_host_contract_runtime_integration", HOST_VALIDATOR
+MODULE = load_script(
+    "validate_protected_host_contract.py", module_name="validate_protected_host_contract_runtime_integration"
 )
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
 
 
 def contract_text(*, present="yes", evidence_sha256="e" * 64):
