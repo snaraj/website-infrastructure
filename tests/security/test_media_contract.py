@@ -1,17 +1,16 @@
 """Protect the disabled, bounded, and repository-external media boundary."""
 
-import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPOSITORY_SPEC = importlib.util.spec_from_file_location(
-    "media_validate_repository", REPO_ROOT / "scripts" / "validate_repository.py"
+REPOSITORY_MODULE = load_script(
+    "validate_repository.py", module_name="media_validate_repository"
 )
-REPOSITORY_MODULE = importlib.util.module_from_spec(REPOSITORY_SPEC)
-REPOSITORY_SPEC.loader.exec_module(REPOSITORY_MODULE)
 
 
 class MediaContractTests(unittest.TestCase):

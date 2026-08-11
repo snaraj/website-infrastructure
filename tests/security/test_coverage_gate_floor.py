@@ -15,7 +15,6 @@ assertions directly instead of hiding behind a neighboring check.
 """
 
 import contextlib
-import importlib.util
 import io
 import json
 import tempfile
@@ -23,13 +22,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GATE_SCRIPT = REPO_ROOT / "scripts" / "ci" / "coverage_gate.py"
-SPEC = importlib.util.spec_from_file_location(
-    "coverage_gate_floor_battery", str(GATE_SCRIPT)
+MODULE = load_script(
+    "ci/coverage_gate.py", module_name="coverage_gate_floor_battery"
 )
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
 
 FLOOR_PERCENT = 76.0
 RECORDED_PERCENT = 80.0

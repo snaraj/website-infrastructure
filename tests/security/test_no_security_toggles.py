@@ -1,13 +1,11 @@
-import importlib.util
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "validate_no_security_toggles.py"
+from .support import load_script
 
-spec = importlib.util.spec_from_file_location("validate_no_security_toggles", SCRIPT)
-MODULE = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(MODULE)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+MODULE = load_script("validate_no_security_toggles.py")
 
 
 def matches_any(line):

@@ -1,7 +1,6 @@
 """Prove Cloudflare state, plan, audit, and target boundaries stay staged."""
 
 import copy
-import importlib.util
 import json
 import os
 import re
@@ -9,6 +8,8 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+
+from .support import load_script
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -394,9 +395,9 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             self.assertIn(fragment.lower(), README.lower())
 
     def test_every_declared_mutation_executes_from_its_phase_fixture(self):
-        spec = importlib.util.spec_from_file_location("cloudflare_mutator", MUTATOR_PATH)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = load_script(
+            "mutate_cloudflare_fixture.py", module_name="cloudflare_mutator"
+        )
         calls = re.findall(
             r'^\s*assert_mutation_denied\s+(?:"\$\{phase\}"|([a-z0-9-]+))\s+([a-z0-9-]+)$',
             POLICY_TEST,

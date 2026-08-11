@@ -9,7 +9,6 @@ priority/policy/hook drift, foreign objects, unknown grammar — must map to
 a fixed value-free failure token. The healthy model must pass exactly.
 """
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -17,12 +16,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "validate_ingress_guard.py"
 
-spec = importlib.util.spec_from_file_location("validate_ingress_guard", SCRIPT)
-MODULE = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(MODULE)
+MODULE = load_script("validate_ingress_guard.py")
 
 TABLE = MODULE.OWNED_TABLE
 CHAIN = MODULE.OWNED_CHAIN

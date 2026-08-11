@@ -6,7 +6,6 @@ import ast
 import contextlib
 import copy
 import datetime as dt
-import importlib.util
 import io
 import json
 import os
@@ -15,14 +14,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "validate_cloudflare_token_receipt.py"
 RUNBOOK = ROOT / "docs" / "runbooks" / "cloudflare-token-receipt.md"
-SPEC = importlib.util.spec_from_file_location("cloudflare_token_receipt", SCRIPT)
-MODULE = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script(
+    "validate_cloudflare_token_receipt.py", module_name="cloudflare_token_receipt"
+)
 
 HASHES = {
     "target_sha256": "1" * 64,

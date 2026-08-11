@@ -11,11 +11,11 @@ from ``denied``.
 """
 
 import json
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from .support import run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_attack_surface_manifest.py"
@@ -24,11 +24,7 @@ PASS_LINE = "attack-surface-manifest: PASS well-formed, closed-vocabulary, full-
 
 
 def run_validator(path):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), str(path)],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, path)
 
 
 class AttackSurfaceManifestCliTests(unittest.TestCase):

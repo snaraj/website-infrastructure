@@ -12,11 +12,11 @@ while still exiting zero.
 """
 
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from .support import run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_ingress_guard.py"
@@ -25,11 +25,7 @@ DENIED_CONTROL_PLANE_PORTS = ("2379", "2380", "6443", "10250")
 
 
 def run_guard(*argv):
-    return subprocess.run(
-        [sys.executable, "-B", str(VALIDATOR), *argv],
-        capture_output=True,
-        text=True,
-    )
+    return run_script(VALIDATOR, *argv)
 
 
 class IngressGuardRenderTests(unittest.TestCase):

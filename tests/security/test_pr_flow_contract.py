@@ -1,15 +1,10 @@
 """Allow/deny contract for the gh-pr-flow rules (scripts/validate_pr_flow.py)."""
 
-import importlib.util
-import pathlib
 import unittest
 
-_MODULE_PATH = (
-    pathlib.Path(__file__).resolve().parents[2] / "scripts" / "validate_pr_flow.py"
-)
-_SPEC = importlib.util.spec_from_file_location("validate_pr_flow", _MODULE_PATH)
-MODULE = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(MODULE)
+from .support import load_script
+
+MODULE = load_script("validate_pr_flow.py")
 
 
 class BranchRuleTests(unittest.TestCase):

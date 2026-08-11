@@ -472,6 +472,14 @@ def validate_runtime_evidence(
     errors.extend(
         _metadata_errors(contract_metadata, evidence_metadata, now_epoch=now)
     )
+    # Invariant: ``parsed`` is read again after this branch (the success
+    # return wraps it in LoadedRuntimeEvidence). On the no-boot-identity
+    # path the branch appends an error, so the ``if errors`` guard below
+    # returns before that read - but that made the binding of ``parsed``
+    # depend on a distant guard instead of this function. Initialize it
+    # explicitly so the name is bound on every path and the success
+    # return can never raise NameError if the guard ever moves.
+    parsed = None
     boot_sha256 = boot_id_probe()
     if boot_sha256 is None:
         errors.append("current boot identity is unavailable")

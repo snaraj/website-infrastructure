@@ -14,7 +14,7 @@ class ScriptsReadmeTests(unittest.TestCase):
     def test_every_script_is_linked_exactly_once(self):
         readme = (SCRIPTS / "README.md").read_text(encoding="utf-8")
         for path in sorted(SCRIPTS.rglob("*")):
-            if not path.is_file() or path.suffix not in {".py", ".sh"}:
+            if not path.is_file() or path.suffix not in {".py", ".sh", ".ps1"}:
                 continue
             relative = path.relative_to(SCRIPTS).as_posix()
             with self.subTest(script=relative):

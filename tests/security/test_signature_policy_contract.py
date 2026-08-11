@@ -1,23 +1,19 @@
 """Prove signature admission cannot be satisfied by comments or weak YAML."""
 
-import importlib.util
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "validate_signature_policy.py"
-SPEC = importlib.util.spec_from_file_location("validate_signature_policy", SCRIPT)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
-REPOSITORY_SPEC = importlib.util.spec_from_file_location(
-    "signature_validate_repository", REPO_ROOT / "scripts/validate_repository.py"
+MODULE = load_script("validate_signature_policy.py")
+REPOSITORY_MODULE = load_script(
+    "validate_repository.py", module_name="signature_validate_repository"
 )
-REPOSITORY_MODULE = importlib.util.module_from_spec(REPOSITORY_SPEC)
-REPOSITORY_SPEC.loader.exec_module(REPOSITORY_MODULE)
 
 
 class SignaturePolicyContractTests(unittest.TestCase):

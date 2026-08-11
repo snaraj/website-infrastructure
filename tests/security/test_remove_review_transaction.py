@@ -1,17 +1,15 @@
 """Exercise no-follow cleanup of failed promotion transactions."""
 
-import importlib.util
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "scripts" / "remove_review_transaction.py"
-SPEC = importlib.util.spec_from_file_location("remove_review_transaction", SCRIPT)
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+MODULE = load_script("remove_review_transaction.py")
 
 
 class ReviewTransactionCleanupTests(unittest.TestCase):
