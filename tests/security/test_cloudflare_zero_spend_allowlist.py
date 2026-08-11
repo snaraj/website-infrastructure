@@ -13,13 +13,16 @@ stays the single source of truth; this file carries no second copy of
 the list) and that the cost policy's zero-spend pins are byte-exact.
 
 Fail-closed by construction: an empty extraction, a missing phase tree,
-a JSON-syntax OpenTofu file the text scan cannot see, or an unparseable
-declaration line is a test failure, never a skip. The deny-path tests
-prove each failure mode fires on synthetic bad input instead of trusting
-that the checkers would.
+a JSON-syntax OpenTofu file the text scan cannot see, an unparseable
+declaration line, a symlink anywhere under the scanned tree (rglob does
+not traverse symlinked directories), or a tracked OpenTofu file outside
+the phase roots (where this scan would never look) is a test failure,
+never a skip. The deny-path tests prove each failure mode fires on
+synthetic bad input instead of trusting that the checkers would.
 """
 
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,13 +108,24 @@ def scan_phase_declarations(phase_root):
     """Return ``(resources, modules)`` declared under one phase tree.
 
     Each entry is ``(path, line_number, name)``. Raises
-    ``AssertionError`` when no OpenTofu file exists at all, when a
+    ``AssertionError`` when a symlink appears anywhere under the tree
+    (``rglob`` does not traverse symlinked directories, so content
+    could hide behind one), when no OpenTofu file exists at all, when a
     JSON-syntax variant could hide declarations from this text scan, or
     when a ``resource``/``module`` line is not a well-formed block
     header.
     """
 
     root = Path(phase_root)
+    symlinks = sorted(
+        str(path) for path in [root, *root.rglob("*")] if path.is_symlink()
+    )
+    if symlinks:
+        raise AssertionError(
+            "fail closed: symlinks are forbidden under the scanned phase "
+            "tree (a symlinked directory is not traversed and a symlinked "
+            "file points out of scope): " + ", ".join(symlinks)
+        )
     json_syntax = sorted(
         str(path)
         for path in root.rglob("*")
@@ -210,6 +224,60 @@ def cost_policy_violations(cost_policy_text):
     return violations
 
 
+# The one tree the phase scan reads. A tracked OpenTofu file anywhere
+# else in the repository would sit outside this battery's sight and
+# outside the seven roots the offline ceremony plans, so its existence
+# is itself a violation.
+PHASE_TREE_PREFIX = "infrastructure/cloudflare/phases/"
+
+
+def tracked_tofu_paths(repo_root):
+    """Return every tracked OpenTofu-syntax path, failing closed on git."""
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-files",
+            "-z",
+            "--",
+            "*.tf",
+            "*.tf.json",
+            "*.tofu",
+            "*.tofu.json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "fail closed: git ls-files could not enumerate the OpenTofu "
+            "inventory: " + result.stderr.strip()
+        )
+    return sorted(entry for entry in result.stdout.split("\0") if entry)
+
+
+def tofu_inventory_violations(tracked_paths):
+    """Judge the tracked OpenTofu inventory against the phase-tree scope.
+
+    Raises ``AssertionError`` when the inventory holds nothing under the
+    phase tree at all — an empty inventory means the enumeration (or
+    the tree) is broken, and must never read as a clean pass.
+    """
+
+    if not any(path.startswith(PHASE_TREE_PREFIX) for path in tracked_paths):
+        raise AssertionError(
+            "fail closed: the tracked OpenTofu inventory holds nothing "
+            "under " + PHASE_TREE_PREFIX
+        )
+    return [
+        "tracked OpenTofu file outside the guarded phase roots: " + path
+        for path in tracked_paths
+        if not path.startswith(PHASE_TREE_PREFIX)
+    ]
+
+
 def single_pinned_integer(cost_policy_text, key):
     """Extract one integer pin from the cost policy, failing closed."""
 
@@ -284,6 +352,13 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
         """deny / 0 USD / resource ceiling must survive byte-for-byte."""
 
         self.assertEqual(cost_policy_violations(self.cost_policy), [])
+
+    def test_no_tracked_opentofu_file_exists_outside_the_phase_roots(self):
+        """Out-of-tree resources must not be able to dodge the scanner."""
+
+        self.assertEqual(
+            tofu_inventory_violations(tracked_tofu_paths(REPO_ROOT)), []
+        )
 
 
 class CloudflareZeroSpendDenyPathTests(unittest.TestCase):
@@ -363,6 +438,60 @@ class CloudflareZeroSpendDenyPathTests(unittest.TestCase):
             (phase / "main.tf").write_bytes(b"\xff\xfe\x00resource")
             with self.assertRaisesRegex(AssertionError, "unreadable phase file"):
                 scan_phase_declarations(Path(directory) / "phases")
+
+    def test_symlinked_phase_directory_fails_closed(self):
+        """A symlinked subdirectory is not traversed, so it is forbidden.
+
+        Reviewer probe m4: a symlinked subdir whose paid .tf rglob would
+        silently skip. The scan must fail on the symlink itself.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            hidden = base / "hidden"
+            hidden.mkdir()
+            (hidden / "main.tf").write_text(
+                'resource "cloudflare_r2_bucket" "spend" {\n}\n',
+                encoding="utf-8",
+            )
+            phases = base / "phases"
+            phases.mkdir()
+            (phases / "honest").mkdir()
+            (phases / "honest" / "main.tf").write_text("", encoding="utf-8")
+            try:
+                (phases / "synthetic").symlink_to(
+                    hidden, target_is_directory=True
+                )
+            except OSError as error:
+                self.skipTest("cannot create symlinks here: " + str(error))
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                scan_phase_declarations(phases)
+
+    def test_out_of_tree_opentofu_files_are_violations(self):
+        """Both plain and JSON-syntax files outside phases/** must fail."""
+
+        violations = tofu_inventory_violations(
+            [
+                PHASE_TREE_PREFIX + "admin-tunnel/main.tf",
+                "websites/spend/main.tf",
+                "kubernetes/sneaky.tf.json",
+            ]
+        )
+        self.assertEqual(len(violations), 2)
+        self.assertTrue(
+            any("websites/spend/main.tf" in item for item in violations)
+        )
+        self.assertTrue(
+            any("kubernetes/sneaky.tf.json" in item for item in violations)
+        )
+
+    def test_empty_opentofu_inventory_fails_closed(self):
+        """A broken enumeration must never read as a clean pass."""
+
+        with self.assertRaisesRegex(AssertionError, "holds nothing"):
+            tofu_inventory_violations([])
+        with self.assertRaisesRegex(AssertionError, "holds nothing"):
+            tofu_inventory_violations(["kubernetes/sneaky.tf.json"])
 
     def test_rego_without_an_allowlist_fails_closed(self):
         """Empty extraction is the canonical fail-closed case."""

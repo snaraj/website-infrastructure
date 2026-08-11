@@ -9,10 +9,19 @@ appeared. This battery pins that exposure surface so the CI unittest
 sweep rejects the drift in the pull request that introduces it.
 
 The audit is a line-shape scan, not a YAML load: the repository's
-policy tooling is dependency-free by contract, and a shape the scan
-cannot classify is a failure, never a skip. The deny-path tests prove
-every rejection fires on synthetic bad workflows instead of trusting
-that the auditor would.
+policy tooling is dependency-free by contract, so no YAML parser is
+available or added. The scan therefore demands block-style YAML for
+every spend-relevant construct: any line carrying a spend-relevant
+token (``jobs:``, ``runs-on:``, ``uses:``, ``schedule:``, ``cron:``,
+or a non-scalar ``on:`` value) that the anchored block-style
+classifiers did not match is a violation — flow-style YAML such as
+``jobs: {m: {runs-on: …}}`` or ``on: {schedule: [{cron: …}]}`` fails
+closed instead of hiding from the line anchors. Symlinks anywhere
+under the scanned tree are failures too (they can point content out
+of scope). The deny-path tests prove every rejection fires on
+synthetic bad workflows — including both flow-style evasions from
+the adversarial review of PR #48 verbatim — instead of trusting that
+the auditor would.
 """
 
 import re
@@ -50,12 +59,39 @@ _RUNS_ON_LINE = re.compile(r"^\s*runs-on:\s*(.*?)\s*$")
 _USES_LINE = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 _SCHEDULE_LINE = re.compile(r"^\s*schedule:\s*$")
 _CRON_LINE = re.compile(r"^\s*-\s*cron:\s*(.*?)\s*$")
+_JOBS_LINE = re.compile(r"^jobs:\s*$")
+_ON_LINE = re.compile(r"^on:\s*(.*?)\s*$")
+# The one scalar trigger form that cannot smuggle spend configuration
+# (``on: push``). Anything else after ``on:`` — flow mappings, flow
+# sequences, quoting tricks — must be rewritten in block style.
+_BARE_TRIGGER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Fail-closed net for everything the anchored classifiers above did not
+# match: a spend-relevant token anywhere else on a non-comment line is
+# an unclassifiable shape (flow-style YAML, odd quoting) and is denied
+# outright rather than silently passed.
+_SPEND_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:runs-on|uses|cron|schedule|jobs)\s*:"
+)
 
 
 def workflow_files(workflow_root):
-    """Return every workflow file under one tree, failing closed on none."""
+    """Return every workflow file under one tree, failing closed on none.
+
+    Symlinks anywhere under the tree (or the tree itself) are failures:
+    ``rglob`` does not traverse symlinked directories, so a symlink
+    could point scanned content out of this audit's sight.
+    """
 
     root = Path(workflow_root)
+    symlinks = sorted(
+        str(path) for path in [root, *root.rglob("*")] if path.is_symlink()
+    )
+    if symlinks:
+        raise AssertionError(
+            "fail closed: symlinks are forbidden under the scanned workflow "
+            "tree (content behind a symlink escapes the audit): "
+            + ", ".join(symlinks)
+        )
     files = sorted(
         path
         for path in root.rglob("*")
@@ -81,8 +117,11 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
     """Audit workflow files against the pinned spend-exposure surface.
 
     Returns violation strings; raises ``AssertionError`` when a file is
-    unreadable or the scan finds nothing to judge (zero ``runs-on``
-    lines across the whole inventory means the scan itself is broken).
+    unreadable, or when the scan matched no ``runs-on`` line anywhere
+    and found no violation either (a silent all-quiet result means the
+    scan itself is broken). Spend-relevant tokens the anchored
+    block-style classifiers cannot place — flow-style YAML above all —
+    are violations, never silent passes.
     """
 
     violations = []
@@ -105,6 +144,11 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
         crons = []
         schedule_lines = 0
         for number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                # A full-line comment cannot declare a YAML key; trailing
+                # comments stay part of the judged line below.
+                continue
             runs_on = _RUNS_ON_LINE.match(line)
             if runs_on is not None:
                 runner_lines += 1
@@ -130,11 +174,30 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
             cron = _CRON_LINE.match(line)
             if cron is not None:
                 crons.append(_unquoted(cron.group(1)))
+                continue
+            if _JOBS_LINE.match(line) is not None:
+                continue
+            trigger = _ON_LINE.match(line)
+            if trigger is not None:
+                value = trigger.group(1)
+                if value and _BARE_TRIGGER.match(value) is None:
+                    violations.append(
+                        "workflow trigger value must be one bare event or "
+                        "block-style at {}:{}: {!r}".format(path, number, value)
+                    )
+                continue
+            if _SPEND_TOKEN.search(line) is not None:
+                violations.append(
+                    "spend-relevant token outside the block-style shapes "
+                    "the scan classifies (flow-style YAML is forbidden) at "
+                    "{}:{}: {!r}".format(path, number, stripped)
+                )
         observed_crons[path.name] = tuple(crons)
         observed_schedule_lines[path.name] = schedule_lines
-    if runner_lines == 0:
+    if runner_lines == 0 and not violations:
         raise AssertionError(
-            "fail closed: the workflow scan matched no runs-on lines at all"
+            "fail closed: the workflow scan matched no runs-on lines and "
+            "reported no violations; the scan itself is broken"
         )
     expected_crons = {
         path.name: pinned_cron_inventory.get(path.name, ()) for path in files
@@ -362,6 +425,88 @@ class ActionsZeroSpendDenyPathTests(unittest.TestCase):
             any("missing from the tree" in item for item in violations),
             violations,
         )
+
+    def test_flow_style_jobs_mapping_is_rejected(self):
+        """Reviewer evasion, verbatim: a flow-style job hiding a paid runner.
+
+        The companion clean file reproduces the reviewed scenario where
+        other workflows still contribute block-style runs-on lines, so
+        the vacuity guard alone would never have caught this.
+        """
+
+        violations = self._audit_synthetic(
+            {
+                "bad.yml": "jobs: {m: {runs-on: macos-latest, "
+                "steps: [{run: echo hi}]}}\n",
+                "good.yml": self._job(),
+            },
+            pins={},
+        )
+        self.assertTrue(
+            any(
+                "flow-style YAML is forbidden" in item and "bad.yml" in item
+                for item in violations
+            ),
+            violations,
+        )
+
+    def test_flow_style_schedule_is_rejected(self):
+        """Reviewer evasion, verbatim: a five-minute cron in a flow trigger."""
+
+        violations = self._audit_synthetic(
+            {
+                "bad.yml": 'on: {schedule: [{cron: "*/5 * * * *"}]}\n'
+                + self._job()
+            },
+            pins={},
+        )
+        self.assertTrue(
+            any("block-style" in item and "bad.yml" in item for item in violations),
+            violations,
+        )
+
+    def test_flow_style_trigger_sequence_is_rejected(self):
+        """Any non-scalar on: value must be rewritten in block style."""
+
+        violations = self._audit_synthetic(
+            {"bad.yml": "on: [push, schedule]\n" + self._job()}, pins={}
+        )
+        self.assertTrue(
+            any("block-style" in item for item in violations), violations
+        )
+
+    def test_flow_style_step_uses_is_rejected(self):
+        """A flow-mapping step hides its uses: from the anchored classifier."""
+
+        violations = self._audit_synthetic(
+            {
+                "bad.yml": self._job(
+                    extra="    steps: [{uses: third-party/setup-anything@v4}]\n"
+                )
+            },
+            pins={},
+        )
+        self.assertTrue(
+            any("flow-style YAML is forbidden" in item for item in violations),
+            violations,
+        )
+
+    def test_symlinked_workflow_tree_fails_closed(self):
+        """A symlink could point scanned content out of the audit's sight."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            outside = base / "outside.yml"
+            outside.write_text(self._job("macos-14"), encoding="utf-8")
+            root = base / "workflows"
+            root.mkdir()
+            (root / "good.yml").write_text(self._job(), encoding="utf-8")
+            try:
+                (root / "linked.yml").symlink_to(outside)
+            except OSError as error:
+                self.skipTest("cannot create symlinks here: " + str(error))
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                workflow_files(root)
 
     def test_empty_workflow_tree_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
