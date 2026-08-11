@@ -21,8 +21,15 @@ class SnapshotError(ValueError):
     """Represent every invalid snapshot without exposing protected details."""
 
 
+# One domain failure type parameterizes the shared no-follow walk helpers.
+# The four private-file validators carry byte-identical copies of the helper
+# family (pinned by tests/security/test_nofollow_helper_drift.py); fix any
+# defect in every copy in the same change.
+_WALK_ERROR = SnapshotError
+
+
 def _path_state(metadata: os.stat_result) -> tuple[int, ...]:
-    """Bind a path entry to security-relevant, stable file metadata."""
+    """Bind a path entry and open descriptor to all stable custody metadata."""
 
     return (
         metadata.st_dev,
@@ -40,7 +47,7 @@ def _path_state(metadata: os.stat_result) -> tuple[int, ...]:
 
 
 def _is_link_or_reparse(metadata: os.stat_result) -> bool:
-    """Recognize POSIX links and Windows reparse points fail closed."""
+    """Treat POSIX links and Windows reparse points as path indirection."""
 
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return stat.S_ISLNK(metadata.st_mode) or bool(
@@ -49,13 +56,13 @@ def _is_link_or_reparse(metadata: os.stat_result) -> bool:
 
 
 def _path_chain(path: Path) -> tuple[tuple[str, tuple[int, ...]], ...]:
-    """Snapshot every ancestor so traversal cannot change during the read."""
+    """Snapshot every ancestor so directory replacement cannot pass silently."""
 
     result: list[tuple[str, tuple[int, ...]]] = []
     for component in reversed((path, *path.parents)):
         metadata = component.lstat()
         if _is_link_or_reparse(metadata):
-            raise SnapshotError()
+            raise _WALK_ERROR()
         result.append((os.path.normcase(str(component)), _path_state(metadata)))
     return tuple(result)
 
@@ -73,14 +80,14 @@ def _open_posix_no_follow(path: Path, flags: int) -> tuple[int, int, str]:
         or not path.is_absolute()
         or not path.name
     ):
-        raise SnapshotError()
+        raise _WALK_ERROR()
     directory_flags = os.O_RDONLY | nofollow | directory
     directory_flags |= getattr(os, "O_CLOEXEC", 0)
     parent_descriptor = os.open("/", directory_flags)
     try:
         for component in path.parts[1:-1]:
             if component in {"", ".", ".."}:
-                raise SnapshotError()
+                raise _WALK_ERROR()
             next_descriptor = os.open(
                 component,
                 directory_flags,
@@ -147,7 +154,7 @@ def read_snapshot(path_text: str) -> bytes:
     ):
         raise SnapshotError()
     if os.name == "posix" and (
-        before.st_uid != os.getuid()
+        before.st_uid != os.geteuid()
         or stat.S_IMODE(before.st_mode) not in {0o400, 0o600}
     ):
         raise SnapshotError()
