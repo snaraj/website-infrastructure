@@ -1345,6 +1345,64 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 self.assertTrue(reaches(value))
                 self.assertFalse(stock(value))
 
+    @staticmethod
+    def _check_rbac_body():
+        """The source of the live verifier's RBAC check, sliced out.
+
+        The predicates this battery exercises are reached only from
+        `check_rbac`, and no test calls `check_rbac` — it needs a whole
+        synthetic cluster. So its WIRING is asserted the way
+        `test_patches_are_wired_into_the_install_root` asserts a patch's: a
+        guard that exists but is not called is the same failure as no guard.
+        """
+
+        text = BOOTSTRAP.read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^def check_rbac\(.*?\n(?=^\w|^PSA_LABELS)", text
+        )
+        if match is None:
+            raise AssertionError("bootstrap.sh no longer defines check_rbac")
+        return match.group(0)
+
+    def test_the_live_verifier_calls_every_guard_this_battery_proves(self):
+        """Each predicate proven above, asserted to be CALLED — and in order.
+
+        Deleting `elif is_bootstrapped_cluster_role_binding(value): continue`
+        from the ClusterRoleBinding loop left the whole battery green: the
+        allowlist was exhaustively covered and completely bypassed, and the
+        deletion silently restores `--verify` refusing a conformant cluster at
+        the runbook's most delicate step. Same exposure for the closure
+        requirements and for the refusal itself.
+        """
+
+        body = self._check_rbac_body()
+        self.assertIn("def check_rbac(", body)
+        self.assertGreater(len(body), 1000, "the slice must be the real function body")
+
+        # The refusal that turns an unexpected binding into a hard failure is
+        # called in BOTH loops — RoleBindings and ClusterRoleBindings.
+        self.assertEqual(body.count("binding_reaches_protected_account(value)"), 2)
+        # The allowlist that keeps that refusal from firing on every cluster.
+        self.assertIn("is_bootstrapped_cluster_role_binding(value)", body)
+        # Order is load-bearing: the allowlist must be consulted BEFORE the
+        # refusal, or the stock bindings are refused before it is ever reached.
+        cluster_loop = body[body.index('index(cluster_binding_doc, "ClusterRoleBinding"'):]
+        self.assertLess(
+            cluster_loop.index("is_bootstrapped_cluster_role_binding(value)"),
+            cluster_loop.index("binding_reaches_protected_account(value)"),
+            "the allowlist must be consulted before the refusal",
+        )
+        # The mirror closure: every Role and ClusterRole a verified binding
+        # names must itself be in the rules mirror.
+        for fragment in (
+            "for (namespace, _), expected in expected_bindings().items():",
+            'require((namespace, role_ref.get("name")) in access_roles)',
+            "for expected in expected_cluster_bindings().values():",
+            'require(role_ref.get("name") in cluster_role_expectations)',
+        ):
+            with self.subTest(closure=fragment):
+                self.assertIn(fragment, body)
+
     def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")
         inventory = re.search(r"(?ms)^  expected_inventory='(?P<body>.*?)'$", text)
