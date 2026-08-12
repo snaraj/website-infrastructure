@@ -27,7 +27,7 @@ mount is safe.
 
 The protected legacy archive is not a namespace or storage class. Its exact
 units, roots, mount binding, identities, and evidence remain outside Git and are
-denied to Flux, Pods, both Tunnel connectors, CI, and provider tooling. A future
+denied to Flux, Pods, every Tunnel connector, CI, and provider tooling. A future
 restore requires a new isolated trust boundary and threat-model decision; a
 cluster rebuild or ordinary rollback may not activate it.
 

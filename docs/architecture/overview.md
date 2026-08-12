@@ -63,7 +63,7 @@ capability, but the production chart cannot enable or mount media until ADR
 0012's evidence exists. No upload API or runtime transcoder is present.
 
 Each site's Tunnel carries exactly two ordered rules: its own apex hostname,
-then a terminal `http_status:404` (ADR 0015). The as-built public path is
+then a terminal `http_status:404` (ADR 0015). The decided public path is
 visitor → Cloudflare edge → the site's own Tunnel → its connector Pod in
 `cloudflare-public` → the site ClusterIP on TCP 8080 → the site Pod. The
 connector-to-origin leg is plain HTTP inside the default-deny NetworkPolicy

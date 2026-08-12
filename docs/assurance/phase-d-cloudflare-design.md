@@ -71,9 +71,11 @@ the origin, and only post-launch with owner awareness.
   exact permission lists (documented as types, never values), no
   account-global token in any workload, JIT ceremonies validated by the
   existing receipt validators.
-- Origin validation stays strict: Full (strict) TLS mode semantics via the
-  tunnel, hostname ownership pinned in IaC, DNSSEC posture reviewed at the
-  zone, log minimization on (no visitor identity retention beyond defaults).
+- Origin binding stays pinned: SSL mode full with hostname ownership pinned
+  in IaC; the connector-to-origin leg is plain HTTP inside the default-deny
+  boundary (ADR 0015), so "Full (strict)" is not claimed. DNSSEC posture
+  reviewed at the zone, log minimization on (no visitor identity retention
+  beyond defaults).
 
 ### Attack tree (summary)
 
@@ -97,7 +99,7 @@ Root: serve attacker content or reach the origin.
    own IaC root, no stray connectors on either.
 3. Access policy: absent for public sites; admin apps (if any) enforce
    WebAuthn-backed policies with no bypass rule.
-4. Origin bind: cloudflared serves only the two planned loopback services;
+4. Origin bind: each connector serves only its own site's ClusterIP origin;
    no wildcard, no catch-all beyond the terminal 404.
 5. Firewall: no new inbound rule appeared anywhere.
 6. Route policy: host routing tables unchanged outside the connector's own
