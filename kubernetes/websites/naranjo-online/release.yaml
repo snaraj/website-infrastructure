@@ -29,13 +29,16 @@ spec:
     remediation:
       retries: 0
       strategy: rollback
-  # Fail-closed release sentinel, deliberately retained through the move to
-  # tag-driven chart sync. deploymentReady:false plus the all-zeros digest is
-  # the state the release-state policy classifies as `initial`, the state the
-  # release Rego rejects, and the state promote-image.sh advances under review.
-  # It is removed only after this site's publisher embeds the built image
-  # digest into the published chart, and then only by a reviewed PR that moves
-  # the same denial into the chart (ADR 0016, transition step 1).
+  # The platform's own fail-closed release gate, deliberately retained through
+  # the move to tag-driven chart sync. These two scalars are the pair the
+  # release-state policy classifies and the only pair promote-image.sh
+  # advances under review: readiness shut over the all-zeros digest is the
+  # `initial` state the release Rego rejects, and a reviewed digest with
+  # readiness open is the `promoted` state it accepts. Neither reconciles
+  # while spec.suspend above is true. The pair leaves this file only after
+  # this site's publisher embeds the built image digest into the published
+  # chart (ADR 0016, transition step 1), and then only by a reviewed PR that
+  # moves the same denial into the chart (transition step 4).
   values:
     deploymentReady: true
     image:

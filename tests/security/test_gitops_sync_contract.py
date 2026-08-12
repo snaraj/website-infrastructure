@@ -107,7 +107,14 @@ def source_spec(slug, *, suspend=False):
 
 
 def release_spec(slug, *, suspend=True, ready=False, digest=ZERO_DIGEST):
-    """Build the release spec from the committed release contract's values."""
+    """Build the release spec from the committed release contract's values.
+
+    The defaults are the fail-closed baseline — suspended, readiness shut, the
+    all-zeros digest — because that is the state a release must be refused
+    from, not because it is the state currently committed. Tests that mean
+    "the release this repository actually commits" pass ``committed_release``
+    explicitly; everything else names the hostile state it is exercising.
+    """
 
     contract = STATE_MODULE.RELEASE_CONTRACTS[slug]
     return {
@@ -120,6 +127,28 @@ def release_spec(slug, *, suspend=True, ready=False, digest=ZERO_DIGEST):
             "deploymentReady": ready,
             "image": {"repository": contract["repository"], "digest": digest},
         },
+    }
+
+
+def committed_release(slug):
+    """Return the reviewed release state this repository currently commits.
+
+    The committed phase is deliberately NOT a constant here. A promotion is a
+    two-scalar edit to ``release.yaml`` — ``deploymentReady`` and
+    ``image.digest`` — and it touches nothing else in this repository, so a
+    battery that restated either scalar would pin one moment of the release
+    arc and go red on the next reviewed promotion for no safety reason. The
+    values are therefore read back through the release-state validator, which
+    is itself the gate that refuses any non-canonical or incoherent pair, and
+    the invariants that make those scalars safe are asserted directly in
+    ``ManifestBindingTests`` below rather than encoded as a literal.
+    """
+
+    state = STATE_MODULE.load_helm_release(slug, REPO_ROOT)
+    return {
+        "suspend": state.suspended,
+        "ready": state.values[("deploymentReady",)] == "true",
+        "digest": str(state.values[("image", "digest")]),
     }
 
 
@@ -238,26 +267,67 @@ class ManifestBindingTests(unittest.TestCase):
                 )
 
     def test_release_fixtures_match_the_committed_release_state(self):
+        """Bind the model to the committed release in every reviewed phase.
+
+        This assertion used to compare the fixture against the all-zeros
+        sentinel as a literal, which pinned ONE phase of the release arc
+        rather than the property that makes the sentinel safe — so a reviewed
+        promotion (a two-scalar edit that this repository sanctions and gates
+        elsewhere) turned it red for no safety reason. The binding is now
+        re-derived and the safety property is asserted directly, which holds
+        in `initial` and `promoted` alike and denies strictly more:
+
+        * readiness is open IF AND ONLY IF the digest is not the all-zeros
+          sentinel — so an unverified digest can never carry an open gate,
+          and a reviewed digest can never hide behind a shut one;
+        * the digest obeys the canonical content-address grammar;
+        * ``site_phase`` classifies the tree into the closed reviewed set,
+          which additionally requires BOTH reconciliation layers suspended
+          and refuses every mixed state outright;
+        * the identity half of the fixture — the image repository and the
+          chart reference — still comes from the closed release contract and
+          is compared against the committed file, so neither side can be
+          re-pointed without the other.
+        """
+
         for slug in SITES:
             with self.subTest(slug=slug):
                 state = STATE_MODULE.load_helm_release(slug, REPO_ROOT)
-                fixture = release_spec(slug)
-                self.assertTrue(
-                    state.suspended,
-                    "committed release must still be suspended (ADR 0016 step 3)",
-                )
-                self.assertEqual(fixture["suspend"], state.suspended)
+                committed = committed_release(slug)
+                fixture = release_spec(slug, **committed)
+
+                # Identity: the left side is the closed release contract, the
+                # right side is the parsed committed manifest, and the chart
+                # reference is compared against a literal rather than against
+                # the constant that produced it.
                 self.assertEqual(
                     fixture["values"]["image"]["repository"],
                     state.values[("image", "repository")],
                 )
                 self.assertEqual(
-                    fixture["values"]["image"]["digest"],
-                    state.values[("image", "digest")],
+                    fixture["chartRef"],
+                    {"kind": OCI_REPOSITORY, "name": slug + "-chart"},
                 )
+
+                # Suspension: ADR 0016 step 3 is a separate reviewed event.
+                self.assertTrue(
+                    state.suspended,
+                    "committed release must still be suspended (ADR 0016 step 3)",
+                )
+                self.assertIs(fixture["suspend"], True)
+
+                # The sentinel's safety property, as the biconditional it has
+                # always been rather than as one of its two sides.
+                digest = str(state.values[("image", "digest")])
+                self.assertRegex(digest, r"\Asha256:[0-9a-f]{64}\Z")
                 self.assertEqual(
-                    str(fixture["values"]["deploymentReady"]).lower(),
-                    state.values[("deploymentReady",)],
+                    state.values[("deploymentReady",)] == "true",
+                    digest != ZERO_DIGEST,
+                    "readiness and digest must never disagree about deployability",
+                )
+                self.assertIn(
+                    STATE_MODULE.site_phase(slug, REPO_ROOT),
+                    ("initial", "promoted"),
                 )
 
     def test_the_two_site_tuples_never_share_a_value(self):
@@ -487,12 +557,58 @@ class ReleaseUpgradeTests(SyncContractHarness):
         self.assertEqual(self.sync_source().outcome, SourceOutcome.ARTIFACT_UPDATED)
 
     def test_the_committed_suspended_release_takes_no_action(self):
-        self.apply_release()
+        """Suspension dominates the committed state whatever its phase.
+
+        Driven by the values this repository actually commits rather than by
+        the fail-closed defaults. That distinction is the point: while the
+        sites were at the all-zeros sentinel this proved only that a release
+        the sentinel would already refuse stays inert, so suspension was never
+        the load-bearing refusal. Applied to a promoted, deploy-eligible
+        release, suspension is the ONLY thing standing between this state and
+        a rollout — and it must leave no trace of having considered one.
+        """
+
+        self.apply_release(**committed_release(self.slug))
         result = self.sync_release()
         self.assertEqual(result.outcome, ReleaseOutcome.SUSPENDED)
         release = self.api.get(HELM_RELEASE, self.namespace, self.slug)
         self.assertEqual(release.status, {})
         self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
+
+    def test_the_committed_release_unsuspended_matches_its_reviewed_phase(self):
+        """Lifting suspension yields exactly the committed phase's outcome.
+
+        The executable half of the sentinel guard, bound to whatever this
+        repository has committed rather than to a phase constant. An
+        `initial` site must be refused for the sentinel even though the chart
+        published here embeds a perfectly good image digest — proving the
+        platform's zero-digest override is never rescued by the chart. A
+        `promoted` site must deploy the exact reviewed digest its own
+        manifest names, and NOT the chart-embedded one, proving the override
+        still wins while ADR 0016 step 4 remains untaken.
+        """
+
+        committed = committed_release(self.slug)
+        phase = STATE_MODULE.site_phase(self.slug, REPO_ROOT)
+        # setUp published this chart with PROMOTED_DIGEST embedded, which is
+        # deliberately not the committed digest, so the two sources of a
+        # digest are distinguishable in the assertions below.
+        self.assertNotEqual(committed["digest"], PROMOTED_DIGEST)
+        self.apply_release(**{**committed, "suspend": False})
+        result = self.sync_release()
+        if phase == "initial":
+            self.assertEqual(result.outcome, ReleaseOutcome.SENTINEL_REFUSED)
+            self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
+        else:
+            self.assertEqual(phase, "promoted")
+            self.assertEqual(result.outcome, ReleaseOutcome.UPGRADED)
+            self.assertEqual(
+                self.api.get(DEPLOYMENT, self.namespace, self.slug).spec["image"],
+                "{}@{}".format(
+                    STATE_MODULE.RELEASE_CONTRACTS[self.slug]["repository"],
+                    committed["digest"],
+                ),
+            )
 
     def test_the_all_zeros_sentinel_still_refuses_deployment(self):
         self.apply_release(suspend=False, ready=False, digest=ZERO_DIGEST)
