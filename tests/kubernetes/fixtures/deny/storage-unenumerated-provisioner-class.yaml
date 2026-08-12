@@ -1,3 +1,4 @@
+# proves: SR-8
 # SR-8. The class identity is the enumerated one, but the provisioner is not.
 # The provisioner is what actually decides where bytes land, so it is checked
 # independently of the name.

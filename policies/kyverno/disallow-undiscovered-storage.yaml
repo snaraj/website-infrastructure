@@ -81,6 +81,13 @@ spec:
                 (object.kind == 'PersistentVolume' && has(object.spec)) ?
                 object.spec.filter(field, !(field in variables.nonSourceFields)) : []
           expressions:
+            # SR-0. A spec that is present but is not a mapping cannot be
+            # reasoned about by any rule below, so it is refused here explicitly
+            # rather than left to whichever expression errors on it first.
+            - expression: >-
+                (object.kind != 'PersistentVolume' && object.kind != 'PersistentVolumeClaim') ||
+                (has(object.spec) && type(object.spec) == type({}))
+              message: A PersistentVolume or PersistentVolumeClaim must carry a spec mapping that can be evaluated.
             # SR-1. Exactly one volume source. Zero sources (an absent or empty
             # spec, a truncated object) and two sources (a decoy local source
             # beside a real remote one) both deny.

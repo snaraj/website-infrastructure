@@ -1,3 +1,4 @@
+# proves: SR-6
 # SR-6. A local volume with no required node affinity is satisfiable on every
 # node, so one reviewed directory silently becomes a directory on any machine
 # that ever joins the cluster.

@@ -1,3 +1,4 @@
+# proves: SR-10
 # SR-10. The identity and provisioner are both enumerated, and the class still
 # names a remote server and share in its parameters. Parameters and mountOptions
 # are exactly where an external endpoint hides, and a statically provisioned

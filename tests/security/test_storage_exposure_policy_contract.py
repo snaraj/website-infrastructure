@@ -54,6 +54,14 @@ STORAGE_RULE = "disallow-persistent-storage-resources"
 # is legitimate only together with that patch.
 EXPECTED_RULE_COUNT = 7
 
+# The complete storage rule set, stated ONCE here in the test rather than read
+# out of either policy. Every other check below compares the two engines against
+# each other, and two files can be narrowed together; this literal is the outside
+# anchor that makes such a matching narrowing fail. It is also the reason nothing
+# in this battery ever SKIPs: a guard that stands down when its expectation stops
+# matching is a guard that disables itself.
+EXPECTED_RULE_IDS = frozenset("SR-{}".format(index) for index in range(15))
+
 # Upstream PersistentVolume volume sources that place bytes somewhere other than
 # this node's own filesystem. The policy never enumerates these — it derives
 # sources by subtracting the known non-source fields, so unknown sources are
@@ -408,6 +416,55 @@ class EnumerationLockstep(unittest.TestCase):
                     "only static local provisioning is enumerated; a dynamic provisioner "
                     "decides where bytes land without a reviewed diff",
                 )
+
+
+class RuleIdentityLock(unittest.TestCase):
+    """Three-way lock: admission, CI mirror, and the fixtures that kill them.
+
+    A deny fixture that merely proves "this file is rejected" cannot show WHICH
+    rule rejected it, so deleting one rule can leave the suite green while
+    another rule's denial covers for it. Every fixture here therefore holds one
+    object and names the rule it exists to kill, and the three sets — the rules
+    admission states, the rules the CI mirror states, and the rules the fixtures
+    claim — must be the same set, and that set must be the one named above.
+    """
+
+    def setUp(self) -> None:
+        self.rule = storage_rule_text(read(KYVERNO_POLICY))
+        self.rego = read(CONFTEST_POLICY)
+        self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
+
+    @staticmethod
+    def ids_in(text: str) -> set[str]:
+        return set(re.findall(r"#\s*(SR-\d+)[.,\s]", text))
+
+    def test_admission_states_exactly_the_expected_rule_set(self) -> None:
+        self.assertEqual(self.ids_in(self.rule), set(EXPECTED_RULE_IDS))
+
+    def test_the_conftest_mirror_states_exactly_the_same_rule_set(self) -> None:
+        storage_section = self.rego[self.rego.index("# SR-0.") :]
+        self.assertEqual(self.ids_in(storage_section), set(EXPECTED_RULE_IDS))
+
+    def test_every_rule_is_claimed_by_at_least_one_deny_fixture(self) -> None:
+        claimed: dict[str, list[str]] = {}
+        for path in self.deny_fixtures:
+            match = require(
+                re.match(r"# proves: (SR-\d+)\n", read(path)),
+                "a `# proves: SR-N` claim on deny fixture " + path.name,
+            )
+            claimed.setdefault(match.group(1), []).append(path.name)
+        self.assertEqual(
+            set(claimed),
+            set(EXPECTED_RULE_IDS),
+            "a rule exists with no fixture that kills it, or a fixture claims a rule "
+            "that no longer exists",
+        )
+
+    def test_admission_and_the_mirror_agree_rule_for_rule(self) -> None:
+        """The lockstep the two engines must keep even if both were rewritten."""
+
+        storage_section = self.rego[self.rego.index("# SR-0.") :]
+        self.assertEqual(self.ids_in(self.rule), self.ids_in(storage_section))
 
 
 class FixtureCoverage(unittest.TestCase):

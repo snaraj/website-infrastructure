@@ -1,3 +1,4 @@
+# proves: SR-2
 # SR-2. hostPath is denied as a PersistentVolume source outright rather than
 # root-checked: unlike a local volume it carries no node-affinity requirement, so
 # the same path is satisfied on every node, and it can name any directory the

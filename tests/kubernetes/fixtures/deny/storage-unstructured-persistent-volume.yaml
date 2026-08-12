@@ -1,3 +1,4 @@
+# proves: SR-0
 # SR-0. The document parses as YAML but the spec is a scalar, not a mapping, so
 # no field access can succeed. A rule that silently becomes undefined on such an
 # object is an allow; this one denies explicitly.

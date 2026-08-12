@@ -1,3 +1,4 @@
+# proves: SR-2
 # SR-2. A block target over the network is the same exposure as a file share,
 # one layer down. Everything else about the object is valid.
 apiVersion: v1

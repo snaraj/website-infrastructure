@@ -1,3 +1,4 @@
+# proves: SR-2
 # SR-2. A network filesystem source makes the volume's bytes reachable from
 # wherever that server is reachable. Every other field is deliberately valid, so
 # the denial is attributable to the source alone.

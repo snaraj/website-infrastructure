@@ -1,3 +1,4 @@
+# proves: SR-4
 # SR-4. A local source is admitted only under the enumerated root. This one
 # points at the control-plane state directory, which would hand etcd's bytes to
 # any pod that could bind the claim.
