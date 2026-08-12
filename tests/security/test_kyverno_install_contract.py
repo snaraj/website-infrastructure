@@ -105,7 +105,38 @@ def render(stage):
     return completed.stdout
 
 
+def pinned_version(key):
+    for line in read(VERSIONS).splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1]
+    raise AssertionError("versions.env has no " + key)
+
+
+def kubectl_is_pinned():
+    """Whether the ambient kubectl is the one versions.env pins.
+
+    It usually is not: `scripts/ci/install-tools.sh` provisions the policy
+    validators, not kubectl, so a CI runner uses whatever its image ships. The
+    installer's tool-binding guard then refuses BEFORE the pin guard — correct
+    behaviour, and the reason the real-repository refusal below is asserted
+    against whichever guard is reachable rather than against one message.
+    """
+
+    kubectl = shutil.which("kubectl")
+    if kubectl is None:
+        return False
+    completed = subprocess.run(
+        [kubectl, "version", "--client", "--output=json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    match = re.search(r'"gitVersion":\s*"([^"]+)"', completed.stdout)
+    return bool(match) and match.group(1) == pinned_version("KUBERNETES_VERSION")
+
+
 PINNED_RENDERER = kustomize_is_pinned()
+PINNED_KUBECTL = kubectl_is_pinned()
 NEEDS_RENDERER = "the pinned kustomize is unavailable; render comparisons skipped"
 
 
@@ -503,7 +534,19 @@ class RealRepositoryTests(unittest.TestCase):
         self.assertIn("@sha256:" + "0" * 64, controllers)
 
     @unittest.skipUnless(BASH and PINNED_RENDERER, NEEDS_RENDERER)
-    def test_planning_the_real_repository_fails_closed_on_the_missing_pins(self):
+    def test_planning_the_real_repository_fails_closed(self):
+        """Every apply path in THIS repository refuses, and names why.
+
+        Which guard refuses depends on the machine. Where kubectl is the pinned
+        version — the reviewed operator workstation — the tool binding passes
+        and the refusal is the missing platform-lane pins, after the render has
+        already been proven against the lock. Where it is not, the tool binding
+        refuses first, which is the same fail-closed property one guard earlier.
+        Asserting only the first message would make this test a fact about the
+        runner image rather than about the installer, which is exactly how it
+        first went red in CI.
+        """
+
         for stage in ("report-only", "enforce"):
             completed = subprocess.run(
                 [required_tool(BASH, BASH_REQUIRED), str(INSTALLER), "--stage", stage, "--plan"],
@@ -511,13 +554,24 @@ class RealRepositoryTests(unittest.TestCase):
                 text=True,
                 cwd=str(ROOT),
             )
-            with self.subTest(stage=stage):
+            with self.subTest(stage=stage, pinned_kubectl=PINNED_KUBECTL):
                 self.assertNotEqual(completed.returncode, 0)
-                self.assertIn("versions.env has no reviewed KYVERNO_VERSION", completed.stderr)
-                self.assertIn("platform-lane decision", completed.stderr)
-                # The render still matched the lock before the pin guard fired,
-                # so the refusal is about the missing decision and nothing else.
-                self.assertIn("matches render.lock", completed.stdout)
+                self.assertNotIn("PLAN only", completed.stdout)
+                if PINNED_KUBECTL:
+                    self.assertIn(
+                        "versions.env has no reviewed KYVERNO_VERSION", completed.stderr
+                    )
+                    self.assertIn("platform-lane decision", completed.stderr)
+                    # The render matched the lock before the pin guard fired, so
+                    # the refusal is about the missing decision and nothing else.
+                    self.assertIn("matches render.lock", completed.stdout)
+                else:
+                    self.assertRegex(
+                        completed.stderr,
+                        r"kubectl is \S+; versions\.env pins " + re.escape(
+                            pinned_version("KUBERNETES_VERSION")
+                        ),
+                    )
 
 
 class RunbookTests(unittest.TestCase):
