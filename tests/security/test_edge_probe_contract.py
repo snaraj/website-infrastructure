@@ -304,6 +304,16 @@ class EdgeProbeEnforcementScopeTests(unittest.TestCase):
     half-completed toggle ceremony the runbook prescribes, because it trains
     the operator to wave a nonzero exit through. These tests pin the carve-out
     and its boundary: inapplicable passes, genuinely unproven still fails.
+
+    A boundary record MUST name an item that is not already in
+    ``HEALTHY_SINGLE_ZONE``. ``final_verdicts`` collapses two differing
+    verdicts for the same (zone, item) key to DIVERGENT, so re-using a key
+    silently converts a SKIP or GAP boundary test into a DIVERGENT test wearing
+    the wrong label — which is exactly what the first version of these two
+    tests did, leaving three enforcement-bypass mutations alive under a green
+    998-test suite. Every boundary test therefore asserts the RESULT counters,
+    not merely the exit code: the counter is what proves which branch of the
+    failure sum actually fired.
     """
 
     HEALTHY_SINGLE_ZONE = (
@@ -315,6 +325,10 @@ class EdgeProbeEnforcementScopeTests(unittest.TestCase):
         "record 1 naranjo.online hsts-exact assert PASS max-age=31536000 ''\n"
         "record 1 naranjo.online readyz assert PASS 'http_code=200 body=ok' ''\n"
     )
+    # Items deliberately absent from HEALTHY_SINGLE_ZONE, reserved for boundary
+    # records so a boundary verdict can never collapse into DIVERGENT.
+    UNUSED_SKIP_ITEM = "www-absent"
+    UNUSED_GAP_ITEM = "dnssec"
 
     def _enforce(self, extra_records=""):
         workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-enforce"
@@ -354,34 +368,132 @@ class EdgeProbeEnforcementScopeTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return completed.stdout
 
+    @staticmethod
+    def _result_counters(output):
+        """Return the RESULT line's key=value pairs as a dict."""
+
+        for line in output.splitlines():
+            if line.startswith("RESULT "):
+                pairs = {}
+                for token in line.split():
+                    if "=" in token:
+                        key, _, value = token.partition("=")
+                        pairs[key] = value
+                return pairs
+        raise AssertionError("no RESULT line in:\n" + output)
+
     def test_single_zone_enforce_exits_zero_when_every_applicable_item_passes(self):
         output = self._enforce()
+        counters = self._result_counters(output)
         self.assertIn("ENFORCE-EXIT=0", output)
         self.assertIn("INAPPLICABLE", output)
-        self.assertIn("skip=0", output)
-        self.assertIn("inapplicable=1", output)
-        self.assertIn("exit=0", output)
+        self.assertEqual(counters["skip"], "0")
+        self.assertEqual(counters["gap"], "0")
+        self.assertEqual(counters["divergent"], "0")
+        self.assertEqual(counters["inapplicable"], "1")
+        self.assertEqual(counters["exit"], "0")
 
     def test_a_genuine_capability_skip_still_fails_enforce(self):
         # The boundary. An item that could not be proven is still fatal, so the
-        # carve-out above cannot be widened into "SKIP is fine".
+        # carve-out above cannot be widened into "SKIP is fine". The counter
+        # assertion is what makes this a SKIP test rather than an accidental
+        # DIVERGENT test: without skip=1 divergent=0, dropping skip from the
+        # failure sum would still leave this green.
         output = self._enforce(
             extra_records=(
-                "record 1 naranjo.online tls10-refused assert SKIP "
+                "record 1 naranjo.online {item} assert SKIP "
                 "client=incapable 'the local client could not be proven able' \n"
-            )
+            ).format(item=self.UNUSED_SKIP_ITEM)
         )
+        counters = self._result_counters(output)
+        self.assertEqual(counters["skip"], "1")
+        self.assertEqual(counters["divergent"], "0")
+        self.assertEqual(counters["exit"], "1")
         self.assertIn("ENFORCE-EXIT=1", output)
-        self.assertIn("exit=1", output)
 
     def test_a_gap_still_fails_enforce(self):
         output = self._enforce(
             extra_records=(
-                "record 1 naranjo.online hsts-exact assert GAP "
-                "'wrong max-age=300' 'the target state is exact' \n"
+                "record 1 naranjo.online {item} assert GAP "
+                "'ds1=absent ds2=absent' 'the zone is expected to be signed' \n"
+            ).format(item=self.UNUSED_GAP_ITEM)
+        )
+        counters = self._result_counters(output)
+        self.assertEqual(counters["gap"], "1")
+        self.assertEqual(counters["divergent"], "0")
+        self.assertEqual(counters["exit"], "1")
+        self.assertIn("ENFORCE-EXIT=1", output)
+
+    def _two_zone_distinctness(self, naranjo_assets, lidersea_assets):
+        """Run the real cross-zone check with BOTH zones selected."""
+
+        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-two-zone"
+        program = (
+            ". '{script}'\n"
+            "WORKDIR='{workdir}'\n"
+            "rm -rf \"$WORKDIR\"; mkdir -p \"$WORKDIR\"\n"
+            "RECORDS=\"$WORKDIR/records.tsv\"\n"
+            ": >\"$RECORDS\"\n"
+            "ZONES=\"$ZONE_A $ZONE_B\"\n"
+            "record 1 naranjo.online assets record RECORD '{a}' ''\n"
+            "record 1 lidersea.com assets record RECORD '{b}' ''\n"
+            "probe_cross_zone_distinctness 1\n"
+            "awk -F'\\t' '$3==\"sites-distinct\"' \"$RECORDS\"\n"
+            "rm -rf \"$WORKDIR\"\n"
+        ).format(
+            script=SCRIPT,
+            workdir=workdir,
+            a=naranjo_assets,
+            b=lidersea_assets,
+        )
+        completed = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip().split("\t")
+
+    def test_two_zone_distinctness_is_asserted_and_passes_on_disjoint_assets(self):
+        # The INAPPLICABLE carve-out is scoped to single-zone runs ONLY. With
+        # both zones selected the item must still be an ASSERTED check, or the
+        # carve-out has quietly disabled distinctness for the run that matters.
+        fields = self._two_zone_distinctness(
+            "/assets/index-AAAA.css,/assets/index-AAAA.js",
+            "/assets/index-BBBB.css,/assets/index-BBBB.js",
+        )
+        self.assertEqual(fields[3], "assert", "two-zone runs must still assert")
+        self.assertEqual(fields[4], "PASS")
+        self.assertEqual(fields[5], "assets-disjoint")
+
+    def test_two_zone_distinctness_gaps_on_identical_assets(self):
+        # The failing direction, and the vacuity probe for the test above: if
+        # this item were re-tiered to a record it could no longer fail a run,
+        # and two sites serving one build would pass unnoticed.
+        fields = self._two_zone_distinctness(
+            "/assets/index-SAME.css,/assets/index-SAME.js",
+            "/assets/index-SAME.css,/assets/index-SAME.js",
+        )
+        self.assertEqual(fields[3], "assert", "a GAP must stay in the asserted tier")
+        self.assertEqual(fields[4], "GAP")
+        self.assertEqual(fields[5], "assets-identical")
+
+    def test_two_verdicts_for_one_key_collapse_to_divergent(self):
+        # The behaviour that silently mislabelled the two boundary tests above.
+        # Pinned explicitly so the next person to add a boundary record sees
+        # why item names must not be re-used, and so the collapse itself stays
+        # a deliberate property rather than an accident.
+        output = self._enforce(
+            extra_records=(
+                "record 1 naranjo.online readyz assert GAP "
+                "'http_code=503' 'the readiness endpoint is not answering 200' \n"
             )
         )
-        self.assertIn("ENFORCE-EXIT=1", output)
+        counters = self._result_counters(output)
+        self.assertEqual(counters["divergent"], "1")
+        self.assertEqual(counters["gap"], "0", "the collapse absorbs the GAP")
+        self.assertEqual(counters["exit"], "1")
 
 
 @unittest.skipUnless(BASH, "bash is unavailable")
