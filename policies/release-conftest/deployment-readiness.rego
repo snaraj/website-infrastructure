@@ -49,6 +49,38 @@ deny contains msg if {
   msg := sprintf("Kustomization %s remains suspended", [input.metadata.name])
 }
 
+# Each site's chart renders in its own repository, so the reviewed desired
+# state this repository still owns for a site is its HelmRelease: the readiness
+# flag and image digest handed to that chart. These three rules are the
+# release-grade counterparts of the chart-level readiness/digest denials below,
+# applied to the only layer this gate can render, so a promoted site is proven
+# from the artifact that exists here instead of one that no longer does.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.spec, "values", {}), "deploymentReady", false) != true
+  msg := sprintf("HelmRelease %s is not marked ready", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  site_image_digest == "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  msg := sprintf("HelmRelease %s still names the all-zero image digest", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  not regex.match("^sha256:[0-9a-f]{64}$", site_image_digest)
+  msg := sprintf("HelmRelease %s does not name a canonical image digest", [input.metadata.name])
+}
+
+site_image_digest := digest if {
+  values := object.get(input.spec, "values", {})
+  digest := object.get(object.get(values, "image", {}), "digest", "")
+}
+
 deny contains msg if {
   input.kind == "Deployment"
   input.metadata.namespace in {"naranjo-online", "lidersea-com", "kyverno"}

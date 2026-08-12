@@ -21,7 +21,7 @@ help:
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
 	  'check-tofu       Alias for check-cloudflare' \
-	  'check-determinism Prove two scaffold renders are byte-identical' \
+	  'check-determinism Prove two renders of the selected mode are identical' \
 	  'check-ingress-guard Verify the SSH-only admin-ingress guard artifacts' \
 	  'coverage         Measure suite coverage and enforce floor/drift/badge' \
 	  'coverage-refresh Re-measure and rewrite the committed coverage ledger/badge'
