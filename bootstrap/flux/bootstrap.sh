@@ -1233,16 +1233,31 @@ def check_binding(value, key, expected, cluster=False):
 
 
 def binding_reaches_protected_account(value):
+    # THREE subject forms, because a ServiceAccount is reachable by all three and
+    # a verifier that knew only two would accept a binding the repository's own
+    # RBAC model reports as granting authority: as a ServiceAccount subject, as
+    # the User `system:serviceaccount:<ns>:<name>`, or through a Group —
+    # `system:serviceaccounts`, `system:serviceaccounts:<ns>`, or
+    # `system:authenticated`, which every authenticated identity carries.
+    # Missing a form here is the same asymmetry that let a Role escape
+    # verification entirely: the live half must never be weaker than the model
+    # it mirrors.
     subjects = value.get("subjects")
     require(isinstance(subjects, list))
-    protected_groups = {"system:serviceaccounts"} | {
+    protected_groups = {"system:serviceaccounts", "system:authenticated"} | {
         "system:serviceaccounts:" + namespace for namespace, _ in PROTECTED_SERVICE_ACCOUNTS
+    }
+    protected_users = {
+        "system:serviceaccount:{}:{}".format(namespace, name)
+        for namespace, name in PROTECTED_SERVICE_ACCOUNTS
     }
     for subject in subjects:
         require(isinstance(subject, dict))
         if subject.get("kind") == "ServiceAccount" and (
             subject.get("namespace"), subject.get("name")
         ) in PROTECTED_SERVICE_ACCOUNTS:
+            return True
+        if subject.get("kind") == "User" and subject.get("name") in protected_users:
             return True
         if subject.get("kind") == "Group" and subject.get("name") in protected_groups:
             return True

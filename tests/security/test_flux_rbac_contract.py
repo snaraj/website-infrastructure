@@ -844,6 +844,59 @@ class FluxRbacNarrownessTests(unittest.TestCase):
             },
         )
 
+    def test_the_cluster_scope_exemption_belongs_to_the_controllers_alone(self):
+        """A reconciler never gets the informer-cache excuse.
+
+        The complement assertion above accepts a cluster-scoped grant that is
+        only derived per-namespace when the grant's scope is a property of
+        Kubernetes rather than a choice — a controller's informer cache is
+        cluster-wide and no Role can satisfy it. That is true of the three
+        controller ServiceAccounts and of nothing else: an impersonated
+        reconciler opens no informer, it applies a fixed set of objects in one
+        namespace.
+
+        Keyed on the apiGroup alone, the exemption let a ClusterRole grant
+        `naranjo-online-reconciler` write authority over every OCIRepository and
+        HelmRelease in the cluster — the other site's included — with the
+        validator PASS and the battery 62/62 OK. Safety invariant 14 says the
+        two site identity tuples never couple, so this is the subject check that
+        makes that assertion real.
+        """
+
+        for name in INSTALLED_CONTROLLERS:
+            with self.subTest(subject=name):
+                self.assertTrue(
+                    model._cluster_scope_is_by_design(
+                        Subject("flux-system", name), SOURCE_GROUP, "ocirepositories"
+                    )
+                )
+        for subject in (
+            Subject("flux-system", "naranjo-online-reconciler"),
+            Subject("flux-system", "lidersea-com-reconciler"),
+            Subject("flux-system", "root-reconciler"),
+            Subject("flux-system", "platform-services-reconciler"),
+            Subject("naranjo-online", "helm-reconciler"),
+            Subject("kube-system", "kustomize-controller"),
+        ):
+            for group, resource in (
+                (SOURCE_GROUP, "ocirepositories"),
+                (HELM_GROUP, "helmreleases"),
+                (KUSTOMIZE_GROUP, "kustomizations"),
+                ("", "events"),
+            ):
+                with self.subTest(subject=str(subject), resource=resource):
+                    self.assertFalse(
+                        model._cluster_scope_is_by_design(subject, group, resource)
+                    )
+        # And the exemption is per (group, resource), not a blanket pass for a
+        # controller: nothing outside the Flux groups and Events qualifies.
+        self.assertFalse(
+            model._cluster_scope_is_by_design(KUSTOMIZE_CONTROLLER, "apps", "deployments")
+        )
+        self.assertFalse(
+            model._cluster_scope_is_by_design(KUSTOMIZE_CONTROLLER, "", "secrets")
+        )
+
     def test_cluster_admin_is_bound_to_nothing(self):
         for document in self.documents:
             if document.get("kind") not in {"ClusterRoleBinding", "RoleBinding"}:
@@ -1142,6 +1195,46 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 self.assertIn(role_ref["name"], cluster_roles)
                 checked += 1
         self.assertEqual(checked, 19)
+
+    def test_the_live_verifier_sees_every_subject_form_that_reaches_a_controller(self):
+        """The live half must not be weaker than the model it mirrors.
+
+        `Authorizer._binds` understands three subject forms, because a
+        ServiceAccount is reachable by all three. The live verifier's
+        `binding_reaches_protected_account` — the rule that turns an unexpected
+        binding into a hard `--verify` failure — knew only two: it matched
+        ServiceAccount and Group subjects but not the `User:
+        system:serviceaccount:…` form, and its Group set omitted
+        `system:authenticated`, which every authenticated identity carries. A
+        binding in either shape granted a controller authority the repository's
+        own model reports as granted and the verifier accepted in silence.
+        """
+
+        reaches = self._bootstrap_contract()["binding_reaches_protected_account"]
+        api_group = "rbac.authorization.k8s.io"
+        for subject in (
+            {"kind": "ServiceAccount", "name": "kustomize-controller", "namespace": "flux-system"},
+            {"kind": "ServiceAccount", "name": "helm-reconciler", "namespace": "naranjo-online"},
+            {"kind": "User", "apiGroup": api_group,
+             "name": "system:serviceaccount:flux-system:kustomize-controller"},
+            {"kind": "User", "apiGroup": api_group,
+             "name": "system:serviceaccount:naranjo-online:helm-reconciler"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:serviceaccounts"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:serviceaccounts:flux-system"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:authenticated"},
+        ):
+            with self.subTest(reaches=subject["name"], kind=subject["kind"]):
+                self.assertTrue(reaches({"subjects": [subject]}), subject)
+        for subject in (
+            {"kind": "ServiceAccount", "name": "kustomize-controller", "namespace": "kube-system"},
+            {"kind": "User", "apiGroup": api_group,
+             "name": "system:serviceaccount:kube-system:kustomize-controller"},
+            {"kind": "User", "apiGroup": api_group, "name": "system:node:pi"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:serviceaccounts:kube-system"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:masters"},
+        ):
+            with self.subTest(ignores=subject["name"], kind=subject["kind"]):
+                self.assertFalse(reaches({"subjects": [subject]}), subject)
 
     def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")

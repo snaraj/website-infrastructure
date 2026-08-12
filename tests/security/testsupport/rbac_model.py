@@ -1513,6 +1513,17 @@ class GrantedRequest(NamedTuple):
 # Everything else must be derived at cluster scope to be granted at cluster
 # scope, which is what stops a namespaced need from being satisfied by a
 # cluster-wide rule.
+#
+# The exemption belongs to the CONTROLLERS ALONE, and the subject is checked as
+# well as the apiGroup. Its justification is the controllers' cluster-wide
+# informer caches — a property of the three controller ServiceAccounts and of no
+# other account here. An impersonated reconciler opens no informer: it applies a
+# fixed set of objects in one namespace, so a cluster-scoped grant to one is
+# never "by design", it is cross-tenant authority. Keyed on the apiGroup alone,
+# this exemption let a ClusterRole grant `naranjo-online-reconciler` write
+# authority over every OCIRepository and HelmRelease in the cluster — including
+# the other site's — with every gate green. That is safety invariant 14's exact
+# class, so the predicate takes the subject.
 CLUSTER_SCOPED_BY_DESIGN = {
     "source.toolkit.fluxcd.io": "a controller's informer cache over its custom "
     "resources is a cluster-wide list/watch; a namespaced grant cannot satisfy it",
@@ -1523,7 +1534,12 @@ CLUSTER_SCOPED_BY_DESIGN = {
 }
 
 
-def _cluster_scope_is_by_design(group, resource):
+def _cluster_scope_is_by_design(subject, group, resource):
+    # The subjects with cluster-wide informers are exactly the controllers that
+    # register reconcilers, which is where the justification comes from — so the
+    # set is read from REGISTERED_CONTROLLERS rather than listed a second time.
+    if subject.namespace != FLUX_SYSTEM or subject.name not in REGISTERED_CONTROLLERS:
+        return False
     return group in CLUSTER_SCOPED_BY_DESIGN or (group, resource) in CLUSTER_SCOPED_BY_DESIGN
 
 
@@ -1649,7 +1665,7 @@ def ungrounded_grants(granted, derived):
             continue
         if (
             request.scope is None
-            and _cluster_scope_is_by_design(request.group, request.resource)
+            and _cluster_scope_is_by_design(request.subject, request.group, request.resource)
             and namespaces_by_key.get(key)
         ):
             continue
