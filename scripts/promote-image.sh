@@ -7,7 +7,8 @@ set -Eeuo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The exact site selector expands to one closed identity tuple. Sharing the
 # verifier removes drift, while each tuple retains its own image, workflow,
-# values file, Helm release, namespace, and rollback decision.
+# source-label provenance, values file, Helm release, namespace, and rollback
+# decision.
 usage() {
   printf 'Usage: %s {naranjo-online|lidersea-com} vMAJOR.MINOR.PATCH sha256:<64 lowercase hex> [--rollback]\n' "$0" >&2
 }
@@ -32,6 +33,7 @@ case "${site}" in
     values="${repo_root}/kubernetes/websites/naranjo-online/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/naranjo-online.yaml"
     identity="https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    expected_source='https://github.com/snaraj/naranjo.online'
     chart_oci='oci://ghcr.io/snaraj/charts/naranjo-online'
     release='naranjo-online'
     namespace='naranjo-online'
@@ -43,6 +45,7 @@ case "${site}" in
     values="${repo_root}/kubernetes/websites/lidersea-com/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/lidersea-com.yaml"
     identity="https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    expected_source='https://github.com/snaraj/lidersea.com'
     chart_oci='oci://ghcr.io/snaraj/charts/lidersea-com'
     release='lidersea-com'
     namespace='lidersea-com'
@@ -235,8 +238,13 @@ for platform in linux/amd64 linux/arm64; do
     printf '%s image labels contain extra fields\n' "${platform}" >&2
     exit 1
   }
-  [[ "${image_source}" == 'https://github.com/snaraj/website-infrastructure' ]] || {
-    printf '%s image source label is not the reviewed repository\n' "${platform}" >&2
+  # Post-extraction provenance: each image is built and labeled by its own
+  # standalone site repository, so the accepted source label is part of the
+  # site's closed identity tuple — the platform repository, the other site,
+  # and an absent or empty label are all denied by the same exact equality,
+  # and set -u aborts if a tuple ever fails to pin its expected source.
+  [[ "${image_source}" == "${expected_source}" ]] || {
+    printf '%s image source label is not the reviewed site repository\n' "${platform}" >&2
     exit 1
   }
   [[ "${image_version}" == "${release_version}" ]] || {

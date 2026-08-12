@@ -1,10 +1,16 @@
 """Keep digest promotion exact while sharing its verification machinery."""
 
+import json
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
-from .support import load_script
+from .support import load_script, required_tool
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +19,28 @@ TRANSITION = load_script(
     "validate_release_transition.py",
     module_name="validate_release_transition_for_promotion",
 )
+
+# The behavioral battery below executes the script's own label-verification
+# loop, so it needs the same shell and JSON tooling the script itself
+# requires; hosts without them skip with an explanation while CI always runs.
+BASH = shutil.which("bash")
+JQ = shutil.which("jq")
+
+# One exact region: from the loop's accumulator initialization through the
+# closing `done`. Executing the shipped bytes (never a copy) means the
+# battery cannot drift from what promotion actually runs.
+LABEL_LOOP_RE = re.compile(r"(?ms)^release_revision=''\n.*?^done$")
+SITE_BODY_TEMPLATE = r"(?ms)^  {}\)\n(?P<body>.*?)^    ;;$"
+EXPECTED_SOURCE_RE = re.compile(r"(?m)^    expected_source='([^']+)'$")
+
+# The two standalone site repositories that build and label the images, and
+# the retired platform-repository label that must now be denied (#8 pinned
+# it; the #21 extraction moved the sources but left the pin behind).
+SITE_SOURCE_LABELS = {
+    "naranjo-online": "https://github.com/snaraj/naranjo.online",
+    "lidersea-com": "https://github.com/snaraj/lidersea.com",
+}
+PLATFORM_REPOSITORY_LABEL = "https://github.com/snaraj/website-infrastructure"
 
 
 class PromotionContractTests(unittest.TestCase):
@@ -30,6 +58,7 @@ class PromotionContractTests(unittest.TestCase):
                 "kubernetes/reconciliation/naranjo-online.yaml",
                 "https://github.com/snaraj/naranjo.online/.github/workflows/"
                 "release-publisher.yml@refs/tags/",
+                "expected_source='https://github.com/snaraj/naranjo.online'",
                 "oci://ghcr.io/snaraj/charts/naranjo-online",
             ),
             "lidersea-com": (
@@ -38,6 +67,7 @@ class PromotionContractTests(unittest.TestCase):
                 "kubernetes/reconciliation/lidersea-com.yaml",
                 "https://github.com/snaraj/lidersea.com/.github/workflows/"
                 "release-publisher.yml@refs/tags/",
+                "expected_source='https://github.com/snaraj/lidersea.com'",
                 "oci://ghcr.io/snaraj/charts/lidersea-com",
             ),
         }
@@ -47,7 +77,11 @@ class PromotionContractTests(unittest.TestCase):
                     r"(?ms)^  {}\)\n(?P<body>.*?)^    ;;$".format(re.escape(site)),
                     self.script,
                 )
-                self.assertIsNotNone(match)
+                if match is None:
+                    # A raise statement, not assertIsNotNone: it narrows the
+                    # Optional for static analysis and survives python -O
+                    # (same discipline as support.required_tool).
+                    raise AssertionError("missing identity tuple for " + site)
                 body = match.group("body")
                 for fragment in fragments:
                     self.assertIn(fragment, body)
@@ -56,6 +90,36 @@ class PromotionContractTests(unittest.TestCase):
                         continue
                     for fragment in other_fragments:
                         self.assertNotIn(fragment, body)
+
+    def test_image_source_label_is_pinned_per_site(self):
+        """The source-label gate compares against the site tuple, never a global.
+
+        #8 introduced the label check against the then-monorepo
+        (`https://github.com/snaraj/website-infrastructure`); the #21
+        extraction re-pointed the cosign identities at the standalone site
+        publishers but left that literal behind, so every post-extraction
+        image failed promotion. The accepted label is now part of each
+        site's closed identity tuple (safety invariant 14): the comparison
+        must reference the tuple variable, each tuple must pin exactly its
+        own repository, and no comparison against the platform repository
+        may remain anywhere in the script.
+        """
+
+        self.assertIn(
+            '[[ "${image_source}" == "${expected_source}" ]]', self.script
+        )
+        self.assertNotIn(
+            "== '" + PLATFORM_REPOSITORY_LABEL + "'", self.script
+        )
+        for site, label in SITE_SOURCE_LABELS.items():
+            with self.subTest(site=site):
+                match = re.search(
+                    SITE_BODY_TEMPLATE.format(re.escape(site)), self.script
+                )
+                if match is None:
+                    raise AssertionError("missing identity tuple for " + site)
+                pins = EXPECTED_SOURCE_RE.findall(match.group("body"))
+                self.assertEqual(pins, [label])
 
     def test_promotion_stays_review_only_and_digest_bound(self):
         for fragment in (
@@ -165,7 +229,10 @@ class PromotionContractTests(unittest.TestCase):
             r"(?ms)^declare -a release_state_paths=\(\n(?P<body>.*?)^\)\n",
             self.script,
         )
-        self.assertIsNotNone(inventory_match)
+        if inventory_match is None:
+            raise AssertionError(
+                "promote-image.sh lost its release_state_paths inventory"
+            )
         cloudflare_review_paths = tuple(
             path
             for path in re.findall(
@@ -225,6 +292,153 @@ class PromotionContractTests(unittest.TestCase):
         self.assertEqual(self.script.count("--rollback"), 3)
         self.assertIn("Both suspension gates remain true", self.script)
         self.assertNotIn("sed -E -i 's/^  suspend:", self.script)
+
+
+@unittest.skipUnless(
+    BASH and JQ, "bash and jq are required for the label-verification battery"
+)
+class SourceLabelVerificationBatteryTests(unittest.TestCase):
+    """Execute the shipped label loop against forged image configs.
+
+    The static tuple tests above prove the per-site pin exists; this
+    battery proves it decides. The exact region promotion runs — from
+    ``release_revision=''`` through the platform loop's ``done`` — is
+    extracted from the script and executed under ``bash`` with a stub
+    ``oras`` that serves a test-controlled config document, so every
+    deny/allow verdict below is produced by the shipped bytes, not a
+    reimplementation that could drift.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = required_tool(
+            BASH, "bash is required for the label-verification battery"
+        )
+        required_tool(JQ, "jq is required for the label-verification battery")
+        script = PROMOTION.read_text(encoding="utf-8")
+        loop = LABEL_LOOP_RE.search(script)
+        if loop is None:
+            raise AssertionError(
+                "promote-image.sh no longer contains the label-verification loop"
+            )
+        cls.label_loop = loop.group(0)
+        if '[[ "${image_source}" == "${expected_source}" ]]' not in cls.label_loop:
+            raise AssertionError(
+                "the label loop lost its per-site source equality gate"
+            )
+        cls.expected_sources = {}
+        for site, label in SITE_SOURCE_LABELS.items():
+            body = re.search(SITE_BODY_TEMPLATE.format(re.escape(site)), script)
+            if body is None:
+                raise AssertionError("missing identity tuple for " + site)
+            pins = EXPECTED_SOURCE_RE.findall(body.group("body"))
+            if pins != [label]:
+                raise AssertionError(
+                    site + " tuple does not pin exactly its own source label"
+                )
+            cls.expected_sources[site] = pins[0]
+
+    @staticmethod
+    def forged_labels(source):
+        """Labels that satisfy every later gate, isolating the source verdict."""
+
+        labels = {
+            "org.opencontainers.image.version": "0.1.9",
+            "org.opencontainers.image.revision": "a" * 40,
+        }
+        if source is not None:
+            labels["org.opencontainers.image.source"] = source
+        return labels
+
+    def run_label_loop(self, expected_source, labels):
+        """Run the shipped loop with a stub registry serving ``labels``."""
+
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps({"config": {"Labels": labels}}), encoding="utf-8"
+            )
+            stub_directory = root / "bin"
+            stub_directory.mkdir()
+            stub = stub_directory / "oras"
+            stub.write_text(
+                '#!/usr/bin/env bash\ncat -- "${PROMOTION_TEST_CONFIG}"\n',
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = (
+                str(stub_directory) + os.pathsep + environment.get("PATH", "")
+            )
+            environment["PROMOTION_TEST_CONFIG"] = str(config_path)
+            prelude = (
+                "set -Eeuo pipefail\n"
+                "expected_source=" + shlex.quote(expected_source) + "\n"
+                "release_version='0.1.9'\n"
+                "reference='registry.invalid/site@sha256:" + "1" * 64 + "'\n"
+            )
+            return subprocess.run(
+                [self.bash, "-c", prelude + self.label_loop],
+                capture_output=True,
+                text=True,
+                env=environment,
+                check=False,
+            )
+
+    def assert_denied_as_unreviewed_source(self, completed):
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "linux/amd64 image source label is not the reviewed site repository",
+            completed.stderr,
+        )
+
+    def test_own_site_source_label_is_allowed(self):
+        for site, expected in self.expected_sources.items():
+            with self.subTest(site=site):
+                completed = self.run_label_loop(
+                    expected, self.forged_labels(expected)
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stdout + completed.stderr,
+                )
+
+    def test_platform_repository_source_label_is_denied(self):
+        for site, expected in self.expected_sources.items():
+            with self.subTest(site=site):
+                self.assert_denied_as_unreviewed_source(
+                    self.run_label_loop(
+                        expected,
+                        self.forged_labels(PLATFORM_REPOSITORY_LABEL),
+                    )
+                )
+
+    def test_other_site_source_label_is_denied(self):
+        """A valid label from the wrong tuple never crosses sites (invariant 14)."""
+
+        for site, expected in self.expected_sources.items():
+            others = [
+                label
+                for other, label in self.expected_sources.items()
+                if other != site
+            ]
+            self.assertEqual(len(others), 1)
+            with self.subTest(site=site, forged=others[0]):
+                self.assert_denied_as_unreviewed_source(
+                    self.run_label_loop(expected, self.forged_labels(others[0]))
+                )
+
+    def test_empty_or_absent_source_label_is_denied(self):
+        for site, expected in self.expected_sources.items():
+            for description, source in (("empty", ""), ("absent", None)):
+                with self.subTest(site=site, label=description):
+                    self.assert_denied_as_unreviewed_source(
+                        self.run_label_loop(
+                            expected, self.forged_labels(source)
+                        )
+                    )
 
 
 if __name__ == "__main__":
