@@ -51,10 +51,24 @@ settings per zone and nothing else.
 2. The current edge-to-origin encryption mode is `full` or `strict`. Confirm it
    with ceremony C first (`zone-setting[<zone>/ssl]`). This matters: the loop
    hazard described in A.4 is real only under the `flexible` mode.
-3. Each site's application already answers a request carrying an
-   `X-Forwarded-Proto: http` header with a 308 to the same URL over https, and
-   emits HSTS only on https responses. That behaviour is merged in each site
-   repository and is what makes A.4 safe.
+3. The application-side redirect behaviour has two halves, and they are **not
+   equally true today**. Read both before relying on either:
+
+   a. **Merged in Git — verifiable now.** Each site's application answers a
+      request carrying an `X-Forwarded-Proto: http` header with a 308 to the
+      same URL over https, and gates `Strict-Transport-Security` to https
+      responses. Confirm by reading each site repository at its current
+      default branch.
+   b. **Not yet observable at the edge.** The images currently running predate
+      those merges. Today both origins answer plaintext with `200` and emit
+      HSTS over cleartext; `scripts/edge-probe.sh` records that as
+      `hsts-over-cleartext present`. The behaviour ships with the next
+      application release. **Do not read (a) as a statement about the live
+      origin** until that deploy has landed and the probe's record item flips
+      to `absent`.
+
+   This split matters because A.4's loop-safety conclusion must not lean on a
+   behaviour that is merged but undeployed. It does not — see A.4.
 4. Nobody is mid-rotation on either Tunnel. Ceremonies A and B never overlap.
 
 ### A.1 Pre-toggle probe — expect gaps, and record them
@@ -69,15 +83,22 @@ Expected today, per the 2026-08-12 attestation and reproduced by this script:
 including `zero-rtt-off`, `hsts-exact`, `tls13-accepted`, `readyz`,
 `www-absent`, `site-identity` and `sites-distinct`.
 
-Read three things before continuing:
+Read four things before continuing:
 
 - the `RESULT` line: `gap=8 skip=0 error=0 divergent=0`. A `skip` means the
   local TLS client could not be proven able to speak a protocol, so that item
   says nothing about the edge; fix the client before trusting the ceremony.
   A `divergent` means two rounds disagreed; re-run before changing anything.
+  (`inapplicable` is different and harmless — it counts items outside the
+  selected scope, such as cross-zone distinctness in a single-zone run.)
 - the capability preflight block: all four protocols must read `capable`.
 - the `dnssec` rows: `naranjo.online` signed and validating, `lidersea.com`
   unsigned. `lidersea.com` unsigned is the recorded expectation, not a defect.
+- the `hsts-over-cleartext` record rows. `present` means the running
+  application build still predates the https-gated HSTS change (precondition
+  A.0.3b), which is the expected state until that release deploys. It is a
+  deployed-state signal only; browsers ignore HSTS received over cleartext, so
+  it is neither a control nor a blocker for this ceremony.
 
 Keep `edge-probe-before.txt` outside the repository. It contains no credential
 and no private identifier, but it is a point-in-time observation, not a
@@ -102,6 +123,14 @@ then do the second. Two zones changed together share one failure.
 ```sh
 scripts/edge-probe.sh --zone naranjo.online --enforce --rounds 2
 ```
+
+**This single-zone enforcing run is meaningful and must exit 0.** Cross-zone
+distinctness cannot be evaluated with one zone in the run, so it is reported
+`INAPPLICABLE` and does not fail the run — an item outside the selected scope
+has nothing to prove. Everything that *can* be evaluated for the toggled zone
+still has to pass. A nonzero exit here is a real failure of the half-completed
+ceremony: stop, do not toggle the second zone, and read the table. Never wave
+a nonzero exit through because "it is only one zone".
 
 Safety invariant 9 applies: these are dashboard mutations, therefore break-glass
 by definition. Record the exact settings changed, and reconcile them into the
@@ -148,19 +177,27 @@ edge serves that redirect, and the client arrives back at the same place. It
 requires the edge-to-origin leg to be plaintext *while the origin insists on
 https*.
 
-That combination does not exist here, for two independent reasons:
+That combination does not exist here. **The conclusion rests on reason 1
+alone**, which is a property of the edge and holds regardless of which
+application build is deployed:
 
-1. With Always Use HTTPS on, a plaintext request is answered by the edge with a
-   30x before it ever reaches an origin. The origin's own 308 is not reached by
-   plaintext clients at all.
-2. On the https path the connector presents the request to the application with
-   `X-Forwarded-Proto: https`, so the application's fail-closed exact-match
-   redirect does not fire. The application redirect only ever fires on an
-   explicit `http` forwarded-proto.
+1. **Load-bearing.** With Always Use HTTPS on, a plaintext request is answered
+   by the edge with a 30x before it ever reaches an origin. No plaintext
+   request survives to the origin, so whatever the origin would have done with
+   one cannot close a loop.
 
-The check that keeps this true is precondition A.0.2: the `flexible` edge-to-
-origin mode is the one that would manufacture the loop, and ceremony C fails the
-run if the mode is ever `flexible` or `off`.
+2. **Defence in depth, and not yet deployed.** On the https path the connector
+   presents the request to the application with `X-Forwarded-Proto: https`, so
+   the application's fail-closed exact-match redirect does not fire; that
+   redirect only ever fires on an explicit `http` forwarded-proto. This is
+   precondition A.0.3a — merged in Git, **not** running at the edge yet
+   (A.0.3b). It is written here because it will matter after the next
+   application release, and because a reader must not mistake it for part of
+   today's safety argument. Reason 1 does not depend on it.
+
+The check that keeps reason 1 true is precondition A.0.2: the `flexible` edge-
+to-origin mode is the one that would manufacture the loop, and ceremony C fails
+the run if the mode is ever `flexible` or `off`.
 
 If a loop is nevertheless observed — a browser reporting too many redirects, or
 `chain=` above 1 in the probe — roll back immediately per A.5 and do not

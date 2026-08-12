@@ -130,15 +130,19 @@ Read-only, credential-free acceptance probe for the two public site edges.
 It contacts only the site hostnames and two public DNS resolvers.
 
 Options:
-  --enforce           Exit nonzero unless every asserted item is PASS. An
-                      unproven target (SKIP), a disagreement between rounds
-                      (DIVERGENT) and a probe error all fail under --enforce:
-                      an item that could not be proven is never a pass.
-                      Without --enforce the probe is report-only and exits 0
-                      whatever it finds, so it is useful before the target
-                      state is reached.
+  --enforce           Exit nonzero unless every APPLICABLE asserted item is
+                      PASS. An unproven target (SKIP), a disagreement between
+                      rounds (DIVERGENT) and a probe error all fail under
+                      --enforce: an item that could not be proven is never a
+                      pass. An item outside the selected scope is reported
+                      INAPPLICABLE and does not fail -- inapplicable is not
+                      the same as unproven. Without --enforce the probe is
+                      report-only and exits 0 whatever it finds, so it is
+                      useful before the target state is reached.
   --zone HOSTNAME     Probe one site only (naranjo.online or lidersea.com).
-                      Cross-zone distinctness then reports SKIP.
+                      Cross-zone distinctness is then INAPPLICABLE, so a
+                      single-zone --enforce run still exits 0 when that zone
+                      meets the target state.
   --rounds N          Repetitions, 1-5 (default 2). Disagreeing rounds are
                       reported as DIVERGENT, never silently resolved.
   --round-gap SECONDS Pause between rounds, 0-600 (default 5).
@@ -517,9 +521,15 @@ probe_http_redirect() {
   case "${code}" in
     301|308)
       if [[ "${location}" != "${expected}" ]]; then
-        record "${round}" "${zone}" "${item}" assert GAP \
-          "http_code=${code} location=${location:-<none>}" \
-          "the redirect does not preserve path and query; expected ${expected}"
+        if [[ "${location}" == http://* ]]; then
+          record "${round}" "${zone}" "${item}" assert GAP \
+            "http_code=${code} location=${location}" \
+            "the redirect stays on plaintext http; expected ${expected}"
+        else
+          record "${round}" "${zone}" "${item}" assert GAP \
+            "http_code=${code} location=${location:-<none>}" \
+            "the redirect does not preserve path and query; expected ${expected}"
+        fi
         return 0
       fi
       hops="$("${CURL}" --silent --show-error --max-time "${TIMEOUT}" \
@@ -545,6 +555,41 @@ probe_http_redirect() {
         'plaintext HTTP is served directly; Always Use HTTPS is off'
       ;;
   esac
+}
+
+# Record whether Strict-Transport-Security is emitted over PLAINTEXT http.
+#
+# This is a deployed-state signal, not a security control: RFC 6797 section 7.2
+# requires a user agent to ignore an HSTS header received over a non-secure
+# transport, so its presence protects nobody and its absence costs nothing.
+# What it tells you is WHICH application build is actually serving. The
+# https-gated HSTS behaviour is merged in both site repositories but the
+# running images predate that merge, so the header is present over cleartext
+# today and disappears once the newer images are deployed. Recording it is how
+# the runbook's "merged in Git" precondition stops being mistaken for "live at
+# the edge".
+#
+# Once Always Use HTTPS is on, the edge answers the plaintext request itself
+# and the origin is never reached, so this item stops carrying information
+# about the application build. That is expected, and noted in the output.
+probe_cleartext_hsts() {
+  local round="$1" zone="$2"
+  local out header
+  out="${WORKDIR}/${zone}-cleartext-headers-${round}.txt"
+  if ! "${CURL}" --silent --show-error --max-time "${TIMEOUT}" \
+    --dump-header "${out}" --output /dev/null "http://${zone}/" 2>/dev/null; then
+    record "${round}" "${zone}" hsts-over-cleartext record RECORD 'unavailable' \
+      'the plaintext request could not complete'
+    return 0
+  fi
+  header="$("${GREP}" -i -m1 -e '^strict-transport-security:' "${out}" || true)"
+  if [[ -n "${header}" ]]; then
+    record "${round}" "${zone}" hsts-over-cleartext record RECORD 'present' \
+      'the origin emits HSTS over cleartext, so the running build predates the https-gated HSTS change; browsers ignore it (RFC 6797 7.2) and it never substitutes for the edge redirect'
+  else
+    record "${round}" "${zone}" hsts-over-cleartext record RECORD 'absent' \
+      'no HSTS over cleartext: either the https-gated build is deployed, or the edge is already answering the plaintext request itself'
+  fi
 }
 
 probe_tls_version() {
@@ -801,6 +846,7 @@ probe_zone() {
   local round="$1" zone="$2" other="$3" dnssec_expectation="$4"
   probe_http_redirect "${round}" "${zone}" http-redirect-root '/'
   probe_http_redirect "${round}" "${zone}" http-redirect-path-query '/readyz?probe=1&x=2'
+  probe_cleartext_hsts "${round}" "${zone}"
   probe_tls_version "${round}" "${zone}" tls10-refused tls1 refused
   probe_tls_version "${round}" "${zone}" tls11-refused tls1_1 refused
   probe_tls_version "${round}" "${zone}" tls12-accepted tls1_2 accepted
@@ -819,8 +865,16 @@ probe_cross_zone_distinctness() {
   local round="$1"
   local a b
   if [[ "${ZONES}" != "${ZONE_A} ${ZONE_B}" ]]; then
-    record "${round}" both sites-distinct assert SKIP 'single-zone-run' \
-      'cross-zone distinctness needs both sites in the same run'
+    # INAPPLICABLE, not SKIP, and the distinction is load-bearing. A SKIP means
+    # "this target could not be proven", which --enforce must treat as unmet. A
+    # single-zone run has no second site to compare against, so the item does
+    # not apply to the selected scope at all -- there is nothing unproven about
+    # it. Recording it as an asserted SKIP made every single-zone --enforce run
+    # exit 1 no matter how healthy the zone was, which trains an operator to
+    # wave a nonzero exit through in the middle of a half-completed toggle
+    # ceremony. Inapplicable is not the same as unproven.
+    record "${round}" both sites-distinct record INAPPLICABLE 'single-zone-run' \
+      'cross-zone distinctness needs both sites in the same run; this item does not apply to the selected scope and is not an unproven target'
     return 0
   fi
   a="$(awk -F'\t' -v r="${round}" -v z="${ZONE_A}" '$1==r && $2==z && $3=="assets" {print $6}' "${RECORDS}")"
@@ -863,6 +917,7 @@ final_verdicts() {
 
 print_report() {
   local verdicts pass gap skip error divergent record_count exit_code
+  local inapplicable
   verdicts="${WORKDIR}/verdicts.tsv"
   final_verdicts >"${verdicts}"
 
@@ -891,17 +946,24 @@ print_report() {
   skip="$(awk -F'\t' '$3=="assert" && $4=="SKIP"' "${verdicts}" | wc -l | tr -d ' ')"
   error="$(awk -F'\t' '$3=="assert" && $4=="ERROR"' "${verdicts}" | wc -l | tr -d ' ')"
   divergent="$(awk -F'\t' '$4=="DIVERGENT"' "${verdicts}" | wc -l | tr -d ' ')"
-  record_count="$(awk -F'\t' '$3=="record"' "${verdicts}" | wc -l | tr -d ' ')"
+  record_count="$(awk -F'\t' '$3=="record" && $4=="RECORD"' "${verdicts}" | wc -l | tr -d ' ')"
+  inapplicable="$(awk -F'\t' '$4=="INAPPLICABLE"' "${verdicts}" | wc -l | tr -d ' ')"
 
+  # --enforce fails on an unmet target (GAP), an unproven one (SKIP), a probe
+  # that could not complete (ERROR), and a probe that answered differently
+  # twice (DIVERGENT). It deliberately does NOT fail on INAPPLICABLE: an item
+  # outside the selected scope has nothing to prove, and conflating the two
+  # made every single-zone enforcing run exit nonzero regardless of the zone's
+  # health.
   exit_code=0
   if [[ "${ENFORCE}" == yes ]] \
     && (( gap + skip + error + divergent > 0 )); then
     exit_code=1
   fi
-  printf '\nRESULT schema=%s utc=%s zones="%s" rounds=%s pass=%s gap=%s skip=%s error=%s divergent=%s recorded=%s enforce=%s exit=%s\n' \
+  printf '\nRESULT schema=%s utc=%s zones="%s" rounds=%s pass=%s gap=%s skip=%s error=%s divergent=%s inapplicable=%s recorded=%s enforce=%s exit=%s\n' \
     "${SCHEMA}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${ZONES}" "${ROUNDS}" \
-    "${pass}" "${gap}" "${skip}" "${error}" "${divergent}" "${record_count}" \
-    "${ENFORCE}" "${exit_code}"
+    "${pass}" "${gap}" "${skip}" "${error}" "${divergent}" "${inapplicable}" \
+    "${record_count}" "${ENFORCE}" "${exit_code}"
   return "${exit_code}"
 }
 

@@ -37,6 +37,7 @@ The two defects the behavioural tests exist for are mirror images:
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -108,6 +109,28 @@ class EdgeProbeParserTests(unittest.TestCase):
         self.assertEqual(
             call_parser("classify_tls_transcript", "client-cannot-attempt.txt"),
             "client-limited",
+        )
+
+    def test_empty_transcript_is_an_unclassified_error(self):
+        # The fail-closed fallback, and the reason it must stay a fallback: the
+        # watchdog kills a hung s_client and leaves an empty transcript behind.
+        # If the fallback said "refused", that empty file would score a PASS on
+        # tls10-refused / tls11-refused -- a timeout would silently certify the
+        # TLS floor as fixed.
+        self.assertEqual(
+            call_parser("classify_tls_transcript", text=""), "error unclassified"
+        )
+
+    def test_session_block_only_transcript_is_an_unclassified_error(self):
+        # A transcript truncated to its SSL-Session: block carries an indented
+        # `Protocol  :` line and nothing else. It is neither a completed
+        # handshake nor a refusal, and must not be scored as either.
+        self.assertEqual(
+            call_parser(
+                "classify_tls_transcript",
+                text="SSL-Session:\n    Protocol  : TLSv1\n    Cipher    : 0000\n",
+            ),
+            "error unclassified",
         )
 
     def test_transport_failure_is_an_error_not_a_refusal(self):
@@ -240,6 +263,278 @@ class EdgeProbeCapabilityGateTests(unittest.TestCase):
         fields = self._probe_tls_version("unproven")
         self.assertEqual(fields[4], "SKIP")
 
+    def test_a_probe_that_produced_no_transcript_records_error(self):
+        # The watchdog path, end to end: a bounded run that yields an empty
+        # transcript must reach the ERROR branch, never the refused-is-PASS
+        # branch. `/bin/true` stands in for a killed s_client -- it exits 0 and
+        # writes nothing, which is the worst case for a fail-open parser.
+        records = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-timeout.tsv"
+        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-timeout-dir"
+        program = (
+            ". '{script}'\n"
+            "WORKDIR='{workdir}'\n"
+            "mkdir -p \"$WORKDIR\"\n"
+            "RECORDS='{records}'\n"
+            ": >\"$RECORDS\"\n"
+            "PREFLIGHT_TLS1=capable\n"
+            "OPENSSL=/usr/bin/true\n"
+            "probe_tls_version 1 probe.invalid tls10-refused tls1 refused\n"
+            "cat \"$RECORDS\"\n"
+            "rm -rf \"$WORKDIR\" \"$RECORDS\"\n"
+        ).format(script=SCRIPT, workdir=workdir, records=records)
+        completed = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        fields = completed.stdout.strip().split("\t")
+        self.assertEqual(fields[4], "ERROR")
+        self.assertNotEqual(fields[4], "PASS")
+
+
+@unittest.skipUnless(BASH, "bash is unavailable")
+class EdgeProbeEnforcementScopeTests(unittest.TestCase):
+    """Behavioural: --enforce fails on unproven, not on inapplicable.
+
+    A single-zone run cannot evaluate cross-zone distinctness. Scoring that as
+    an asserted SKIP made every single-zone enforcing run exit 1 no matter how
+    healthy the zone was — which is worse than useless in the middle of the
+    half-completed toggle ceremony the runbook prescribes, because it trains
+    the operator to wave a nonzero exit through. These tests pin the carve-out
+    and its boundary: inapplicable passes, genuinely unproven still fails.
+    """
+
+    HEALTHY_SINGLE_ZONE = (
+        "record 1 naranjo.online http-redirect-root assert PASS "
+        "'http_code=301 location=https://naranjo.online/ chain=1:200' ''\n"
+        "record 1 naranjo.online tls10-refused assert PASS refused ''\n"
+        "record 1 naranjo.online tls11-refused assert PASS refused ''\n"
+        "record 1 naranjo.online tls12-accepted assert PASS 'accepted TLSv1.2' ''\n"
+        "record 1 naranjo.online hsts-exact assert PASS max-age=31536000 ''\n"
+        "record 1 naranjo.online readyz assert PASS 'http_code=200 body=ok' ''\n"
+    )
+
+    def _enforce(self, extra_records=""):
+        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-enforce"
+        program = (
+            ". '{script}'\n"
+            "WORKDIR='{workdir}'\n"
+            "rm -rf \"$WORKDIR\"; mkdir -p \"$WORKDIR\"\n"
+            "RECORDS=\"$WORKDIR/records.tsv\"\n"
+            ": >\"$RECORDS\"\n"
+            "ZONES='naranjo.online'\n"
+            "ROUNDS=1\n"
+            "ENFORCE=yes\n"
+            "PREFLIGHT_TLS1=capable\n"
+            "PREFLIGHT_TLS1_1=capable\n"
+            "PREFLIGHT_TLS1_2=capable\n"
+            "PREFLIGHT_TLS1_3=capable\n"
+            "{healthy}"
+            "{extra}"
+            # The real function decides the scope verdict; the test does not
+            # hand-write it, so removing the carve-out shows up here.
+            "probe_cross_zone_distinctness 1\n"
+            "if print_report; then status=0; else status=$?; fi\n"
+            "printf 'ENFORCE-EXIT=%s\\n' \"$status\"\n"
+            "rm -rf \"$WORKDIR\"\n"
+        ).format(
+            script=SCRIPT,
+            workdir=workdir,
+            healthy=self.HEALTHY_SINGLE_ZONE,
+            extra=extra_records,
+        )
+        completed = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def test_single_zone_enforce_exits_zero_when_every_applicable_item_passes(self):
+        output = self._enforce()
+        self.assertIn("ENFORCE-EXIT=0", output)
+        self.assertIn("INAPPLICABLE", output)
+        self.assertIn("skip=0", output)
+        self.assertIn("inapplicable=1", output)
+        self.assertIn("exit=0", output)
+
+    def test_a_genuine_capability_skip_still_fails_enforce(self):
+        # The boundary. An item that could not be proven is still fatal, so the
+        # carve-out above cannot be widened into "SKIP is fine".
+        output = self._enforce(
+            extra_records=(
+                "record 1 naranjo.online tls10-refused assert SKIP "
+                "client=incapable 'the local client could not be proven able' \n"
+            )
+        )
+        self.assertIn("ENFORCE-EXIT=1", output)
+        self.assertIn("exit=1", output)
+
+    def test_a_gap_still_fails_enforce(self):
+        output = self._enforce(
+            extra_records=(
+                "record 1 naranjo.online hsts-exact assert GAP "
+                "'wrong max-age=300' 'the target state is exact' \n"
+            )
+        )
+        self.assertIn("ENFORCE-EXIT=1", output)
+
+
+@unittest.skipUnless(BASH, "bash is unavailable")
+class EdgeProbeRedirectSimulationTests(unittest.TestCase):
+    """Behavioural: the post-remediation redirect verdicts, both directions.
+
+    The remediated state cannot be observed until the owner throws the toggles,
+    so the redirect assertion is a CI-invisible path. The review protocol asks
+    for simulated evidence of both directions; this drives the real
+    ``probe_http_redirect`` against a curl test double and pins one PASS shape
+    and five distinct GAP shapes. The scenario set came from the adversarial
+    review round.
+    """
+
+    SCENARIOS = (
+        ("301 preserving root", "/", "301 https://naranjo.online/", "1:200", "PASS"),
+        ("308 preserving root", "/", "308 https://naranjo.online/", "1:200", "PASS"),
+        (
+            "query string dropped",
+            "/readyz?probe=1&x=2",
+            "301 https://naranjo.online/readyz",
+            "1:200",
+            "GAP",
+        ),
+        ("two redirect hops", "/", "301 https://naranjo.online/", "2:200", "GAP"),
+        ("temporary 302", "/", "302 https://naranjo.online/", "1:200", "GAP"),
+        (
+            "https downgraded to http",
+            "/",
+            "301 http://naranjo.online/",
+            "1:200",
+            "GAP",
+        ),
+        ("today: served directly", "/", "200 ", "0:200", "GAP"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stub_dir = Path(
+            tempfile.mkdtemp(prefix="edge-probe-curl-stub.", dir=os.environ.get("TMPDIR"))
+        )
+        cls.stub = cls.stub_dir / "curl-double"
+        cls.stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "# curl test double. --dump-header means a header observation, the\n"
+            "# follow-up hop-count request is the one carrying --location, and\n"
+            "# everything else is the first redirect observation.\n"
+            "previous=''\n"
+            "for argument in \"$@\"; do\n"
+            "  if [[ \"${previous}\" == --dump-header ]]; then\n"
+            "    printf '%s' \"${EDGE_PROBE_SIM_HEADERS:-}\" >\"${argument}\"\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  if [[ \"${argument}\" == --location ]]; then\n"
+            "    printf '%s' \"${EDGE_PROBE_SIM_HOPS}\"\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  previous=\"${argument}\"\n"
+            "done\n"
+            "printf '%s' \"${EDGE_PROBE_SIM_FIRST}\"\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        cls.stub.chmod(0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.stub_dir, ignore_errors=True)
+
+    def _redirect_verdict(self, path, first, hops):
+        workdir = self.stub_dir / "work"
+        program = (
+            ". '{script}'\n"
+            "WORKDIR='{workdir}'\n"
+            "rm -rf \"$WORKDIR\"; mkdir -p \"$WORKDIR\"\n"
+            "RECORDS=\"$WORKDIR/records.tsv\"\n"
+            ": >\"$RECORDS\"\n"
+            "CURL='{stub}'\n"
+            "TIMEOUT=5\n"
+            "probe_http_redirect 1 naranjo.online http-redirect-root '{path}'\n"
+            "cat \"$RECORDS\"\n"
+        ).format(script=SCRIPT, workdir=workdir, stub=self.stub, path=path)
+        environment = dict(os.environ)
+        environment["EDGE_PROBE_SIM_FIRST"] = first
+        environment["EDGE_PROBE_SIM_HOPS"] = hops
+        completed = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip().split("\t")
+
+    def test_every_post_remediation_redirect_shape_scores_correctly(self):
+        for label, path, first, hops, expected in self.SCENARIOS:
+            with self.subTest(scenario=label):
+                fields = self._redirect_verdict(path, first, hops)
+                self.assertEqual(
+                    fields[4],
+                    expected,
+                    "{}: expected {}, observed {} ({})".format(
+                        label, expected, fields[4], fields[5]
+                    ),
+                )
+
+    def test_the_simulation_can_produce_both_verdicts(self):
+        # Vacuity probe: the scenario set must contain at least one of each, so
+        # the table above cannot be satisfied by a constant verdict.
+        verdicts = {scenario[4] for scenario in self.SCENARIOS}
+        self.assertEqual(verdicts, {"PASS", "GAP"})
+
+    def _cleartext_hsts(self, headers):
+        workdir = self.stub_dir / "work-hsts"
+        program = (
+            ". '{script}'\n"
+            "WORKDIR='{workdir}'\n"
+            "rm -rf \"$WORKDIR\"; mkdir -p \"$WORKDIR\"\n"
+            "RECORDS=\"$WORKDIR/records.tsv\"\n"
+            ": >\"$RECORDS\"\n"
+            "CURL='{stub}'\n"
+            "TIMEOUT=5\n"
+            "probe_cleartext_hsts 1 naranjo.online\n"
+            "cat \"$RECORDS\"\n"
+        ).format(script=SCRIPT, workdir=workdir, stub=self.stub)
+        environment = dict(os.environ)
+        environment["EDGE_PROBE_SIM_HEADERS"] = headers
+        completed = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-c", program],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip().split("\t")
+
+    def test_cleartext_hsts_is_recorded_in_both_directions_and_never_asserted(self):
+        # Deployed-state signal, not a control: a browser ignores HSTS received
+        # over cleartext (RFC 6797 7.2), so this must never become an assertion
+        # that could pass or fail the run.
+        present = self._cleartext_hsts(
+            "HTTP/1.1 200 OK\r\nstrict-transport-security: max-age=31536000\r\n\r\n"
+        )
+        self.assertEqual(present[3], "record")
+        self.assertEqual(present[4], "RECORD")
+        self.assertEqual(present[5], "present")
+
+        absent = self._cleartext_hsts("HTTP/1.1 301 Moved Permanently\r\n\r\n")
+        self.assertEqual(absent[3], "record")
+        self.assertEqual(absent[5], "absent")
+
 
 @unittest.skipUnless(BASH, "bash is unavailable")
 class EdgeProbeCommandLineTests(unittest.TestCase):
@@ -342,6 +637,13 @@ class EdgeProbeSourceContractTests(unittest.TestCase):
         # holding over this file; the check here is that nobody reverts it.
         self.assertIn("one.one.one.one", self.source)
         self.assertIn("dns.google", self.source)
+
+    def test_the_cleartext_hsts_record_is_wired_into_every_zone_probe(self):
+        # Source pin. The behaviour of the record item itself is executed in
+        # EdgeProbeRedirectSimulationTests; what cannot be executed offline is
+        # the per-zone probe sequence, so its wiring is pinned here.
+        sequence = self.source.split("probe_zone() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("probe_cleartext_hsts", sequence)
 
     def test_the_probe_takes_no_credential(self):
         for forbidden in ("CF_API_TOKEN", "CLOUDFLARE_API_TOKEN", "Authorization"):
