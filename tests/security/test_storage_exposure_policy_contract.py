@@ -93,6 +93,27 @@ EXPECTED_ADMITTED_POD_VOLUME_SOURCES = frozenset(
     {"emptyDir", "configMap", "secret", "projected", "downwardAPI"}
 )
 
+# The pod-volume model has TWO arms, and each one needs its own killer. The
+# subtraction was the largest new control of the round that introduced it and it
+# shipped with none: neutering either arm left `structural OK | parity PASS |
+# fixtures PASS | kyverno 0 failed | validators PASS` while the probe the model
+# was written to deny — a fully compliant Pod in `default` mounting ``azureFile``
+# — went straight back to ADMITTED (measured, wi #96 delta review). The only
+# fixture touching the arms held twenty objects under a file-level assertion,
+# which is the multi-document masking defect this branch fixed everywhere else.
+#
+# So each arm gets a single-object deny fixture that ONLY it rejects, and each
+# fixture declares the message fragment its arm emits. The mapping is held here,
+# outside both the fixture and the runner, so neither the fixture nor its
+# attribution can be dropped quietly. Pods are deliberately NOT part of the
+# engine-parity corpus — the Kyverno half of this policy is namespace-scoped
+# while the Conftest mirror is repo-wide — so ``scripts/test-policy-fixtures.sh``
+# is the runner that enforces these.
+POD_VOLUME_ARM_FIXTURES = {
+    "pod-volume-undiscovered-source": "uses undiscovered storage source",
+    "pod-volume-multiple-sources": "must declare exactly one volume source, found",
+}
+
 # The differential harness's corpus floor, held outside the harness so that
 # neither the corpus nor the floor inside the script can be trimmed quietly. A
 # harness that compares nothing is the next vacuity after a battery that compares
@@ -797,9 +818,64 @@ class EngineParityHarnessContract(unittest.TestCase):
         harness = read(self.harness)
         self.assertIn("self_test_delta", harness, "the harness no longer proves its own comparison")
         self.assertIn(
-            "check_object \"${self_test_probe}\" 'allow'",
+            'check_object "${self_test_probe}" "${expected}"',
             harness,
             "the harness's self-test no longer exercises the real comparison path",
+        )
+        # The comparison is per-engine, and the self-test requires BOTH halves.
+        # A single `if conftest != expected || kyverno != expected` is satisfied
+        # by either half, so a probe that makes both true cannot tell a working
+        # comparison from one that lost a half — dropping either disjunct left
+        # the harness passing and its self-test green (measured, wi #96 delta
+        # review). Two reasons, both required, is what makes each half killable.
+        self.assertIn("self_test 'allow'", harness)
+        self.assertIn(
+            "self_test_delta != 2",
+            harness,
+            "the harness's self-test no longer requires BOTH per-engine comparisons to fire",
+        )
+        for reason in ("reason_conftest", "reason_kyverno"):
+            with self.subTest(reason=reason):
+                self.assertIn(
+                    'self_test_requires "${' + reason + '}"',
+                    harness,
+                    "the harness's self-test no longer asserts the " + reason + " half",
+                )
+
+    def test_the_harness_proves_its_own_message_attribution_every_run(self) -> None:
+        """The attribution grep needs a killer too, and had none.
+
+        ``test_the_harness_feeds_both_engines_and_pins_the_expected_verdict``
+        pins ``conftest test``, ``kyverno apply`` and the verdict literals — not
+        the ``# rego-message:`` grep. Replacing that grep with a constant that
+        never fires was invisible to every committed gate, and combined with any
+        neutered Rego arm it silently reopens the SR-0 finding this branch
+        closed. So the harness runs the attribution path against a message no
+        rule emits, on every invocation, and the grep is pinned here as well:
+        neither layer alone is sufficient and no single edit defeats both.
+        """
+
+        harness = read(self.harness)
+        self.assertIn(
+            "sed -n 's/^# rego-message: //p'",
+            harness,
+            "the harness no longer reads the message each deny fixture attributes itself to",
+        )
+        self.assertIn(
+            'grep -Fq -- "${expected_message}"',
+            harness,
+            "the harness no longer requires the claimed denial in the Conftest output",
+        )
+        self.assertIn("expected_message_override", harness)
+        self.assertIn(
+            "self_test 'deny'",
+            harness,
+            "the harness's self-test no longer exercises the attribution path",
+        )
+        self.assertIn(
+            'self_test_requires "${reason_attribution}"',
+            harness,
+            "the harness's self-test no longer asserts that attribution is what refused the probe",
         )
 
     def test_the_corpus_cannot_be_trimmed_below_the_floor(self) -> None:
@@ -832,6 +908,120 @@ class EngineParityHarnessContract(unittest.TestCase):
                     present,
                     stem + " proved an engine divergence and is no longer in the corpus",
                 )
+
+
+class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
+    """Each pod-volume arm has one fixture that only it rejects.
+
+    The subtraction model that replaced the ten-name pod blocklist was the
+    largest new control of its round and shipped with no killer at all: either
+    arm could be neutralized with the structural battery, the parity harness, the
+    fixture runner, the Kyverno suite and the validators ALL green, and the probe
+    the model exists to deny went back to admitted. The only fixture that touched
+    the arms was a twenty-object file asserted at file level — the exact
+    multi-document masking defect this branch fixed for the storage corpus.
+
+    This class is the outside anchor for the correction: the two fixtures, the
+    message each one attributes its denial to, the one-object-per-file rule that
+    keeps the attribution honest, and the runner mechanism plus self-test that
+    turn the declaration into a check.
+    """
+
+    def setUp(self) -> None:
+        self.rego = read(CONFTEST_POLICY)
+        self.runner = REPO_ROOT / "scripts" / "test-policy-fixtures.sh"
+
+    def test_each_pod_volume_arm_has_a_single_object_deny_fixture(self) -> None:
+        for stem, fragment in sorted(POD_VOLUME_ARM_FIXTURES.items()):
+            path = FIXTURES / "deny" / (stem + ".yaml")
+            with self.subTest(fixture=stem):
+                self.assertTrue(
+                    path.is_file(),
+                    stem + " is the only killer for its pod-volume arm and it is gone",
+                )
+                text = read(path)
+                # One object per file, for the same reason the storage corpus
+                # holds one: a second object's denial would stand in for this
+                # one's and the arm would stop being separately killable.
+                self.assertEqual(len(re.findall(r"(?m)^kind: \S+$", text)), 1)
+                self.assertNotIn("\n---\n", text)
+                claim = require(
+                    re.match(r"# proves: (\S+)\n# rego-message: (.+)\n", text),
+                    "`# proves:` and `# rego-message:` headers on deny fixture " + path.name,
+                )
+                self.assertEqual(
+                    claim.group(2).strip(),
+                    fragment,
+                    "the message " + stem + " attributes its denial to has changed",
+                )
+
+    def test_each_declared_pod_message_is_a_message_the_mirror_actually_emits(self) -> None:
+        """A fragment no rule emits would make the attribution unfalsifiable."""
+
+        for stem, fragment in sorted(POD_VOLUME_ARM_FIXTURES.items()):
+            with self.subTest(fixture=stem):
+                self.assertGreaterEqual(
+                    len(fragment),
+                    20,
+                    "the declared denial message is too short to attribute anything: " + fragment,
+                )
+                self.assertIn(
+                    fragment,
+                    self.rego,
+                    "no Conftest rule emits the message " + stem + " claims: " + fragment,
+                )
+
+    def test_the_two_fixtures_cover_the_two_distinct_arms(self) -> None:
+        """One fixture per arm — not two fixtures for the same arm.
+
+        The arms are separate deny rules with separate messages, and the
+        fragments above are what tells them apart.
+        """
+
+        self.assertEqual(len(set(POD_VOLUME_ARM_FIXTURES.values())), 2)
+
+    def test_the_fixture_runner_attributes_denials_and_proves_it_every_run(self) -> None:
+        """The runner mechanism, and the mutant that would otherwise survive it.
+
+        ``scripts/test-policy-fixtures.sh`` asserted only that a FILE was
+        rejected, which is why neutering a pod arm was invisible. It now requires
+        the declared message — and, because a grep replaced by a constant that
+        never fires would leave it printing the same PASS lines forever, it
+        exercises that grep against a message no rule emits before it runs the
+        corpus. Both layers are pinned: this test keeps the self-test from being
+        deleted, the self-test keeps the grep honest.
+        """
+
+        runner = read(self.runner)
+        self.assertIn(
+            "sed -n 's/^# rego-message: //p'",
+            runner,
+            "the fixture runner no longer reads the message a deny fixture attributes itself to",
+        )
+        self.assertIn(
+            'grep -Fq -- "${expected_message}"',
+            runner,
+            "the fixture runner no longer requires the claimed denial in the Conftest output",
+        )
+        self.assertIn("expected_message_override", runner)
+        self.assertIn(
+            "SELF-TEST FAILED",
+            runner,
+            "the fixture runner no longer proves its own attribution check",
+        )
+        self.assertIn(
+            "attribution_failures != 1",
+            runner,
+            "the fixture runner's self-test no longer requires the attribution check to be "
+            "what refused the probe",
+        )
+        # The self-test probe must be one of the fixtures pinned above, so the
+        # probe cannot be pointed at a file that stops existing.
+        probe = require(
+            re.search(r"(?m)^self_test_probe=.*/deny/(\S+)\.yaml\"$", runner),
+            "a self-test probe under tests/kubernetes/fixtures/deny/ in the fixture runner",
+        )
+        self.assertIn(probe.group(1), POD_VOLUME_ARM_FIXTURES)
 
 
 class DocumentedCountsMatchTheArtifacts(unittest.TestCase):

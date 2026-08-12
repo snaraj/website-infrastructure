@@ -173,8 +173,18 @@ It proves its own comparison on every run. Neutering that comparison — one
 `if` — was the single mutant that survived the whole matrix, because every other
 guard around the harness reads its text rather than its behaviour. The harness
 now runs the real comparison against a deliberately wrong expectation first and
-aborts unless exactly one divergence comes back, so a harness that compares
-nothing fails instead of passing.
+aborts unless the comparison is what refused the probe, so a harness that
+compares nothing fails instead of passing.
+
+The comparison is one statement PER ENGINE, deliberately not one disjunction:
+a probe that makes both halves true cannot tell a working comparison from one
+that lost a half, and dropping either disjunct left the harness passing with its
+own self-test green. Two statements with distinct reasons, and a self-test that
+requires BOTH reasons, make each half separately killable. The attribution grep
+gets the same treatment — a second probe declares a message no rule emits and
+requires the attribution check to be what refused it — because a grep replaced
+by a constant that never fires was invisible to every gate and, combined with any
+neutered Rego arm, silently reopens SR-0.
 
 It also enforces ATTRIBUTION. Both fixture runners assert only that a file is
 rejected, so neutralizing one rule stays green whenever any other rule denies the
@@ -235,6 +245,20 @@ the presence of its comment.
     previously a ten-name blocklist, under which an otherwise fully compliant
     Pod outside the tenant namespaces could mount `azureFile` or
     `awsElasticBlockStore` and be admitted.
+
+    Each of the two arms has its OWN killer, because the model shipped without
+    one: neutering either arm left the structural battery, the parity harness,
+    the fixture runner, the Kyverno suite and the validators all green while that
+    same compliant Pod went back to admitted, since the only fixture touching the
+    arms held twenty objects under a file-level assertion.
+    `tests/kubernetes/fixtures/deny/pod-volume-undiscovered-source.yaml` kills
+    the source arm and `pod-volume-multiple-sources.yaml` kills the arity arm —
+    one object per file, each rejected by its arm alone, each declaring the
+    message that arm emits. `scripts/test-policy-fixtures.sh` requires the
+    declared message, and proves that requirement against a message no rule emits
+    before it runs the corpus. Pods are deliberately NOT in the engine-parity
+    corpus: the Kyverno half is namespace-scoped while this half is repo-wide, so
+    they are not a parity surface and are not claimed as one.
   - At **admission**, the Kyverno rules that bound Pod volumes are scoped to the
     tenant namespaces (`naranjo-online`, `lidersea-com`, `cloudflare-public`) and
     are exact allowlists there. A Pod created directly in another namespace is

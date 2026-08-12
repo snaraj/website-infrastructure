@@ -1,0 +1,42 @@
+# proves: pod-volume-source
+# rego-message: uses undiscovered storage source
+# The pod-volume SOURCE arm of the subtraction model, isolated.
+#
+# This Pod is fully compliant in every other respect and sits in `default` — a
+# namespace outside the three tenant namespaces, which is exactly where the
+# retired ten-name blocklist left a hole: `azureFile` was never on that list, so
+# this object was ADMITTED by CI (measured, wi #96 adversarial review). The
+# subtraction model denies it because `azureFile` is not one of the five sources
+# whose bytes come from the cluster's own API server or the node's ephemeral
+# storage.
+#
+# Every other field is deliberately valid and the volume declares exactly ONE
+# source, so the arity arm cannot fire and the denial is attributable to the
+# source arm alone. `scripts/test-policy-fixtures.sh` requires the declared
+# message above, so neutering that arm fails this fixture by NAME rather than
+# hiding behind another rule's denial.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: undiscovered-pod-volume-source
+  namespace: default
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+  volumes:
+    - name: tmp
+      azureFile:
+        secretName: invented-storage
+        shareName: media

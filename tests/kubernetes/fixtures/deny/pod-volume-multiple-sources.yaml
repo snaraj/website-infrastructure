@@ -1,0 +1,40 @@
+# proves: pod-volume-arity
+# rego-message: must declare exactly one volume source, found
+# The pod-volume ARITY arm of the subtraction model, isolated.
+#
+# The subtraction derives a volume's source by removing the known non-source
+# fields (`name`) and treating whatever is left as the source. That derivation
+# only means anything while a volume entry carries EXACTLY ONE source: with two,
+# an admitted source can sit beside an unadmitted one as a decoy, and the source
+# arm's `some source in` would still find the admitted name.
+#
+# Both sources here are on the admitted list on purpose, so the SOURCE arm
+# cannot fire and the denial is attributable to the arity arm alone. Neutering
+# that arm admits this object outright — the file stops being rejected at all —
+# and `scripts/test-policy-fixtures.sh` additionally requires the declared
+# message above, so the arm cannot be weakened behind another rule's denial.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-volume-two-sources
+  namespace: default
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: ghcr.io/snaraj/lidersea-com@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      resources:
+        requests: {cpu: 25m, memory: 32Mi}
+        limits: {cpu: 200m, memory: 128Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+  volumes:
+    - name: tmp
+      emptyDir: {}
+      configMap:
+        name: app-config
