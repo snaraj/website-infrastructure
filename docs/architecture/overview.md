@@ -16,7 +16,8 @@ flowchart LR
       API["Kubernetes API :6443"]
       ControlPlane["kubeadm control plane\nstacked etcd + containerd"]
       Flux["Flux pull-only"]
-      PublicTunnel["pi-websites cloudflared"]
+      NaranjoTunnel["naranjo-online Tunnel connector\ncloudflare-public namespace"]
+      LiderseaTunnel["lidersea-com Tunnel connector\ncloudflare-public namespace"]
       NaranjoService["naranjo-online ClusterIP :8080"]
       LiderseaService["lidersea-com ClusterIP :8080"]
       NaranjoPods["naranjo.online Go pods\nimage from its own repo"]
@@ -27,35 +28,48 @@ flowchart LR
     LegacyArchive["inactive protected legacy archive\noperator-only; no runtime"]
   end
 
-  Edge -->|"outbound Tunnel path"| PublicTunnel
-  PublicTunnel -->|"naranjo.online"| NaranjoService --> NaranjoPods
-  PublicTunnel -->|"lidersea.com"| LiderseaService --> LiderseaPods
+  Edge -->|"outbound Tunnel path"| NaranjoTunnel
+  Edge -->|"outbound Tunnel path"| LiderseaTunnel
+  NaranjoTunnel -->|"naranjo.online"| NaranjoService --> NaranjoPods
+  LiderseaTunnel -->|"lidersea.com"| LiderseaService --> LiderseaPods
   Delivery -. "future read-only" .-> NaranjoPods
   Originals -. "offline derivative publication" .-> Delivery
   WARP -->|"private /32"| AdminTunnel
   AdminTunnel --> SSH
   AdminTunnel -. "denied (PLAT-DEC-001 SSH-only)" .-> API
-  PublicTunnel -. "denied" .-> SSH
-  PublicTunnel -. "denied" .-> API
-  PublicTunnel -. "denied" .-> LegacyArchive
+  NaranjoTunnel -. "denied" .-> SSH
+  NaranjoTunnel -. "denied" .-> API
+  NaranjoTunnel -. "denied" .-> LiderseaService
+  LiderseaTunnel -. "denied" .-> SSH
+  LiderseaTunnel -. "denied" .-> API
+  LiderseaTunnel -. "denied" .-> NaranjoService
+  NaranjoTunnel -. "denied" .-> LegacyArchive
+  LiderseaTunnel -. "denied" .-> LegacyArchive
   Kubernetes -. "denied" .-> LegacyArchive
 ```
 
-Both Tunnel connectors initiate outbound connections. The residential address
+Every Tunnel connector initiates outbound connections. The residential address
 is never a DNS origin and ports 22, 80, 443, and 6443 are not WAN-forwarded.
 
 Each frontend is compiled from Svelte into immutable assets and embedded into
 its own Go HTTP binary — in that site's standalone repository, which publishes
 the signed image this platform deploys by digest. Each release has its own image, chart, namespace,
-ServiceAccount, Service, HelmRelease, and digest-promotion path; sharing the
-Tunnel does not couple releases. The services expose static content and health
+ServiceAccount, Service, HelmRelease, and digest-promotion path — and, per
+[ADR 0015](../adr/0015-per-site-tunnels.md), its own Cloudflare Tunnel,
+runtime token, and proxied apex CNAME, so the two sites share no edge object
+or failure domain. The services expose static content and health
 endpoints. The naranjo service also contains a tested, bounded file-streaming
 capability, but the production chart cannot enable or mount media until ADR
 0012's evidence exists. No upload API or runtime transcoder is present.
 
-The two public Tunnel rules are ordered exactly: `naranjo.online`,
-`lidersea.com`, then a terminal `http_status:404`. NetworkPolicy permits the
-connector to reach only each named TCP 8080 workload. Kustomize remains the
+Each site's Tunnel carries exactly two ordered rules: its own apex hostname,
+then a terminal `http_status:404` (ADR 0015). The decided public path is
+visitor → Cloudflare edge → the site's own Tunnel → its connector Pod in
+`cloudflare-public` → the site ClusterIP on TCP 8080 → the site Pod. The
+connector-to-origin leg is plain HTTP inside the default-deny NetworkPolicy
+boundary by accepted decision; internal TLS/mTLS per origin is a future
+option (ADR 0015). NetworkPolicy permits each connector to reach only its
+own site's named TCP 8080 workload. Kustomize remains the
 bootstrap/composition layer for Flux, namespaces, RBAC, and HelmRelease
 resources.
 

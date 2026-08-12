@@ -71,18 +71,21 @@ the origin, and only post-launch with owner awareness.
   exact permission lists (documented as types, never values), no
   account-global token in any workload, JIT ceremonies validated by the
   existing receipt validators.
-- Origin validation stays strict: Full (strict) TLS mode semantics via the
-  tunnel, hostname ownership pinned in IaC, DNSSEC posture reviewed at the
-  zone, log minimization on (no visitor identity retention beyond defaults).
+- Origin binding stays pinned: SSL mode full with hostname ownership pinned
+  in IaC; the connector-to-origin leg is plain HTTP inside the default-deny
+  boundary (ADR 0015), so "Full (strict)" is not claimed. DNSSEC posture
+  reviewed at the zone, log minimization on (no visitor identity retention
+  beyond defaults).
 
 ### Attack tree (summary)
 
 Root: serve attacker content or reach the origin.
 1. DNS takeover → registrar/Cloudflare custody + DNSSEC review + IaC-pinned
    records (drift visible in plan).
-2. Tunnel credential theft → token lives only in the SOPS-encrypted Secret
-   path; rotation ceremony documented; compromise yields only the ability
-   to serve the two hostnames — which signature-gated workloads limit.
+2. Tunnel credential theft → each site's token lives only in its
+   SOPS-encrypted Secret path; rotation ceremony documented; compromise of
+   one token yields only the ability to serve that one site's hostname
+   (per-site Tunnels, ADR 0015) — which signature-gated workloads limit.
 3. Access policy bypass → no such policies exist for public sites (nothing
    to bypass); admin apps (if enabled) require WebAuthn hardware presence.
 4. Cache poisoning → cache keys default-safe; no user-generated content;
@@ -92,10 +95,11 @@ Root: serve attacker content or reach the origin.
 ### Seven-point verification checklist (apply ceremony)
 
 1. DNS: exactly the planned records in each zone, proxied, nothing extra.
-2. Tunnel identity: one tunnel, its ID matches IaC, no stray connectors.
+2. Tunnel identity: two per-site tunnels (ADR 0015), each ID matching its
+   own IaC root, no stray connectors on either.
 3. Access policy: absent for public sites; admin apps (if any) enforce
    WebAuthn-backed policies with no bypass rule.
-4. Origin bind: cloudflared serves only the two planned loopback services;
+4. Origin bind: each connector serves only its own site's ClusterIP origin;
    no wildcard, no catch-all beyond the terminal 404.
 5. Firewall: no new inbound rule appeared anywhere.
 6. Route policy: host routing tables unchanged outside the connector's own
@@ -119,9 +123,10 @@ add-ons, no metered analytics enter this design.
 
 ## IaC shape (plan-only)
 
-The existing seven credential-free phase roots gain performance/Zero-Trust
-settings as reviewed additions to the relevant phases (zone settings with
-the admitted features; cache rules for the two hostnames), following the
-same fixture-tested, hash-bound plan-gate ceremony as every other phase.
+The credential-free Cloudflare roots — being reconciled to ADR 0015's
+per-site shape (issue #61) — gain performance/Zero-Trust settings as
+reviewed additions to the relevant roots (zone settings with the admitted
+features; cache rules, one per site), following the same fixture-tested
+policy gating as every other root.
 Policy tests (allow/deny fixtures for each admitted/rejected feature state)
 land with the IaC change, not this document.

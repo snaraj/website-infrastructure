@@ -3,7 +3,8 @@
 | Boundary | May initiate | Explicitly denied |
 | --- | --- | --- |
 | Internet visitor | HTTPS through approved Cloudflare hostname | Origin, SSH, Kubernetes API |
-| `pi-websites` connector | DNS, Cloudflare Tunnel transport, approved site TCP 8080 | Pi host, admin route, Kubernetes API, arbitrary egress |
+| `naranjo-online` Tunnel connector | DNS, its own Cloudflare Tunnel transport, `naranjo-online` TCP 8080 only | `lidersea-com` service, Pi host, admin route, Kubernetes API, arbitrary egress |
+| `lidersea-com` Tunnel connector | DNS, its own Cloudflare Tunnel transport, `lidersea-com` TCP 8080 only | `naranjo-online` service, Pi host, admin route, Kubernetes API, arbitrary egress |
 | `naranjo-online` pod | Serve `naranjo.online` on TCP 8080 after connector ingress | All egress, API token, other namespaces, host |
 | `lidersea-com` pod | Serve `lidersea.com` on TCP 8080 after connector ingress | All egress, API token, other namespaces, host |
 | Future naranjo media reader | Read single-link regular delivery derivatives through one rooted, read-only, mount-verified boundary | Originals, staging, metadata, links, nested mounts, writes, directory listing, other host paths |
@@ -26,7 +27,7 @@ mount is safe.
 
 The protected legacy archive is not a namespace or storage class. Its exact
 units, roots, mount binding, identities, and evidence remain outside Git and are
-denied to Flux, Pods, both Tunnel connectors, CI, and provider tooling. A future
+denied to Flux, Pods, every Tunnel connector, CI, and provider tooling. A future
 restore requires a new isolated trust boundary and threat-model decision; a
 cluster rebuild or ordinary rollback may not activate it.
 
