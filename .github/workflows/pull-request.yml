@@ -46,29 +46,20 @@ jobs:
           }
 
           readonly oid_pattern='^([0-9a-f]{40}|[0-9a-f]{64})$'
-          [[ "${GITHUB_EVENT_NAME}" == pull_request ]] || fail
-          [[ "${GITHUB_REPOSITORY}" == "${PR_BASE_REPOSITORY}" ]] || fail
-          [[ "${PR_BASE_REF}" == main ]] || fail
-          [[ "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] || fail
-          [[ "${GITHUB_REF}" == "refs/pull/${PR_NUMBER}/merge" ]] || fail
-          [[ "${PR_BASE_SHA}" =~ ${oid_pattern} ]] || fail
-          [[ "${PR_HEAD_SHA}" =~ ${oid_pattern} ]] || fail
-          [[ "${GITHUB_SHA}" =~ ${oid_pattern} ]] || fail
-          [[ "$(git rev-parse --is-shallow-repository)" == false ]] || fail
 
-          checked_out_sha="$(git rev-parse --verify 'HEAD^{commit}')" || fail
-          [[ "${checked_out_sha}" == "${GITHUB_SHA}" ]] || fail
-          merge_record_text="$(git rev-list --parents -n 1 "${checked_out_sha}")" || fail
-          read -r -a merge_record <<< "${merge_record_text}"
-          [[ "${#merge_record[@]}" -eq 3 ]] || fail
-          [[ "${merge_record[0]}" == "${checked_out_sha}" ]] || fail
-          [[ "${merge_record[1]}" == "${PR_BASE_SHA}" ]] || fail
-          [[ "${merge_record[2]}" == "${PR_HEAD_SHA}" ]] || fail
-          [[ "$(git rev-parse --verify "${PR_BASE_SHA}^{commit}")" == "${PR_BASE_SHA}" ]] || fail
-          [[ "$(git rev-parse --verify "${PR_HEAD_SHA}^{commit}")" == "${PR_HEAD_SHA}" ]] || fail
+          # Every server-authenticated identity, merge-record and base-tip
+          # assertion lives in the script so it is shellcheck-covered and
+          # executed against real Git fixtures by tests/security. It prints the
+          # verified live base tip, which drives both range-scanning gates
+          # below so they can never scan a different range than the one the
+          # merge commit proves. The shape is re-checked here rather than
+          # trusted: a captured value crossing a process boundary is input.
+          base_sha="$(./scripts/ci/verify-pull-request-merge-base.sh)" || fail
+          [[ "${base_sha}" =~ ${oid_pattern} ]] || fail
+          [[ "${PR_HEAD_SHA}" =~ ${oid_pattern} ]] || fail
 
           python3 -I -B scripts/validate_publication_history.py \
-            --pull-request "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || fail
+            --pull-request "${base_sha}" "${PR_HEAD_SHA}" || fail
 
           expected_version="$(awk -F= '
             $1 == "GITLEAKS_VERSION" && $2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {
@@ -107,7 +98,7 @@ jobs:
             --max-target-megabytes=2 \
             --timeout=120 \
             --config policies/gitleaks.toml \
-            --log-opts="${PR_BASE_SHA}..${PR_HEAD_SHA}" \
+            --log-opts="${base_sha}..${PR_HEAD_SHA}" \
             . || fail
 
           [[ -f "${empty_ignore}" && ! -L "${empty_ignore}" && ! -s "${empty_ignore}" ]] || fail
