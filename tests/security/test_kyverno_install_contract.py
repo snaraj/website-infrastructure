@@ -77,6 +77,37 @@ def read(path):
     return path.read_text(encoding="utf-8")
 
 
+def capture(pattern, text, description):
+    """Return a required capture group, failing loudly when nothing matched.
+
+    Verification code that CRASHES on an input it cannot parse reports nothing
+    useful: an ``AttributeError`` on ``None.group`` reads as a broken test
+    rather than as the missing check it actually is, and a battery that errors
+    where it meant to assert is a false green waiting to happen. Every parse in
+    this module goes through here (or through ``first_index`` below), so an
+    unreadable input surfaces as a named coverage gap instead.
+    """
+
+    match = re.search(pattern, text)
+    if match is None:
+        raise AssertionError(
+            "{}: nothing matched {!r}; the subject's shape changed and this "
+            "check silently stopped covering it".format(description, pattern)
+        )
+    return match.group(1)
+
+
+def first_index(lines, needle, description):
+    """Index of the first line containing ``needle``, or a stated failure."""
+
+    for index, line in enumerate(lines):
+        if needle in line:
+            return index
+    raise AssertionError(
+        "{}: no recorded invocation contains {!r}".format(description, needle)
+    )
+
+
 def lock_value(key):
     for line in read(LOCK).splitlines():
         if line.startswith(key + "="):
@@ -132,12 +163,46 @@ def kubectl_is_pinned():
         check=False,
     )
     match = re.search(r'"gitVersion":\s*"([^"]+)"', completed.stdout)
-    return bool(match) and match.group(1) == pinned_version("KUBERNETES_VERSION")
+    # `is not None` rather than a truthiness test: it is the form that actually
+    # narrows the Optional for a static checker, and this file must not contain
+    # a single unguarded access on a match object.
+    if match is None:
+        return False
+    return match.group(1) == pinned_version("KUBERNETES_VERSION")
 
 
 PINNED_RENDERER = kustomize_is_pinned()
 PINNED_KUBECTL = kubectl_is_pinned()
 NEEDS_RENDERER = "the pinned kustomize is unavailable; render comparisons skipped"
+
+
+class ParseGuardTests(unittest.TestCase):
+    """The parse helpers report a coverage gap; they never crash into one.
+
+    This module reads its subjects — the installer, the overlays, the recorded
+    kubectl invocations — by pattern. A pattern that stops matching because the
+    subject changed shape means the check it fed has silently stopped covering
+    anything, which is the most valuable failure this battery can produce and
+    the easiest one to lose to an AttributeError on None.
+    """
+
+    def test_an_unmatched_pattern_fails_as_a_named_gap(self):
+        with self.assertRaises(AssertionError) as raised:
+            capture(r"(nothing-like-this)", "some other text", "the subject")
+        self.assertIn("the subject", str(raised.exception))
+        self.assertIn("silently stopped covering it", str(raised.exception))
+
+    def test_a_missing_invocation_fails_as_a_named_gap(self):
+        with self.assertRaises(AssertionError) as raised:
+            first_index(["apply -f one", "apply -f two"], "delete", "the probe")
+        self.assertIn("the probe", str(raised.exception))
+        self.assertIn("no recorded invocation", str(raised.exception))
+
+    def test_a_matching_pattern_returns_its_capture(self):
+        # Vacuity floor: a helper that always raised would make every caller
+        # above red, but a helper that returned the wrong group would be silent.
+        self.assertEqual(capture(r"phase-(\w+)\.yaml", "apply -f phase-network.yaml", "x"), "network")
+        self.assertEqual(first_index(["a", "b", "c"], "c", "x"), 2)
 
 
 class StagedRolloutTests(unittest.TestCase):
@@ -292,9 +357,13 @@ class EngineConfigurationTests(unittest.TestCase):
                 self.assertIn("[*/*,{},*]".format(namespace), self.text)
 
     def test_the_webhook_selector_excludes_every_lockout_namespace(self):
-        selector = re.search(r"(?m)^  webhooks: '(.*)'$", self.text)
-        self.assertIsNotNone(selector, "the webhooks key must be a quoted JSON object")
-        parsed = json.loads(selector.group(1))
+        parsed = json.loads(
+            capture(
+                r"(?m)^  webhooks: '(.*)'$",
+                self.text,
+                "the webhooks key must be a quoted JSON object",
+            )
+        )
         expressions = parsed["namespaceSelector"]["matchExpressions"]
         self.assertEqual(len(expressions), 1)
         expression = expressions[0]
@@ -355,16 +424,18 @@ class OrderingContractTests(unittest.TestCase):
         self.installer = read(INSTALLER)
 
     def test_the_phase_order_puts_network_before_the_controller(self):
-        phases = re.search(r"(?m)^PHASE_NAMES=\((.*)\)$", self.installer)
-        self.assertIsNotNone(phases)
-        ordered = phases.group(1).split()
+        ordered = capture(
+            r"(?m)^PHASE_NAMES=\((.*)\)$", self.installer, "the installer's phase order"
+        ).split()
         self.assertEqual(
             ordered, ["namespace", "bounds", "network", "controller", "policies"]
         )
 
     def test_there_is_no_webhook_phase(self):
-        phases = re.search(r"(?m)^PHASE_NAMES=\((.*)\)$", self.installer)
-        self.assertNotIn("webhooks", phases.group(1).split())
+        ordered = capture(
+            r"(?m)^PHASE_NAMES=\((.*)\)$", self.installer, "the installer's phase order"
+        ).split()
+        self.assertNotIn("webhooks", ordered)
 
     def test_the_health_wait_happens_after_the_controller_phase(self):
         controller = self.installer.index("if [[ \"$phase\" == 'controller' ]]")
@@ -1020,7 +1091,7 @@ class InstallerGuardTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         applied = [
-            re.search(r"phase-(\w+)\.yaml", line).group(1)
+            capture(r"phase-(\w+)\.yaml", line, "the applied phase file")
             for line in self._invocations()
             if re.search(r"apply -f \S*phase-\w+\.yaml", line)
         ]
@@ -1029,9 +1100,9 @@ class InstallerGuardTests(unittest.TestCase):
         # the whole ordering claim: nothing that triggers webhook registration
         # runs before the backend is Available.
         log = self._invocations()
-        wait = next(index for index, line in enumerate(log) if "--for=condition=Available" in line)
-        controller = next(index for index, line in enumerate(log) if "phase-controller.yaml" in line)
-        policies = next(index for index, line in enumerate(log) if "phase-policies.yaml" in line)
+        wait = first_index(log, "--for=condition=Available", "the controller health wait")
+        controller = first_index(log, "phase-controller.yaml", "the controller phase")
+        policies = first_index(log, "phase-policies.yaml", "the policies phase")
         self.assertLess(controller, wait)
         self.assertLess(wait, policies)
         journal.unlink()
