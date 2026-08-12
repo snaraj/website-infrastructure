@@ -50,8 +50,33 @@ SOURCE_CONTROLLER = Subject("flux-system", "source-controller")
 # requires, so unsuspending admission without granting (or removing) this
 # authority turns this battery red.
 DECLARED_INSUFFICIENCIES = {
+    # The Kyverno staging stop: the admission reconciler is namespaced on
+    # purpose, so it can own the inert controller shell but cannot create the
+    # cluster-scoped policy objects the same path declares.
     ("admission", "kyverno.io", "clusterpolicies"),
     ("admission", "admissionregistration.k8s.io", "validatingwebhookconfigurations"),
+    # READINESS READ-BACK, pre-existing and NOT introduced by the narrowing
+    # (these Roles are unchanged from main). A `wait: true` Kustomization and a
+    # HelmRelease that has not disabled Helm's wait both evaluate readiness by
+    # walking a workload down to its Pods, under the impersonated identity — so
+    # each needs `get`/`list` on replicasets and pods in the target namespace.
+    #
+    # This CANNOT simply be granted: policies/conftest/kubernetes.rego denies
+    # any Role in cloudflare-public, naranjo-online, lidersea-com, or kyverno
+    # that names pods or replicasets AT ALL — the rule is verb-agnostic, so even
+    # a read grant is refused as "direct workload control". Closing the gap is
+    # therefore a reviewed decision between narrowing that policy to write verbs
+    # and turning the waits off, not something this change may quietly pick.
+    # Until then every affected object stays suspended, which the test below
+    # requires.
+    ("admission", "apps", "replicasets"),
+    ("admission", "", "pods"),
+    ("cloudflare-public", "apps", "replicasets"),
+    ("cloudflare-public", "", "pods"),
+    ("naranjo-online", "apps", "replicasets"),
+    ("naranjo-online", "", "pods"),
+    ("lidersea-com", "apps", "replicasets"),
+    ("lidersea-com", "", "pods"),
 }
 
 # Requests the narrowed authorization must refuse. Each row is the concrete
@@ -112,7 +137,9 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.documents = model.effective_flux_rbac(ROOT)
         cls.authorizer = Authorizer.from_documents(cls.documents)
-        cls.requirements, cls.controller_requirements = model.derive_requirements(ROOT)
+        derived = model.derive_requirements(ROOT)
+        cls.requirements = derived.applied
+        cls.controller_requirements = derived.controller
 
     def test_derivation_covers_every_reconciled_object(self):
         # A derivation that found nothing would pass every sufficiency test
@@ -146,7 +173,18 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
             with self.subTest(resource=expected):
                 self.assertIn(expected, applied)
         self.assertGreater(len(self.requirements), 250)
-        self.assertGreater(len(self.controller_requirements), 50)
+        self.assertGreater(len(self.controller_requirements), 150)
+        # All three controllers must appear. source-controller reconciles every
+        # source object under its own identity; a derivation that never named it
+        # left that whole authority unproven.
+        self.assertEqual(
+            {str(requirement.subject) for requirement in self.controller_requirements},
+            {
+                "system:serviceaccount:flux-system:source-controller",
+                "system:serviceaccount:flux-system:kustomize-controller",
+                "system:serviceaccount:flux-system:helm-controller",
+            },
+        )
 
     def test_every_applied_object_is_permitted_or_a_declared_staging_stop(self):
         gaps = {
@@ -161,15 +199,19 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
             "suspended",
         )
 
-    def test_a_declared_staging_stop_requires_its_kustomization_to_stay_suspended(self):
-        suspended = model.suspended_kustomizations(ROOT)
+    def test_a_declared_staging_stop_requires_its_owner_to_stay_suspended(self):
+        # Both kinds are checked: a HelmRelease is switched off by its own
+        # spec.suspend, independently of the Kustomization that delivers it.
+        suspended = model.suspended_owners(ROOT)
         for owner, group, resource in sorted(DECLARED_INSUFFICIENCIES):
             with self.subTest(owner=owner, resource=resource):
                 self.assertIn(
                     owner,
                     suspended,
-                    "Kustomization {} is no longer suspended but still cannot apply "
-                    "{}/{}: unsuspending it would fail halfway".format(owner, group, resource),
+                    "{} is no longer suspended but still cannot use {}/{}: "
+                    "unsuspending it would fail halfway".format(
+                        owner, group or "core", resource
+                    ),
                 )
 
     def test_the_controllers_can_run_the_reconciliation_under_their_own_identity(self):
@@ -196,6 +238,92 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                         requirement.subject, "impersonate", "", "serviceaccounts",
                         requirement.namespace, requirement.name,
                     )
+                )
+
+    def test_source_resolution_is_derived_for_every_custom_resource(self):
+        """The authority every reconciliation starts with (P1-1).
+
+        A reconciler resolves `spec.sourceRef`/`spec.chartRef` through its own
+        API client BEFORE impersonation is configured, so reading the source is
+        the CONTROLLER's own authority. Deleting the source read rule from the
+        narrowed ClusterRole is a coherent-looking further narrowing that would
+        stop ALL reconciliation live — the root Kustomization could not read the
+        GitRepository it syncs from — so it must fail here.
+        """
+
+        reads = [
+            requirement
+            for requirement in self.controller_requirements
+            if "resolves its" in requirement.reason
+        ]
+        self.assertTrue(reads)
+        # Every Kustomization and every HelmRelease resolves exactly one source,
+        # and does it as the controller rather than as the impersonated account.
+        self.assertEqual(
+            {str(requirement.subject) for requirement in reads},
+            {
+                "system:serviceaccount:flux-system:kustomize-controller",
+                "system:serviceaccount:flux-system:helm-controller",
+            },
+        )
+        owners = {requirement.owner for requirement in reads}
+        self.assertEqual(
+            owners,
+            {
+                "flux-system", "platform-prerequisites", "admission", "platform-services",
+                "naranjo-online", "lidersea-com", "cloudflare-public",
+            },
+        )
+        for requirement in reads:
+            with self.subTest(
+                subject=str(requirement.subject),
+                resource=requirement.resource,
+                namespace=requirement.namespace,
+            ):
+                self.assertTrue(
+                    self.authorizer.allows(
+                        requirement.subject, requirement.verb, requirement.group,
+                        requirement.resource, requirement.namespace,
+                    ),
+                    requirement.describe(),
+                )
+
+    def test_the_root_kustomization_can_read_the_repository_it_syncs_from(self):
+        # The single most load-bearing request in the whole system, asserted on
+        # its own so a regression names itself.
+        for verb in ("get", "list", "watch"):
+            with self.subTest(verb=verb):
+                self.assertTrue(
+                    self.authorizer.allows(
+                        KUSTOMIZE_CONTROLLER, verb, "source.toolkit.fluxcd.io",
+                        "gitrepositories", "flux-system",
+                    )
+                )
+
+    def test_source_controller_can_reconcile_every_source_it_owns(self):
+        sources = model.flux_custom_resources(ROOT).sources
+        self.assertGreaterEqual(len(sources), 4)
+        for source in sources:
+            group, resource, _ = model.KIND_RESOURCES[source["kind"]]
+            namespace = source["metadata"].get("namespace", "flux-system")
+            with self.subTest(name=source["metadata"]["name"], namespace=namespace):
+                self.assertTrue(
+                    self.authorizer.allows(
+                        SOURCE_CONTROLLER, "patch", group, resource, namespace
+                    )
+                )
+
+    def test_controllers_can_probe_the_api_server_liveness_endpoint(self):
+        # The one grant a Role cannot express, so it stays cluster-scoped and is
+        # pinned rather than only justified in prose.
+        for subject in (SOURCE_CONTROLLER, KUSTOMIZE_CONTROLLER, HELM_CONTROLLER):
+            with self.subTest(subject=str(subject)):
+                self.assertTrue(
+                    self.authorizer.allows_non_resource(subject, "head", model.LIVENESS_URL)
+                )
+                self.assertFalse(
+                    self.authorizer.allows_non_resource(subject, "get", "/metrics"),
+                    "the non-resource grant must not be broader than the probe",
                 )
 
     def test_site_release_reconcilers_grant_the_source_kind_their_own_source_declares(self):
@@ -464,7 +592,13 @@ class FluxRbacCompositionTests(unittest.TestCase):
             for document in documents
             if document.get("kind") == "RoleBinding"
         }
-        for key, expected in contract["expected_bindings"]().items():
+        expected_role_bindings = contract["expected_bindings"]()
+        # Exact set equality, matching the ClusterRoleBinding assertion below.
+        # `assertIn` alone let a RoleBinding that the model never modelled — a
+        # group-subject grant in another namespace, say — exist on both sides of
+        # the mirror without either noticing.
+        self.assertEqual(set(bindings), set(expected_role_bindings))
+        for key, expected in expected_role_bindings.items():
             with self.subTest(binding=key):
                 self.assertIn(key, bindings)
                 self.assertEqual(bindings[key]["roleRef"], expected[0])
@@ -524,6 +658,73 @@ class FluxRbacCompositionTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(saved)
         return contract
+
+
+class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
+    """The desired-state enumeration must refuse what it cannot follow.
+
+    Under-counting the desired state is how a sufficiency proof lies: an object
+    the enumeration never saw needs no permission, so the suite stays green
+    while the reconciliation it belongs to is denied on the cluster.
+    """
+
+    def build_root(self, kustomization, extra=None):
+        directory = tempfile.mkdtemp(prefix="flux-rbac-enumeration.")
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = Path(directory).resolve()
+        path = root / "kubernetes" / "example"
+        path.mkdir(parents=True)
+        (path / "kustomization.yaml").write_text(kustomization, encoding="utf-8")
+        for name, body in (extra or {}).items():
+            (path / name).write_text(body, encoding="utf-8")
+        return root
+
+    def test_a_generator_or_component_is_refused_rather_than_skipped(self):
+        # A configMapGenerator renders a ConfigMap that `resources:` never names,
+        # into a namespace whose reconciler may not be able to create one.
+        for key, body in (
+            ("configMapGenerator", "configMapGenerator:\n  - name: extra\n"),
+            ("components", "components:\n  - ../shared\n"),
+            ("namespace", "namespace: naranjo-online\n"),
+            ("namePrefix", "namePrefix: staged-\n"),
+        ):
+            root = self.build_root(
+                "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+                "kind: Kustomization\n"
+                "resources:\n  - object.yaml\n" + body,
+                {"object.yaml": "apiVersion: v1\nkind: ServiceAccount\n"
+                                "metadata:\n  name: example\n  namespace: naranjo-online\n"},
+            )
+            with self.subTest(key=key):
+                with self.assertRaises(AssertionError) as raised:
+                    model.objects_applied_by(root, "kubernetes/example")
+                self.assertIn(key, str(raised.exception))
+
+    def test_a_path_that_applies_nothing_is_refused(self):
+        # `resources: []` silently drops every requirement the path should have
+        # contributed, which no assertion downstream can distinguish from
+        # "everything here is authorized".
+        root = self.build_root(
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources: []\n"
+        )
+        with self.assertRaises(AssertionError) as raised:
+            model.objects_applied_by(root, "kubernetes/example")
+        self.assertIn("no objects enumerated", str(raised.exception))
+
+    def test_the_reviewed_roots_are_all_enumerable(self):
+        # The strictness above must not be satisfied by refusing everything.
+        for relative in (
+            "kubernetes/reconciliation",
+            "kubernetes/platform/prerequisites",
+            "kubernetes/platform/admission",
+            "kubernetes/platform/cloudflare-public/release",
+            "kubernetes/websites/naranjo-online",
+            "kubernetes/websites/lidersea-com",
+        ):
+            with self.subTest(root=relative):
+                self.assertTrue(model.objects_applied_by(ROOT, relative))
 
 
 class FluxRbacStructuralValidatorTests(unittest.TestCase):
@@ -651,6 +852,70 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
             any("flux-system/flux-controller-decryption" in error for error in errors), errors
         )
 
+    def test_a_reindented_rule_still_reaches_the_secret_check(self):
+        # P3-3, the same vacuity class as commit 2 one axis over: re-indenting a
+        # rule is valid YAML that changes nothing about what it grants, and the
+        # block splitter used to assume a maximum indent.
+        root = self.build_tree()
+        path = root / "kubernetes/flux-system/access.yaml"
+        text = path.read_text(encoding="utf-8")
+        old = (
+            "rules:\n"
+            '  - apiGroups: [""]\n'
+            "    resources: [secrets]\n"
+            "    verbs: [get, list, watch]"
+        )
+        self.assertIn(old, text)
+        reindented = (
+            "rules:\n"
+            '      - apiGroups: [""]\n'
+            "        resources: [secrets]\n"
+            "        verbs: [get, list, watch, delete]"
+        )
+        path.write_text(text.replace(old, reindented, 1), encoding="utf-8")
+        errors = self.validator.flux_rbac_contract_errors(root)
+        self.assertTrue(any("must be read-only" in error for error in errors), errors)
+
+    def test_a_patch_that_targets_the_wrong_object_is_refused(self):
+        for relative, old, new, fragment in (
+            (
+                "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+                "kind: ClusterRole\n",
+                "kind: Role\n",
+                "must target kind ClusterRole",
+            ),
+            (
+                "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
+                "  name: crd-controller-flux-system\n",
+                "  name: crd-controller-renamed\n",
+                "must name crd-controller-flux-system",
+            ),
+        ):
+            with self.subTest(patch=Path(relative).name):
+                errors = self.mutate(relative, old, new)
+                self.assertTrue(any(fragment in error for error in errors), errors)
+
+    def test_a_missing_patch_or_install_root_or_authored_file_is_refused(self):
+        for relative, fragment in (
+            (
+                "kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml",
+                "Flux RBAC narrowing patch is missing: cluster-reconciler.yaml",
+            ),
+            (
+                "kubernetes/flux-system/controllers/kustomization.yaml",
+                "Flux controller install root is missing",
+            ),
+            (
+                "kubernetes/flux-system/access.yaml",
+                "authored Flux RBAC file is missing",
+            ),
+        ):
+            root = self.build_tree()
+            (root / relative).unlink()
+            with self.subTest(removed=relative):
+                errors = self.validator.flux_rbac_contract_errors(root)
+                self.assertTrue(any(fragment in error for error in errors), errors)
+
     def test_a_hand_written_cluster_admin_binding_is_refused(self):
         errors = self.mutate(
             "kubernetes/flux-system/access.yaml",
@@ -774,6 +1039,108 @@ class FluxRbacAuthorizerSemanticsTests(unittest.TestCase):
         )
         self.assertFalse(
             self.authorizer.allows(self.subject, "get", "", "secrets", None, "named")
+        )
+
+    def test_a_binding_to_a_role_outside_the_reviewed_set_is_refused(self):
+        """P2-1: an unresolvable roleRef must raise, never grant nothing.
+
+        Built-in roles — cluster-admin, admin, edit, any system:* — are never
+        among the parsed documents, so treating an unresolvable reference as an
+        empty rule set made the model report "denied" for authority the cluster
+        actually grants. That is a false green in the only direction that
+        matters.
+        """
+
+        for role in ("admin", "cluster-admin", "edit", "system:controller:generic"):
+            with self.subTest(role=role):
+                with self.assertRaises(AssertionError) as raised:
+                    Authorizer.from_documents(
+                        [
+                            {
+                                "kind": "RoleBinding",
+                                "metadata": {"name": "borrowed", "namespace": "kube-system"},
+                                "roleRef": {"kind": "ClusterRole", "name": role},
+                                "subjects": [
+                                    {
+                                        "kind": "ServiceAccount",
+                                        "name": "kustomize-controller",
+                                        "namespace": "flux-system",
+                                    }
+                                ],
+                            }
+                        ]
+                    )
+                self.assertIn(role, str(raised.exception))
+
+    def test_group_and_user_subject_forms_reach_a_service_account(self):
+        """P2-2: a binding need not name the account to reach it.
+
+        The live-state verifier already refuses group-shaped bindings that reach
+        a protected account. Before this, the model saw only `kind:
+        ServiceAccount`, so a Role bound to `Group: system:serviceaccounts:
+        flux-system` granted authority the model reported as denied — the model
+        was strictly weaker than the verifier it claims to mirror.
+        """
+
+        rules = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]}]
+        for subject_entry in (
+            {"kind": "Group", "name": "system:serviceaccounts:flux-system",
+             "apiGroup": "rbac.authorization.k8s.io"},
+            {"kind": "Group", "name": "system:serviceaccounts",
+             "apiGroup": "rbac.authorization.k8s.io"},
+            {"kind": "Group", "name": "system:authenticated",
+             "apiGroup": "rbac.authorization.k8s.io"},
+            {"kind": "User", "name": "system:serviceaccount:flux-system:kustomize-controller",
+             "apiGroup": "rbac.authorization.k8s.io"},
+        ):
+            authorizer = Authorizer.from_documents(
+                [
+                    {
+                        "kind": "Role",
+                        "metadata": {"name": "borrowed", "namespace": "kube-system"},
+                        "rules": rules,
+                    },
+                    {
+                        "kind": "RoleBinding",
+                        "metadata": {"name": "borrowed", "namespace": "kube-system"},
+                        "roleRef": {"kind": "Role", "name": "borrowed"},
+                        "subjects": [subject_entry],
+                    },
+                ]
+            )
+            with self.subTest(subject=subject_entry["name"]):
+                self.assertTrue(
+                    authorizer.allows(
+                        KUSTOMIZE_CONTROLLER, "create", "", "secrets", "kube-system"
+                    )
+                )
+
+    def test_a_group_for_another_namespace_does_not_reach_this_account(self):
+        authorizer = Authorizer.from_documents(
+            [
+                {
+                    "kind": "Role",
+                    "metadata": {"name": "elsewhere", "namespace": "kube-system"},
+                    "rules": [
+                        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]}
+                    ],
+                },
+                {
+                    "kind": "RoleBinding",
+                    "metadata": {"name": "elsewhere", "namespace": "kube-system"},
+                    "roleRef": {"kind": "Role", "name": "elsewhere"},
+                    "subjects": [
+                        {
+                            "kind": "Group",
+                            "name": "system:serviceaccounts:kyverno",
+                            "apiGroup": "rbac.authorization.k8s.io",
+                        }
+                    ],
+                },
+            ]
+        )
+        self.assertFalse(
+            authorizer.allows(KUSTOMIZE_CONTROLLER, "create", "", "secrets", "kube-system")
         )
 
     def test_an_unbound_subject_is_denied(self):

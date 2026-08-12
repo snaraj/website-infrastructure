@@ -1184,10 +1184,20 @@ def _rbac_rule_blocks(document):
     if match is None:
         return []
     body = match.group("body")
+    # The item indent is DERIVED from the first entry rather than assumed. An
+    # assumed range (the original "no more than four spaces") is the same
+    # vacuity class as matching only one list style: re-indenting a rule by two
+    # columns is valid YAML that changes nothing about what it grants, and it
+    # would have slipped every check built on top of this helper.
+    lead = re.search(r"(?m)^(?P<indent>\s*)-\s", body)
+    if lead is None:
+        return []
+    indent = lead.group("indent")
+    item = re.compile(r"^{}-\s".format(re.escape(indent)))
     blocks = []
     current = []
     for line in body.splitlines():
-        if re.match(r"^\s*-\s", line) and re.match(r"^\s{0,4}-\s", line):
+        if item.match(line):
             if current:
                 blocks.append("\n".join(current))
             current = [line]

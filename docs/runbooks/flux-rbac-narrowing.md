@@ -62,12 +62,42 @@ the denials — no cluster-admin, no wildcard reaching a Flux account, no
 unrestricted impersonation, no token minting, no Secret writes — and that the
 model's composition of the patches equals what `kustomize build` renders.
 
-The one authorization gap the proof tolerates is declared: the `admission`
-reconciler cannot create the ClusterPolicies or the admission webhook its path
-declares, which is the staging stop recorded in `access.yaml`. The test requires
-the `admission` Kustomization to stay suspended for exactly as long as that gap
-exists, so unsuspending admission without first granting (or removing) that
-authority turns the suite red.
+### The declared gaps, and what they block
+
+The proof tolerates exactly two classes of gap, both declared in
+`DECLARED_INSUFFICIENCIES`, and each tied by test to its object staying
+suspended.
+
+**1. The Kyverno staging stop.** The `admission` reconciler is namespaced on
+purpose, so it can own the inert controller shell but cannot create the
+ClusterPolicies or the `ValidatingWebhookConfiguration` its own path declares.
+This is the stop already recorded in `access.yaml`.
+
+**2. Readiness read-back — PRE-EXISTING, and a genuine unsuspend blocker.** A
+`wait: true` Kustomization and a HelmRelease that has not disabled Helm's wait
+both evaluate readiness by walking a workload down to the Pods it creates, under
+the impersonated identity. So `admission` (waits on a Deployment in `kyverno`)
+and all three `helm-reconciler` accounts need `get`/`list` on `replicasets` and
+`pods` in their target namespace, and none of them has it.
+
+These Roles are unchanged by this narrowing — the gap exists on `main` today —
+but it means "this narrowing will not break unsuspend" is NOT established, and
+saying so plainly is the point of declaring it.
+
+It cannot simply be granted. `policies/conftest/kubernetes.rego` denies any Role
+in `cloudflare-public`, `naranjo-online`, `lidersea-com`, or `kyverno` that names
+`pods` or `replicasets` **at all** — the rule is verb-agnostic, so even a read
+grant is refused as "direct workload control". Closing the gap is therefore a
+reviewed decision between two options, and this change deliberately picks
+neither:
+
+- narrow that Conftest rule to write verbs, so read-back is permitted while
+  direct workload control stays denied; or
+- turn the waits off — `wait: false` on the Kustomization, `disableWait` on the
+  HelmRelease actions — and accept that readiness is no longer gated there.
+
+Until one is chosen and reviewed, every affected object stays suspended, which
+the suite enforces.
 
 ## Live proof, before the deletion
 
@@ -102,6 +132,30 @@ again after the deletion.
       --as=system:serviceaccount:flux-system:naranjo-online-reconciler
     auth can-i create ocirepositories.source.toolkit.fluxcd.io -n lidersea-com \
       --as=system:serviceaccount:flux-system:lidersea-com-reconciler
+    # The source read every reconciliation begins with. It happens under the
+    # CONTROLLER's identity, before impersonation is configured, so it is asked
+    # as the controller and not as the reconciler account.
+    auth can-i get gitrepositories.source.toolkit.fluxcd.io -n flux-system \
+      --as=system:serviceaccount:flux-system:kustomize-controller
+    auth can-i get ocirepositories.source.toolkit.fluxcd.io -n naranjo-online \
+      --as=system:serviceaccount:flux-system:helm-controller
+    auth can-i patch gitrepositories.source.toolkit.fluxcd.io -n flux-system \
+      --as=system:serviceaccount:flux-system:source-controller
+    auth can-i create helmcharts.source.toolkit.fluxcd.io -n cloudflare-public \
+      --as=system:serviceaccount:flux-system:helm-controller
+
+    # DECLARED GAPS — these answer `no` today, and that is recorded rather than
+    # fixed (see "The declared gaps" above). Run them so the answer is observed
+    # rather than assumed, and do NOT unsuspend the objects that need them until
+    # the reviewed decision is made.
+    auth can-i list pods -n kyverno \
+      --as=system:serviceaccount:flux-system:admission-reconciler
+    auth can-i list replicasets -n naranjo-online \
+      --as=system:serviceaccount:naranjo-online:helm-reconciler
+    auth can-i list pods -n lidersea-com \
+      --as=system:serviceaccount:lidersea-com:helm-reconciler
+    auth can-i list pods -n cloudflare-public \
+      --as=system:serviceaccount:cloudflare-public:helm-reconciler
 
     # must be no
     auth can-i create deployments -n kube-system \
