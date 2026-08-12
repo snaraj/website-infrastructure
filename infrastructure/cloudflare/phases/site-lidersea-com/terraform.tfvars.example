@@ -1,0 +1,4 @@
+approve_site_lidersea_com_phase             = false
+cloudflare_account_id                       = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+cloudflare_lidersea_com_zone_id             = "REPLACE_WITH_LIDERSEA_COM_32_HEX_ZONE_ID"
+verified_lidersea_com_adoption_audit_sha256 = "REPLACE_WITH_FRESH_ADOPTION_AUDIT_SHA256"

@@ -208,7 +208,7 @@ def cost_policy_violations(cost_policy_text):
     pins = (
         ("defaultDecision", "defaultDecision: deny"),
         ("infrastructureCostUsd", "infrastructureCostUsd: 0"),
-        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 9"),
+        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 21"),
     )
     lines = cost_policy_text.splitlines()
     violations = []
@@ -302,10 +302,16 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
         cls.cost_policy = COST_POLICY_PATH.read_text(encoding="utf-8")
         cls.allowed_types = rego_allowed_resource_types(cls.rego)
 
-    def test_rego_extraction_yields_the_closed_five_type_allowlist(self):
-        """The extraction must produce the documented closed set shape."""
+    def test_rego_extraction_yields_the_closed_six_type_allowlist(self):
+        """The extraction must produce the documented closed set shape.
 
-        self.assertEqual(len(self.allowed_types), 5)
+        Six, not five: the two website roots carry ``cloudflare_zone_setting``
+        for the zone security target state. It is a free zone-level control on
+        every Cloudflare plan, so the zero-cost boundary is unchanged; the
+        count is pinned here so a seventh type cannot arrive unnoticed.
+        """
+
+        self.assertEqual(len(self.allowed_types), 6)
         for resource_type in self.allowed_types:
             with self.subTest(resource_type=resource_type):
                 self.assertRegex(resource_type, r"^cloudflare_[a-z0-9_]+$")
@@ -352,6 +358,21 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
         """deny / 0 USD / resource ceiling must survive byte-for-byte."""
 
         self.assertEqual(cost_policy_violations(self.cost_policy), [])
+
+    def test_the_zone_setting_type_is_the_only_allowlist_growth(self):
+        """Name the exact closed set so a silent widening fails here."""
+
+        self.assertEqual(
+            self.allowed_types,
+            frozenset({
+                "cloudflare_dns_record",
+                "cloudflare_zero_trust_gateway_policy",
+                "cloudflare_zero_trust_tunnel_cloudflared",
+                "cloudflare_zero_trust_tunnel_cloudflared_config",
+                "cloudflare_zero_trust_tunnel_cloudflared_route",
+                "cloudflare_zone_setting",
+            }),
+        )
 
     def test_no_tracked_opentofu_file_exists_outside_the_phase_roots(self):
         """Out-of-tree resources must not be able to dodge the scanner."""
@@ -531,8 +552,8 @@ class CloudflareZeroSpendDenyPathTests(unittest.TestCase):
             ("defaultDecision: deny", "defaultDecision: allow"),
             ("infrastructureCostUsd: 0", "infrastructureCostUsd: 1"),
             (
-                "  maximumManagedResourceCount: 9",
-                "  maximumManagedResourceCount: 10",
+                "  maximumManagedResourceCount: 21",
+                "  maximumManagedResourceCount: 22",
             ),
             ("defaultDecision: deny", ""),
             (

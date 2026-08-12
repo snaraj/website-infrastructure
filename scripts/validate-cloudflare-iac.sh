@@ -26,9 +26,8 @@ phases=(
   admin-policies
   admin-route
   admin-api
-  public-edge
-  public-dns-naranjo
-  public-dns-lidersea
+  site-naranjo-online
+  site-lidersea-com
 )
 
 command -v tofu >/dev/null 2>&1 || {

@@ -1,0 +1,358 @@
+{
+  "codex_contract": {
+    "phase": "site-naranjo-online"
+  },
+  "variables": {
+    "approve_site_naranjo_online_phase": {
+      "value": true
+    },
+    "cloudflare_account_id": {
+      "value": "11111111111111111111111111111111"
+    },
+    "cloudflare_naranjo_online_zone_id": {
+      "value": "22222222222222222222222222222222"
+    },
+    "verified_naranjo_online_adoption_audit_sha256": {
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_tunnel_cloudflared",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "id": "00000000-0000-0000-0000-000000000000",
+          "account_id": "11111111111111111111111111111111",
+          "name": "naranjo-online",
+          "config_src": "cloudflare"
+        },
+        "after": {
+          "id": "00000000-0000-0000-0000-000000000000",
+          "account_id": "11111111111111111111111111111111",
+          "name": "naranjo-online",
+          "config_src": "cloudflare"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_tunnel_cloudflared_config",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "account_id": "11111111111111111111111111111111",
+          "tunnel_id": "00000000-0000-0000-0000-000000000000",
+          "source": "cloudflare",
+          "config": {
+            "ingress": [
+              {
+                "hostname": "naranjo.online",
+                "service": "http://naranjo-online.naranjo-online.svc.cluster.local:8080"
+              },
+              {
+                "service": "http_status:404"
+              }
+            ]
+          }
+        },
+        "after": {
+          "account_id": "11111111111111111111111111111111",
+          "tunnel_id": "00000000-0000-0000-0000-000000000000",
+          "source": "cloudflare",
+          "config": {
+            "ingress": [
+              {
+                "hostname": "naranjo.online",
+                "service": "http://naranjo-online.naranjo-online.svc.cluster.local:8080"
+              },
+              {
+                "service": "http_status:404"
+              }
+            ]
+          }
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_dns_record.naranjo_online_apex",
+      "mode": "managed",
+      "type": "cloudflare_dns_record",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "name": "naranjo.online",
+          "type": "CNAME",
+          "content": "00000000-0000-0000-0000-000000000000.cfargotunnel.com",
+          "proxied": true,
+          "ttl": 1
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "name": "naranjo.online",
+          "type": "CNAME",
+          "content": "00000000-0000-0000-0000-000000000000.cfargotunnel.com",
+          "proxied": true,
+          "ttl": 1
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zone_setting.naranjo_online_always_use_https",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "always_use_https",
+          "value": "off"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "always_use_https",
+          "value": "on"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zone_setting.naranjo_online_min_tls_version",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "min_tls_version",
+          "value": "1.0"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "min_tls_version",
+          "value": "1.2"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zone_setting.naranjo_online_tls_1_3",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "tls_1_3",
+          "value": "on"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "tls_1_3",
+          "value": "on"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zone_setting.naranjo_online_zero_rtt",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "0rtt",
+          "value": "off"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "0rtt",
+          "value": "off"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "cloudflare_zone_setting.naranjo_online_ssl",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "ssl",
+          "value": "flexible"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "ssl",
+          "value": "full"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "provider_config": {
+      "cloudflare": {
+        "name": "cloudflare",
+        "full_name": "registry.opentofu.org/cloudflare/cloudflare",
+        "expressions": {}
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online",
+          "mode": "managed",
+          "type": "cloudflare_zero_trust_tunnel_cloudflared",
+          "expressions": {
+            "account_id": {
+              "references": [
+                "var.cloudflare_account_id"
+              ]
+            },
+            "name": {},
+            "config_src": {}
+          }
+        },
+        {
+          "address": "cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online",
+          "mode": "managed",
+          "type": "cloudflare_zero_trust_tunnel_cloudflared_config",
+          "expressions": {
+            "account_id": {
+              "references": [
+                "var.cloudflare_account_id"
+              ]
+            },
+            "tunnel_id": {
+              "references": [
+                "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online.id",
+                "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online"
+              ]
+            },
+            "source": {},
+            "config": {}
+          }
+        },
+        {
+          "address": "cloudflare_dns_record.naranjo_online_apex",
+          "mode": "managed",
+          "type": "cloudflare_dns_record",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "name": {},
+            "type": {},
+            "content": {
+              "references": [
+                "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online.id",
+                "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online"
+              ]
+            },
+            "proxied": {},
+            "ttl": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_always_use_https",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_min_tls_version",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_tls_1_3",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_zero_rtt",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_ssl",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        }
+      ]
+    }
+  }
+}

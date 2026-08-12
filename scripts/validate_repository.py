@@ -149,6 +149,7 @@ ALLOWED_CLOUDFLARE_RESOURCES = {
     "cloudflare_zero_trust_tunnel_cloudflared",
     "cloudflare_zero_trust_tunnel_cloudflared_config",
     "cloudflare_zero_trust_tunnel_cloudflared_route",
+    "cloudflare_zone_setting",
 }
 APPROVED_SOPS_SECRET_PATHS = {
     "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml": (

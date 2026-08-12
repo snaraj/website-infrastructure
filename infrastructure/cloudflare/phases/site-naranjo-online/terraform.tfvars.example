@@ -1,0 +1,4 @@
+approve_site_naranjo_online_phase             = false
+cloudflare_account_id                         = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+cloudflare_naranjo_online_zone_id             = "REPLACE_WITH_NARANJO_ONLINE_32_HEX_ZONE_ID"
+verified_naranjo_online_adoption_audit_sha256 = "REPLACE_WITH_FRESH_ADOPTION_AUDIT_SHA256"

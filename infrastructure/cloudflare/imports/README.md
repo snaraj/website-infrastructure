@@ -5,21 +5,29 @@ running them, and no import is part of repository-only validation. Use an
 import only when read-only discovery proves the exact object already exists and
 an explicit operator checkpoint approves adding it to the correct state.
 
-The current `scripts/cloudflare-plan-gate.sh` is initial-onboarding create-only:
-it requires exact `actions = ["create"]` and an absent prior object. It cannot
-authorize import, refresh-only, no-op, update, reconciliation, replacement, or
-rollback. Every import below remains blocked until a separate import/
-reconciliation policy and gate are implemented and independently validated.
+The administrative imports below remain blocked: `scripts/cloudflare-plan-gate.sh`
+is initial-onboarding create-only, requiring exact `actions = ["create"]` and an
+absent prior object, so it cannot authorize import, refresh-only, no-op, update,
+reconciliation, replacement, or rollback for those roots.
+
+The two website roots are the adoption case and are governed by the committed
+plan policy instead: `infrastructure/cloudflare/policy/cloudflare-plan.rego`
+requires every website change to carry a prior object, forbids create, delete,
+and replacement outright, and pins the adopted Tunnel and apex record to
+`["no-op"]`. That policy is an offline review aid for the owner's own plan, not
+an apply authorization, and the authenticated ceremony scripts do not yet speak
+these phase names.
 
 ## Credential-reach warning
 
 An exact OpenTofu import address is not an exact Cloudflare token boundary.
 Account permissions used for Tunnels, Gateway policies, and private-network
 routes can reach the applicable resource class across the selected account.
-Zone DNS Write can reach every DNS record in its selected zone; Cloudflare does
-not offer API-token scope for one record. The two DNS phases therefore use two
-different one-zone tokens, but each token still has unavoidable record-wide
-reach inside its zone.
+Zone DNS Write can reach every DNS record in its selected zone, and Zone
+Settings Write can reach every setting in it; Cloudflare does not offer
+API-token scope for one record or one setting. The two website roots therefore
+use two different one-zone tokens, but each token still has unavoidable
+record-wide and setting-wide reach inside its own zone.
 
 For every import or refresh window:
 
@@ -43,7 +51,7 @@ remain mandatory but do not reduce token reach.
 
 ## Non-negotiable state and secret custody
 
-- Initialize only one of the seven directories under
+- Initialize only one of the six directories under
   `infrastructure/cloudflare/phases/`.
 - Give every phase its own state path on a protected encrypted volume.
 - Keep the read-only audit token and both Tunnel runtime tokens separate from
@@ -74,19 +82,21 @@ admin-tunnel import -> revoke write token -> exact account-wide Tunnel audit
   -> optional admin-api import
 ```
 
-The public dependency is strict:
+The website dependency is strict and per site:
 
 ```text
-public-edge imports -> revoke write token -> exact account-wide Tunnel/config audit
-  -> public-dns-naranjo import -> revoke Naranjo token -> complete-zone audit
-  -> public-dns-lidersea import last -> revoke write token -> complete-zone audit
+site-naranjo-online: read-only adoption audit -> import 8 objects one at a time
+  -> non-destructive refresh-only plan -> apply -> revoke write token
+  -> complete naranjo.online zone + owning Tunnel audit
+  -> site-lidersea-com (same sequence, different token, last)
 ```
 
 Never import the route merely because the Tunnel exists. The audit must first
 emit the admin-policies contract proving the final block and TCP 22
 identity/device allow are enabled, correctly ordered, and bound to the selected
-account and Pi `/32`. Never import either DNS record before the exact
-`pi-websites` ingress and terminal 404 produce the public-edge contract.
+account and Pi `/32`. Never import one site's objects into the other site's
+root: the objects are already distinct, and a crossed import would point one
+zone's apex at the other site's Tunnel.
 
 ## Phase-owned import addresses
 
@@ -156,56 +166,73 @@ and carry the matching route-contract hash. Its JIT token is new and distinct
 from the earlier admin-policies token even though both require an
 account-scoped policy permission.
 
-### `public-edge`
+### `site-naranjo-online`
 
-Owning root: `infrastructure/cloudflare/phases/public-edge`
+Owning root: `infrastructure/cloudflare/phases/site-naranjo-online`
 
-```powershell
-tofu -chdir=infrastructure/cloudflare/phases/public-edge import 'cloudflare_zero_trust_tunnel_cloudflared.pi_websites' '<account_id>/<tunnel_id>'
-tofu -chdir=infrastructure/cloudflare/phases/public-edge import 'cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites' '<account_id>/<tunnel_id>'
-```
-
-The future gated refresh-only plan must contain one `pi-websites` Tunnel and one
-config, exactly two ordered apex-to-cluster origins, and an unqualified terminal
-`http_status:404`. It must contain no DNS record or private route. Revoke and
-rejection-verify the write token, then use the separate read-only token to audit
-the selected account's complete Tunnel/config inventory and prove no unrelated
-change before emitting the public-edge contract.
-
-### `public-dns-naranjo`
-
-Owning root: `infrastructure/cloudflare/phases/public-dns-naranjo`
+Eight objects, imported one at a time, each followed by a refresh-only plan
+before the next. Replace every bracketed identifier through a protected
+mechanism; no real identifier belongs in shell history or in Git.
 
 ```powershell
-tofu -chdir=infrastructure/cloudflare/phases/public-dns-naranjo import 'cloudflare_dns_record.naranjo_online' '<naranjo_online_zone_id>/<dns_record_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zero_trust_tunnel_cloudflared.naranjo_online' '<account_id>/<naranjo_online_tunnel_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online' '<account_id>/<naranjo_online_tunnel_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_dns_record.naranjo_online_apex' '<naranjo_online_zone_id>/<apex_dns_record_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_always_use_https' '<naranjo_online_zone_id>/always_use_https'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_min_tls_version' '<naranjo_online_zone_id>/min_tls_version'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_tls_1_3' '<naranjo_online_zone_id>/tls_1_3'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_zero_rtt' '<naranjo_online_zone_id>/0rtt'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_ssl' '<naranjo_online_zone_id>/ssl'
 ```
 
-This JIT token has DNS Write on the `naranjo.online` zone only, which still
-means every record in that zone. The exact plan permits only the proxied apex
-`ttl = 1` CNAME to the audited `pi-websites` Tunnel. Stop on any A, AAAA, or
-CNAME conflict. Revoke and rejection-verify this token, then audit the entire
-zone with the separate read-only token before the Lidersea token can be minted.
+The Tunnel and its configuration share one import identifier: the configuration
+resource is addressed by the Tunnel it configures, not by an identifier of its
+own. The apex record identifier is the record's own opaque ID, read from the
+zone through the read-only audit token. Each zone setting is addressed by its
+Cloudflare setting name, which is the literal shown above and is not a secret.
 
-### `public-dns-lidersea`
+After the eighth import the refresh-only plan must show exactly eight objects
+and nothing else: the Tunnel and the apex record as no-op, the configuration as
+no-op, and the five zone settings as no-op or as an update toward the exact
+committed value. Any create, delete, or replacement is a hard stop — see the
+runbook. Then revoke and rejection-verify the write token and use the separate
+read-only token to audit the complete `naranjo.online` zone and the owning
+Tunnel before the second site's token is minted.
 
-Owning root: `infrastructure/cloudflare/phases/public-dns-lidersea`
+### `site-lidersea-com`
+
+Owning root: `infrastructure/cloudflare/phases/site-lidersea-com`
 
 ```powershell
-tofu -chdir=infrastructure/cloudflare/phases/public-dns-lidersea import 'cloudflare_dns_record.lidersea_com' '<lidersea_com_zone_id>/<dns_record_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zero_trust_tunnel_cloudflared.lidersea_com' '<account_id>/<lidersea_com_tunnel_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zero_trust_tunnel_cloudflared_config.lidersea_com' '<account_id>/<lidersea_com_tunnel_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_dns_record.lidersea_com_apex' '<lidersea_com_zone_id>/<apex_dns_record_id>'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_always_use_https' '<lidersea_com_zone_id>/always_use_https'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_min_tls_version' '<lidersea_com_zone_id>/min_tls_version'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_tls_1_3' '<lidersea_com_zone_id>/tls_1_3'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_zero_rtt' '<lidersea_com_zone_id>/0rtt'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_ssl' '<lidersea_com_zone_id>/ssl'
 ```
 
-This is the literal final activation. Its different JIT token has DNS Write on
-the `lidersea.com` zone only, which still means every record in that zone. The
-exact plan permits only the proxied apex `ttl = 1` CNAME to the audited
-`pi-websites` Tunnel. Stop on a conflict or unexpected zone change, revoke and
-rejection-verify the write token, audit the entire zone with the separate
-read-only token, and retain the final receipt.
+This is the literal final activation. Its different JIT token carries DNS Write
+and Zone Settings Write on the `lidersea.com` zone only — which still means
+every record and every setting in that zone — plus the account connector
+permission its Tunnel needs. Stop on a conflict or unexpected zone change,
+revoke and rejection-verify the write token, audit the entire zone with the
+separate read-only token, and retain the final receipt.
+
+Import identifier formats are the pinned provider's own, documented at
+<https://registry.terraform.io/providers/cloudflare/cloudflare/5.22.0>. Confirm
+each one against that documentation immediately before the ceremony rather than
+trusting this file.
 
 ## Existing infrastructure only
 
 Do not import or manage zones, plans, subscriptions, Registrar objects, API
-token objects, device enrollment, WARP settings, Workers, storage, media, or
-any paid feature. Do not use import to adopt an object that merely resembles
+token objects, device enrollment, WARP settings, Workers, storage, media,
+Cloudflare-managed HSTS, or any paid feature. The application owns
+`Strict-Transport-Security`; adopting the zone HSTS setting would create a
+second writer for one header. Do not use import to adopt an object that merely resembles
 the target. Names, account/zone binding, Tunnel binding, route, policy
 language, precedence, ingress order, DNS type/content/proxy/TTL, and
 entitlement must all match exactly.

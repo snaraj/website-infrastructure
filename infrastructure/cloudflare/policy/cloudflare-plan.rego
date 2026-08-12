@@ -9,10 +9,66 @@ valid_phases := {
   "admin-policies",
   "admin-route",
   "admin-api",
-  "public-edge",
-  "public-dns-naranjo",
-  "public-dns-lidersea",
+  "site-naranjo-online",
+  "site-lidersea-com",
 }
+
+# Administrative onboarding is create-only. The two public site roots ADOPT
+# live objects that already serve traffic: a plan that would create, delete, or
+# replace one of them is a hard stop, never an activation.
+create_only_phases := {
+  "admin-tunnel",
+  "admin-policies",
+  "admin-route",
+  "admin-api",
+}
+
+# One site, one root, one state, one token, one blast radius. `foreign_marker`
+# is the other site's identity token; it must never appear anywhere in this
+# root's plan values or configuration references.
+site_contracts := {
+  "site-naranjo-online": {
+    "slug": "naranjo_online",
+    "tunnel_name": "naranjo-online",
+    "hostname": "naranjo.online",
+    "origin": "http://naranjo-online.naranjo-online.svc.cluster.local:8080",
+    "zone_variable": "cloudflare_naranjo_online_zone_id",
+    "audit_variable": "verified_naranjo_online_adoption_audit_sha256",
+    "foreign_marker": "lidersea",
+  },
+  "site-lidersea-com": {
+    "slug": "lidersea_com",
+    "tunnel_name": "lidersea-com",
+    "hostname": "lidersea.com",
+    "origin": "http://lidersea-com.lidersea-com.svc.cluster.local:8080",
+    "zone_variable": "cloudflare_lidersea_com_zone_id",
+    "audit_variable": "verified_lidersea_com_adoption_audit_sha256",
+    "foreign_marker": "naranjo",
+  },
+}
+
+adopt_only_phases := object.keys(site_contracts)
+
+# The zone security target state, encoded once. `ssl` is deliberately "full"
+# and never a strict variant: the connector-to-origin leg is plain HTTP by
+# accepted decision, so strict origin pull would break the site, not harden it.
+zone_setting_contracts := {
+  "always_use_https": {"setting_id": "always_use_https", "value": "on"},
+  "min_tls_version": {"setting_id": "min_tls_version", "value": "1.2"},
+  "tls_1_3": {"setting_id": "tls_1_3", "value": "on"},
+  "zero_rtt": {"setting_id": "0rtt", "value": "off"},
+  "ssl": {"setting_id": "ssl", "value": "full"},
+}
+
+# Identity objects that already exist live: a plan may confirm them, never
+# change them. Ingress configuration and zone settings may legitimately move to
+# the exact committed target, so they accept an update.
+adopted_identity_types := {
+  "cloudflare_zero_trust_tunnel_cloudflared",
+  "cloudflare_dns_record",
+}
+
+forbidden_dns_record_types := {"A", "AAAA"}
 
 cloudflared_tunnel_resource_type := "cloudflare_zero_trust_tunnel_cloudflared"
 
@@ -30,15 +86,25 @@ expected_types := {
   "admin-api": {
     "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": "cloudflare_zero_trust_gateway_policy",
   },
-  "public-edge": {
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites": cloudflared_tunnel_resource_type,
-    "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites": "cloudflare_zero_trust_tunnel_cloudflared_config",
+  "site-naranjo-online": {
+    "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online": cloudflared_tunnel_resource_type,
+    "cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online": "cloudflare_zero_trust_tunnel_cloudflared_config",
+    "cloudflare_dns_record.naranjo_online_apex": "cloudflare_dns_record",
+    "cloudflare_zone_setting.naranjo_online_always_use_https": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.naranjo_online_min_tls_version": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.naranjo_online_tls_1_3": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.naranjo_online_zero_rtt": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.naranjo_online_ssl": "cloudflare_zone_setting",
   },
-  "public-dns-naranjo": {
-    "cloudflare_dns_record.naranjo_online": "cloudflare_dns_record",
-  },
-  "public-dns-lidersea": {
-    "cloudflare_dns_record.lidersea_com": "cloudflare_dns_record",
+  "site-lidersea-com": {
+    "cloudflare_zero_trust_tunnel_cloudflared.lidersea_com": cloudflared_tunnel_resource_type,
+    "cloudflare_zero_trust_tunnel_cloudflared_config.lidersea_com": "cloudflare_zero_trust_tunnel_cloudflared_config",
+    "cloudflare_dns_record.lidersea_com_apex": "cloudflare_dns_record",
+    "cloudflare_zone_setting.lidersea_com_always_use_https": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.lidersea_com_min_tls_version": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.lidersea_com_tls_1_3": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.lidersea_com_zero_rtt": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.lidersea_com_ssl": "cloudflare_zone_setting",
   },
 }
 
@@ -47,9 +113,8 @@ approval_variables := {
   "admin-policies": "approve_admin_policies_phase",
   "admin-route": "approve_admin_route_phase",
   "admin-api": "enable_kubernetes_api_access",
-  "public-edge": "approve_public_edge_phase",
-  "public-dns-naranjo": "enable_public_dns_naranjo_activation",
-  "public-dns-lidersea": "enable_public_dns_lidersea_activation",
+  "site-naranjo-online": "approve_site_naranjo_online_phase",
+  "site-lidersea-com": "approve_site_lidersea_com_phase",
 }
 
 expected_expression_fields := {
@@ -58,10 +123,22 @@ expected_expression_fields := {
   "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
   "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin": {"account_id", "tunnel_id", "network", "comment"},
   "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
-  "cloudflare_zero_trust_tunnel_cloudflared.pi_websites": {"account_id", "name", "config_src"},
-  "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites": {"account_id", "tunnel_id", "source", "config"},
-  "cloudflare_dns_record.naranjo_online": {"zone_id", "name", "type", "content", "proxied", "ttl"},
-  "cloudflare_dns_record.lidersea_com": {"zone_id", "name", "type", "content", "proxied", "ttl"},
+  "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online": {"account_id", "name", "config_src"},
+  "cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online": {"account_id", "tunnel_id", "source", "config"},
+  "cloudflare_dns_record.naranjo_online_apex": {"zone_id", "name", "type", "content", "proxied", "ttl"},
+  "cloudflare_zone_setting.naranjo_online_always_use_https": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.naranjo_online_min_tls_version": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.naranjo_online_tls_1_3": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.naranjo_online_zero_rtt": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.naranjo_online_ssl": {"zone_id", "setting_id", "value"},
+  "cloudflare_zero_trust_tunnel_cloudflared.lidersea_com": {"account_id", "name", "config_src"},
+  "cloudflare_zero_trust_tunnel_cloudflared_config.lidersea_com": {"account_id", "tunnel_id", "source", "config"},
+  "cloudflare_dns_record.lidersea_com_apex": {"zone_id", "name", "type", "content", "proxied", "ttl"},
+  "cloudflare_zone_setting.lidersea_com_always_use_https": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.lidersea_com_min_tls_version": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.lidersea_com_tls_1_3": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.lidersea_com_zero_rtt": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.lidersea_com_ssl": {"zone_id", "setting_id", "value"},
 }
 
 critical_fields := {
@@ -73,12 +150,8 @@ critical_fields := {
     "traffic", "identity", "device_posture", "rule_settings",
   },
   "cloudflare_dns_record": {"zone_id", "name", "type", "content", "proxied", "ttl"},
+  "cloudflare_zone_setting": {"zone_id", "setting_id", "value"},
 }
-
-canonical_naranjo_online_hostname := "naranjo.online"
-canonical_naranjo_online_origin := "http://naranjo-online.naranjo-online.svc.cluster.local:8080"
-canonical_lidersea_com_hostname := "lidersea.com"
-canonical_lidersea_com_origin := "http://lidersea-com.lidersea-com.svc.cluster.local:8080"
 
 phase := object.get(object.get(input, "codex_contract", {}), "phase", "")
 
@@ -347,71 +420,80 @@ admin_api_exact if {
   has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "rule_settings", "var.admin_session_freshness")
 }
 
-public_edge_exact if {
-  tunnel := change_after("cloudflare_zero_trust_tunnel_cloudflared.pi_websites")
+# One site root, proved whole: the adopted Tunnel identity, its exact single
+# public ingress plus terminal catch-all, its own proxied apex CNAME derived
+# from that same Tunnel, and the five zone settings that carry the security
+# target state. Nothing here reaches the other site.
+site_root_exact(name) if {
+  contract := site_contracts[name]
+  account_id := variable_value("cloudflare_account_id")
+  zone_id := variable_value(contract.zone_variable)
+  valid_account_id(account_id)
+  valid_account_id(zone_id)
+  account_id != zone_id
+  valid_contract_hash(variable_value(contract.audit_variable))
+
+  tunnel_address := sprintf("cloudflare_zero_trust_tunnel_cloudflared.%s", [contract.slug])
+  tunnel := change_after(tunnel_address)
   account_matches(tunnel)
-  tunnel.name == "pi-websites"
+  tunnel.name == contract.tunnel_name
   tunnel.config_src == "cloudflare"
   object.get(tunnel, "tunnel_secret", null) == null
+  has_exact_reference(tunnel_address, "account_id", "var.cloudflare_account_id")
 
-  edge := change_after("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites")
+  config_address := sprintf("cloudflare_zero_trust_tunnel_cloudflared_config.%s", [contract.slug])
+  edge := change_after(config_address)
   account_matches(edge)
   edge.source == "cloudflare"
   object.keys(edge.config) == {"ingress"}
-  ingress := edge.config.ingress
-  count(ingress) == 3
-  ingress[0] == {"hostname": canonical_naranjo_online_hostname, "service": canonical_naranjo_online_origin}
-  ingress[1] == {"hostname": canonical_lidersea_com_hostname, "service": canonical_lidersea_com_origin}
-  ingress[2] == {"service": "http_status:404"}
+  count(edge.config.ingress) == 2
+  edge.config.ingress[0] == {"hostname": contract.hostname, "service": contract.origin}
+  edge.config.ingress[1] == {"service": "http_status:404"}
+  has_exact_reference(config_address, "account_id", "var.cloudflare_account_id")
+  has_only_id_tree(config_address, "tunnel_id", tunnel_address)
 
-  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared.pi_websites", "account_id", "var.cloudflare_account_id")
-  has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites", "account_id", "var.cloudflare_account_id")
-  has_only_id_tree(
-    "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
-    "tunnel_id",
-    "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
+  apex_address := sprintf("cloudflare_dns_record.%s_apex", [contract.slug])
+  apex := change_after(apex_address)
+  apex.zone_id == zone_id
+  apex.name == contract.hostname
+  apex.type == "CNAME"
+  apex.proxied == true
+  apex.ttl == 1
+  regex.match(
+    `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.]cfargotunnel[.]com$`,
+    apex.content,
   )
+  has_exact_reference(apex_address, "zone_id", sprintf("var.%s", [contract.zone_variable]))
+  has_only_id_tree(apex_address, "content", tunnel_address)
+
+  every setting_key, setting in zone_setting_contracts {
+    exact_zone_setting(contract, setting_key, setting, zone_id)
+  }
 }
 
-exact_dns_record(record, hostname, zone_id, tunnel_id) if {
-  record.name == hostname
-  record.zone_id == zone_id
-  record.type == "CNAME"
-  record.content == sprintf("%s.cfargotunnel.com", [tunnel_id])
-  record.proxied == true
-  record.ttl == 1
+exact_zone_setting(contract, setting_key, setting, zone_id) if {
+  address := sprintf("cloudflare_zone_setting.%s_%s", [contract.slug, setting_key])
+  planned := change_after(address)
+  planned.zone_id == zone_id
+  planned.setting_id == setting.setting_id
+  planned.value == setting.value
+  has_exact_reference(address, "zone_id", sprintf("var.%s", [contract.zone_variable]))
 }
 
-public_dns_naranjo_exact if {
-  account_id := variable_value("cloudflare_account_id")
-  naranjo_zone := variable_value("cloudflare_naranjo_online_zone_id")
-  tunnel_id := variable_value("pi_websites_tunnel_id")
-  valid_account_id(account_id)
-  valid_account_id(naranjo_zone)
-  valid_uuid(tunnel_id)
-  account_id != naranjo_zone
-  valid_contract_hash(variable_value("verified_public_edge_contract_sha256"))
-
-  naranjo := change_after("cloudflare_dns_record.naranjo_online")
-  exact_dns_record(naranjo, canonical_naranjo_online_hostname, naranjo_zone, tunnel_id)
-  has_exact_reference("cloudflare_dns_record.naranjo_online", "zone_id", "var.cloudflare_naranjo_online_zone_id")
-  has_exact_reference("cloudflare_dns_record.naranjo_online", "content", "var.pi_websites_tunnel_id")
+adoption_action(actions) if {
+  actions == ["no-op"]
 }
 
-public_dns_lidersea_exact if {
-  account_id := variable_value("cloudflare_account_id")
-  lidersea_zone := variable_value("cloudflare_lidersea_com_zone_id")
-  tunnel_id := variable_value("pi_websites_tunnel_id")
-  valid_account_id(account_id)
-  valid_account_id(lidersea_zone)
-  valid_uuid(tunnel_id)
-  account_id != lidersea_zone
-  valid_contract_hash(variable_value("verified_public_edge_contract_sha256"))
+adoption_action(actions) if {
+  actions == ["update"]
+}
 
-  lidersea := change_after("cloudflare_dns_record.lidersea_com")
-  exact_dns_record(lidersea, canonical_lidersea_com_hostname, lidersea_zone, tunnel_id)
-  has_exact_reference("cloudflare_dns_record.lidersea_com", "zone_id", "var.cloudflare_lidersea_com_zone_id")
-  has_exact_reference("cloudflare_dns_record.lidersea_com", "content", "var.pi_websites_tunnel_id")
+ingress_rules(change) := rules if {
+  after := object.get(change.change, "after", {})
+  is_object(after)
+  config := object.get(after, "config", {})
+  is_object(config)
+  rules := object.get(config, "ingress", [])
 }
 
 phase_contract_exact if {
@@ -435,18 +517,8 @@ phase_contract_exact if {
 }
 
 phase_contract_exact if {
-  phase == "public-edge"
-  public_edge_exact
-}
-
-phase_contract_exact if {
-  phase == "public-dns-naranjo"
-  public_dns_naranjo_exact
-}
-
-phase_contract_exact if {
-  phase == "public-dns-lidersea"
-  public_dns_lidersea_exact
+  phase in adopt_only_phases
+  site_root_exact(phase)
 }
 
 deny contains "missing or unknown Cloudflare phase contract" if {
@@ -507,15 +579,130 @@ deny contains msg if {
 }
 
 deny contains msg if {
+  phase in create_only_phases
   some change in managed_changes
   change.change.actions != ["create"]
   msg := sprintf("initial activation plans must contain create actions only: %s", [change.address])
 }
 
 deny contains msg if {
+  phase in create_only_phases
   some change in managed_changes
   object.get(change.change, "before", null) != null
   msg := sprintf("initial activation plans must have no prior object: %s", [change.address])
+}
+
+# Adoption contract. The live Tunnels and apex records predate this repository:
+# a site plan confirms them or moves a zone setting to its target, and anything
+# that would create, delete, or replace a live object is a hard stop.
+deny contains msg if {
+  phase in adopt_only_phases
+  some change in managed_changes
+  not adoption_action(change.change.actions)
+  msg := sprintf("site roots adopt live objects; only no-op or update is permitted: %s", [change.address])
+}
+
+deny contains msg if {
+  phase in adopt_only_phases
+  some change in managed_changes
+  object.get(change.change, "before", null) == null
+  msg := sprintf("site roots must never create a live object; import it first: %s", [change.address])
+}
+
+deny contains msg if {
+  phase in adopt_only_phases
+  some change in managed_changes
+  change.type in adopted_identity_types
+  change.change.actions != ["no-op"]
+  msg := sprintf("adopted Tunnel and apex identity must plan as no-op: %s", [change.address])
+}
+
+# Safety invariant 3: no origin address record may ever reach a zone here.
+deny contains msg if {
+  some change in managed_changes
+  change.type == "cloudflare_dns_record"
+  object.get(object.get(change.change, "after", {}), "type", "") in forbidden_dns_record_types
+  msg := sprintf("origin address records are forbidden: %s", [change.address])
+}
+
+deny contains msg if {
+  some change in managed_changes
+  change.type == "cloudflare_dns_record"
+  contains(object.get(object.get(change.change, "after", {}), "name", ""), "*")
+  msg := sprintf("wildcard DNS names are forbidden: %s", [change.address])
+}
+
+deny contains msg if {
+  some change in managed_changes
+  some rule in ingress_rules(change)
+  contains(object.get(rule, "hostname", ""), "*")
+  msg := sprintf("wildcard Tunnel hostnames are forbidden: %s", [change.address])
+}
+
+# A public site Tunnel never carries private-network reach.
+deny contains msg if {
+  some change in managed_changes
+  after := object.get(change.change, "after", {})
+  is_object(after)
+  config := object.get(after, "config", {})
+  is_object(config)
+  "warp_routing" in object.keys(config)
+  msg := sprintf("WARP or private routing is forbidden on a public Tunnel: %s", [change.address])
+}
+
+deny contains msg if {
+  phase in adopt_only_phases
+  some change in managed_changes
+  change.type == "cloudflare_zero_trust_tunnel_cloudflared_route"
+  msg := sprintf("private routes are forbidden in a public site root: %s", [change.address])
+}
+
+# Site isolation. The other site's identity token must not appear in this
+# root's planned values, its ingress rules, or its configuration references.
+deny contains msg if {
+  contract := site_contracts[phase]
+  some change in managed_changes
+  some field, value in object.get(change.change, "after", {})
+  is_string(value)
+  contains(value, contract.foreign_marker)
+  msg := sprintf("cross-site value is forbidden in %s: %s.%s", [phase, change.address, field])
+}
+
+deny contains msg if {
+  contract := site_contracts[phase]
+  some change in managed_changes
+  some rule in ingress_rules(change)
+  some field, value in rule
+  is_string(value)
+  contains(value, contract.foreign_marker)
+  msg := sprintf("cross-site ingress value is forbidden in %s: %s.%s", [phase, change.address, field])
+}
+
+deny contains msg if {
+  contract := site_contracts[phase]
+  some resource in configured_managed
+  some field, expression in object.get(resource, "expressions", {})
+  some reference in object.get(expression, "references", [])
+  contains(reference, contract.foreign_marker)
+  msg := sprintf("cross-site reference is forbidden in %s: %s.%s", [phase, resource.address, field])
+}
+
+# The zone security target state, named setting by setting so a drifted value
+# reports which control moved instead of one opaque contract failure.
+deny contains msg if {
+  contract := site_contracts[phase]
+  some setting_key, setting in zone_setting_contracts
+  planned := change_after(sprintf("cloudflare_zone_setting.%s_%s", [contract.slug, setting_key]))
+  object.get(planned, "setting_id", "") != setting.setting_id
+  msg := sprintf("zone setting %s is bound to the wrong control in %s", [setting_key, phase])
+}
+
+deny contains msg if {
+  contract := site_contracts[phase]
+  some setting_key, setting in zone_setting_contracts
+  planned := change_after(sprintf("cloudflare_zone_setting.%s_%s", [contract.slug, setting_key]))
+  object.get(planned, "value", null) != setting.value
+  msg := sprintf("zone setting %s must equal %v in %s", [setting.setting_id, setting.value, phase])
 }
 
 deny contains msg if {

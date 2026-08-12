@@ -55,10 +55,36 @@ PHASES = (
     "admin-policies",
     "admin-route",
     "admin-api",
-    "public-edge",
-    "public-dns-naranjo",
-    "public-dns-lidersea",
+    "site-naranjo-online",
+    "site-lidersea-com",
 )
+
+SITE_PHASES = ("site-naranjo-online", "site-lidersea-com")
+
+ZONE_SETTING_TARGETS = (
+    ("always_use_https", "on"),
+    ("min_tls_version", "1.2"),
+    ("tls_1_3", "on"),
+    ("zero_rtt", "off"),
+    ("ssl", "full"),
+)
+
+SITE_IDENTITY = {
+    "site-naranjo-online": {
+        "slug": "naranjo_online",
+        "tunnel_name": "naranjo-online",
+        "hostname": "naranjo.online",
+        "origin": "http://naranjo-online.naranjo-online.svc.cluster.local:8080",
+        "foreign_marker": "lidersea",
+    },
+    "site-lidersea-com": {
+        "slug": "lidersea_com",
+        "tunnel_name": "lidersea-com",
+        "hostname": "lidersea.com",
+        "origin": "http://lidersea-com.lidersea-com.svc.cluster.local:8080",
+        "foreign_marker": "naranjo",
+    },
+}
 
 EXPECTED_RESOURCES = {
     "admin-tunnel": {"cloudflare_zero_trust_tunnel_cloudflared.pi_admin"},
@@ -68,13 +94,17 @@ EXPECTED_RESOURCES = {
     },
     "admin-route": {"cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin"},
     "admin-api": {"cloudflare_zero_trust_gateway_policy.pi_admin_api_allow"},
-    "public-edge": {
-        "cloudflare_zero_trust_tunnel_cloudflared.pi_websites",
-        "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites",
-    },
-    "public-dns-naranjo": {"cloudflare_dns_record.naranjo_online"},
-    "public-dns-lidersea": {"cloudflare_dns_record.lidersea_com"},
 }
+for _phase, _identity in SITE_IDENTITY.items():
+    _slug = _identity["slug"]
+    EXPECTED_RESOURCES[_phase] = {
+        "cloudflare_zero_trust_tunnel_cloudflared." + _slug,
+        "cloudflare_zero_trust_tunnel_cloudflared_config." + _slug,
+        "cloudflare_dns_record.{}_apex".format(_slug),
+    } | {
+        "cloudflare_zone_setting.{}_{}".format(_slug, _key)
+        for _key, _value in ZONE_SETTING_TARGETS
+    }
 
 
 class CloudflareTargetBindingContractTests(unittest.TestCase):
@@ -91,7 +121,7 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             for phase in PHASES
         }
 
-    def test_exactly_seven_nonempty_phase_roots_exist(self):
+    def test_exactly_six_nonempty_phase_roots_exist(self):
         observed = {
             path.name
             for path in PHASE_ROOT.iterdir()
@@ -146,8 +176,11 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", AUDIT)
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("required=("))
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("CLOUDFLARE_API_TOKEN:?"))
+        bash = BASH
+        if bash is None:
+            self.fail("Bash disappeared between skip evaluation and execution")
         result = subprocess.run(
-            [BASH, str(REPO_ROOT / "scripts" / "cloudflare-audit.sh")],
+            [bash, str(REPO_ROOT / "scripts" / "cloudflare-audit.sh")],
             capture_output=True,
             check=False,
             text=True,
@@ -174,9 +207,15 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         self.assertNotIn("cloudflare_zero_trust_tunnel_cloudflared_route", (
             PHASE_ROOT / "admin-policies" / "main.tf"
         ).read_text(encoding="utf-8"))
-        self.assertNotIn("cloudflare_dns_record", (
-            PHASE_ROOT / "public-edge" / "main.tf"
-        ).read_text(encoding="utf-8"))
+        for phase in SITE_PHASES:
+            with self.subTest(phase=phase):
+                text = (PHASE_ROOT / phase / "main.tf").read_text(
+                    encoding="utf-8"
+                )
+                self.assertNotIn(
+                    "cloudflare_zero_trust_tunnel_cloudflared_route", text
+                )
+                self.assertNotIn("cloudflare_zero_trust_gateway_policy", text)
 
     def test_admin_policies_precede_route_and_api_is_separate(self):
         policies = (PHASE_ROOT / "admin-policies" / "main.tf").read_text(
@@ -198,19 +237,81 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         self.assertIn("verified_admin_route_contract_sha256", api)
         self.assertIn("verified_admin_api_inputs_contract_sha256", api)
 
-    def test_dns_is_one_zone_per_state_and_public_edge_is_terminal(self):
-        edge = (PHASE_ROOT / "public-edge" / "main.tf").read_text(encoding="utf-8")
-        self.assertIn("http_status:404", edge)
-        self.assertLess(edge.index("naranjo.online"), edge.index("lidersea.com"))
-        self.assertLess(edge.index("lidersea.com"), edge.index("http_status:404"))
-        for phase, expected, forbidden in (
-            ("public-dns-naranjo", "naranjo.online", "lidersea.com"),
-            ("public-dns-lidersea", "lidersea.com", "naranjo.online"),
-        ):
+    def test_each_site_root_is_one_tunnel_one_apex_and_no_other_site(self):
+        """One website per root: its own Tunnel, its own apex, nothing shared.
+
+        The superseded design put both sites behind one ``pi-websites`` Tunnel,
+        so one compromised or rate-limited object reached both zones. These
+        assertions are the textual half of that separation; the policy matrix
+        in ``scripts/test-cloudflare-policy.sh`` is the behavioural half.
+        """
+
+        for phase in SITE_PHASES:
+            identity = SITE_IDENTITY[phase]
+            with self.subTest(phase=phase):
+                text = (PHASE_ROOT / phase / "main.tf").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn('name       = "{}"'.format(identity["tunnel_name"]), text)
+                self.assertIn('hostname = "{}"'.format(identity["hostname"]), text)
+                self.assertIn('service  = "{}"'.format(identity["origin"]), text)
+                self.assertIn("http_status:404", text)
+                self.assertLess(
+                    text.index(identity["origin"]),
+                    text.index("http_status:404"),
+                )
+                self.assertEqual(text.count("hostname ="), 1)
+                self.assertNotIn("*.", text)
+                # No cross-site reference of any kind, in any file of the root.
+                for path in sorted((PHASE_ROOT / phase).glob("*")):
+                    if path.name == ".terraform.lock.hcl":
+                        continue
+                    self.assertNotIn(
+                        identity["foreign_marker"],
+                        path.read_text(encoding="utf-8"),
+                        "cross-site reference in " + str(path),
+                    )
+
+    def test_each_site_root_encodes_the_zone_security_target_state(self):
+        """The five settings, their exact values, and no strict SSL variant."""
+
+        for phase in SITE_PHASES:
+            identity = SITE_IDENTITY[phase]
             text = (PHASE_ROOT / phase / "main.tf").read_text(encoding="utf-8")
-            self.assertIn(expected, text)
-            self.assertNotIn(forbidden, text)
-            self.assertIn("verified_public_edge_contract_sha256", text)
+            for key, value in ZONE_SETTING_TARGETS:
+                with self.subTest(phase=phase, setting=key):
+                    self.assertIn(
+                        'resource "cloudflare_zone_setting" "{}_{}" {{'.format(
+                            identity["slug"], key
+                        ),
+                        text,
+                    )
+                    self.assertIn('value      = "{}"'.format(value), text)
+            self.assertEqual(
+                text.count('resource "cloudflare_zone_setting"'),
+                len(ZONE_SETTING_TARGETS),
+            )
+            # Strict origin pull would break a plain-HTTP origin leg, and
+            # Cloudflare-managed HSTS would fight the application's header.
+            self.assertNotIn('"strict"', text)
+            self.assertNotIn("security_header", text)
+            self.assertNotIn("automatic_https_rewrites", text)
+
+    def test_site_roots_adopt_and_never_create_or_destroy(self):
+        """The plan policy must refuse a create, a delete, and a replacement."""
+
+        for fragment in (
+            "adopt_only_phases",
+            "create_only_phases",
+            'adoption_action(actions) if {',
+            'actions == ["no-op"]',
+            'actions == ["update"]',
+            "site roots must never create a live object",
+            "adopted Tunnel and apex identity must plan as no-op",
+            '"delete" in change.change.actions',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, POLICY)
 
     def test_allow_fixtures_exactly_match_phase_graphs(self):
         for phase, fixture in self.fixtures.items():
@@ -235,8 +336,17 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             '"delete" in change.change.actions',
             "critical field is unknown",
             "configured argument fields are not exact",
-            'phase == "public-dns-naranjo"',
-            'phase == "public-dns-lidersea"',
+            "phase in adopt_only_phases",
+            "site_root_exact(phase)",
+            "origin address records are forbidden",
+            "wildcard DNS names are forbidden",
+            "wildcard Tunnel hostnames are forbidden",
+            "WARP or private routing is forbidden on a public Tunnel",
+            "private routes are forbidden in a public site root",
+            "cross-site value is forbidden in",
+            "cross-site ingress value is forbidden in",
+            "cross-site reference is forbidden in",
+            "zone setting %s must equal %v in %s",
             'valid_contract_hash(variable_value("verified_admin_policy_inputs_contract_sha256"))',
             'valid_contract_hash(variable_value("verified_admin_api_inputs_contract_sha256"))',
             'change.change.actions != ["create"]',
@@ -316,7 +426,11 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         receipt_schema = re.search(
             r"expected_receipt_keys=\$'([^']+)'", PLAN_GATE
         )
-        self.assertIsNotNone(receipt_schema)
+        if receipt_schema is None:
+            self.fail(
+                "the plan gate no longer declares expected_receipt_keys; the "
+                "receipt schema assertions below would silently vanish"
+            )
         self.assertNotIn("state_lineage_sha256", receipt_schema.group(1))
         self.assertNotIn("state_serial", receipt_schema.group(1))
         self.assertIn("state_binding_sha256", receipt_schema.group(1))
@@ -388,27 +502,48 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             "JIT",
             "source-IP",
             "revocation",
-            "seven",
-            "public-dns-naranjo",
-            "public-dns-lidersea",
+            "six",
+            "site-naranjo-online",
+            "site-lidersea-com",
         ):
             self.assertIn(fragment.lower(), README.lower())
 
     def test_every_declared_mutation_executes_from_its_phase_fixture(self):
+        """Every mutation the shell driver names must really mutate its fixture.
+
+        Both call shapes are covered: the explicit ``phase mutation`` lines and
+        the loop-expanded ``"${phase}" mutation`` lines. Missing the loops would
+        leave the whole website-adoption matrix — the majority of the driver —
+        unproved on this side of the gate.
+        """
+
         module = load_script(
             "mutate_cloudflare_fixture.py", module_name="cloudflare_mutator"
         )
-        calls = re.findall(
-            r'^\s*assert_mutation_denied\s+(?:"\$\{phase\}"|([a-z0-9-]+))\s+([a-z0-9-]+)$',
+        declared = set()
+        for phases, body in re.findall(
+            r"(?ms)^for phase in ([a-z0-9 -]+); do\n(.*?)^done$", POLICY_TEST
+        ):
+            for mutation in re.findall(
+                r'(?m)^\s*assert_mutation_denied "\$\{phase\}" ([a-z0-9-]+)$',
+                body,
+            ):
+                for phase in phases.split():
+                    declared.add((phase, mutation))
+        for phase, mutation in re.findall(
+            r"(?m)^\s*assert_mutation_denied ([a-z0-9-]+) ([a-z0-9-]+)$",
             POLICY_TEST,
-            re.MULTILINE,
-        )
-        self.assertGreater(len(calls), 30)
-        # Explicit calls are sufficient here; shell policy validation exercises
-        # the loop-expanded generic and per-zone cases.
-        for phase, mutation in calls:
-            if not phase:
-                continue
+        ):
+            declared.add((phase, mutation))
+
+        self.assertGreater(len(declared), 100)
+        for phase in PHASES:
+            with self.subTest(phase=phase):
+                self.assertTrue(
+                    any(declared_phase == phase for declared_phase, _ in declared),
+                    "no mutation exercises " + phase,
+                )
+        for phase, mutation in sorted(declared):
             with self.subTest(phase=phase, mutation=mutation):
                 mutated = copy.deepcopy(self.fixtures[phase])
                 module.mutate(mutated, mutation)

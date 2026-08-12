@@ -9,10 +9,12 @@ terraform {
   }
 
   # Supply a protected, encrypted-volume path through -backend-config. Never
-  # initialize a live phase against repository-adjacent state.
+  # initialize a live root against repository-adjacent state.
   backend "local" {}
 }
 
 # Authentication is accepted only from CLOUDFLARE_API_TOKEN in the operator's
-# private process environment. This phase token needs no DNS permission.
+# private process environment. This root's just-in-time token needs account
+# Cloudflare Tunnel write plus zone DNS write and zone settings write on the
+# one zone this root owns; it must never carry the other site's zone.
 provider "cloudflare" {}
