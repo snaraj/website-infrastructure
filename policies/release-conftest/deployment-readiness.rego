@@ -41,6 +41,24 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s remains suspended", [input.metadata.name])
 }
 
+# Release-mode half of the tag-driven sync contract. The scaffold renderer
+# already denies an unverified chart source structurally; this rule makes the
+# same denial part of what a promoted or active render must survive, so a
+# release can never ship a site whose chart would be accepted unsigned.
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.spec, "verify", {}), "provider", "") != "cosign"
+  msg := sprintf("chart source %s/%s does not require cosign verification", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  count(object.get(object.get(input.spec, "verify", {}), "matchOIDCIdentity", [])) != 1
+  msg := sprintf("chart source %s/%s does not bind exactly one keyless publisher identity", [input.metadata.namespace, input.metadata.name])
+}
+
 deny contains msg if {
   input.kind == "Kustomization"
   input.apiVersion == "kustomize.toolkit.fluxcd.io/v1"

@@ -12,14 +12,15 @@ spec:
   serviceAccountName: helm-reconciler
   driftDetection:
     mode: enabled
-  chart:
-    spec:
-      chart: ./chart
-      reconcileStrategy: Revision
-      sourceRef:
-        kind: GitRepository
-        name: naranjo-online-source
-      interval: 10m0s
+  # The chart artifact comes from the signature-verified OCIRepository beside
+  # this file, so the release this cluster runs is whichever published version
+  # its reviewed SemVer range resolves to — no branch head, no raw commit, and
+  # no per-release edit here. chartRef carries no namespace, so helm-controller
+  # (started with --no-cross-namespace-refs=true) can only ever resolve it
+  # inside this site's own namespace.
+  chartRef:
+    kind: OCIRepository
+    name: naranjo-online-chart
   install:
     remediation:
       retries: 0
@@ -28,6 +29,13 @@ spec:
     remediation:
       retries: 0
       strategy: rollback
+  # Fail-closed release sentinel, deliberately retained through the move to
+  # tag-driven chart sync. deploymentReady:false plus the all-zeros digest is
+  # the state the release-state policy classifies as `initial`, the state the
+  # release Rego rejects, and the state promote-image.sh advances under review.
+  # It is removed only after this site's publisher embeds the built image
+  # digest into the published chart, and then only by a reviewed PR that moves
+  # the same denial into the chart (ADR 0016, transition step 1).
   values:
     deploymentReady: true
     image:

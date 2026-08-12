@@ -113,16 +113,54 @@ site_workload_accounts := {
   "lidersea-com": "lidersea-com",
 }
 
+# Only the connector release still resolves its chart from a Git source; both
+# site namespaces moved to published, signature-verified OCI chart artifacts,
+# so a GitRepository in a site namespace has no legitimate identity at all.
 tenant_source_names := {
   "cloudflare-public": "cloudflare-public-source",
-  "naranjo-online": "naranjo-online-source",
-  "lidersea-com": "lidersea-com-source",
 }
 
 tenant_chart_paths := {
   "cloudflare-public": "./kubernetes/platform/cloudflare-public/chart",
-  "naranjo-online": "./chart",
-  "lidersea-com": "./chart",
+}
+
+git_chart_namespaces := {"cloudflare-public"}
+
+# Each site's Helm chart is published by that site's own tag-triggered release
+# publisher, so the published version tag is the release identity Flux follows.
+site_chart_sources := {
+  "naranjo-online": "naranjo-online-chart",
+  "lidersea-com": "lidersea-com-chart",
+}
+
+site_chart_urls := {
+  "naranjo-online": "oci://ghcr.io/snaraj/charts/naranjo-online",
+  "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
+}
+
+# The reviewed SemVer window per site: an inclusive ratchet floor that denies
+# resolution to a release older than the last reviewed one, and an exclusive
+# major-1 ceiling that keeps the range inside the pre-graduation majors of
+# ADR 0014.
+site_chart_semver := {
+  "naranjo-online": ">=0.1.9 <1.0.0",
+  "lidersea-com": ">=0.1.9 <1.0.0",
+}
+
+site_chart_layer_media_type := "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+
+# The exact keyless certificate identity of each site's chart publisher. These
+# two tuples must never couple: a chart signed by the other site's workflow, by
+# another workflow in the same repository, or by a branch-ref run is denied.
+site_chart_identities := {
+  "naranjo-online": {
+    "issuer": `^https://token\.actions\.githubusercontent\.com$`,
+    "subject": `^https://github\.com/snaraj/naranjo\.online/\.github/workflows/release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`,
+  },
+  "lidersea-com": {
+    "issuer": `^https://token\.actions\.githubusercontent\.com$`,
+    "subject": `^https://github\.com/snaraj/lidersea\.com/\.github/workflows/release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`,
+  },
 }
 
 approved_git_source_scopes := {
@@ -134,23 +172,21 @@ approved_git_source_scopes := {
     "ignore": "/*\n!/kubernetes\n/kubernetes/*\n!/kubernetes/platform\n/kubernetes/platform/*\n!/kubernetes/platform/cloudflare-public\n/kubernetes/platform/cloudflare-public/*\n!/kubernetes/platform/cloudflare-public/chart\n",
     "sparseCheckout": ["kubernetes/platform/cloudflare-public/chart"],
   },
-  "naranjo-online/naranjo-online-source": {
-    "ignore": "/*\n!/chart\n",
-    "sparseCheckout": ["chart"],
-  },
-  "lidersea-com/lidersea-com-source": {
-    "ignore": "/*\n!/chart\n",
-    "sparseCheckout": ["chart"],
-  },
 }
 
-# Each tenant source pulls its own standalone public repository; the
-# platform sources keep pulling this repository.
+# The remaining tenant source pulls this repository; nothing else may.
 approved_git_source_urls := {
   "flux-system/flux-system": "https://github.com/snaraj/website-infrastructure.git",
   "cloudflare-public/cloudflare-public-source": "https://github.com/snaraj/website-infrastructure.git",
-  "naranjo-online/naranjo-online-source": "https://github.com/snaraj/naranjo.online.git",
-  "lidersea-com/lidersea-com-source": "https://github.com/snaraj/lidersea.com.git",
+}
+
+valid_site_chart_verification(namespace) if {
+  verify := object.get(input.spec, "verify", {})
+  object.get(verify, "provider", "") == "cosign"
+  object.get(verify, "secretRef", null) == null
+  identities := object.get(verify, "matchOIDCIdentity", [])
+  count(identities) == 1
+  identities[0] == site_chart_identities[namespace]
 }
 
 valid_site_ingress_policy if {
@@ -508,6 +544,91 @@ deny contains msg if {
   msg := sprintf("GitRepository %s/%s must use canonical identity %s", [input.metadata.namespace, input.metadata.name, expected_name])
 }
 
+# Site charts are published, signed OCI artifacts. Any Git chart source in a
+# site namespace would reintroduce branch-head tracking with no signature
+# verification at all, so the kind itself is denied there.
+deny contains msg if {
+  input.kind == "GitRepository"
+  input.metadata.namespace in site_namespaces
+  msg := sprintf("GitRepository %s/%s is forbidden; site charts arrive as cosign-verified OCI artifacts", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  expected_name := site_chart_sources[input.metadata.namespace]
+  input.metadata.name != expected_name
+  msg := sprintf("OCIRepository %s/%s must use canonical identity %s", [input.metadata.namespace, input.metadata.name, expected_name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  not input.metadata.namespace in site_namespaces
+  msg := sprintf("OCIRepository %s/%s is outside the exact chart-source identity allowlist", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  object.get(input.spec, "url", "") != site_chart_urls[input.metadata.namespace]
+  msg := sprintf("OCIRepository %s/%s must pull the canonical published chart repository", [input.metadata.namespace, input.metadata.name])
+}
+
+# Exactly one selector shape: a SemVer range. A tag, a digest, or an absent ref
+# would either freeze the site off the release train or let a mutable name
+# decide what runs, and both defeat tag-driven release identity.
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  object.get(input.spec, "ref", {}) != {"semver": site_chart_semver[input.metadata.namespace]}
+  msg := sprintf("OCIRepository %s/%s must select releases with the exact reviewed SemVer range", [input.metadata.namespace, input.metadata.name])
+}
+
+# The reconcile-time half of the digest-only invariant: an unsigned chart, or a
+# chart signed by any identity other than this exact site's publisher, never
+# becomes an artifact.
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  not valid_site_chart_verification(input.metadata.namespace)
+  msg := sprintf("OCIRepository %s/%s must verify chart signatures against this site's exact keyless publisher identity", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.spec, "layerSelector", {}), "mediaType", "") != site_chart_layer_media_type
+  msg := sprintf("OCIRepository %s/%s must extract only the Helm chart layer media type", [input.metadata.namespace, input.metadata.name])
+}
+
+# The cluster holds no registry credential, exactly as it holds no Git
+# credential. Anonymous public pulls only; no ServiceAccount pull secrets, no
+# client certificates, no proxy credential, and no plaintext registry.
+deny contains msg if {
+  input.kind == "OCIRepository"
+  some field in {"serviceAccountName", "certSecretRef", "proxySecretRef"}
+  object.get(input.spec, field, null) != null
+  msg := sprintf("OCIRepository %s/%s must use anonymous public registry access (%s is forbidden)", [input.metadata.namespace, input.metadata.name, field])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  object.get(input.spec, "insecure", false) != false
+  msg := sprintf("OCIRepository %s/%s must not pull over plaintext HTTP", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  object.get(input.spec, "provider", "generic") != "generic"
+  msg := sprintf("OCIRepository %s/%s must not use a cloud-provider credential chain", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  object.get(input.spec, "suspend", false) != false
+  msg := sprintf("OCIRepository %s/%s must not be independently suspended; suspension is a HelmRelease and Kustomization decision", [input.metadata.namespace, input.metadata.name])
+}
+
 deny contains msg if {
   input.kind == "GitRepository"
   input.apiVersion == "source.toolkit.fluxcd.io/v1"
@@ -622,7 +743,7 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in tenant_namespaces
+  input.metadata.namespace in git_chart_namespaces
   chart_spec := object.get(object.get(input.spec, "chart", {}), "spec", {})
   expected_path := tenant_chart_paths[input.metadata.namespace]
   object.get(chart_spec, "chart", "") != expected_path
@@ -632,7 +753,7 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in tenant_namespaces
+  input.metadata.namespace in git_chart_namespaces
   source_ref := object.get(object.get(object.get(input.spec, "chart", {}), "spec", {}), "sourceRef", {})
   object.get(source_ref, "kind", "") != "GitRepository"
   msg := sprintf("HelmRelease %s/%s must use a GitRepository chart source", [input.metadata.namespace, input.metadata.name])
@@ -641,11 +762,50 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in tenant_namespaces
+  input.metadata.namespace in git_chart_namespaces
   source_ref := object.get(object.get(object.get(input.spec, "chart", {}), "spec", {}), "sourceRef", {})
   expected_name := tenant_source_names[input.metadata.namespace]
   object.get(source_ref, "name", "") != expected_name
   msg := sprintf("HelmRelease %s/%s must use source %s", [input.metadata.namespace, input.metadata.name, expected_name])
+}
+
+# A site release is bound to its published chart artifact and to nothing else.
+# An inline chart block would reintroduce branch-head tracking beside the
+# tag-driven source and give the release two competing chart identities.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in site_namespaces
+  object.get(input.spec, "chart", null) != null
+  msg := sprintf("HelmRelease %s/%s must not carry an inline chart; site charts arrive as published OCI artifacts", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.spec, "chartRef", {}), "kind", "") != "OCIRepository"
+  msg := sprintf("HelmRelease %s/%s must resolve its chart through an OCIRepository chartRef", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in site_namespaces
+  expected_name := site_chart_sources[input.metadata.namespace]
+  object.get(object.get(input.spec, "chartRef", {}), "name", "") != expected_name
+  msg := sprintf("HelmRelease %s/%s must use chart source %s", [input.metadata.namespace, input.metadata.name, expected_name])
+}
+
+# An explicit chartRef namespace is the one way a site could be pointed at the
+# other site's published chart even with helm-controller's cross-namespace
+# refs disabled at some future date; deny it in desired state too.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.spec, "chartRef", {}), "namespace", input.metadata.namespace) != input.metadata.namespace
+  msg := sprintf("HelmRelease %s/%s must not reference a cross-namespace chart source", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {

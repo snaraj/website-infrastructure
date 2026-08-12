@@ -19,7 +19,7 @@ resources appear by type and ordinal only. Inferences are marked
 | 9 | kubeadm init + control plane | `validate_kubeadm_config.py`, `validate_encryption_config.py`; execution Codex-owned | pending live |
 | 10 | Recovery tooling + etcd snapshots | `bootstrap/`, `docs/runbooks/*`, Phase E harnesses (planned) | designed, partially tested |
 | 11 | Flux GitOps | `kubernetes/flux-system` render, source/kustomization objects, `.sourceignore` | rendered + policy-tested, suspended |
-| 12 | Website workload contracts | `kubernetes/websites/*` (HelmRelease/GitRepository/quotas/policies) | rendered + policy-tested, suspended |
+| 12 | Website workload contracts | `kubernetes/websites/*` (HelmRelease/OCIRepository/quotas/policies) | rendered + policy-tested, suspended |
 | 13 | Admission (Kyverno) | `policies/kyverno/*` staged Audit; enforce is a release gate | staged |
 | 14 | Cloudflare edge (tunnel, DNS, zones) | `infrastructure/cloudflare/phases/*` (seven plan-only OpenTofu roots) | plan-only, credential-free |
 | 15 | GitHub Actions + GHCR | `.github/workflows/*`, pinned tooling, coverage/badges lanes in site repos | live |

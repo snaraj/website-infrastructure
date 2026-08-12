@@ -18,7 +18,11 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from validate_image_release import repository_errors as image_release_errors
+from validate_image_release import (
+    SITE_CONTRACTS as IMAGE_RELEASE_SITE_CONTRACTS,
+    read_policy as read_release_policy,
+    repository_errors as image_release_errors,
+)
 from validate_release_state import (
     CanonicalYamlError,
     RELEASE_CONTRACTS,
@@ -43,7 +47,10 @@ from validate_release_transition import (
     tunnel_secret_errors,
 )
 from validate_signature_policy import (
+    CHART_REPOSITORIES,
     admission_kustomization_errors,
+    chart_source_errors,
+    chart_source_semver_bounds,
     flux_sync_errors,
     flux_system_kustomization_errors,
     reconciliation_kustomization_errors,
@@ -1081,10 +1088,15 @@ def flux_components_errors(root):
     if not versions_path.is_file():
         return ["versions.env is missing for generated Flux validation"]
     versions_text = read(versions_path)
-    values = dict(
-        match.groups()
+    # ``read`` returns text, so these are str keys and str values. The two
+    # groups are named explicitly rather than splatted from ``match.groups()``:
+    # that call is typed as a variable-length tuple, which reads as an
+    # arbitrary-arity pair to a static checker and invites a bytes/str
+    # confusion warning on a mapping that is unambiguously str-keyed here.
+    values = {
+        match.group(1): match.group(2)
         for match in re.finditer(r"(?m)^([A-Z0-9_]+)=([^\s#]+)$", versions_text)
-    )
+    }
     required_keys = (
         "FLUX_VERSION",
         "FLUX_SOURCE_CONTROLLER_IMAGE",
@@ -1281,6 +1293,54 @@ def _git_visible_cloudflare_paths(root):
     }, []
 
 
+def chart_source_contract_errors(root):
+    """Bind each site's published chart source to its closed identity tuple.
+
+    Two independent failures are reported separately on purpose:
+
+    * the OCIRepository body itself must equal the exact reviewed contract —
+      registry path, SemVer range, layer media type, and this site's (and only
+      this site's) keyless publisher subject and issuer;
+    * the SemVer range's exclusive upper bound must still honor the tracked
+      production-graduation gate in ``release-policy.env`` (ADR 0014). While a
+      site's gate reads ``no``, a range that could resolve major 1 or later
+      would let Flux deploy a production release the owner has not graduated,
+      so the range and the gate can never drift apart silently.
+    """
+
+    errors = []
+    policy = read_release_policy(root)
+    if policy is None:
+        # image_release_errors already reports the malformed policy file; here
+        # the missing gate simply means the range cannot be cleared.
+        policy = {}
+    for slug in sorted(CHART_REPOSITORIES):
+        source = root / "kubernetes" / "websites" / slug / "source.yaml"
+        if source.is_symlink() or not source.is_file():
+            errors.append("{} chart source is missing or symbolic".format(slug))
+            continue
+        try:
+            text = read(source)
+        except (OSError, UnicodeError):
+            errors.append("{} chart source is unavailable".format(slug))
+            continue
+        if chart_source_errors(text, slug):
+            errors.append("{} chart source is non-canonical".format(slug))
+        try:
+            _, upper = chart_source_semver_bounds(slug)
+        except ValueError:
+            errors.append("{} chart SemVer range is outside the closed grammar".format(slug))
+            continue
+        gate = IMAGE_RELEASE_SITE_CONTRACTS[slug]["gate"]
+        if policy.get(gate) != "yes" and upper[0] > 1:
+            errors.append(
+                "{} chart SemVer range admits an ungraduated production major".format(
+                    slug
+                )
+            )
+    return errors
+
+
 def signature_policy_source_errors(root, allowed_inventories=None):
     """Validate policies and bind their exact inventory to classified release mode."""
 
@@ -1393,6 +1453,10 @@ def signature_policy_source_errors(root, allowed_inventories=None):
         UnicodeError,
     ):
         errors.append("Flux admission reconciliation is non-canonical")
+    # The image-admission policies above and the chart sources below are the
+    # two ends of one identity tuple; validating them in the same pass means a
+    # change that re-points one and forgets the other cannot pass either mode.
+    errors.extend(chart_source_contract_errors(root))
     return errors
 
 

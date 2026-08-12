@@ -65,14 +65,9 @@ def website_release_text(
         "  serviceAccountName: helm-reconciler\n"
         "  driftDetection:\n"
         "    mode: enabled\n"
-        "  chart:\n"
-        "    spec:\n"
-        "      chart: ./chart\n"
-        "      reconcileStrategy: Revision\n"
-        "      sourceRef:\n"
-        "        kind: GitRepository\n"
-        "        name: {name}-source\n"
-        "      interval: 10m0s\n"
+        "  chartRef:\n"
+        "    kind: OCIRepository\n"
+        "    name: {name}-chart\n"
         "  install:\n"
         "    remediation:\n"
         "      retries: 0\n"
@@ -434,22 +429,45 @@ class StrictReleaseStateTests(unittest.TestCase):
                     b"  serviceAccountName: default\n",
                     1,
                 ),
-                # Cross-site chart paths are structurally identical now
-                # (./chart); the equivalent modern bypass is pointing one
-                # site's release at the OTHER site's Flux source.
-                "cross-site-source": canonical.replace(
-                    b"        name: naranjo-online-source\n",
-                    b"        name: lidersea-com-source\n",
+                # Since site charts arrive as published OCI artifacts, the
+                # cross-site bypass is pointing one site's release at the
+                # OTHER site's signature-verified chart source — the two
+                # identity tuples must never couple.
+                "cross-site-chart-source": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: lidersea-com-chart\n",
                     1,
                 ),
-                "source-kind": canonical.replace(
-                    b"        kind: GitRepository\n",
-                    b"        kind: OCIRepository\n",
+                "chart-source-kind": canonical.replace(
+                    b"    kind: OCIRepository\n",
+                    b"    kind: HelmChart\n",
                     1,
                 ),
-                "source-name": canonical.replace(
-                    b"        name: naranjo-online-source\n",
-                    b"        name: cloudflare-public-source\n",
+                "chart-source-name": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: cloudflare-public-source\n",
+                    1,
+                ),
+                # An explicit chartRef namespace is the only field that could
+                # reach another tenant's chart artifact at all.
+                "chart-source-namespace": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: naranjo-online-chart\n    namespace: lidersea-com\n",
+                    1,
+                ),
+                # Reintroducing a Git-tracked inline chart beside the published
+                # source would restore branch-head deployment.
+                "inline-chart-reintroduced": canonical.replace(
+                    b"  chartRef:\n    kind: OCIRepository\n"
+                    b"    name: naranjo-online-chart\n",
+                    b"  chart:\n"
+                    b"    spec:\n"
+                    b"      chart: ./chart\n"
+                    b"      reconcileStrategy: Revision\n"
+                    b"      sourceRef:\n"
+                    b"        kind: GitRepository\n"
+                    b"        name: naranjo-online-source\n"
+                    b"      interval: 10m0s\n",
                     1,
                 ),
                 "values-from": canonical.replace(
@@ -458,13 +476,6 @@ class StrictReleaseStateTests(unittest.TestCase):
                     b"    - kind: ConfigMap\n"
                     b"      name: mutable-overrides\n"
                     b"  values:\n",
-                    1,
-                ),
-                "chart-values-files": canonical.replace(
-                    b"      sourceRef:\n",
-                    b"      valuesFiles:\n"
-                    b"        - values-production.yaml\n"
-                    b"      sourceRef:\n",
                     1,
                 ),
                 "post-renderer": canonical.replace(
