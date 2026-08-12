@@ -1,0 +1,26 @@
+# A connector-egress policy named for the naranjo origin but whose podSelector
+# pins the OTHER site's connector instance (lidersea-com-tunnel). Denied: the
+# egress policy name, selected instance, and target origin must all be the same
+# site (the egress half of the double-pin).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-naranjo-online
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: lidersea-com-tunnel
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: naranjo-online
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: naranjo-online
+      ports:
+        - port: 8080
+          protocol: TCP

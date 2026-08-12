@@ -69,13 +69,19 @@ spec:
         cel:
           expressions:
             - expression: >-
-                !has(object.spec.volumes) || object.spec.volumes.all(volume,
+                !has(object.spec.volumes) ||
+                (has(object.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.metadata.labels &&
+                object.metadata.labels['app.kubernetes.io/instance'] in
+                ['naranjo-online-tunnel', 'lidersea-com-tunnel'] &&
+                object.spec.volumes.all(volume,
                 volume.name == 'tunnel-token' && has(volume.secret) &&
-                volume.secret.secretName == 'pi-websites-tunnel-token' &&
+                volume.secret.secretName ==
+                object.metadata.labels['app.kubernetes.io/instance'] + '-token' &&
                 has(volume.secret.defaultMode) && volume.secret.defaultMode == 288 &&
                 has(volume.secret.items) && volume.secret.items.size() == 1 &&
-                volume.secret.items[0].key == 'token' && volume.secret.items[0].path == 'token')
-              message: Tunnel Pods may mount only the exact reviewed tunnel-token Secret key.
+                volume.secret.items[0].key == 'token' && volume.secret.items[0].path == 'token'))
+              message: Each site connector Pod may mount only its own matching tunnel-token Secret.
     - name: disallow-legacy-service-account-token-secrets
       match:
         any:

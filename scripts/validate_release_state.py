@@ -24,6 +24,10 @@ SCALAR_RE = re.compile(r"[A-Za-z0-9./][A-Za-z0-9_./:@+-]*\Z")
 TOKEN_REVISION_RE = re.compile(
     r"(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})\Z"
 )
+# One public connector per website (ADR 0015), each with its OWN rotation
+# revision so one Tunnel rotates without disturbing the other. The order is the
+# canonical order of the release values block.
+PUBLIC_CONNECTOR_SITES = ("naranjo-online", "lidersea-com")
 MAX_RELEASE_YAML_BYTES = 65536
 
 RELEASE_CONTRACTS = {
@@ -460,14 +464,16 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
             ]
         )
     else:
-        common.extend(
-            [
-                "    tunnel:",
-                re.compile(
-                    r"      tokenRevision: " + TOKEN_REVISION_RE.pattern
-                ),
-            ]
-        )
+        common.append("    connectors:")
+        for site in PUBLIC_CONNECTOR_SITES:
+            common.extend(
+                [
+                    "      {}:".format(site),
+                    re.compile(
+                        r"        tokenRevision: " + TOKEN_REVISION_RE.pattern
+                    ),
+                ]
+            )
     return common
 
 
@@ -553,12 +559,15 @@ def load_helm_release(name: str, root: Path = ROOT) -> HelmReleaseState:
             raise CanonicalYamlError("release image digest is not canonical")
         _bool_scalar(str(values.get(("deploymentReady",), "")))
     else:
-        token_revision = values.get(("tunnel", "tokenRevision"))
-        if (
-            not isinstance(token_revision, str)
-            or TOKEN_REVISION_RE.fullmatch(token_revision) is None
-        ):
-            raise CanonicalYamlError("tunnel token revision is not canonical")
+        # Every connector carries its own canonical revision; a missing or
+        # malformed revision on EITHER connector fails closed.
+        for site in PUBLIC_CONNECTOR_SITES:
+            token_revision = values.get(("connectors", site, "tokenRevision"))
+            if (
+                not isinstance(token_revision, str)
+                or TOKEN_REVISION_RE.fullmatch(token_revision) is None
+            ):
+                raise CanonicalYamlError("tunnel token revision is not canonical")
     return HelmReleaseState(suspended, values, values_text)
 
 

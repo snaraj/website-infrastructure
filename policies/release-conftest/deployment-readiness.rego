@@ -112,10 +112,15 @@ deny contains msg if {
   msg := sprintf("raw tenant ReplicaSet %s/%s is forbidden in reviewed desired state", [input.metadata.namespace, input.metadata.name])
 }
 
+# Each per-site connector Deployment (naranjo-online-tunnel, lidersea-com-tunnel)
+# must carry a resolved tunnel-token revision; an unresolved revision on EITHER
+# connector keeps the connector desired state fail-closed.
+cloudflared_connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
+
 deny contains msg if {
   input.kind == "Deployment"
   input.metadata.namespace == "cloudflare-public"
-  input.metadata.name == "cloudflared"
+  input.metadata.name in cloudflared_connector_deployments
   revision := object.get(
     object.get(object.get(object.get(input.spec, "template", {}), "metadata", {}), "annotations", {}),
     "platform.snaraj.dev/tunnel-token-revision",

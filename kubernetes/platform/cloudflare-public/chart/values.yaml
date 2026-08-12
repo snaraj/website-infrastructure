@@ -7,22 +7,36 @@ image:
   pullPolicy: IfNotPresent
 
 tunnel:
-  secretName: pi-websites-tunnel-token
   secretKey: token
-  # Change this non-secret revision in the same reviewed PR as a token rotation.
-  tokenRevision: not-configured
 
-origin:
-  namespace: naranjo-online
-  podLabels:
-    app.kubernetes.io/name: naranjo-online
-  port: 8080
-
-liderseaOrigin:
-  namespace: lidersea-com
-  podLabels:
-    app.kubernetes.io/name: lidersea-com
-  port: 8080
+# One connector per website, each an independent Cloudflare Tunnel (ADR 0015).
+# Keyed by site so Helm merges per connector: a HelmRelease may rotate ONE
+# connector's tokenRevision without touching the other's rendered Deployment.
+# Each entry is one exact identity tuple — instance, its own token Secret
+# (referenced by NAME only; the token value lives solely in a cluster Secret),
+# its own rotation revision, and its own origin — so no field of one site's
+# connector can be paired with another site's.
+connectors:
+  naranjo-online:
+    instance: naranjo-online-tunnel
+    secretName: naranjo-online-tunnel-token
+    # Change this non-secret revision in the same reviewed PR as that ONE
+    # Tunnel's token rotation; the other connector is untouched.
+    tokenRevision: not-configured
+    origin:
+      namespace: naranjo-online
+      podLabels:
+        app.kubernetes.io/name: naranjo-online
+      port: 8080
+  lidersea-com:
+    instance: lidersea-com-tunnel
+    secretName: lidersea-com-tunnel-token
+    tokenRevision: not-configured
+    origin:
+      namespace: lidersea-com
+      podLabels:
+        app.kubernetes.io/name: lidersea-com
+      port: 8080
 
 resources:
   requests:

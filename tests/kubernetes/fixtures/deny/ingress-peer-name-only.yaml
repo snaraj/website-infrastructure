@@ -1,0 +1,28 @@
+# Regression proof: BEFORE this reconciliation a name-only ingress peer was the
+# ACCEPTED shape. Under the double-pin it must now be DENIED — the peer must
+# also pin this site's own connector instance (naranjo-online-tunnel).
+# Otherwise identical to the accepted policy, so removing the instance pin from
+# valid_site_ingress_policy flips this fixture back to accepted (mutation goes red).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []

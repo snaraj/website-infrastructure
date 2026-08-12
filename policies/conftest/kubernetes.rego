@@ -63,6 +63,28 @@ pod_spec := input.spec.template.spec if {
   input.kind in {"Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job"}
 }
 
+# The Pod-level metadata that carries the workload identity labels. Volume
+# admission needs it because a connector's mounted Secret must be bound to that
+# connector's own instance, not merely to the set of known token names.
+pod_metadata := object.get(input, "metadata", {}) if {
+  input.kind == "Pod"
+}
+
+pod_metadata := object.get(input.spec.jobTemplate.spec.template, "metadata", {}) if {
+  input.kind == "CronJob"
+}
+
+pod_metadata := object.get(input.spec.template, "metadata", {}) if {
+  input.kind in {"Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job"}
+}
+
+# The site connector identity this Pod claims (empty when absent).
+connector_instance := object.get(
+  object.get(pod_metadata, "labels", {}),
+  "app.kubernetes.io/instance",
+  "",
+)
+
 restricted_namespace if {
   object.get(object.get(input, "metadata", {}), "namespace", "default") in tenant_namespaces
 }
@@ -206,12 +228,20 @@ valid_site_ingress_policy if {
   peers := object.get(rule, "from", [])
   count(peers) == 1
   peer := peers[0]
+  # Symmetry with the connector-egress side: the ingress peer pins BOTH the
+  # shared platform name AND this site's own connector instance
+  # (<site>-tunnel), so only that site's connector — never the other site's —
+  # can open the TCP 8080 origin leg even if a future additive egress policy
+  # widened the connector side.
   peer == {
     "namespaceSelector": {
       "matchLabels": {"kubernetes.io/metadata.name": "cloudflare-public"},
     },
     "podSelector": {
-      "matchLabels": {"app.kubernetes.io/name": "cloudflare-public"},
+      "matchLabels": {
+        "app.kubernetes.io/name": "cloudflare-public",
+        "app.kubernetes.io/instance": sprintf("%s-tunnel", [namespace]),
+      },
     },
   }
   object.get(rule, "ports", []) == [{"port": 8080, "protocol": "TCP"}]
@@ -285,33 +315,50 @@ valid_public_edge_rule(rule) if {
   }
 }
 
-valid_public_policy_selector if {
-  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
-    "app.kubernetes.io/name": "cloudflare-public",
-    "app.kubernetes.io/instance": "cloudflare-public",
-  }
+# The egress-policy envelope every cloudflare-public tunnel policy shares:
+# egress-only, no ingress, exactly one egress rule.
+valid_public_policy_envelope if {
   {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
   count(object.get(input.spec, "ingress", [])) == 0
-  egress := object.get(input.spec, "egress", [])
-  count(egress) == 1
+  count(object.get(input.spec, "egress", [])) == 1
+}
+
+# DNS and edge are identical for every connector, so they carry the shared
+# name-only selector that reaches both site connectors' Pods (size 1).
+valid_public_shared_selector if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/name": "cloudflare-public",
+  }
+}
+
+# A site connector-egress policy is pinned to exactly one connector by
+# name+instance (<site>-tunnel) — the egress half of the double-pin (size 2).
+valid_public_connector_selector(instance) if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/name": "cloudflare-public",
+    "app.kubernetes.io/instance": instance,
+  }
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
+  valid_public_shared_selector
   input.metadata.name == "cloudflared-dns"
   valid_public_dns_rule(input.spec.egress[0])
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
+  valid_public_shared_selector
   input.metadata.name == "cloudflared-edge"
   valid_public_edge_rule(input.spec.egress[0])
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
   namespace := trim_prefix(input.metadata.name, "cloudflared-")
   namespace in site_namespaces
+  valid_public_connector_selector(sprintf("%s-tunnel", [namespace]))
   valid_public_site_rule(input.spec.egress[0])
   target := input.spec.egress[0].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
   target == namespace
@@ -347,16 +394,52 @@ valid_tenant_volume(namespace, volume) if {
   }
 }
 
+# Each connector mounts ONLY ITS OWN site's tunnel-token Secret: the expected
+# name is DERIVED from the connector's own instance label (<site>-tunnel ->
+# <site>-tunnel-token), so a connector mounting the other site's token is
+# denied even though that token is otherwise a known, approved Secret. Merely
+# allowlisting the two names would let either connector mount either token and
+# break ADR 0015's per-site identity tuple. The superseded shared
+# pi-websites-tunnel-token matches no connector instance and is denied.
 valid_tenant_volume(namespace, volume) if {
   namespace == "cloudflare-public"
+  connector_instance in {"naranjo-online-tunnel", "lidersea-com-tunnel"}
   volume == {
     "name": "tunnel-token",
     "secret": {
       "defaultMode": 288,
       "items": [{"key": "token", "path": "token"}],
-      "secretName": "pi-websites-tunnel-token",
+      "secretName": sprintf("%s-token", [connector_instance]),
     },
   }
+}
+
+# The reviewed connector Deployment inventory (ADR 0015): one per website.
+connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
+
+public_connector_deployment if {
+  input.kind == "Deployment"
+  object.get(input.metadata, "namespace", "") == "cloudflare-public"
+}
+
+# The connector identity tuple is ROOTED IN THE DEPLOYMENT NAME, never in a
+# caller-supplied label. Deriving the expected token from the instance label
+# alone leaves an internally self-consistent bypass: keep the allowlisted
+# `lidersea-com-tunnel` Deployment name, move its metadata/selector/template
+# instance labels AND its mounted Secret to the other site, and every
+# instance-derived check agrees with itself while that Deployment's Pods
+# consume the other website's runtime credential.
+#
+# Written as a POSITIVE proof that its denial NEGATES, never as a rule that
+# hunts for a mismatch. A missing, null, scalar, or list `labels` makes the
+# proof below UNDEFINED, and `not` then fires the denial. A mismatch-hunting
+# rule would instead go undefined itself on exactly those degenerate shapes —
+# under OPA's default non-strict mode a builtin type error silently drops the
+# deny body — and fail OPEN where the Kyverno mirror errors and denies.
+connector_identity_rooted_in_name if {
+  input.metadata.labels["app.kubernetes.io/instance"] == input.metadata.name
+  input.spec.selector.matchLabels["app.kubernetes.io/instance"] == input.metadata.name
+  input.spec.template.metadata.labels["app.kubernetes.io/instance"] == input.metadata.name
 }
 
 valid_source_controller_storage if {
@@ -930,6 +1013,40 @@ deny contains msg if {
   some volume in object.get(pod_spec, "volumes", [])
   not valid_tenant_volume(namespace, volume)
   msg := sprintf("volume %s is outside the exact ephemeral/credential volume allowlist for namespace %s", [volume.name, namespace])
+}
+
+# `volumes: null` is a STORED null, not an absent key: object.get returns that
+# null rather than its default and `some volume in null` iterates nothing, so
+# every volume denial above silently stops firing. CEL's has() is true on an
+# explicitly-null field and .all() errors on it, so Kyverno refuses the same
+# object — the one shape in a 16-shape sweep where the two engines disagreed.
+# Refusing every non-list `volumes` here closes that divergence at the only
+# place it can be closed without weakening anything: normalizing the field to
+# an empty list instead would ALSO skip the walk of a map-shaped value, which
+# `some volume in` does iterate today. Scoped to the tenant namespaces because
+# that is exactly where Kyverno's two volume rules match.
+deny contains msg if {
+  is_workload
+  restricted_namespace
+  not is_array(object.get(pod_spec, "volumes", []))
+  msg := sprintf("%s %s/%s declares a non-list volumes field", [input.kind, input.metadata.namespace, input.metadata.name])
+}
+
+# Only the two reviewed connector Deployments may exist in cloudflare-public,
+# so an invented third connector cannot claim a site's identity.
+deny contains msg if {
+  public_connector_deployment
+  not object.get(input.metadata, "name", "") in connector_deployments
+  msg := sprintf("Deployment cloudflare-public/%s is outside the reviewed connector inventory", [object.get(input.metadata, "name", "")])
+}
+
+# Every instance label a connector Deployment states must equal its own
+# Deployment name, so the label the mount rule derives the token from cannot
+# be restated by the caller (see connector_identity_rooted_in_name).
+deny contains msg if {
+  public_connector_deployment
+  not connector_identity_rooted_in_name
+  msg := sprintf("Deployment cloudflare-public/%s must state its own name as app.kubernetes.io/instance in its metadata labels, selector, and pod template; the connector identity tuple is rooted in the Deployment name", [object.get(input.metadata, "name", "")])
 }
 
 deny contains msg if {

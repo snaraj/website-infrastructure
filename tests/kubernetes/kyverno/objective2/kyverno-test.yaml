@@ -14,6 +14,13 @@ policies:
 resources:
   - ../../fixtures/allow/lidersea-hardened.yaml
   - ../../fixtures/deny/objective2-bypasses.yaml
+  - ../../fixtures/deny/connector-token-cross-swap-naranjo.yaml
+  - ../../fixtures/deny/connector-token-cross-swap-lidersea.yaml
+  - ../../fixtures/deny/tunnel-mount-superseded-token.yaml
+  - ../../fixtures/deny/connector-null-volumes.yaml
+  - ../../fixtures/kyverno-admission/connector-readiness-allow.yaml
+  - ../../fixtures/kyverno-admission/connector-readiness-deny.yaml
+  - ../../fixtures/allow/two-connector-networking.yaml
 results:
   - policy: require-restricted-workloads
     rule: require-restricted-pod
@@ -120,6 +127,72 @@ results:
     resources: [widened-ingress]
     kind: NetworkPolicy
     result: fail
+  - policy: require-exact-tenant-networking
+    rule: exact-site-ingress-and-no-egress
+    resources: [cloudflared-to-naranjo-online]
+    kind: NetworkPolicy
+    result: fail
+  # P1-2: neither connector may mount the other site's token, in either
+  # direction, even though both token names are individually approved.
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [naranjo-connector-with-lidersea-token]
+    kind: Pod
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [lidersea-connector-with-naranjo-token]
+    kind: Pod
+    result: fail
+  # The superseded shared token, asserted BEHAVIOURALLY in this engine too.
+  # A structural "the literal is absent from the policy" guard cannot see it
+  # re-entering by concatenation ('pi-websites' + '-tunnel-token'); this row
+  # can, because the Pod is refused on the mount it actually declares.
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [cloudflared-superseded-token]
+    kind: Pod
+    result: fail
+  # An explicitly-null `volumes`: CEL's has() is true on it and .all() errors,
+  # so this engine refuses it. Conftest refuses it too, by an explicit non-list
+  # rule rather than by silently iterating nothing — the one shape where the
+  # two engines used to disagree.
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [cloudflared-null-volumes]
+    kind: Pod
+    result: fail
+  # P1-1: connector rollout must be POSSIBLE for the two renamed identities...
+  - policy: require-release-readiness
+    rule: require-replicaset-owned-by-exact-deployment
+    resources: [naranjo-online-tunnel-7d9f, lidersea-com-tunnel-6b2c]
+    kind: ReplicaSet
+    result: pass
+  - policy: require-release-readiness
+    rule: require-tunnel-token-revision
+    resources: [naranjo-online-tunnel, lidersea-com-tunnel]
+    kind: Deployment
+    result: pass
+  # ...including under the identity-root binding: a canonical connector states
+  # its own name in every instance label and mounts the Secret derived from it.
+  - policy: require-release-readiness
+    rule: require-connector-identity-tuple
+    resources: [naranjo-online-tunnel, lidersea-com-tunnel]
+    kind: Deployment
+    result: pass
+  # ...and impossible for the superseded shared owner or an invented connector.
+  - policy: require-release-readiness
+    rule: require-replicaset-owned-by-exact-deployment
+    resources: [cloudflared-legacy-owner, invented-connector-owner]
+    kind: ReplicaSet
+    result: fail
+  # The reconciled connector-egress policies stay admissible under the
+  # double-pinned tunnel-egress rule.
+  - policy: require-exact-tenant-networking
+    rule: exact-tunnel-cross-namespace-egress
+    resources: [cloudflared-dns, cloudflared-edge, cloudflared-naranjo-online, cloudflared-lidersea-com]
+    kind: NetworkPolicy
+    result: pass
   - policy: disallow-undiscovered-storage
     rule: disallow-persistent-storage-resources
     resources: [invented-media]

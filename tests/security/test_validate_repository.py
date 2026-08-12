@@ -177,15 +177,30 @@ def replace_once(root, relative, before, after):
     path.write_bytes(text.replace(before, after).encode("utf-8"))
 
 
+def resolve_connector_revisions(root, revision="rev-reviewed-test"):
+    """Resolve EVERY connector's own revision in the public release fixture.
+
+    Each website's connector carries its own revision, so a staged fixture must
+    resolve both; leaving one behind is the half-configured state the classifier
+    now refuses outright.
+    """
+
+    path = root / "kubernetes/platform/cloudflare-public/release/release.yaml"
+    text = path.read_text(encoding="utf-8")
+    before = "        tokenRevision: not-configured\n"
+    if text.count(before) != len(MODULE.PUBLIC_CONNECTOR_SITES):
+        raise AssertionError("public release connector revisions are not canonical")
+    path.write_bytes(
+        text.replace(
+            before, "        tokenRevision: {}\n".format(revision)
+        ).encode("utf-8")
+    )
+
+
 def configure_cloudflare_fixture(root):
     """Create the exact synthetic staged encrypted-Secret lifecycle."""
 
-    replace_once(
-        root,
-        "kubernetes/platform/cloudflare-public/release/release.yaml",
-        "      tokenRevision: not-configured\n",
-        "      tokenRevision: rev-reviewed-test\n",
-    )
+    resolve_connector_revisions(root)
     replace_once(
         root,
         "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
@@ -1627,12 +1642,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
-            replace_once(
-                root,
-                "kubernetes/platform/cloudflare-public/release/release.yaml",
-                "      tokenRevision: not-configured\n",
-                "      tokenRevision: rev-reviewed-test\n",
-            )
+            resolve_connector_revisions(root)
             self.assertEqual(
                 MODULE.check_activation(root),
                 ["release transition state is unavailable or unsafe"],

@@ -1,0 +1,35 @@
+# A connector Pod whose `volumes` is an explicit null rather than a list.
+#
+# This shape is the one cross-engine divergence a 16-shape sweep found: `null`
+# is STORED, not absent, so Rego's `object.get(spec, "volumes", [])` returns the
+# null instead of its default and every volume denial iterates nothing, while
+# CEL's `has()` is true on an explicitly-null field and `.all()` errors on it,
+# so Kyverno refuses the same object. The divergence was benign — a null mounts
+# no credential, and the chart cannot render it — but the two engines disagreeing
+# at all is the finding, so the null is now refused on both sides and this
+# fixture is what holds that closed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cloudflared-null-volumes
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+  volumes: null
