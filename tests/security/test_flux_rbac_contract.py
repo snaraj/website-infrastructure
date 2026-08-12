@@ -1313,6 +1313,17 @@ class FluxRbacCompositionTests(unittest.TestCase):
                      "namespace": "flux-system"}
                 )
                 self.assertFalse(stock(tampered))
+            with self.subTest(subject_kind_swapped=name):
+                # The names line up EXACTLY and only the kind differs: a
+                # ServiceAccount called `system:authenticated` is not the group
+                # `system:authenticated`. Identity is the (kind, name) pair here
+                # too, so a name-only comparison must not accept this.
+                swapped = binding(name, role, [])
+                swapped["subjects"] = [
+                    {"kind": "ServiceAccount", "name": group, "namespace": "flux-system"}
+                    for group in groups
+                ]
+                self.assertFalse(stock(swapped))
         # An unlisted name is never allowlisted, however stock it looks.
         self.assertFalse(
             stock(binding("system:almost-basic-user", "system:basic-user",
@@ -1577,19 +1588,32 @@ class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
 
         # A group that is NOT exactly the Flux group is refused, however much of
         # the string it shares: a near-miss label, a group that merely contains
-        # the domain, and the bare domain itself.
+        # the domain, the bare domain itself, and — the two rows that used to
+        # pass through silently — no version at all.
         for api_version, kind in (
             ("evil-kustomize.toolkit.fluxcd.io/v1", "Kustomization"),
             ("notkustomize.toolkit.fluxcd.io/v1", "Kustomization"),
             ("kustomize.toolkit.fluxcd.io.attacker.example/v1", "Kustomization"),
             ("helm.toolkit.fluxcd.io.attacker.example/v2", "HelmRelease"),
             ("toolkit.fluxcd.io/v1", "Kustomization"),
-            ("image.toolkit.fluxcd.io/v1beta2", "ImageUpdateAutomation"),
+            ("source.toolkit.fluxcd.io/v1", "Kustomization"),
             # No version at all: the old prefix test matched nothing here AND
             # the old substring refusal missed it, so it fell through as an
             # ordinary applied object with no impersonation requirement derived.
             ("kustomize.toolkit.fluxcd.io", "Kustomization"),
             ("helm.toolkit.fluxcd.io", "HelmRelease"),
+        ):
+            with self.subTest(misattributed=api_version, kind=kind):
+                with self.assertRaises(AssertionError) as raised:
+                    classify(api_version, kind)
+                self.assertIn("group it is not in", str(raised.exception))
+
+        # A kind this module does NOT classify, in the Flux domain, is the other
+        # refusal: it is a reconciliation input nobody taught this enumeration.
+        for api_version, kind in (
+            ("image.toolkit.fluxcd.io/v1beta2", "ImageUpdateAutomation"),
+            ("notification.toolkit.fluxcd.io/v1", "Receiver"),
+            ("toolkit.fluxcd.io.example.com/v1", "Deployment"),
         ):
             with self.subTest(refuses=api_version, kind=kind):
                 with self.assertRaises(AssertionError) as raised:
@@ -1611,14 +1635,32 @@ class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
                     "not exactly one apiGroup and one version", str(raised.exception)
                 )
 
+        # A classified kind outside the Flux domain entirely is the same
+        # mis-attribution refusal.
+        for api_version, kind in (
+            ("xtoolkit.fluxcd.io/v1", "Kustomization"),
+            ("kustomize.example.com/v1", "Kustomization"),
+            ("helm.example.com/v2", "HelmRelease"),
+            ("source.example.com/v1", "OCIRepository"),
+            ("v1", "GitRepository"),
+        ):
+            with self.subTest(foreign_group=api_version, kind=kind):
+                with self.assertRaises(AssertionError) as raised:
+                    classify(api_version, kind)
+                self.assertIn("group it is not in", str(raised.exception))
+
         # And nothing outside the Flux domain is disturbed: ordinary objects are
-        # not custom resources, and they do not raise.
+        # not custom resources, and they do not raise. `xtoolkit.fluxcd.io`
+        # CONTAINS the Flux domain as a substring while being a different
+        # domain — a substring test refuses it, label comparison does not, and
+        # refusing a third party's CRD is not this module's business.
         for api_version, kind in (
             ("apps/v1", "Deployment"),
             ("v1", "ServiceAccount"),
             ("networking.k8s.io/v1", "NetworkPolicy"),
             ("kyverno.io/v1", "ClusterPolicy"),
             ("fluxcd.io/v1", "Thing"),
+            ("xtoolkit.fluxcd.io/v1", "Deployment"),
         ):
             with self.subTest(ignores=api_version, kind=kind):
                 self.assertFalse(classify(api_version, kind))

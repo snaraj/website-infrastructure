@@ -1031,6 +1031,15 @@ SOURCE_API_GROUP = "source.toolkit.fluxcd.io"
 # underlying complaint is right: this decided identity by string shape.)
 FLUX_API_DOMAIN = ("toolkit", "fluxcd", "io")
 
+# The kinds this module classifies, and the ONE apiGroup each of them may carry.
+# A classified kind in any other group is refused rather than passed through:
+# KIND_RESOURCES maps a kind to its group, so a pass-through would derive
+# authority against a group the object is not in.
+CLASSIFIED_KIND_GROUPS = dict(
+    [("Kustomization", KUSTOMIZE_API_GROUP), ("HelmRelease", HELM_API_GROUP)]
+    + [(kind, SOURCE_API_GROUP) for kind in SOURCE_KINDS]
+)
+
 
 def _api_group(api_version):
     """The apiGroup of a `group/version` string, exactly.
@@ -1088,15 +1097,33 @@ def _classify_flux_document(document, origin, kustomizations, helm_releases, sou
     if kind in SOURCE_KINDS and group == SOURCE_API_GROUP:
         sources.append(document)
         return True
-    # Both refusals below are the fail-closed direction: a near-miss stops the
+    # Every refusal below is the fail-closed direction: a near-miss stops the
     # derivation with a named error instead of being read as an ordinary applied
     # object whose controller-side authority nobody derived.
+    #
+    # Order matters: the shape first, then the identity, then the domain. Each
+    # message names the most specific thing that is wrong.
     if group is None:
         raise AssertionError(
             "{} declares apiVersion {!r} for {}, which is not exactly one "
             "apiGroup and one version. This enumeration decides authority from "
             "the group, so it refuses a shape it would have to guess at.".format(
                 origin, api_version, kind
+            )
+        )
+    # A KIND this module classifies, carried in a group it does not know, is the
+    # mis-attribution case: `KIND_RESOURCES` maps a kind to its apiGroup, so
+    # letting a `Kustomization` in some other group fall through would derive
+    # applied-object authority against `kustomize.toolkit.fluxcd.io` for an
+    # object that is not in it — a group it is not in, which is exactly what the
+    # extra-path-segment row used to do.
+    expected_group = CLASSIFIED_KIND_GROUPS.get(kind)
+    if expected_group is not None:
+        raise AssertionError(
+            "{} declares {} in apiGroup {!r}, but this enumeration knows {} only "
+            "in {!r}. Deriving authority for it would attribute the object to a "
+            "group it is not in.".format(
+                origin, kind, group, kind, expected_group
             )
         )
     if (group and _is_flux_group(group)) or _mentions_flux_domain(api_version):
