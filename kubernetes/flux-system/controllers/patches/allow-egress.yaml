@@ -1,0 +1,14 @@
+# The generated export ships upstream's `allow-egress` NetworkPolicy with
+# `egress: [{}]`, which permits every flux-system Pod to reach every
+# destination on every port. Removing that one rule keeps the object's Egress
+# isolation and its intra-namespace ingress allow while deleting the blanket
+# permission, so the namespace is egress-fail-closed as soon as the controllers
+# exist. The only permitted flows are the enumerated ones in
+# ../../egress/network-policies.yaml.
+#
+# This is a removal, never a rewrite: regenerating gotk-components.yaml with a
+# newer Flux CLI keeps working, and a regeneration that dropped this patch is
+# rejected by scripts/validate_repository.py and by the Conftest rule that
+# requires flux-system/allow-egress to carry no egress rule.
+- op: remove
+  path: /spec/egress

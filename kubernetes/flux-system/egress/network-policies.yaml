@@ -1,0 +1,138 @@
+# Fail-closed egress for the Flux controllers.
+#
+# Applied as a separate reviewed step AFTER the controllers are installed and
+# observed Running (docs/runbooks/flux-install.md). Every rule below is an
+# enumerated allow on top of a default deny; there is no rule that omits `to`,
+# and no rule that reaches a private network. This is the in-cluster layer of
+# the platform's default-deny egress intent; the host-level layer is owned by
+# the platform lane and is neither asserted nor replaced here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: flux-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Cluster DNS. Every controller resolves the source host and the in-cluster
+# artifact Service through kube-dns.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-dns
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# The in-cluster artifact fetch: kustomize-controller and helm-controller read
+# built artifacts from source-controller over the cluster-local Service. Both
+# the Service port (80) and the container port (9090) are named because whether
+# a policy is evaluated before or after kube-proxy's destination translation is
+# a dataplane detail; the peer set is flux-system Pods either way, so naming
+# both cannot reach anything the intra-namespace peer does not already reach.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-artifacts
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: flux
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 9090
+          protocol: TCP
+---
+# Public HTTPS, and nothing else. source-controller fetches the anonymous
+# public Git source over TCP 443; the same rule is what an OCI chart source and
+# its keyless-verification endpoints would use. Every private, loopback,
+# link-local, carrier-grade-NAT, multicast, and reserved range is excluded, so
+# this grants no path to the LAN, to the node, or to any other namespace, and
+# no port other than 443 is reachable. Plain HTTP (80) is deliberately absent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-public-https
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP
+---
+# The Kubernetes API server, with a fail-closed sentinel destination.
+#
+# Every controller needs the API server for leader election, watches, and
+# applies. Its endpoint is the control-plane node's own address: real host
+# inventory, which safety invariant 12 keeps out of this public index forever.
+# The reviewed shape — these Pods, this port, one exact /32 — is committed; the
+# address is not, and `192.0.2.0/32` is RFC 5737 TEST-NET-1, which can never
+# match a real endpoint. The operator substitutes the true address at apply
+# time from private custody (docs/runbooks/flux-install.md); it is never
+# committed, and `make release-check` refuses this sentinel.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-kube-apiserver
+  namespace: flux-system
+  annotations:
+    platform.snaraj.dev/readiness: sentinel-until-reviewed-control-plane-endpoint
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/32
+      ports:
+        - port: 6443
+          protocol: TCP

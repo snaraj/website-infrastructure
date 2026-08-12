@@ -366,7 +366,14 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
         namespaces = []
         for name in ("flux-system", "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"):
             if name == "flux-system":
-                labels = {**c["flux_labels"](), "kubernetes.io/metadata.name": name}
+                # The reviewed controller overlay adds enforce/audit Pod
+                # Security to the namespace the generated export only warns
+                # about, so the reviewed live namespace carries both sets.
+                labels = {
+                    **c["flux_labels"](),
+                    **c["PSA_LABELS"],
+                    "kubernetes.io/metadata.name": name,
+                }
                 annotations = {}
             else:
                 labels = {**c["PSA_LABELS"], "kubernetes.io/metadata.name": name}

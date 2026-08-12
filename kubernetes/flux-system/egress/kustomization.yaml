@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Applied as its own reviewed step so the controllers can be observed healthy
+# before the namespace is closed, and so the closure can be rolled back without
+# touching the controller install.
+resources:
+  - network-policies.yaml
