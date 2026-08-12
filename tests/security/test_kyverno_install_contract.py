@@ -317,6 +317,35 @@ class StagedRolloutTests(unittest.TestCase):
                 )
                 self.assertEqual(set(actions), {"Audit"})
 
+    def test_every_reviewed_policy_actually_runs_at_admission(self):
+        """`spec.admission: false` is one word per policy and stops every rule
+        in it from running at admission at all — background scan only.
+
+        A policy can be `validationFailureAction: Enforce`, carry
+        `failurePolicy: Fail`, and still never be consulted by the webhook. So
+        "the policy is enforcing" is not a claim any action field can support on
+        its own, and this is the half that is cheapest to lose silently.
+        """
+
+        for name in CORE_POLICIES + SIGNATURE_POLICIES:
+            with self.subTest(policy=name):
+                self.assertRegex(
+                    read(POLICIES / (name + ".yaml")), r"(?m)^  admission: true\s*$"
+                )
+
+    def test_no_reviewed_policy_narrows_by_user_identity(self):
+        """The userInfo `MatchResources` fields narrow a rule to principals
+        bound to a named role. `clusterRoles: [no-such-cluster-role]` matches
+        NOBODY while every policy test still reports a pass, because rows that
+        fall outside a match are reported Pass/Skip/Excluded rather than failed.
+        None of the reviewed policies has any reason to select by identity."""
+
+        for name in CORE_POLICIES + SIGNATURE_POLICIES:
+            policy = read(POLICIES / (name + ".yaml"))
+            for field in ("clusterRoles", "subjects", "roles"):
+                with self.subTest(policy=name, field=field):
+                    self.assertNotRegex(policy, r"(?m)^\s+" + field + r":")
+
     def test_the_signature_policies_need_no_rule_downgrade(self):
         # A vacuity guard on the test above: these two carry verifyImages rules
         # with no validate block, so an "every policy has a patch file" rule
@@ -772,11 +801,38 @@ class RenderLockTests(unittest.TestCase):
         )
 
     def test_the_runtime_webhook_sweep_is_enumerated_and_labelled(self):
-        # Kyverno's own webhook configurations are not in any render, so rollback
-        # cannot find them by inventory. Both the reviewed names and the label
-        # sweep must exist: a name list alone goes stale on an upgrade.
-        self.assertIn("kyverno-resource-validating-webhook-cfg", lock_value("runtime.webhooks.validating"))
-        self.assertIn("kyverno-resource-mutating-webhook-cfg", lock_value("runtime.webhooks.mutating"))
+        """Kyverno's own webhook configurations are not in any render, so
+        rollback and break-glass cannot find them by inventory.
+
+        The names are the exact `*WebhookConfigurationName` constants at the
+        pinned v1.18.2 tag (`pkg/config/config.go`). Pinning the WHOLE set, not
+        a sample, is the point: the first transcription omitted
+        `kyverno-cel-exception-validating-webhook-cfg`, which v1.18.2 creates
+        with `failurePolicy: Fail`, so an omitted name is a configuration the
+        emergency path never deletes by name. The label sweep is the backstop
+        for an upstream rename, never the primary.
+        """
+
+        self.assertEqual(
+            lock_value("runtime.webhooks.validating").split(","),
+            [
+                "kyverno-policy-validating-webhook-cfg",
+                "kyverno-resource-validating-webhook-cfg",
+                "kyverno-exception-validating-webhook-cfg",
+                "kyverno-cel-exception-validating-webhook-cfg",
+                "kyverno-global-context-validating-webhook-cfg",
+                "kyverno-cleanup-validating-webhook-cfg",
+                "kyverno-ttl-validating-webhook-cfg",
+            ],
+        )
+        self.assertEqual(
+            lock_value("runtime.webhooks.mutating").split(","),
+            [
+                "kyverno-policy-mutating-webhook-cfg",
+                "kyverno-resource-mutating-webhook-cfg",
+                "kyverno-verify-mutating-webhook-cfg",
+            ],
+        )
         self.assertEqual(
             lock_value("runtime.webhooks.label"), "webhook.kyverno.io/managed-by=kyverno"
         )

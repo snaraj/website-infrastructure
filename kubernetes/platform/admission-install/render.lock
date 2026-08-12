@@ -50,8 +50,13 @@ inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-s
 # inventory. They are enumerated here, and swept by label as well, because an
 # unremoved webhook configuration is the one piece of residue that can keep
 # refusing writes after the controller it points at is gone.
+# The names are the exact constants pkg/config/config.go defines at the pinned
+# v1.18.2 tag, transcribed in full rather than from memory: an omitted name is a
+# webhook configuration that break-glass and rollback never delete by name, and
+# `kyverno-cel-exception-validating-webhook-cfg` was missing from the first
+# transcription. The label sweep is the backstop, not the primary.
 runtime.webhooks.label=webhook.kyverno.io/managed-by=kyverno
-runtime.webhooks.validating=kyverno-policy-validating-webhook-cfg,kyverno-resource-validating-webhook-cfg,kyverno-exception-validating-webhook-cfg,kyverno-global-context-validating-webhook-cfg,kyverno-cleanup-validating-webhook-cfg,kyverno-ttl-validating-webhook-cfg
+runtime.webhooks.validating=kyverno-policy-validating-webhook-cfg,kyverno-resource-validating-webhook-cfg,kyverno-exception-validating-webhook-cfg,kyverno-cel-exception-validating-webhook-cfg,kyverno-global-context-validating-webhook-cfg,kyverno-cleanup-validating-webhook-cfg,kyverno-ttl-validating-webhook-cfg
 runtime.webhooks.mutating=kyverno-policy-mutating-webhook-cfg,kyverno-resource-mutating-webhook-cfg,kyverno-verify-mutating-webhook-cfg
 
 # The component export the promotion must land, and the render parameters it

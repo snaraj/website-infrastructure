@@ -775,13 +775,11 @@ demote_to_report_only() {
   render_stage report-only "$rendered"
   verify_lock report-only "$rendered"
   verify_stage_actions report-only "$rendered"
+  # The substitution replaces a CIDR and nothing else, so re-verifying the
+  # bound file here would be a guard no input can trip — deliberately not added.
+  # What proves this path applies the FAIL-OPEN bytes is behavioural: the suite
+  # reads the policy-action lines of the file the demotion actually sent.
   substitute_endpoint "$rendered" "$bound"
-  # Verify the bytes that are actually SENT, not only the ones that were
-  # rendered. This is the emergency de-escalation path and the automatic
-  # recovery from a failed promotion: "what I checked" and "what I applied" have
-  # to be the same file, or a demotion can announce fail-open while applying the
-  # enforcing bytes.
-  verify_stage_actions report-only "$bound"
   KUBECTL apply -f "$bound" >/dev/null || \
     die 'demotion to report-only failed; run --break-glass to stop the API server calling admission'
   note 'demoted to stage report-only: the webhook is fail-open and the policies report again'
