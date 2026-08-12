@@ -225,7 +225,9 @@ authority: the owner alone merges.
   reviewers and other lanes must not spend review effort on it. The
   reviewer removes it when posting the verdict; on REQUEST-CHANGES the
   author re-applies it once the fix commits are pushed. On an issue it
-  carries the same meaning — complete enough to act on or decide. It is
+  carries the same meaning — complete enough to act on or decide — and
+  whoever then acts on it or records the decision removes the label;
+  opening a PR that claims the issue counts as acting. It is
   a coordination signal only: never a substitute for draft/ready state,
   for the APPROVE verdict that flips a PR ready, or for owner merge
   authority.
@@ -271,7 +273,9 @@ The complete delivery loop, each step gated by the sections around it:
    them.
 2. **Claim the work.** File (or take) the issue; state intent and
    constraints. Label it — including both agent labels — assign the
-   owner, set a milestone.
+   owner, set a milestone. Apply `requires-review` once the issue is
+   complete-from-author — the problem stated, the acceptance criteria
+   final; until it carries that label, the issue is still being drafted.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
    a branch that is not yours is a branch you never push to.
