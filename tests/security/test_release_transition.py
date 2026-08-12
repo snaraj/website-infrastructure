@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import io
+import re
 import shutil
 import tempfile
 import textwrap
@@ -69,6 +70,8 @@ SITE_FILES = {
 class ReleaseTransitionTests(unittest.TestCase):
     """Reject unsafe mixtures while allowing staged promotion and rollback."""
 
+    DIGEST_LINE = re.compile(r"(?m)^      digest: sha256:[0-9a-f]{64}$")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -76,9 +79,50 @@ class ReleaseTransitionTests(unittest.TestCase):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, destination)
+        self.normalize_scaffold_baseline()
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def normalize_scaffold_baseline(self):
+        """Pin every copied site file to the canonical pre-promotion baseline.
+
+        The live repository legitimately moves between scaffold and
+        transition states as reviewed digest promotions land (the runbook's
+        staged flow), while this battery exercises transition MECHANICS from
+        one canonical starting point. Normalizing the copies — rather than
+        assuming the live tree's phase — keeps every mutation below
+        applicable on scaffold, transition, and release trees alike; the
+        live tree's own safety pin stays in
+        test_validate_release_state.StrictReleaseStateTests.
+        """
+
+        for release, parent, _ in SITE_FILES.values():
+            release_path = self.root / release
+            text = release_path.read_text(encoding="utf-8")
+            text = text.replace(
+                "    deploymentReady: true\n", "    deploymentReady: false\n"
+            )
+            text, digest_lines = self.DIGEST_LINE.subn(
+                "      digest: " + TRANSITION.STATE.ZERO_DIGEST, text
+            )
+            self.assertEqual(digest_lines, 1, release)
+            self.assertEqual(
+                text.count("    deploymentReady: false\n"), 1, release
+            )
+            with release_path.open(
+                "w", encoding="utf-8", newline="\n"
+            ) as output:
+                output.write(text)
+            for relative in (release, parent):
+                path = self.root / relative
+                text = path.read_text(encoding="utf-8")
+                text = text.replace("  suspend: false\n", "  suspend: true\n")
+                self.assertEqual(text.count("  suspend: true\n"), 1, relative)
+                with path.open(
+                    "w", encoding="utf-8", newline="\n"
+                ) as output:
+                    output.write(text)
 
     def replace_once(self, relative, before, after):
         path = self.root / relative

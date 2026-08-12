@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -112,11 +113,60 @@ def init_git_repository(root):
     )
 
 
+SITE_BASELINE_FILES = (
+    (
+        "kubernetes/websites/naranjo-online/release.yaml",
+        "kubernetes/reconciliation/naranjo-online.yaml",
+    ),
+    (
+        "kubernetes/websites/lidersea-com/release.yaml",
+        "kubernetes/reconciliation/lidersea-com.yaml",
+    ),
+)
+DIGEST_LINE = re.compile(r"(?m)^      digest: sha256:[0-9a-f]{64}$")
+
+
+def normalize_site_scaffold_baseline(root):
+    """Pin the copied site files to the canonical pre-promotion baseline.
+
+    The live repository legitimately moves between scaffold and transition
+    states as reviewed digest promotions land, while these fixtures mutate
+    from one canonical starting point. Normalizing the copies — rather than
+    assuming the live tree's phase — keeps every mutation applicable on
+    scaffold, transition, and release trees alike; the live tree's own
+    safety pin stays in test_validate_release_state.
+    """
+
+    for release, parent in SITE_BASELINE_FILES:
+        release_path = root / release
+        text = release_path.read_text(encoding="utf-8")
+        text = text.replace(
+            "    deploymentReady: true\n", "    deploymentReady: false\n"
+        )
+        text, digest_lines = DIGEST_LINE.subn(
+            "      digest: sha256:" + "0" * 64, text
+        )
+        if digest_lines != 1:
+            raise AssertionError(
+                "fixture release lacks one digest line: " + release
+            )
+        release_path.write_bytes(text.encode("utf-8"))
+        for relative in (release, parent):
+            path = root / relative
+            text = path.read_text(encoding="utf-8")
+            path.write_bytes(
+                text.replace(
+                    "  suspend: false\n", "  suspend: true\n"
+                ).encode("utf-8")
+            )
+
+
 def copy_activation_fixture(root):
     for relative in ACTIVATION_FIXTURE_FILES:
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / relative, destination)
+    normalize_site_scaffold_baseline(root)
 
 
 def replace_once(root, relative, before, after):

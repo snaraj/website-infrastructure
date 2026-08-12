@@ -201,10 +201,24 @@ def write_complete_tree(root):
 class StrictReleaseStateTests(unittest.TestCase):
     """Keep release-state interpretation exact, closed, and fail-safe."""
 
-    def test_current_repository_sites_are_initial_and_suspended(self):
+    def test_current_repository_sites_are_suspended_in_a_reviewed_phase(self):
+        """The committed tree stays a safe desired state as promotions land.
+
+        Pre-promotion each live site is 'initial' (the all-zeros digest
+        sentinel); a reviewed digest promotion moves a site to 'promoted'
+        while BOTH suspension gates stay true (the runbook's staged flow —
+        activation is a separate reviewed arc). The strict parser refuses
+        every incoherent mixture outright, and this pin keeps rejecting any
+        live tree whose sites leave those two phases or whose suspensions
+        loosen outside that arc.
+        """
+
         for name in SITE_DOMAINS:
             with self.subTest(name=name):
-                self.assertEqual(MODULE.site_phase(name, REPO_ROOT), "initial")
+                self.assertIn(
+                    MODULE.site_phase(name, REPO_ROOT),
+                    ("initial", "promoted"),
+                )
         self.assertTrue(MODULE.all_helm_releases_suspended(REPO_ROOT))
         for name in MODULE.RELEASE_CONTRACTS:
             with self.subTest(parent=name):
