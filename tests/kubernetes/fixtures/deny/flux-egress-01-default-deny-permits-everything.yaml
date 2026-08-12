@@ -1,0 +1,24 @@
+# One reopening of the flux-system egress closure, alone in its own file.
+#
+# One document per file, and one `expect-deny` per file, is deliberate:
+# scripts/test-policy-fixtures.sh asserts that THIS fixture is rejected for THIS
+# reason. A multi-document deny fixture asserted at file level cannot do that --
+# the other documents keep failing the file while one deny arm is quietly
+# neutered, and the suite stays green.
+#
+# The standalone default-deny turned into an allow-all: it still declares both
+# policyTypes, so it reads as isolation, while `egress: [{}]` permits every
+# destination. This is the shape a careless "fix" for a blocked controller takes.
+# expect-deny: NetworkPolicy flux-system/default-deny must isolate every Pod for ingress and egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: flux-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - {}
