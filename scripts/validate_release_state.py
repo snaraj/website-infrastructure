@@ -33,8 +33,12 @@ RELEASE_CONTRACTS = {
         "namespace": "naranjo-online",
         "repository": "ghcr.io/snaraj/naranjo-online",
         "readiness": "suspended-until-lock-build-signature-and-digest",
-        "chart": "./chart",
-        "source": "naranjo-online-source",
+        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        # so this identity has no in-repository chart path and no Git chart
+        # source; ``chart_ref`` is the OCIRepository beside its release.
+        "chart": None,
+        "source": None,
+        "chart_ref": "naranjo-online-chart",
         "parent_path": "./kubernetes/websites/naranjo-online",
         "parent_service_account": "naranjo-online-reconciler",
         "parent_dependencies": (
@@ -49,8 +53,12 @@ RELEASE_CONTRACTS = {
         "namespace": "lidersea-com",
         "repository": "ghcr.io/snaraj/lidersea-com",
         "readiness": "suspended-until-capacity-lock-build-signature-and-digest",
-        "chart": "./chart",
-        "source": "lidersea-com-source",
+        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        # so this identity has no in-repository chart path and no Git chart
+        # source; ``chart_ref`` is the OCIRepository beside its release.
+        "chart": None,
+        "source": None,
+        "chart_ref": "lidersea-com-chart",
         "parent_path": "./kubernetes/websites/lidersea-com",
         "parent_service_account": "lidersea-com-reconciler",
         "parent_dependencies": (
@@ -65,8 +73,12 @@ RELEASE_CONTRACTS = {
         "namespace": "cloudflare-public",
         "repository": None,
         "readiness": "suspended-until-sops-token-and-cloudflare-plan",
+        # The connector chart is this repository's own, so it keeps the
+        # anonymous Git chart source; it has no published release identity of
+        # its own and therefore no OCI chart reference.
         "chart": "./kubernetes/platform/cloudflare-public/chart",
         "source": "cloudflare-public-source",
+        "chart_ref": None,
         "parent_path": "./kubernetes/platform/cloudflare-public/release",
         "parent_service_account": "platform-services-reconciler",
         "parent_dependencies": (
@@ -397,16 +409,36 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
                 "    mode: enabled",
             ]
         )
+    # Two mutually exclusive chart bindings, one per release family. A site
+    # release must reference its own signature-verified OCIRepository and must
+    # NOT carry an inline ``chart:`` block; the connector release must keep the
+    # in-repository Git chart and must NOT carry a ``chartRef``. Because this
+    # allowlist is exhaustive and ordered, either substitution — including one
+    # site pointing at the other site's chart source — is rejected here before
+    # any downstream policy sees it.
+    if contract["chart_ref"] is not None:
+        common.extend(
+            [
+                "  chartRef:",
+                "    kind: OCIRepository",
+                "    name: {}".format(contract["chart_ref"]),
+            ]
+        )
+    else:
+        common.extend(
+            [
+                "  chart:",
+                "    spec:",
+                "      chart: {}".format(contract["chart"]),
+                "      reconcileStrategy: Revision",
+                "      sourceRef:",
+                "        kind: GitRepository",
+                "        name: {}".format(contract["source"]),
+                "      interval: 10m0s",
+            ]
+        )
     common.extend(
         [
-            "  chart:",
-            "    spec:",
-            "      chart: {}".format(contract["chart"]),
-            "      reconcileStrategy: Revision",
-            "      sourceRef:",
-            "        kind: GitRepository",
-            "        name: {}".format(contract["source"]),
-            "      interval: 10m0s",
             "  install:",
             "    remediation:",
             "      retries: 0",
