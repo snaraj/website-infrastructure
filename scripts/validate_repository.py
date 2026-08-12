@@ -1160,11 +1160,35 @@ def flux_egress_contract_errors(root):
         "path: /spec/egress" not in read(patch)
     ):
         errors.append("allow-egress patch must remove /spec/egress and nothing else")
+    # Pod Security on flux-system: the generated export only warns, so the
+    # overlay's enforce labels are the control. A patch file that exists but is
+    # not wired into the install root is the same failure as no patch at all,
+    # which is why both halves are checked for both patches.
+    namespace_patch = root / "kubernetes/flux-system/controllers/patches/namespace.yaml"
+    if not namespace_patch.is_file():
+        errors.append("flux-system Pod Security enforcement patch is missing")
+    else:
+        namespace_text = read(namespace_patch)
+        for fragment in (
+            "pod-security.kubernetes.io~1enforce",
+            "value: restricted",
+            "value: v1.36",
+        ):
+            if fragment not in namespace_text:
+                errors.append(
+                    "flux-system Pod Security patch must enforce restricted at a pinned "
+                    "version: " + fragment
+                )
     controllers_index = root / "kubernetes/flux-system/controllers/kustomization.yaml"
     if not controllers_index.is_file():
         errors.append("Flux controller install root is missing")
-    elif "patches/allow-egress.yaml" not in read(controllers_index):
-        errors.append("Flux controller install root does not apply the allow-egress patch")
+    else:
+        controllers_text = read(controllers_index)
+        for referenced in ("patches/allow-egress.yaml", "patches/namespace.yaml"):
+            if referenced not in controllers_text:
+                errors.append(
+                    "Flux controller install root does not apply " + referenced
+                )
     egress_index = root / "kubernetes/flux-system/egress/kustomization.yaml"
     if not egress_index.is_file():
         errors.append("Flux egress Kustomization root is missing")

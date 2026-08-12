@@ -162,6 +162,13 @@ class PodSecurityEnforcementTests(unittest.TestCase):
                 )
                 self.assertIn("value: " + value, patch)
 
+    def test_the_install_root_applies_the_namespace_patch(self):
+        # A patch file that exists but is not wired in is the same failure as
+        # no patch at all. Found by mutating the wiring rather than the file.
+        self.assertIn(
+            "path: patches/namespace.yaml", read(CONTROLLERS / "kustomization.yaml")
+        )
+
     def test_the_generated_namespace_only_warns(self):
         # The gap this patch closes. If a future export starts enforcing on its
         # own, the patch's `add` operations would begin colliding and this test
