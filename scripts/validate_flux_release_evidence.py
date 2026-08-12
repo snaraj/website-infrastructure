@@ -143,10 +143,11 @@ for name in (
         raise SystemExit(f"Kustomization {identity} spec differs from exact desired state")
 
 
+# Only this repository's own desired state and the connector chart still come
+# from Git. Each site's chart is a published, signature-verified OCI artifact,
+# so a live GitRepository in a site namespace is itself a finding.
 source_identities = {
     ("flux-system", "flux-system"),
-    ("naranjo-online", "naranjo-online-source"),
-    ("lidersea-com", "lidersea-com-source"),
     ("cloudflare-public", "cloudflare-public-source"),
 }
 gitrepositories = load_items("gitrepositories.json")
@@ -176,26 +177,112 @@ for filename, kind in (
     ("buckets.json", "Bucket"),
     ("externalartifacts.json", "ExternalArtifact"),
     ("helmrepositories.json", "HelmRepository"),
-    ("ocirepositories.json", "OCIRepository"),
 ):
     if load_items(filename):
         raise SystemExit(f"live {kind} inventory must be empty")
 
 
+# Chart sources: exactly two, one per site, each verified against that site's
+# own keyless publisher identity. The artifact digest is what makes the running
+# chart content-addressed even though the SemVer range selected it by tag.
+CHART_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+oci_chart_sources = {
+    ("naranjo-online", "naranjo-online-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
+        "subject": (
+            r"^https://github\.com/snaraj/naranjo\.online/\.github/workflows/"
+            r"release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+        ),
+    },
+    ("lidersea-com", "lidersea-com-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
+        "subject": (
+            r"^https://github\.com/snaraj/lidersea\.com/\.github/workflows/"
+            r"release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+        ),
+    },
+}
+EXPECTED_CHART_ISSUER = r"^https://token\.actions\.githubusercontent\.com$"
+ocirepositories = load_items("ocirepositories.json")
+exact_namespaced_inventory(
+    ocirepositories, set(oci_chart_sources), "OCIRepository"
+)
+chart_artifact_revisions = {}
+for (namespace, name), contract in sorted(oci_chart_sources.items()):
+    identity = f"{namespace}/{name}"
+    item = by_identity(ocirepositories, namespace, name, "OCIRepository")
+    desired = desired_flux_object(
+        "OCIRepository", "source.toolkit.fluxcd.io/v1", namespace, name
+    )
+    exact_generation(item, "OCIRepository", identity)
+    one_ready(item, "OCIRepository", identity)
+    spec = item.get("spec", {})
+    verify = spec.get("verify", {})
+    identities = verify.get("matchOIDCIdentity") if isinstance(verify, dict) else None
+    if (
+        spec.get("url") != contract["url"]
+        or spec.get("secretRef") is not None
+        or spec.get("serviceAccountName") is not None
+        or spec.get("insecure") not in (None, False)
+        or not isinstance(verify, dict)
+        or verify.get("provider") != "cosign"
+        or verify.get("secretRef") is not None
+        or not isinstance(identities, list)
+        or len(identities) != 1
+        or identities[0]
+        != {"issuer": EXPECTED_CHART_ISSUER, "subject": contract["subject"]}
+    ):
+        raise SystemExit(
+            f"OCIRepository {identity} is not the exact anonymous, cosign-verified chart source"
+        )
+    if spec != desired.get("spec"):
+        raise SystemExit(f"OCIRepository {identity} spec differs from exact desired state")
+    artifact = status(item).get("artifact", {})
+    revision = artifact.get("revision") if isinstance(artifact, dict) else None
+    digest = artifact.get("digest") if isinstance(artifact, dict) else None
+    # Flux records an OCI artifact revision as "<tag>@<digest>". Both halves are
+    # load-bearing: the tag is the release identity the owner reads, the digest
+    # is what actually ran, and a revision carrying only one of them means the
+    # controller resolved something this contract cannot pin.
+    if (
+        not isinstance(revision, str)
+        or revision.count("@") != 1
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    ):
+        raise SystemExit(f"OCIRepository {identity} has no tag-and-digest artifact revision")
+    chart_tag, chart_digest = revision.split("@", 1)
+    if (
+        CHART_TAG_RE.fullmatch(chart_tag) is None
+        or chart_digest != digest
+        or chart_digest == "sha256:" + ("0" * 64)
+    ):
+        raise SystemExit(
+            f"OCIRepository {identity} artifact is not one stable release tag bound to its digest"
+        )
+    chart_artifact_revisions[(namespace, name)] = (chart_tag, revision)
+
+
 helmreleases = load_items("helmreleases.json")
 helmcharts = load_items("helmcharts.json")
+# The connector keeps a Git chart, so it is the only release that still
+# materializes a HelmChart object; the two sites resolve their charts through
+# chartRef and must NOT have one.
 release_sources = {
-    ("naranjo-online", "naranjo-online"): "naranjo-online-source",
-    ("lidersea-com", "lidersea-com"): "lidersea-com-source",
+    ("naranjo-online", "naranjo-online"): ("naranjo-online", "naranjo-online-chart"),
+    ("lidersea-com", "lidersea-com"): ("lidersea-com", "lidersea-com-chart"),
+    ("cloudflare-public", "cloudflare-public"): None,
+}
+git_chart_sources = {
     ("cloudflare-public", "cloudflare-public"): "cloudflare-public-source",
 }
 expected_chart_identities = {
     (namespace, f"{namespace}-{name}")
-    for namespace, name in release_sources
+    for namespace, name in git_chart_sources
 }
 exact_namespaced_inventory(helmreleases, set(release_sources), "HelmRelease")
 exact_namespaced_inventory(helmcharts, expected_chart_identities, "HelmChart")
-for (namespace, name), source_name in release_sources.items():
+for (namespace, name), chart_source in release_sources.items():
     identity = f"{namespace}/{name}"
     release = by_identity(helmreleases, namespace, name, "HelmRelease")
     desired_release = desired_flux_object(
@@ -225,6 +312,27 @@ for (namespace, name), source_name in release_sources.items():
         raise SystemExit(
             f"HelmRelease {identity} attempted revision is not its latest deployed revision"
         )
+    if chart_source is not None:
+        # Tag-driven site release: the chart it deployed must be the exact
+        # version its own verified OCIRepository currently resolves, and the
+        # HelmRelease must reference that source rather than a HelmChart.
+        if release.get("spec", {}).get("chartRef") != {
+            "kind": "OCIRepository",
+            "name": chart_source[1],
+        }:
+            raise SystemExit(
+                f"HelmRelease {identity} does not resolve its chart through its own verified OCI source"
+            )
+        if release_status.get("helmChart") is not None:
+            raise SystemExit(
+                f"HelmRelease {identity} must not materialize a HelmChart on the chartRef path"
+            )
+        chart_tag, chart_revision = chart_artifact_revisions[chart_source]
+        if attempted_revision not in {chart_tag, chart_tag.lstrip("v"), chart_revision}:
+            raise SystemExit(
+                f"HelmRelease {identity} deployed a chart version its verified source does not currently resolve"
+            )
+        continue
     chart_reference = release_status.get("helmChart")
     if not isinstance(chart_reference, str) or chart_reference.count("/") != 1:
         raise SystemExit(f"HelmRelease {identity} has no canonical HelmChart reference")
@@ -243,7 +351,7 @@ for (namespace, name), source_name in release_sources.items():
     if (
         chart_spec.get("reconcileStrategy") != "Revision"
         or chart_spec.get("sourceRef")
-        != {"kind": "GitRepository", "name": source_name}
+        != {"kind": "GitRepository", "name": git_chart_sources[(namespace, name)]}
         or chart_spec != desired_chart_spec
         or chart_status.get("observedSourceArtifactRevision")
         != expected_git_revision

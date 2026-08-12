@@ -36,13 +36,42 @@ KUSTOMIZATION_NAMES = (
 )
 SOURCE_IDENTITIES = (
     ("flux-system", "flux-system"),
-    ("naranjo-online", "naranjo-online-source"),
-    ("lidersea-com", "lidersea-com-source"),
     ("cloudflare-public", "cloudflare-public-source"),
 )
+# Each site's chart is a published, cosign-verified OCI artifact selected by a
+# SemVer range; only the connector still resolves a chart from Git.
+CHART_ISSUER = r"^https://token\.actions\.githubusercontent\.com$"
+
+
+def chart_subject(domain):
+    escaped = domain.replace(".", r"\.")
+    return (
+        r"^https://github\.com/snaraj/"
+        + escaped
+        + r"/\.github/workflows/release-publisher\.yml"
+        r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+    )
+
+
+OCI_CHART_SOURCES = {
+    ("naranjo-online", "naranjo-online-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
+        "subject": chart_subject("naranjo.online"),
+        "tag": "v0.1.9",
+        "digest": "sha256:" + "a" * 64,
+    },
+    ("lidersea-com", "lidersea-com-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
+        "subject": chart_subject("lidersea.com"),
+        "tag": "v0.1.9",
+        "digest": "sha256:" + "b" * 64,
+    },
+}
+# None marks the tag-driven chartRef releases; the connector keeps its Git
+# chart source and is therefore the only release with a HelmChart object.
 RELEASE_SOURCES = {
-    ("naranjo-online", "naranjo-online"): "naranjo-online-source",
-    ("lidersea-com", "lidersea-com"): "lidersea-com-source",
+    ("naranjo-online", "naranjo-online"): None,
+    ("lidersea-com", "lidersea-com"): None,
     ("cloudflare-public", "cloudflare-public"): "cloudflare-public-source",
 }
 POLICY_NAMES = (
@@ -183,27 +212,142 @@ class ReleaseGateContractTests(unittest.TestCase):
             "buckets.json",
             "externalartifacts.json",
             "helmrepositories.json",
-            "ocirepositories.json",
         ):
             self._write(filename, {"items": []})
+
+        chart_sources = []
+        for (namespace, name), contract in OCI_CHART_SOURCES.items():
+            spec = {
+                "interval": "10m0s",
+                "layerSelector": {
+                    "mediaType": (
+                        "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+                    ),
+                    "operation": "copy",
+                },
+                "ref": {"semver": ">=0.1.9 <1.0.0"},
+                "timeout": "60s",
+                "url": contract["url"],
+                "verify": {
+                    "matchOIDCIdentity": [
+                        {
+                            "issuer": CHART_ISSUER,
+                            "subject": contract["subject"],
+                        }
+                    ],
+                    "provider": "cosign",
+                },
+            }
+            chart_sources.append(
+                {
+                    "apiVersion": "source.toolkit.fluxcd.io/v1",
+                    "kind": "OCIRepository",
+                    "metadata": {
+                        "namespace": namespace,
+                        "name": name,
+                        "generation": 2,
+                    },
+                    "spec": spec,
+                    "status": {
+                        "conditions": [ready_condition()],
+                        "observedGeneration": 2,
+                        "artifact": {
+                            "revision": "{}@{}".format(
+                                contract["tag"], contract["digest"]
+                            ),
+                            "digest": contract["digest"],
+                        },
+                    },
+                }
+            )
+            self._write(
+                "desired-flux-ocirepository-{}-{}.json".format(namespace, name),
+                {
+                    "apiVersion": "source.toolkit.fluxcd.io/v1",
+                    "kind": "OCIRepository",
+                    "metadata": {"namespace": namespace, "name": name},
+                    "spec": spec,
+                },
+            )
+        self._write("ocirepositories.json", {"items": chart_sources})
 
         releases = []
         charts = []
         for (namespace, name), source_name in RELEASE_SOURCES.items():
-            revision = "0.1.0+{}".format(name.replace("-", ""))
-            chart_name = "{}-{}".format(name, name)
-            chart_spec = {
-                "chart": "./reviewed/" + name,
-                "interval": "10m0s",
-                "reconcileStrategy": "Revision",
-                "sourceRef": {"kind": "GitRepository", "name": source_name},
-            }
-            release_spec = {
-                "chart": {"spec": chart_spec},
-                "interval": "10m0s",
-                "releaseName": name,
-                "serviceAccountName": "helm-reconciler",
-            }
+            if source_name is None:
+                contract = OCI_CHART_SOURCES[(namespace, namespace + "-chart")]
+                revision = contract["tag"]
+                release_spec = {
+                    "chartRef": {
+                        "kind": "OCIRepository",
+                        "name": namespace + "-chart",
+                    },
+                    "interval": "10m0s",
+                    "releaseName": name,
+                    "serviceAccountName": "helm-reconciler",
+                }
+                release_status = {
+                    "conditions": [ready_condition()],
+                    "observedGeneration": 3,
+                    "lastAttemptedGeneration": 3,
+                    "lastAttemptedRevision": revision,
+                    "history": [
+                        {
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "deployed",
+                            "chartVersion": revision,
+                        }
+                    ],
+                }
+            else:
+                revision = "0.1.0+{}".format(name.replace("-", ""))
+                chart_name = "{}-{}".format(name, name)
+                chart_spec = {
+                    "chart": "./reviewed/" + name,
+                    "interval": "10m0s",
+                    "reconcileStrategy": "Revision",
+                    "sourceRef": {"kind": "GitRepository", "name": source_name},
+                }
+                release_spec = {
+                    "chart": {"spec": chart_spec},
+                    "interval": "10m0s",
+                    "releaseName": name,
+                    "serviceAccountName": "helm-reconciler",
+                }
+                release_status = {
+                    "conditions": [ready_condition()],
+                    "observedGeneration": 3,
+                    "lastAttemptedGeneration": 3,
+                    "lastAttemptedRevision": revision,
+                    "helmChart": "{}/{}".format(namespace, chart_name),
+                    "history": [
+                        {
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "deployed",
+                            "chartVersion": revision,
+                        }
+                    ],
+                }
+                charts.append(
+                    {
+                        "metadata": {
+                            "namespace": namespace,
+                            "name": chart_name,
+                            "generation": 4,
+                        },
+                        "spec": {
+                            **chart_spec,
+                        },
+                        "status": {
+                            "conditions": [ready_condition()],
+                            "observedGeneration": 4,
+                            "observedSourceArtifactRevision": GIT_REVISION,
+                            "artifact": {"revision": revision},
+                        },
+                    }
+                )
             releases.append(
                 {
                     "apiVersion": "helm.toolkit.fluxcd.io/v2",
@@ -214,21 +358,7 @@ class ReleaseGateContractTests(unittest.TestCase):
                         "generation": 3,
                     },
                     "spec": release_spec,
-                    "status": {
-                        "conditions": [ready_condition()],
-                        "observedGeneration": 3,
-                        "lastAttemptedGeneration": 3,
-                        "lastAttemptedRevision": revision,
-                        "helmChart": "{}/{}".format(namespace, chart_name),
-                        "history": [
-                            {
-                                "name": name,
-                                "namespace": namespace,
-                                "status": "deployed",
-                                "chartVersion": revision,
-                            }
-                        ],
-                    },
+                    "status": release_status,
                 }
             )
             self._write(
@@ -239,24 +369,6 @@ class ReleaseGateContractTests(unittest.TestCase):
                     "metadata": {"namespace": namespace, "name": name},
                     "spec": release_spec,
                 },
-            )
-            charts.append(
-                {
-                    "metadata": {
-                        "namespace": namespace,
-                        "name": chart_name,
-                        "generation": 4,
-                    },
-                    "spec": {
-                        **chart_spec,
-                    },
-                    "status": {
-                        "conditions": [ready_condition()],
-                        "observedGeneration": 4,
-                        "observedSourceArtifactRevision": GIT_REVISION,
-                        "artifact": {"revision": revision},
-                    },
-                }
             )
         self._write("helmreleases.json", {"items": releases})
         self._write("helmcharts.json", {"items": charts})
@@ -690,6 +802,8 @@ class ReleaseGateContractTests(unittest.TestCase):
         fixtures = (
             ("kustomizations.json", "flux-system", "rogue-kustomization"),
             ("gitrepositories.json", "default", "rogue-source"),
+            ("ocirepositories.json", "default", "rogue-chart-source"),
+            ("ocirepositories.json", "naranjo-online", "second-chart-source"),
             ("helmreleases.json", "default", "rogue-release"),
             ("helmcharts.json", "default", "rogue-chart"),
         )
@@ -718,7 +832,6 @@ class ReleaseGateContractTests(unittest.TestCase):
             "buckets.json",
             "externalartifacts.json",
             "helmrepositories.json",
-            "ocirepositories.json",
         )
         for filename in fixtures:
             with self.subTest(filename=filename):
@@ -754,9 +867,13 @@ class ReleaseGateContractTests(unittest.TestCase):
             ),
             (
                 "helmreleases.json",
-                lambda item: item["spec"]["chart"]["spec"].update(
-                    {"chart": "./unreviewed"}
+                lambda item: item["spec"]["chartRef"].update(
+                    {"name": "unreviewed-chart"}
                 ),
+            ),
+            (
+                "ocirepositories.json",
+                lambda item: item["spec"]["ref"].update({"semver": ">=0.0.0"}),
             ),
             (
                 "helmcharts.json",
@@ -803,6 +920,112 @@ class ReleaseGateContractTests(unittest.TestCase):
         )
         self._write("gitrepositories.json", value)
         self._assert_rejected()
+
+    def test_unverified_or_misattributed_chart_source_fails_closed(self):
+        """Every way a live chart source could stop proving its publisher.
+
+        This exercises the captured-evidence validator, not a running Flux
+        controller: it proves the successor gate refuses evidence in which a
+        site's chart could have come from an unsigned artifact or from the
+        wrong signing identity.
+        """
+
+        other_subject = chart_subject("lidersea.com")
+        mutations = {
+            "verification removed": lambda item: item["spec"].pop("verify"),
+            "provider downgraded": lambda item: item["spec"]["verify"].update(
+                {"provider": "notation"}
+            ),
+            "keyless identity dropped": lambda item: item["spec"]["verify"].update(
+                {"matchOIDCIdentity": []}
+            ),
+            "second identity widened": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ].append({"issuer": CHART_ISSUER, "subject": other_subject}),
+            "sibling site subject": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update({"subject": other_subject}),
+            "foreign issuer": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update({"issuer": "^https://accounts\\.example\\.invalid$"}),
+            "branch ref subject": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update(
+                {
+                    "subject": (
+                        r"^https://github\.com/snaraj/naranjo\.online/"
+                        r"\.github/workflows/release-publisher\.yml"
+                        r"@refs/heads/main$"
+                    )
+                }
+            ),
+            "registry credential": lambda item: item["spec"].update(
+                {"secretRef": {"name": "ghcr-pull"}}
+            ),
+            "service account pull": lambda item: item["spec"].update(
+                {"serviceAccountName": "puller"}
+            ),
+            "plaintext registry": lambda item: item["spec"].update({"insecure": True}),
+            "registry path swap": lambda item: item["spec"].update(
+                {"url": "oci://ghcr.io/snaraj/charts/lidersea-com"}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("ocirepositories.json")
+                mutate(value["items"][0])
+                self._write("ocirepositories.json", value)
+                self._assert_rejected()
+
+    def test_chart_artifact_without_tag_and_digest_fails_closed(self):
+        mutations = {
+            "tag only": lambda artifact: artifact.update({"revision": "v0.1.9"}),
+            "digest only": lambda artifact: artifact.update(
+                {"revision": artifact["digest"]}
+            ),
+            "unstable tag": lambda artifact: artifact.update(
+                {"revision": "latest@" + artifact["digest"]}
+            ),
+            "digest disagrees with revision": lambda artifact: artifact.update(
+                {"revision": "v0.1.9@sha256:" + "c" * 64}
+            ),
+            "all-zero digest": lambda artifact: artifact.update(
+                {
+                    "revision": "v0.1.9@sha256:" + "0" * 64,
+                    "digest": "sha256:" + "0" * 64,
+                }
+            ),
+            "artifact absent": lambda artifact: artifact.clear(),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("ocirepositories.json")
+                mutate(value["items"][0]["status"]["artifact"])
+                self._write("ocirepositories.json", value)
+                self._assert_rejected()
+
+    def test_site_release_not_bound_to_its_own_chart_source_fails_closed(self):
+        mutations = {
+            "cross-site chart source": lambda item: item["spec"]["chartRef"].update(
+                {"name": "lidersea-com-chart"}
+            ),
+            "helm chart reintroduced": lambda item: item["status"].update(
+                {"helmChart": "naranjo-online/naranjo-online-naranjo-online"}
+            ),
+            "deployed version is not the resolved one": lambda item: (
+                item["status"].update({"lastAttemptedRevision": "v0.1.8"}),
+                item["status"]["history"][0].update({"chartVersion": "v0.1.8"}),
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("helmreleases.json")
+                mutate(value["items"][0])
+                self._write("helmreleases.json", value)
+                self._assert_rejected()
 
     def test_missing_helmrelease_observed_generation_fails_closed(self):
         value = self._read("helmreleases.json")
