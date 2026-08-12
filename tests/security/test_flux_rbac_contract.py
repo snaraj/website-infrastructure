@@ -1232,9 +1232,107 @@ class FluxRbacCompositionTests(unittest.TestCase):
             {"kind": "User", "apiGroup": api_group, "name": "system:node:pi"},
             {"kind": "Group", "apiGroup": api_group, "name": "system:serviceaccounts:kube-system"},
             {"kind": "Group", "apiGroup": api_group, "name": "system:masters"},
+            # Suffix near-misses. Exact set membership already makes these
+            # false; asserted so a future `startswith`/`in` rewrite of this
+            # matcher cannot pass silently.
+            {"kind": "ServiceAccount", "name": "kustomize-controller-2",
+             "namespace": "flux-system"},
+            {"kind": "User", "apiGroup": api_group,
+             "name": "system:serviceaccount:flux-system:kustomize-controller-2"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:authenticated-2"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:serviceaccounts:flux-system-2"},
         ):
             with self.subTest(ignores=subject["name"], kind=subject["kind"]):
                 self.assertFalse(reaches({"subjects": [subject]}), subject)
+
+    def test_the_stock_cluster_bindings_pass_but_a_tampered_one_does_not(self):
+        """The allowlist that keeps the previous test from refusing every cluster.
+
+        `system:authenticated` is carried by every authenticated identity, so
+        once the verifier understands that group, the four ClusterRoleBindings
+        Kubernetes creates on every cluster reach the Flux accounts too — and
+        `--verify` reads every ClusterRoleBinding on the cluster, unfiltered.
+        Left alone it would refuse a conformant cluster, and the runbook runs
+        `--verify` immediately after the destructive deletion: a false refusal
+        aborts the migration at its most delicate boundary and sends the
+        operator into a rollback that was never needed.
+
+        The allowlist is BY NAME and pinned to the exact roleRef and subject
+        set, so the stock binding passes and a tampered one — repointed, or
+        grown a subject — still fails. Each is asserted both ways.
+        """
+
+        contract = self._bootstrap_contract()
+        stock = contract["is_bootstrapped_cluster_role_binding"]
+        reaches = contract["binding_reaches_protected_account"]
+        api_group = "rbac.authorization.k8s.io"
+
+        def binding(name, role, groups):
+            return {
+                "metadata": {"name": name},
+                "roleRef": {"apiGroup": api_group, "kind": "ClusterRole", "name": role},
+                "subjects": [
+                    {"kind": "Group", "apiGroup": api_group, "name": group}
+                    for group in groups
+                ],
+            }
+
+        captures = {
+            "system:basic-user": ("system:basic-user", ["system:authenticated"]),
+            "system:discovery": ("system:discovery", ["system:authenticated"]),
+            "system:public-info-viewer": (
+                "system:public-info-viewer",
+                ["system:authenticated", "system:unauthenticated"],
+            ),
+            "system:service-account-issuer-discovery": (
+                "system:service-account-issuer-discovery", ["system:serviceaccounts"],
+            ),
+        }
+        self.assertEqual(
+            set(captures), set(contract["BOOTSTRAPPED_CLUSTER_ROLE_BINDINGS"])
+        )
+        for name, (role, groups) in sorted(captures.items()):
+            value = binding(name, role, groups)
+            with self.subTest(stock=name):
+                # Every one of them DOES reach a protected account — that is why
+                # the allowlist is needed rather than the matcher being wrong.
+                self.assertTrue(reaches(value))
+                self.assertTrue(stock(value))
+            with self.subTest(repointed=name):
+                self.assertFalse(stock(binding(name, "cluster-admin", groups)))
+            with self.subTest(extra_subject=name):
+                self.assertFalse(
+                    stock(binding(name, role, groups + ["system:masters"]))
+                )
+            with self.subTest(dropped_subject=name):
+                self.assertFalse(stock(binding(name, role, groups[:-1])))
+            with self.subTest(service_account_subject=name):
+                tampered = binding(name, role, groups)
+                tampered["subjects"].append(
+                    {"kind": "ServiceAccount", "name": "kustomize-controller",
+                     "namespace": "flux-system"}
+                )
+                self.assertFalse(stock(tampered))
+        # An unlisted name is never allowlisted, however stock it looks.
+        self.assertFalse(
+            stock(binding("system:almost-basic-user", "system:basic-user",
+                          ["system:authenticated"]))
+        )
+        # And the forms the previous test pins still reach: the allowlist
+        # narrows WHICH bindings are exempt, never what the matcher understands.
+        for subject in (
+            {"kind": "User", "apiGroup": api_group,
+             "name": "system:serviceaccount:flux-system:kustomize-controller"},
+            {"kind": "Group", "apiGroup": api_group, "name": "system:authenticated"},
+        ):
+            value = {
+                "metadata": {"name": "borrowed"},
+                "roleRef": {"apiGroup": api_group, "kind": "ClusterRole", "name": "cluster-admin"},
+                "subjects": [subject],
+            }
+            with self.subTest(still_reaches=subject["kind"]):
+                self.assertTrue(reaches(value))
+                self.assertFalse(stock(value))
 
     def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")
@@ -1436,6 +1534,158 @@ class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError) as raised:
             model._classify_flux_document(documents[0], "automation.yaml", [], [], [])
         self.assertIn("cannot classify", str(raised.exception))
+
+    def test_the_api_group_is_parsed_exactly_rather_than_prefix_matched(self):
+        """Identity by parsing, not by string shape.
+
+        The classification used `apiVersion.startswith("<group>/")`, which
+        decides a document's identity — and therefore whose authority applies to
+        it — from the shape of a string. CodeQL flagged all three as
+        `py/incomplete-url-substring-sanitization`, HIGH; the security framing
+        is wrong for an apiGroup check, but the underlying complaint is right,
+        and it is the same principle as keying a declared gap on `(kind, name)`
+        or the cluster-scope exemption on the subject: compare the identity,
+        exactly, after parsing it.
+
+        Both refusals below are the fail-closed direction — a near miss stops
+        the derivation with a named error rather than being read as an ordinary
+        applied object whose controller-side authority nobody derived.
+        """
+
+        classified = []
+
+        def classify(api_version, kind):
+            kustomizations, releases, sources = [], [], []
+            result = model._classify_flux_document(
+                {"apiVersion": api_version, "kind": kind}, "fixture",
+                kustomizations, releases, sources,
+            )
+            classified.append((kustomizations, releases, sources))
+            return result
+
+        # The real shapes still classify, into the right bucket.
+        for api_version, kind, index in (
+            ("kustomize.toolkit.fluxcd.io/v1", "Kustomization", 0),
+            ("helm.toolkit.fluxcd.io/v2", "HelmRelease", 1),
+            ("source.toolkit.fluxcd.io/v1", "OCIRepository", 2),
+            ("source.toolkit.fluxcd.io/v1beta2", "Bucket", 2),
+        ):
+            with self.subTest(accepts=api_version, kind=kind):
+                self.assertTrue(classify(api_version, kind))
+                self.assertEqual(len(classified[-1][index]), 1)
+                self.assertEqual(sum(len(bucket) for bucket in classified[-1]), 1)
+
+        # A group that is NOT exactly the Flux group is refused, however much of
+        # the string it shares: a near-miss label, a group that merely contains
+        # the domain, and the bare domain itself.
+        for api_version, kind in (
+            ("evil-kustomize.toolkit.fluxcd.io/v1", "Kustomization"),
+            ("notkustomize.toolkit.fluxcd.io/v1", "Kustomization"),
+            ("kustomize.toolkit.fluxcd.io.attacker.example/v1", "Kustomization"),
+            ("helm.toolkit.fluxcd.io.attacker.example/v2", "HelmRelease"),
+            ("toolkit.fluxcd.io/v1", "Kustomization"),
+            ("image.toolkit.fluxcd.io/v1beta2", "ImageUpdateAutomation"),
+            # No version at all: the old prefix test matched nothing here AND
+            # the old substring refusal missed it, so it fell through as an
+            # ordinary applied object with no impersonation requirement derived.
+            ("kustomize.toolkit.fluxcd.io", "Kustomization"),
+            ("helm.toolkit.fluxcd.io", "HelmRelease"),
+        ):
+            with self.subTest(refuses=api_version, kind=kind):
+                with self.assertRaises(AssertionError) as raised:
+                    classify(api_version, kind)
+                self.assertIn("cannot classify", str(raised.exception))
+
+        # An apiVersion that is not one group and one version is refused before
+        # anything is decided from it — extra segments included.
+        for api_version, kind in (
+            ("helm.toolkit.fluxcd.io/v2/extra", "HelmRelease"),
+            ("kustomize.toolkit.fluxcd.io/", "Kustomization"),
+            ("/v1", "Kustomization"),
+            ("apps/v1/extra", "Deployment"),
+        ):
+            with self.subTest(malformed=api_version, kind=kind):
+                with self.assertRaises(AssertionError) as raised:
+                    classify(api_version, kind)
+                self.assertIn(
+                    "not exactly one apiGroup and one version", str(raised.exception)
+                )
+
+        # And nothing outside the Flux domain is disturbed: ordinary objects are
+        # not custom resources, and they do not raise.
+        for api_version, kind in (
+            ("apps/v1", "Deployment"),
+            ("v1", "ServiceAccount"),
+            ("networking.k8s.io/v1", "NetworkPolicy"),
+            ("kyverno.io/v1", "ClusterPolicy"),
+            ("fluxcd.io/v1", "Thing"),
+        ):
+            with self.subTest(ignores=api_version, kind=kind):
+                self.assertFalse(classify(api_version, kind))
+                self.assertEqual(sum(len(bucket) for bucket in classified[-1]), 0)
+
+    def test_every_reviewed_custom_resource_classifies_identically_after_the_parse(self):
+        """Behavioural equivalence on the real tree, proven rather than asserted.
+
+        Parsing the apiGroup instead of prefix-matching the whole apiVersion
+        must change NOTHING about the 13 custom resources this repository
+        actually declares — it may only change what happens to shapes that were
+        being handled by string luck. Both halves are pinned here: the exact
+        inventory that must keep classifying, and version-agnosticism within a
+        group, which the prefix test also had and which must not regress.
+        """
+
+        found = model.flux_custom_resources(ROOT)
+        self.assertEqual(len(found.kustomizations), 6)
+        self.assertEqual(len(found.helm_releases), 3)
+        self.assertEqual(len(found.sources), 4)
+        self.assertEqual(
+            sorted(
+                (document["kind"], document["apiVersion"])
+                for bucket in (found.kustomizations, found.helm_releases, found.sources)
+                for document in bucket
+            ),
+            sorted(
+                [("Kustomization", "kustomize.toolkit.fluxcd.io/v1")] * 6
+                + [("HelmRelease", "helm.toolkit.fluxcd.io/v2")] * 3
+                + [("GitRepository", "source.toolkit.fluxcd.io/v1")] * 2
+                + [("OCIRepository", "source.toolkit.fluxcd.io/v1")] * 2
+            ),
+        )
+        for index, bucket, group in (
+            (0, found.kustomizations, KUSTOMIZE_GROUP),
+            (1, found.helm_releases, HELM_GROUP),
+            (2, found.sources, SOURCE_GROUP),
+        ):
+            for document in bucket:
+                buckets = ([], [], [])
+                with self.subTest(
+                    kind=document["kind"], name=document["metadata"]["name"]
+                ):
+                    self.assertEqual(model._api_group(document["apiVersion"]), group)
+                    self.assertTrue(
+                        model._classify_flux_document(document, "reviewed", *buckets)
+                    )
+                    self.assertEqual(len(buckets[index]), 1)
+                    self.assertEqual(sum(len(one) for one in buckets), 1)
+
+        # Version-agnostic WITHIN the group: the group decides identity, the
+        # version never did and still does not.
+        for version in ("v1", "v1beta1", "v1beta2", "v2", "v2beta2", "v1alpha1"):
+            for kind, group, index in (
+                ("Kustomization", KUSTOMIZE_GROUP, 0),
+                ("HelmRelease", HELM_GROUP, 1),
+                ("OCIRepository", SOURCE_GROUP, 2),
+            ):
+                buckets = ([], [], [])
+                with self.subTest(version=version, kind=kind):
+                    self.assertTrue(
+                        model._classify_flux_document(
+                            {"apiVersion": group + "/" + version, "kind": kind},
+                            "fixture", *buckets,
+                        )
+                    )
+                    self.assertEqual(len(buckets[index]), 1)
 
     def test_an_argument_patch_that_could_drop_a_flag_is_refused(self):
         # Leader election is read out of the generated export's arguments, which

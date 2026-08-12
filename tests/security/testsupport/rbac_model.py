@@ -1012,27 +1012,94 @@ def cluster_watching_controllers(root=REPO_ROOT):
     return watching
 
 
-# apiVersion prefixes whose objects are Flux's own custom resources. A document
-# in one of these groups that this module cannot classify is REFUSED: it is a
+# The apiGroups whose objects are Flux's own custom resources. A document in one
+# of these groups that this module cannot classify is REFUSED: it is a
 # reconciliation input — a source, an execution object, or an identity selector —
 # and treating it as an ordinary applied object would leave its controller-side
 # authority (impersonation, source resolution, status ownership) underived.
-FLUX_API_GROUP_SUFFIX = ".toolkit.fluxcd.io/"
+KUSTOMIZE_API_GROUP = "kustomize.toolkit.fluxcd.io"
+HELM_API_GROUP = "helm.toolkit.fluxcd.io"
+SOURCE_API_GROUP = "source.toolkit.fluxcd.io"
+
+# The Flux API domain as LABELS, not as a string to match against. Every string
+# form of a domain check is wrong in some direction — `startswith` admits
+# `kustomize.toolkit.fluxcd.io.attacker.example` on a bare prefix, `endswith`
+# admits `notkustomize.toolkit.fluxcd.io`, and `in` admits both — so a dotted
+# name is compared the way it is structured: label by label. (CodeQL's
+# py/incomplete-url-substring-sanitization flagged the prefix tests that used to
+# be here, and the security framing is wrong for an apiGroup while the
+# underlying complaint is right: this decided identity by string shape.)
+FLUX_API_DOMAIN = ("toolkit", "fluxcd", "io")
+
+
+def _api_group(api_version):
+    """The apiGroup of a `group/version` string, exactly.
+
+    Returns ``""`` for the core group (a bare ``v1``) and ``None`` for anything
+    that is not exactly one group and one version — an apiVersion with no
+    version, with an empty half, or with extra path segments is not a shape this
+    enumeration will guess at.
+    """
+
+    parts = api_version.split("/")
+    if len(parts) == 1:
+        return ""
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0]
+
+
+def _is_flux_group(group):
+    """Whether ``group`` is the Flux API domain or a subdomain of it."""
+
+    labels = tuple(group.split("."))
+    return len(labels) >= len(FLUX_API_DOMAIN) and labels[-len(FLUX_API_DOMAIN):] == FLUX_API_DOMAIN
+
+
+def _mentions_flux_domain(api_version):
+    """Whether the Flux domain appears anywhere in ``api_version`` as labels.
+
+    Deliberately broader than :func:`_is_flux_group`, and used only on the
+    REFUSAL path: a malformed apiVersion that names the Flux domain somewhere —
+    `kustomize.toolkit.fluxcd.io` with no version, or
+    `kustomize.toolkit.fluxcd.io.attacker.example/v1` — is a reconciliation
+    input this module could not classify, and refusing it is the fail-closed
+    direction. Compared as labels for the same reason as above.
+    """
+
+    labels = tuple(part for part in re.split(r"[./]", api_version) if part)
+    span = len(FLUX_API_DOMAIN)
+    return any(
+        labels[index:index + span] == FLUX_API_DOMAIN
+        for index in range(max(len(labels) - span + 1, 0))
+    )
 
 
 def _classify_flux_document(document, origin, kustomizations, helm_releases, sources):
     kind = document.get("kind")
     api_version = document.get("apiVersion") or ""
-    if kind == "Kustomization" and api_version.startswith("kustomize.toolkit.fluxcd.io/"):
+    group = _api_group(api_version)
+    if kind == "Kustomization" and group == KUSTOMIZE_API_GROUP:
         kustomizations.append(document)
         return True
-    if kind == "HelmRelease" and api_version.startswith("helm.toolkit.fluxcd.io/"):
+    if kind == "HelmRelease" and group == HELM_API_GROUP:
         helm_releases.append(document)
         return True
-    if kind in SOURCE_KINDS and api_version.startswith("source.toolkit.fluxcd.io/"):
+    if kind in SOURCE_KINDS and group == SOURCE_API_GROUP:
         sources.append(document)
         return True
-    if FLUX_API_GROUP_SUFFIX in api_version:
+    # Both refusals below are the fail-closed direction: a near-miss stops the
+    # derivation with a named error instead of being read as an ordinary applied
+    # object whose controller-side authority nobody derived.
+    if group is None:
+        raise AssertionError(
+            "{} declares apiVersion {!r} for {}, which is not exactly one "
+            "apiGroup and one version. This enumeration decides authority from "
+            "the group, so it refuses a shape it would have to guess at.".format(
+                origin, api_version, kind
+            )
+        )
+    if (group and _is_flux_group(group)) or _mentions_flux_domain(api_version):
         raise AssertionError(
             "{} declares {} {}, a Flux custom resource this enumeration cannot "
             "classify. Teach flux_custom_resources about it — an unclassified "

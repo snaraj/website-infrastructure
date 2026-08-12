@@ -1232,6 +1232,60 @@ def check_binding(value, key, expected, cluster=False):
     require(normalized_subjects(value.get("subjects")) == normalized_subjects(expected[1]))
 
 
+# Kubernetes bootstraps these four ClusterRoleBindings on every cluster, and all
+# four reach every authenticated identity — which now includes the Flux accounts,
+# because the check below understands `system:authenticated`. They are
+# ALLOWLISTED BY NAME and pinned to their exact roleRef and subject set, so a
+# stock binding passes and a TAMPERED one — repointed at another ClusterRole, or
+# grown an extra subject — still fails.
+#
+# Without this the verifier refuses a conformant cluster: `--verify` reads every
+# ClusterRoleBinding on the cluster, unfiltered, and the runbook runs it
+# IMMEDIATELY AFTER the destructive deletion, so a false refusal aborts the
+# migration at its most delicate boundary and sends the operator into a rollback
+# that was never needed. Fail-closed, but wrong at the worst moment.
+#
+# The pins are the upstream defaults for the pinned Kubernetes minor. A cluster
+# whose defaults differ fails here and is a reviewed change, not a silent pass.
+BOOTSTRAPPED_CLUSTER_ROLE_BINDINGS = {
+    "system:basic-user": ("system:basic-user", ("system:authenticated",)),
+    "system:discovery": ("system:discovery", ("system:authenticated",)),
+    "system:public-info-viewer": (
+        "system:public-info-viewer", ("system:authenticated", "system:unauthenticated"),
+    ),
+    "system:service-account-issuer-discovery": (
+        "system:service-account-issuer-discovery", ("system:serviceaccounts",),
+    ),
+}
+
+
+def is_bootstrapped_cluster_role_binding(value):
+    """Whether ``value`` is EXACTLY one of the stock bindings, untampered."""
+
+    metadata = value.get("metadata")
+    require(isinstance(metadata, dict))
+    expected = BOOTSTRAPPED_CLUSTER_ROLE_BINDINGS.get(metadata.get("name"))
+    if expected is None:
+        return False
+    role_ref = value.get("roleRef")
+    require(isinstance(role_ref, dict))
+    if role_ref != {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": expected[0],
+    }:
+        return False
+    subjects = value.get("subjects")
+    require(isinstance(subjects, list))
+    actual = []
+    for subject in subjects:
+        require(isinstance(subject, dict))
+        if subject.get("kind") != "Group":
+            return False
+        actual.append(subject.get("name"))
+    return tuple(sorted(actual)) == tuple(sorted(expected[1]))
+
+
 def binding_reaches_protected_account(value):
     # THREE subject forms, because a ServiceAccount is reachable by all three and
     # a verifier that knew only two would accept a binding the repository's own
@@ -1311,6 +1365,8 @@ def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, sco
     for key, value in cluster_bindings.items():
         if key in expected_clusters:
             check_binding(value, key, expected_clusters[key], cluster=True)
+        elif is_bootstrapped_cluster_role_binding(value):
+            continue
         elif binding_reaches_protected_account(value):
             raise ContractError()
     require(set(expected_clusters) <= set(cluster_bindings))
