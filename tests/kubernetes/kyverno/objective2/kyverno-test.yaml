@@ -120,6 +120,11 @@ results:
     resources: [widened-ingress]
     kind: NetworkPolicy
     result: fail
+  - policy: require-exact-tenant-networking
+    rule: exact-site-ingress-and-no-egress
+    resources: [cloudflared-to-naranjo-online]
+    kind: NetworkPolicy
+    result: fail
   - policy: disallow-undiscovered-storage
     rule: disallow-persistent-storage-resources
     resources: [invented-media]

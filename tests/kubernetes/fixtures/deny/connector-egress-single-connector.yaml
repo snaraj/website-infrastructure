@@ -1,0 +1,25 @@
+# The superseded single-shared-connector shape: a connector-egress policy whose
+# podSelector pins instance=cloudflare-public (the old shared connector) instead
+# of this site's own <site>-tunnel instance. Denied under the two-connector model.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-naranjo-online
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: cloudflare-public
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: naranjo-online
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: naranjo-online
+      ports:
+        - port: 8080
+          protocol: TCP

@@ -71,7 +71,8 @@ spec:
             - expression: >-
                 !has(object.spec.volumes) || object.spec.volumes.all(volume,
                 volume.name == 'tunnel-token' && has(volume.secret) &&
-                volume.secret.secretName == 'pi-websites-tunnel-token' &&
+                (volume.secret.secretName == 'naranjo-online-tunnel-token' ||
+                volume.secret.secretName == 'lidersea-com-tunnel-token') &&
                 has(volume.secret.defaultMode) && volume.secret.defaultMode == 288 &&
                 has(volume.secret.items) && volume.secret.items.size() == 1 &&
                 volume.secret.items[0].key == 'token' && volume.secret.items[0].path == 'token')

@@ -1,0 +1,27 @@
+# The naranjo site must admit ONLY the naranjo connector. Pinning the OTHER
+# site's connector instance (lidersea-com-tunnel) on the naranjo ingress peer
+# is denied: this is the ingress half of the cross-site-reachability guard.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: lidersea-com-tunnel
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []

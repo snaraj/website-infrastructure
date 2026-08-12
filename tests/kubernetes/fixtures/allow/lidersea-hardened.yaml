@@ -59,6 +59,7 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: lidersea-com-tunnel
       ports:
         - port: 8080
           protocol: TCP
@@ -111,7 +112,7 @@ spec:
   volumes:
     - name: tunnel-token
       secret:
-        secretName: pi-websites-tunnel-token
+        secretName: lidersea-com-tunnel-token
         defaultMode: 288
         items:
           - key: token

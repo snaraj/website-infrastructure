@@ -170,12 +170,20 @@ valid_site_ingress_policy if {
   peers := object.get(rule, "from", [])
   count(peers) == 1
   peer := peers[0]
+  # Symmetry with the connector-egress side: the ingress peer pins BOTH the
+  # shared platform name AND this site's own connector instance
+  # (<site>-tunnel), so only that site's connector — never the other site's —
+  # can open the TCP 8080 origin leg even if a future additive egress policy
+  # widened the connector side.
   peer == {
     "namespaceSelector": {
       "matchLabels": {"kubernetes.io/metadata.name": "cloudflare-public"},
     },
     "podSelector": {
-      "matchLabels": {"app.kubernetes.io/name": "cloudflare-public"},
+      "matchLabels": {
+        "app.kubernetes.io/name": "cloudflare-public",
+        "app.kubernetes.io/instance": sprintf("%s-tunnel", [namespace]),
+      },
     },
   }
   object.get(rule, "ports", []) == [{"port": 8080, "protocol": "TCP"}]
@@ -249,33 +257,50 @@ valid_public_edge_rule(rule) if {
   }
 }
 
-valid_public_policy_selector if {
-  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
-    "app.kubernetes.io/name": "cloudflare-public",
-    "app.kubernetes.io/instance": "cloudflare-public",
-  }
+# The egress-policy envelope every cloudflare-public tunnel policy shares:
+# egress-only, no ingress, exactly one egress rule.
+valid_public_policy_envelope if {
   {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
   count(object.get(input.spec, "ingress", [])) == 0
-  egress := object.get(input.spec, "egress", [])
-  count(egress) == 1
+  count(object.get(input.spec, "egress", [])) == 1
+}
+
+# DNS and edge are identical for every connector, so they carry the shared
+# name-only selector that reaches both site connectors' Pods (size 1).
+valid_public_shared_selector if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/name": "cloudflare-public",
+  }
+}
+
+# A site connector-egress policy is pinned to exactly one connector by
+# name+instance (<site>-tunnel) — the egress half of the double-pin (size 2).
+valid_public_connector_selector(instance) if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/name": "cloudflare-public",
+    "app.kubernetes.io/instance": instance,
+  }
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
+  valid_public_shared_selector
   input.metadata.name == "cloudflared-dns"
   valid_public_dns_rule(input.spec.egress[0])
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
+  valid_public_shared_selector
   input.metadata.name == "cloudflared-edge"
   valid_public_edge_rule(input.spec.egress[0])
 }
 
 valid_public_tunnel_policy if {
-  valid_public_policy_selector
+  valid_public_policy_envelope
   namespace := trim_prefix(input.metadata.name, "cloudflared-")
   namespace in site_namespaces
+  valid_public_connector_selector(sprintf("%s-tunnel", [namespace]))
   valid_public_site_rule(input.spec.egress[0])
   target := input.spec.egress[0].to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
   target == namespace
@@ -311,14 +336,20 @@ valid_tenant_volume(namespace, volume) if {
   }
 }
 
+# Each connector mounts only its own site's tunnel-token Secret, referenced by
+# name. The superseded shared pi-websites-tunnel-token is no longer accepted.
 valid_tenant_volume(namespace, volume) if {
   namespace == "cloudflare-public"
+  object.get(object.get(volume, "secret", {}), "secretName", "") in {
+    "naranjo-online-tunnel-token",
+    "lidersea-com-tunnel-token",
+  }
   volume == {
     "name": "tunnel-token",
     "secret": {
       "defaultMode": 288,
       "items": [{"key": "token", "path": "token"}],
-      "secretName": "pi-websites-tunnel-token",
+      "secretName": volume.secret.secretName,
     },
   }
 }
