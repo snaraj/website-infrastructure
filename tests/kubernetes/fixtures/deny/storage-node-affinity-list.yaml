@@ -1,0 +1,17 @@
+# proves: SR-6
+# Degenerate shape. `nodeAffinity:` is a LIST, so `required` cannot be read out
+# of it at all.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-node-affinity-list
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /mnt/local-pie-ssd/media
+  nodeAffinity:
+    - required: {}

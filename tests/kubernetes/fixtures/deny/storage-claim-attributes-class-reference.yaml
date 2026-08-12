@@ -1,0 +1,15 @@
+# proves: SR-15
+# The claim side of the same reference. storageClassName gets both object and
+# reference treatment; volumeAttributesClassName now does too.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-attributes-reference-claim
+  namespace: naranjo-online
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: local-pie-ssd
+  volumeAttributesClassName: remote-attributes
+  resources:
+    requests:
+      storage: 1Gi

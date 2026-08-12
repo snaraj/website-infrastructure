@@ -1,0 +1,9 @@
+# proves: SR-0
+# Degenerate shape. `spec:` is declared with a null value rather than omitted.
+# Multi-rule by construction: with no readable spec, SR-1 (zero sources) and
+# SR-7 (no enumerated class) legitimately fire beside SR-0.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-null-spec
+spec:

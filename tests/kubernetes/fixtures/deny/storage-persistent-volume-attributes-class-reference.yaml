@@ -1,22 +1,21 @@
-# proves: SR-1
-# SR-1 (arity) plus SR-2 (the second source). A reviewer skimming for a local
-# path would find one; the object still carries a network source beside it, so
-# the arity rule exists to make "the source" a single, readable fact.
+# proves: SR-15
+# The reference, not the object. Every other field is admissible; the volume
+# names a VolumeAttributesClass, which carries a driver name plus a free-form
+# parameter map and can retarget the volume at a backend. SR-14 refuses the
+# CLASS; without SR-15 the REFERENCE was un-gated in both engines.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: storage-two-sources
+  name: storage-volume-attributes-reference
 spec:
   capacity:
     storage: 1Gi
   accessModes: [ReadOnlyMany]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-pie-ssd
+  volumeAttributesClassName: remote-attributes
   local:
     path: /mnt/local-pie-ssd/media
-  nfs:
-    server: storage.invalid
-    path: /export/media
   nodeAffinity:
     required:
       nodeSelectorTerms:

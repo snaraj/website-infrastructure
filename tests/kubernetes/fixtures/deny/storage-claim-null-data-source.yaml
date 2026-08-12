@@ -1,0 +1,16 @@
+# proves: SR-12
+# Degenerate shape. `dataSourceRef:` is DECLARED with a null value. Kyverno's
+# has() calls that field present and denies; a Rego arm that compared the value
+# against null admitted it. Declaration, not non-nullness, is the test.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-null-data-source-claim
+  namespace: naranjo-online
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: local-pie-ssd
+  resources:
+    requests:
+      storage: 1Gi
+  dataSourceRef:

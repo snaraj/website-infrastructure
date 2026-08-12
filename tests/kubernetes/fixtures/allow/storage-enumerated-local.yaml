@@ -1,9 +1,17 @@
 # The complete admissible storage shape under the enumerated-local-means model:
 # the one enumerated StorageClass, a statically provisioned local PersistentVolume
-# rooted in the one enumerated local root and pinned to its node, and a claim that
-# names the same enumerated class. Nothing here can be reached from outside the
-# cluster: no network source, no CSI driver, no provisioner that could place bytes
-# somewhere the owner did not enumerate.
+# rooted in the one enumerated local root and pinned to NAMED nodes, and a claim
+# that names the same enumerated class. Nothing here can be reached from outside
+# the cluster: no network source, no CSI driver, no provisioner that could place
+# bytes somewhere the owner did not enumerate.
+#
+# The node affinity below uses `operator: In` with an explicit value list on
+# purpose. This fixture is the model answer a reviewer copies, and the earlier
+# shape — `operator: Exists` on kubernetes.io/hostname — is satisfied by EVERY
+# node that ever joins the cluster, which is exactly the unbounded selection SR-6
+# exists to refuse. `storage-node-placeholder` is a placeholder: the real node
+# identity is a discovery fact ADR 0012 keeps out of this repository, and the
+# admissible SHAPE is what a fixture can honestly carry.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -30,7 +38,8 @@ spec:
       nodeSelectorTerms:
         - matchExpressions:
             - key: kubernetes.io/hostname
-              operator: Exists
+              operator: In
+              values: [storage-node-placeholder]
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

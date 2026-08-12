@@ -66,6 +66,12 @@ spec:
             # /var/lib, where etcd and kubelet state live.
             - name: enumeratedLocalRoots
               expression: "['/mnt/local-pie-ssd']"
+            # Empty by design, for the same reason the driver list is. SR-14
+            # refuses every VolumeAttributesClass OBJECT; this list is what a
+            # PersistentVolume or claim may REFERENCE, so the reference gets the
+            # same treatment storageClassName gets from SR-7 and SR-11.
+            - name: enumeratedVolumeAttributesClasses
+              expression: "[]"
             # Every PersistentVolumeSpec field that is NOT a volume source. The
             # policy derives the object's volume sources by subtraction, so any
             # source this repository has never heard of — a new upstream source,
@@ -122,13 +128,29 @@ spec:
                 (has(object.spec.local.path) && type(object.spec.local.path) == string &&
                 !object.spec.local.path.contains('..'))
               message: A local PersistentVolume path must not contain a parent traversal segment.
-            # SR-6. A local volume without required node affinity is satisfiable
-            # by any node, which turns one node's directory into an unbounded set
-            # of directories across the cluster.
+            # SR-6. A local volume without a BOUNDED required node affinity is
+            # satisfiable by any node, which turns one node's directory into an
+            # unbounded set of directories across the cluster. Presence alone was
+            # not enough: `operator: Exists` on kubernetes.io/hostname matches
+            # every node that ever joins, and `required: {}` asserts nothing. Each
+            # term must NAME the nodes it accepts, through an In match with a
+            # non-empty value list on either matchExpressions or matchFields.
             - expression: >-
                 object.kind != 'PersistentVolume' || !('local' in variables.volumeSources) ||
-                (has(object.spec.nodeAffinity) && has(object.spec.nodeAffinity.required))
-              message: A local PersistentVolume must pin itself to its node with required nodeAffinity.
+                (has(object.spec.nodeAffinity) && type(object.spec.nodeAffinity) == type({}) &&
+                has(object.spec.nodeAffinity.required) &&
+                type(object.spec.nodeAffinity.required) == type({}) &&
+                has(object.spec.nodeAffinity.required.nodeSelectorTerms) &&
+                type(object.spec.nodeAffinity.required.nodeSelectorTerms) == type([]) &&
+                size(object.spec.nodeAffinity.required.nodeSelectorTerms) > 0 &&
+                object.spec.nodeAffinity.required.nodeSelectorTerms.all(term,
+                (has(term.matchExpressions) && term.matchExpressions.exists(matcher,
+                has(matcher.operator) && matcher.operator == 'In' &&
+                has(matcher.values) && size(matcher.values) > 0)) ||
+                (has(term.matchFields) && term.matchFields.exists(matcher,
+                has(matcher.operator) && matcher.operator == 'In' &&
+                has(matcher.values) && size(matcher.values) > 0))))
+              message: A local PersistentVolume must pin itself to named nodes with a bounded required nodeAffinity.
             # SR-7. The class name is part of the enumerated means; a volume that
             # claims an unenumerated class is an unenumerated means.
             - expression: >-
@@ -183,6 +205,27 @@ spec:
                 object.kind != 'VolumeAttributesClass' || (has(object.driverName) &&
                 object.driverName in variables.enumeratedCsiDrivers)
               message: A VolumeAttributesClass must name a CSI driver on the enumerated local-provisioner allowlist.
+            # SR-15. The REFERENCE, not the object. storageClassName is gated
+            # both as an object (SR-9) and as a reference (SR-7, SR-11);
+            # volumeAttributesClassName had neither treatment, so a volume or
+            # claim could name a class created out of band and nothing here
+            # reasoned about it. The enumeration is empty, so every reference is
+            # denied today.
+            - expression: >-
+                (object.kind != 'PersistentVolume' && object.kind != 'PersistentVolumeClaim') ||
+                !has(object.spec) || type(object.spec) != type({}) ||
+                !has(object.spec.volumeAttributesClassName) ||
+                object.spec.volumeAttributesClassName in variables.enumeratedVolumeAttributesClasses
+              message: A PersistentVolume or PersistentVolumeClaim must not reference an un-enumerated VolumeAttributesClass.
+            # SR-16. SR-10's rationale where it equally holds: mountOptions is
+            # where a remote endpoint is named, and ['addr=storage.invalid', 'vers=4.1']
+            # is an NFS mount by another spelling. A statically provisioned local
+            # volume needs none.
+            - expression: >-
+                object.kind != 'PersistentVolume' || !has(object.spec) ||
+                type(object.spec) != type({}) || !has(object.spec.mountOptions) ||
+                (type(object.spec.mountOptions) == type([]) && size(object.spec.mountOptions) == 0)
+              message: A PersistentVolume must declare no mountOptions; that is where a remote endpoint would be named.
     - name: disallow-stateful-claim-templates
       match:
         any:

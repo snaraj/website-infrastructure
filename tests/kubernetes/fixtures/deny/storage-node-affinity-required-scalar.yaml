@@ -1,0 +1,19 @@
+# proves: SR-6
+# Degenerate shape, and the one divergence that failed open in the OTHER engine:
+# `required` is a STRING, which satisfied Kyverno's has() check while Rego
+# refused it. Both engines now require a bounded node selector, so neither reads
+# a scalar as a node pin.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-node-affinity-scalar
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /mnt/local-pie-ssd/media
+  nodeAffinity:
+    required: anything

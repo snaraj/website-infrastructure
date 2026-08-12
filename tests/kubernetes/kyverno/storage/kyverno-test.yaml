@@ -30,6 +30,21 @@ resources:
   - ../../fixtures/deny/storage-claim-with-data-source.yaml
   - ../../fixtures/deny/storage-csi-driver-object.yaml
   - ../../fixtures/deny/storage-volume-attributes-class.yaml
+  - ../../fixtures/deny/storage-local-unbounded-node-affinity.yaml
+  - ../../fixtures/deny/storage-node-affinity-null.yaml
+  - ../../fixtures/deny/storage-node-affinity-list.yaml
+  - ../../fixtures/deny/storage-node-affinity-required-scalar.yaml
+  - ../../fixtures/deny/storage-local-source-null.yaml
+  - ../../fixtures/deny/storage-local-source-scalar.yaml
+  - ../../fixtures/deny/storage-local-source-list.yaml
+  - ../../fixtures/deny/storage-csi-source-null.yaml
+  - ../../fixtures/deny/storage-csi-source-scalar.yaml
+  - ../../fixtures/deny/storage-claim-null-data-source.yaml
+  - ../../fixtures/deny/storage-persistent-volume-attributes-class-reference.yaml
+  - ../../fixtures/deny/storage-claim-attributes-class-reference.yaml
+  - ../../fixtures/deny/storage-persistent-volume-mount-options.yaml
+  - ../../fixtures/deny/storage-null-spec-persistent-volume.yaml
+  - ../../fixtures/deny/storage-null-spec-claim.yaml
 results:
   # The only admissible shape: enumerated class, enumerated provisioner,
   # enumerated local root, node-pinned volume, enumerated claim.
@@ -143,4 +158,84 @@ results:
     rule: disallow-persistent-storage-resources
     resources: [storage-remote-attributes]
     kind: VolumeAttributesClass
+    result: fail
+  # SR-6, the rule's actual claim: required node affinity that matches every
+  # node is not a pin. Below it, the degenerate shapes that made the Rego
+  # mirror silently skip a rule while these rows stayed green.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-unbounded]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-list]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-list]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-csi-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-csi-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-data-source-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-spec]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-spec-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  # SR-15: the reference, on both the volume and the claim. SR-16: mount
+  # options on a PersistentVolume, where SR-10's rationale equally holds.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-volume-attributes-reference]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-attributes-reference-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-mount-options]
+    kind: PersistentVolume
     result: fail
