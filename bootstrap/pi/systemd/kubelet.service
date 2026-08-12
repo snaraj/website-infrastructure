@@ -6,9 +6,13 @@ After=network-online.target containerd.service
 StartLimitIntervalSec=0
 
 [Service]
+# kubeadm-flags.env contains only dynamic node/runtime flags. Keep kubeadm's
+# fixed kubeconfig and ComponentConfig paths explicit in the service contract.
+Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
 Environment="KUBELET_KUBEADM_ARGS="
 EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
-ExecStart=/usr/local/bin/kubelet $KUBELET_KUBEADM_ARGS
+ExecStart=/usr/local/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS
 Restart=always
 RestartSec=10
 Delegate=yes

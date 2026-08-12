@@ -175,12 +175,25 @@ class InstallerTransactionContractTests(unittest.TestCase):
         ):
             self.assertIn(fragment, self.script)
 
-    def test_kubelet_accepts_only_kubeadm_generated_runtime_flags(self):
-        self.assertIn(
-            "EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env", self.kubelet
-        )
-        self.assertIn(
-            "ExecStart=/usr/local/bin/kubelet $KUBELET_KUBEADM_ARGS", self.kubelet
+    def test_kubelet_binds_kubeadm_managed_config_and_dynamic_runtime_flags(self):
+        expected_bindings = [
+            'Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig='
+            '/etc/kubernetes/bootstrap-kubelet.conf '
+            '--kubeconfig=/etc/kubernetes/kubelet.conf"',
+            'Environment="KUBELET_CONFIG_ARGS='
+            '--config=/var/lib/kubelet/config.yaml"',
+            'Environment="KUBELET_KUBEADM_ARGS="',
+            "EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env",
+            "ExecStart=/usr/local/bin/kubelet $KUBELET_KUBECONFIG_ARGS "
+            "$KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS",
+        ]
+        self.assertEqual(
+            [
+                line
+                for line in self.kubelet.splitlines()
+                if line.startswith(("Environment=", "EnvironmentFile=", "ExecStart="))
+            ],
+            expected_bindings,
         )
         self.assertNotIn("/etc/default/kubelet", self.kubelet)
         self.assertNotIn("KUBELET_EXTRA_ARGS", self.kubelet)
