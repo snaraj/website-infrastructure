@@ -21,8 +21,8 @@ Each root owns one narrow resource graph and one independently protected state:
 | `phases/admin-policies` | Final Pi block and TCP 22 identity/device allow only | Exact admin-tunnel and strong-posture audit contracts |
 | `phases/admin-route` | One RFC1918 Pi `/32` route through `pi-admin` | Exact admin-policies audit contract |
 | `phases/admin-api` | One identity/device allow for TCP 6443 | Later, separate approval after route verification |
-| `phases/site-naranjo-online` | `naranjo-online` Tunnel, its single-origin configuration, the proxied `naranjo.online` apex CNAME, and that zone's five security settings | Adoption of the live naranjo.online objects; first website root |
-| `phases/site-lidersea-com` | `lidersea-com` Tunnel, its single-origin configuration, the proxied `lidersea.com` apex CNAME, and that zone's five security settings | Adoption of the live lidersea.com objects; final activation |
+| `phases/site-naranjo-online` | `naranjo-online` Tunnel, its single-origin configuration, the proxied `naranjo.online` apex CNAME, and that zone's six security settings | Adoption of the live naranjo.online objects; first website root |
+| `phases/site-lidersea-com` | `lidersea-com` Tunnel, its single-origin configuration, the proxied `lidersea.com` apex CNAME, and that zone's six security settings | Adoption of the live lidersea.com objects; final activation |
 
 The security dependencies are:
 
@@ -97,7 +97,7 @@ exactly one proxied `ttl = 1` apex CNAME in its own zone, whose content is
 derived from that root's own Tunnel resource attribute, so no Tunnel UUID ever
 enters Git or a variable file.
 
-Each website root additionally owns exactly five free zone-level settings that
+Each website root additionally owns exactly six free zone-level settings that
 carry the zone security target state:
 
 | Setting | Committed value | Why |
@@ -106,6 +106,7 @@ carry the zone security target state:
 | `min_tls_version` | `1.2` | TLS 1.0 and 1.1 are currently accepted, and the legacy handshakes are signed `ecdsa_sha1` |
 | `tls_1_3` | `on` | Already on; committed so it cannot silently regress |
 | `0rtt` | `off` | Already off; early data is replayable and the handshake saving does not justify it |
+| `http3` | `on` | Already advertised on every response; pinned so it cannot regress unnoticed |
 | `ssl` | `full` | The connector-to-origin leg is plain HTTP by accepted decision, so a strict variant would break the site rather than harden it. A strict value is a policy denial, not a judgement call |
 
 `Strict-Transport-Security` is deliberately absent from this table: the
@@ -136,7 +137,7 @@ The two plan shapes are separate contracts and are never collapsed:
 - **Website adoption is adopt-only.** Every change must carry a prior object,
   no change may be a create, a delete, or a replacement, and the adopted Tunnel
   and apex record must plan as `["no-op"]`. Only the ingress configuration and
-  the five zone settings may plan as `["update"]`, and only toward the exact
+  the six zone settings may plan as `["update"]`, and only toward the exact
   committed value. A create in a website plan means the import did not happen
   and would duplicate a live object; a delete or replacement means an outage.
 
@@ -244,8 +245,8 @@ The six JIT write tokens have these maximum Cloudflare-enforced boundaries:
 | `admin-policies` | Required Gateway-policy write across the selected account | Final Pi block and TCP 22 allow only |
 | `admin-route` | Required private-network route write across the selected account | One Pi `/32` through `pi-admin` only |
 | `admin-api` | Required Gateway-policy write across the selected account | TCP 6443 allow only |
-| `site-naranjo-online` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `naranjo.online` zone | One adopted Tunnel, its config, one adopted apex CNAME, and five zone settings |
-| `site-lidersea-com` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `lidersea.com` zone | One adopted Tunnel, its config, one adopted apex CNAME, and five zone settings |
+| `site-naranjo-online` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `naranjo.online` zone | One adopted Tunnel, its config, one adopted apex CNAME, and six zone settings |
+| `site-lidersea-com` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `lidersea.com` zone | One adopted Tunnel, its config, one adopted apex CNAME, and six zone settings |
 
 Grant only matching read permission if the current provider requires it. The
 read-only audit token is separate from all write tokens. Its Zone Read and DNS

@@ -22,7 +22,7 @@ SSL certificates all pre-exist. The roots are written to **adopt** them:
 - every planned change must carry a prior object;
 - create, delete, and replacement are refused by the committed plan policy;
 - the adopted Tunnel and the adopted apex record must plan as `no-op`;
-- only the Tunnel ingress configuration and the five zone settings may plan as
+- only the Tunnel ingress configuration and the six zone settings may plan as
   an update, and only toward the exact committed value.
 
 Not adopted, deliberately: the zones themselves, the plan/subscription, the
@@ -67,7 +67,7 @@ the two-root shape.
    `make check` — which this runbook requires green — before any plan runs.
    The tracked `terraform.tfvars.example` carries placeholders only and is
    never the file you fill in.
-3. Import the eight objects one at a time, in the order given in
+3. Import the nine objects one at a time, in the order given in
    `imports/README.md`, running a refresh-only plan after each.
 4. Produce the reviewed saved plan and walk the review checklist below.
 5. Apply only that saved plan.
@@ -81,7 +81,7 @@ the two-root shape.
 
 ## Plan review — what a correct plan looks like
 
-Exactly eight resources, no more and no fewer:
+Exactly nine resources, no more and no fewer:
 
 | Resource | Expected action |
 | --- | --- |
@@ -92,6 +92,7 @@ Exactly eight resources, no more and no fewer:
 | `min_tls_version` | update to `1.2` (expected: TLS 1.0 and 1.1 are accepted today) |
 | `tls_1_3` | `no operation` (expected: already on) |
 | `0rtt` | `no operation` (expected: already off) |
+| `http3` | `no operation` (expected: already on — HTTP/3 is advertised on every response) |
 | `ssl` | `no operation` if the zone is already `full`; an update to `full` otherwise |
 
 The redirect gap, the TLS floor, the already-on TLS 1.3, and the already-off
@@ -112,7 +113,7 @@ improvising, if the plan shows any of:
   configuration or the state binding is wrong, not that the object should go.
 - **any `create`.** A create means the import did not happen or landed at the
   wrong address, and applying it would duplicate a live object.
-- **a resource count other than eight**, an address outside the committed set,
+- **a resource count other than nine**, an address outside the committed set,
   or a resource type outside the allowlist.
 - **the other site's hostname, origin, zone, Tunnel, or variable** appearing
   anywhere in this root's plan.

@@ -170,7 +170,7 @@ account-scoped policy permission.
 
 Owning root: `infrastructure/cloudflare/phases/site-naranjo-online`
 
-Eight objects, imported one at a time, each followed by a refresh-only plan
+Nine objects, imported one at a time, each followed by a refresh-only plan
 before the next. Replace every bracketed identifier through a protected
 mechanism; no real identifier belongs in shell history or in Git.
 
@@ -182,6 +182,7 @@ tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudfl
 tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_min_tls_version' '<naranjo_online_zone_id>/min_tls_version'
 tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_tls_1_3' '<naranjo_online_zone_id>/tls_1_3'
 tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_zero_rtt' '<naranjo_online_zone_id>/0rtt'
+tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_http3' '<naranjo_online_zone_id>/http3'
 tofu -chdir=infrastructure/cloudflare/phases/site-naranjo-online import 'cloudflare_zone_setting.naranjo_online_ssl' '<naranjo_online_zone_id>/ssl'
 ```
 
@@ -191,9 +192,9 @@ own. The apex record identifier is the record's own opaque ID, read from the
 zone through the read-only audit token. Each zone setting is addressed by its
 Cloudflare setting name, which is the literal shown above and is not a secret.
 
-After the eighth import the refresh-only plan must show exactly eight objects
+After the ninth import the refresh-only plan must show exactly nine objects
 and nothing else: the Tunnel and the apex record as no-op, the configuration as
-no-op, and the five zone settings as no-op or as an update toward the exact
+no-op, and the six zone settings as no-op or as an update toward the exact
 committed value. Any create, delete, or replacement is a hard stop — see the
 runbook. Then revoke and rejection-verify the write token and use the separate
 read-only token to audit the complete `naranjo.online` zone and the owning
@@ -211,6 +212,7 @@ tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflar
 tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_min_tls_version' '<lidersea_com_zone_id>/min_tls_version'
 tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_tls_1_3' '<lidersea_com_zone_id>/tls_1_3'
 tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_zero_rtt' '<lidersea_com_zone_id>/0rtt'
+tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_http3' '<lidersea_com_zone_id>/http3'
 tofu -chdir=infrastructure/cloudflare/phases/site-lidersea-com import 'cloudflare_zone_setting.lidersea_com_ssl' '<lidersea_com_zone_id>/ssl'
 ```
 
