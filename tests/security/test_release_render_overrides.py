@@ -32,9 +32,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER = REPO_ROOT / "scripts" / "render-manifests.sh"
 DETERMINISM = REPO_ROOT / "scripts" / "ci" / "verify-render-determinism.sh"
 RELEASE_POLICY = REPO_ROOT / "policies" / "release-conftest"
-NARANJO_RELEASE = (
-    REPO_ROOT / "kubernetes" / "websites" / "naranjo-online" / "release.yaml"
-)
 
 BASH = shutil.which("bash")
 CONFTEST = shutil.which("conftest")
@@ -54,6 +51,11 @@ REVIEWED_DIGEST = "sha256:" + "ab" * 32
 # interpolated into an artifact reference fails the ratchet below rather than
 # being silently skipped.
 SITES = ("naranjo-online", "lidersea-com")
+# The two release-state values the fixtures rewrite. Matching the line shape
+# rather than one particular value is what keeps this battery independent of
+# whether a promotion has already merged into the base branch.
+READY_LINE = re.compile(r"^    deploymentReady: (?:true|false)$", re.MULTILINE)
+DIGEST_LINE = re.compile(r"^      digest: sha256:[0-9a-f]{64}$", re.MULTILINE)
 ARTIFACT_REFERENCE = re.compile(r"\$\{ARTIFACT_ROOT\}/([A-Za-z0-9._${}-]+\.yaml)")
 INTERPOLATION = re.compile(r"\$\{[^}]*\}")
 # Two Kustomize roots are built outside the declared target list; each is
@@ -529,17 +531,55 @@ def disposable_checkout(destination):
     return destination
 
 
-def promote(root, site=SITES[0], digest=REVIEWED_DIGEST):
-    """Move one site's release state from ``initial`` to ``staged``."""
+def _rewrite_release(root, site, ready, digest):
+    """Set one site's release state without assuming its current state.
+
+    The tracked file is ``initial`` today and ``staged`` the moment that
+    site's promotion merges. A fixture keyed on the initial sentinels would
+    turn this whole battery — and therefore every pull request — red at
+    exactly that moment, which is the class of defect this module exists to
+    close. The rewrite is therefore state-independent: it matches whichever
+    value is present and asserts the *result*, never the input.
+    """
 
     path = root / "kubernetes" / "websites" / site / "release.yaml"
-    text = path.read_text(encoding="utf-8")
-    promoted = text.replace(
-        "    deploymentReady: false\n", "    deploymentReady: true\n"
-    ).replace(ZERO_DIGEST, digest)
-    if promoted == text:
-        raise AssertionError("release fixture did not carry the initial sentinels")
-    path.write_text(promoted, encoding="utf-8")
+    rewritten, readiness_count = READY_LINE.subn(
+        "    deploymentReady: {}".format("true" if ready else "false"),
+        path.read_text(encoding="utf-8"),
+    )
+    rewritten, digest_count = DIGEST_LINE.subn(
+        "      digest: {}".format(digest), rewritten
+    )
+    if (readiness_count, digest_count) != (1, 1):
+        raise AssertionError(
+            "release fixture for {} exposed {} readiness and {} digest "
+            "line(s); expected exactly one of each".format(
+                site, readiness_count, digest_count
+            )
+        )
+    expected_readiness = "    deploymentReady: {}\n".format(
+        "true" if ready else "false"
+    )
+    if expected_readiness not in rewritten or digest not in rewritten:
+        raise AssertionError("release rewrite for {} did not take effect".format(site))
+    path.write_text(rewritten, encoding="utf-8")
+
+
+def promote(root, site=SITES[0], digest=REVIEWED_DIGEST):
+    """Leave one site in the ``staged`` phase, whatever it started in."""
+
+    _rewrite_release(root, site, True, digest)
+
+
+def demote(root, sites=SITES):
+    """Leave every named site in the ``initial`` phase.
+
+    Every state-dependent test calls this first, so the battery's verdict is
+    the same before and after any promotion merges into the base branch.
+    """
+
+    for site in sites:
+        _rewrite_release(root, site, False, ZERO_DIGEST)
 
 
 def render(root, mode):
@@ -593,6 +633,7 @@ class PromotedRenderStateTests(unittest.TestCase):
 
     def test_initial_state_still_renders_in_scaffold_mode(self):
         root = self.checkout()
+        demote(root)
         self.assertEqual(selected_mode(root), "scaffold")
         completed = render(root, "scaffold")
         self.assertEqual(
@@ -602,6 +643,7 @@ class PromotedRenderStateTests(unittest.TestCase):
 
     def test_promoted_state_renders_and_passes_in_transition_mode(self):
         root = self.checkout()
+        demote(root)
         promote(root)
         self.assertEqual(selected_mode(root), "transition")
         completed = render(root, "transition")
@@ -619,6 +661,7 @@ class PromotedRenderStateTests(unittest.TestCase):
         that claims promotion but renders the inert sentinel is denied."""
 
         root = self.checkout()
+        demote(root)
         promote(root)
         kustomization = (
             root / "kubernetes" / "websites" / "naranjo-online" / "kustomization.yaml"
@@ -653,6 +696,7 @@ class PromotedRenderStateTests(unittest.TestCase):
         artifact is not produced — and require an honest refusal."""
 
         root = self.checkout()
+        demote(root)
         promote(root)
         script = root / "scripts" / "render-manifests.sh"
         script.write_text(
@@ -771,12 +815,25 @@ class RenderDeterminismModeTests(unittest.TestCase):
 
 
 class ReleaseStateFixtureTests(unittest.TestCase):
-    """Keep the promotion fixture honest against the tracked release file."""
+    """Keep the rewrite targets honest against the tracked release file.
 
-    def test_the_tracked_site_release_still_carries_the_initial_sentinels(self):
-        text = NARANJO_RELEASE.read_text(encoding="utf-8")
-        self.assertIn("    deploymentReady: false\n", text)
-        self.assertIn(ZERO_DIGEST, text)
+    Deliberately not an assertion about which phase the tracked file is in:
+    it is `initial` today and `staged` once that site's promotion merges, and
+    a battery that pinned either one would go red on the other. What must
+    hold in both states is that the two values the fixtures rewrite are
+    present, exactly once each, in the shape the rewrite matches.
+    """
+
+    def test_the_tracked_site_release_exposes_both_rewrite_targets(self):
+        for site in SITES:
+            with self.subTest(site=site):
+                text = (
+                    REPO_ROOT / "kubernetes" / "websites" / site / "release.yaml"
+                ).read_text(encoding="utf-8")
+                self.assertRegex(text, READY_LINE)
+                self.assertRegex(text, DIGEST_LINE)
+                self.assertEqual(len(READY_LINE.findall(text)), 1)
+                self.assertEqual(len(DIGEST_LINE.findall(text)), 1)
 
 
 if __name__ == "__main__":

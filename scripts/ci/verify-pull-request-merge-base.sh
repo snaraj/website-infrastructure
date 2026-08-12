@@ -79,7 +79,10 @@ fi
 
 if [[ "${merge_record[1]}" != "$base_tip" ]]; then
   printf 'merge first parent %s, live base tip %s\n' "${merge_record[1]}" "$base_tip" >&2
-  fail 'merge first parent is not the live base branch tip'
+  # This also fires on a narrow benign race: the base branch advancing between
+  # GitHub computing the merge ref and the runner's fetch. Naming the remedy
+  # keeps that case from reading as a history-integrity incident.
+  fail 'merge first parent is not the live base branch tip (if the base branch advanced during checkout, re-run the job)'
 fi
 
 # The payload snapshot is still held to account: on a protected, linear base

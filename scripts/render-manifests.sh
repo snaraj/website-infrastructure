@@ -300,6 +300,11 @@ assert_site_release_phase() {
   [[ -s "$manifest" ]] || die "missing rendered site artifact: $(basename -- "$manifest")"
   case "$phase" in
     initial)
+      # The forbidden entry here is closed-vocabulary documentation rather
+      # than a live check: the required all-zero denial already dominates it,
+      # because the all-zero sentinel is canonical in shape. Listing the full
+      # vocabulary in every arm is what makes the staged arm's forbidden set —
+      # where these checks are load-bearing — obviously exhaustive.
       required=("$suspended" "$not_ready" "$zero_digest")
       forbidden=("$uncanonical")
       ;;
