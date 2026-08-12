@@ -1,0 +1,34 @@
+# Single-node sizing and scheduling, applied to every Kyverno Deployment by
+# label rather than by name so a promotion render that adds a controller cannot
+# ship an unbounded one.
+#
+# replicas: 1 — this is a one-node cluster. A second replica has nowhere to be
+# scheduled that adds availability; it only doubles the reservation and, for a
+# webhook backend, doubles the number of endpoints that must stay healthy.
+# Availability here comes from the ResourceQuota, the restart policy, and the
+# staged failurePolicy, not from a replica the node cannot place.
+#
+# priorityClassName: system-cluster-critical — deliberately ABOVE the sites.
+# Under memory pressure the kubelet must not evict the admission controller:
+# with the enforcing webhook registered, an evicted Kyverno turns every write
+# the webhook matches into a failure. Bounded consumption is the ResourceQuota's
+# job; not being the first thing killed is this field's job. The Flux
+# controllers already ship at this class, so admission is not being singled out.
+#
+# resources — 100m/192Mi requested, 500m/384Mi ceiling, per controller. See
+# ../resource-controls.yaml for the arithmetic against the node envelope.
+- op: add
+  path: /spec/replicas
+  value: 1
+- op: add
+  path: /spec/template/spec/priorityClassName
+  value: system-cluster-critical
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi

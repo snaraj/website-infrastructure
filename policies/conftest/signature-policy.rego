@@ -22,6 +22,19 @@ signature_policy_contracts := {
 
 signature_policy_actions := {"Audit", "Enforce"}
 
+# The two webhook failure policies a rendered signature policy may declare, and
+# nothing else. `Fail` is the committed source and the enforcing install.
+# `Ignore` exists for exactly one artifact: the report-only install stage
+# (kubernetes/platform/admission-install/report-only), where a fail-closed
+# webhook would refuse Pod creation in the site namespaces the moment the
+# controller was unreachable — the failure mode that stage exists to prevent.
+#
+# This is an enumeration, not a relaxation: the object equality below still pins
+# every other byte, so `Ignore` is only reachable on a policy that is otherwise
+# byte-identical to the reviewed one. A render that pairs `Ignore` with any
+# other edit is still denied.
+signature_policy_failure_policies := {"Fail", "Ignore"}
+
 signature_keyless(contract) := {
   "subject": sprintf(
     "https://github.com/snaraj/%s/.github/workflows/%s@refs/tags/v*",
@@ -73,7 +86,7 @@ provenance_verify_image(contract) := {
   }],
 }
 
-expected_signature_policy(name, contract, action) := {
+expected_signature_policy(name, contract, action, failure_policy) := {
   "apiVersion": "kyverno.io/v1",
   "kind": "ClusterPolicy",
   "metadata": {
@@ -88,7 +101,7 @@ expected_signature_policy(name, contract, action) := {
     "background": false,
     "validationFailureAction": action,
     "webhookConfiguration": {
-      "failurePolicy": "Fail",
+      "failurePolicy": failure_policy,
       "timeoutSeconds": 30,
     },
     "rules": [
@@ -111,7 +124,13 @@ valid_signature_policy if {
   contract := signature_policy_contracts[name]
   action := object.get(object.get(input, "spec", {}), "validationFailureAction", "")
   action in signature_policy_actions
-  input == expected_signature_policy(name, contract, action)
+  failure_policy := object.get(
+    object.get(object.get(input, "spec", {}), "webhookConfiguration", {}),
+    "failurePolicy",
+    "",
+  )
+  failure_policy in signature_policy_failure_policies
+  input == expected_signature_policy(name, contract, action, failure_policy)
 }
 
 deny contains msg if {

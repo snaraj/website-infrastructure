@@ -1,0 +1,105 @@
+# Negative control for the admission namespace's network contract. Every
+# document here is a plausible, well-intentioned widening of one reviewed flow —
+# the shapes a hurried operator or a helpful diff would actually produce — and
+# each must be rejected.
+#
+# 1. An unnamed extra policy: any flow into or out of the admission controller
+#    that nobody reviewed.
+# 2. The webhook ingress opened to a whole subnet instead of the one API-server
+#    address: every node and Pod in that range can then reach the webhook port.
+# 3. The API-server egress with an added port: "while we are here, let it also
+#    reach the kubelet" is how 10250 gets granted.
+# 4. The public-HTTPS egress with the private ranges dropped: the same rule that
+#    reaches Sigstore now also reaches the LAN, the node, and every other
+#    namespace's Pod network.
+# 5. A default-deny that only denies ingress: egress is unrestricted for every
+#    Pod in the namespace, and the four allows below become decorative.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-debug-shell
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 22
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-admission-webhook
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - port: 9443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-kube-apiserver
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.10/32
+      ports:
+        - port: 6443
+          protocol: TCP
+        - port: 10250
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-public-https
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 127.0.0.0/8
+      ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

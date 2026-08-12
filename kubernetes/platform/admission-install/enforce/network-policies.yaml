@@ -1,0 +1,150 @@
+# The admission namespace's closure, applied as ONE document.
+#
+# This is the ordering defect this file exists to prevent. The committed
+# desired state in kubernetes/platform/prerequisites/network-policies.yaml
+# already carries a bare ingress+egress `default-deny` for `kyverno` and no
+# allows at all, and kubernetes/reconciliation/admission.yaml `dependsOn`
+# platform-prerequisites with `wait: true`. Reconciled in that order against a
+# cluster where these allows are absent, the controller can never reach the API
+# server, never becomes Available, and the admission Kustomization waits
+# forever on a readiness its own predecessor made impossible.
+#
+# So the deny and its allows are one apply, never two steps: the installer
+# applies this whole file in a single phase, before the controller exists to be
+# isolated by it. There is no window in which the namespace is closed and
+# unreachable, and no window in which it is open.
+#
+# `192.0.2.0/32` is RFC 5737 TEST-NET-1: an address that can never match
+# anything real. Safety invariant 12 keeps the control-plane address out of
+# this public index permanently, so the committed bytes carry the reviewed
+# SHAPE with a fail-closed sentinel destination. The installer substitutes the
+# real address from the bound kubeconfig context's `server` value at apply
+# time — the same value the binding guard already proved — and refuses to apply
+# any document in which the sentinel survives. Nothing is typed by hand and
+# nothing reaches shell history.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# The API server calls the webhook. Without this the webhook is registered and
+# unreachable, which under failurePolicy Fail is exactly the cluster-wide write
+# refusal this whole design exists to make impossible.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-admission-webhook
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.0.2.0/32
+      ports:
+        - port: 9443
+          protocol: TCP
+---
+# Cluster DNS. Kyverno resolves the API server and, for the signature policies,
+# the Sigstore and registry endpoints; a namespace with egress denied and no DNS
+# allow fails in a way that looks like a certificate problem.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-dns
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: TCP
+        - port: 53
+          protocol: UDP
+---
+# The API server itself: every controller watches policies and reports through
+# it, and the admission controller writes its own webhook configurations there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-kube-apiserver
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/32
+      ports:
+        - port: 6443
+          protocol: TCP
+---
+# Public HTTPS, for the `verifyImages` rules only. A NetworkPolicy selects
+# destinations by address and never by name, so the reviewed rule is "public
+# addresses, TCP 443, nothing else" while the intent is narrower. The
+# destinations it exists to permit, recorded so the intent stays reviewable:
+#
+#   ghcr.io, pkg-containers.githubusercontent.com  the signed site artifacts
+#   fulcio.sigstore.dev, rekor.sigstore.dev        keyless verification
+#   tuf-repo-cdn.sigstore.dev                      the Sigstore TUF root
+#
+# Keyless verification is not an offline operation: with these endpoints
+# unreachable the signature policies fail closed, correctly but confusingly.
+# Container image pulls are deliberately NOT in that list — the kubelet pulls
+# from the node's network namespace, where a Pod NetworkPolicy has no effect.
+#
+# The excluded ranges are the same private, loopback, link-local, CGNAT,
+# multicast, and reserved blocks the tunnel egress policy uses. A shorter list
+# is a wider allow: every entry removed is a LAN or node destination granted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-public-https
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP

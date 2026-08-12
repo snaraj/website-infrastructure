@@ -194,6 +194,13 @@ declare -a KUSTOMIZE_TARGETS=(
   kubernetes/reconciliation
   kubernetes/platform/prerequisites
   kubernetes/platform/admission
+  # The two staged install roots. They are direct-apply roots, unreachable from
+  # any Flux Kustomization, but their bytes are exactly what an operator would
+  # put on the cluster during the admission ceremony — so they receive the same
+  # schema and policy validation as everything Flux reconciles, and the
+  # determinism gate covers them too.
+  kubernetes/platform/admission-install/report-only
+  kubernetes/platform/admission-install/enforce
   kubernetes/platform/cloudflare-public/release
   kubernetes/websites/naranjo-online
   kubernetes/websites/lidersea-com

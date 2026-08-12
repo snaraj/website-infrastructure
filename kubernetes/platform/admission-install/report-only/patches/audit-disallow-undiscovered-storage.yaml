@@ -1,0 +1,29 @@
+# Stage 1 report-only downgrade for policies/kyverno/disallow-undiscovered-storage.yaml.
+#
+# One op per rule, by index, deliberately not a wildcard: adding a rule to the
+# committed policy without adding its op here would ship a rule that still
+# ENFORCES during the fail-open stage. tests/security/
+# test_kyverno_install_contract.py counts the committed rules and requires
+# exactly this many ops at exactly these indices, so the omission fails the
+# suite instead of the cluster.
+- op: replace
+  path: /spec/rules/0/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/1/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/2/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/3/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/4/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/5/validate/failureAction
+  value: Audit
+- op: replace
+  path: /spec/rules/6/validate/failureAction
+  value: Audit
