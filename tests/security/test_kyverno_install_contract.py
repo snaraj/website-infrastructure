@@ -900,8 +900,31 @@ class RealRepositoryTests(unittest.TestCase):
                 self.assertIn(issue, blockers)
 
     def test_the_runbook_states_that_stage_two_is_not_authorized(self):
+        """Pinned as STRUCTURE, not as a substring.
+
+        The first version of this test asserted only that "NOT AUTHORIZED"
+        appeared somewhere in the file — and the quoted script output inside the
+        section contains that string, so renaming the heading to "Stage 2 notes"
+        left the suite green. That is precisely the text-pinned-guard defect this
+        round exists to remove, reproduced in a test written during the round.
+        The heading is now pinned as a heading, and it must appear BEFORE the
+        first promotion instruction, because a warning a reader reaches after
+        the command is not a warning.
+        """
+
         runbook = read(RUNBOOK)
-        self.assertIn("NOT AUTHORIZED", runbook)
+        heading = re.search(r"(?m)^## STAGE 2 IS \*\*NOT AUTHORIZED\*\*\s*$", runbook)
+        if heading is None:
+            raise AssertionError(
+                "the runbook has no STAGE 2 IS NOT AUTHORIZED heading; a reader "
+                "who sees only this document must not reach the promotion "
+                "believing it is sanctioned"
+            )
+        self.assertLess(
+            heading.start(),
+            runbook.index("--stage enforce"),
+            "the refusal must precede the first promotion instruction",
+        )
         for issue in ("#99", "#100", "#102", "#87", "#96"):
             with self.subTest(issue=issue):
                 self.assertIn(issue, runbook)
