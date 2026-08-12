@@ -1,8 +1,26 @@
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+BASH = shutil.which("bash")
+if BASH is None and os.name == "nt":
+    candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+    if candidate.is_file():
+        BASH = str(candidate)
+
+
+def bash_path(path):
+    value = Path(path).as_posix()
+    if os.name == "nt" and len(value) >= 3 and value[1:3] == ":/":
+        return f"/{value[0].lower()}{value[2:]}"
+    return value
 
 
 class EtcdSnapshotContractTests(unittest.TestCase):
@@ -48,6 +66,73 @@ class EtcdSnapshotContractTests(unittest.TestCase):
             self.assertIn(fragment, self.installer)
         for downloader in ("curl ", "wget ", "Invoke-WebRequest"):
             self.assertNotIn(downloader, self.installer)
+
+    def test_ssd_placeholder_predicate_has_source_parity_and_real_ere_behavior(self):
+        expected_pattern = (
+            r"^(EXPECTED_SSD_FILESYSTEM_UUID|EXPECTED_SSD_MOUNT_SOURCE)="
+            r"($|REPLACE_|UNRESOLVED)"
+        )
+        predicates = []
+        for label, source in (
+            ("installer", self.installer),
+            ("snapshot", self.snapshot),
+        ):
+            active_patterns = re.findall(
+                r"(?m)^[ \t]*if grep -E '([^'\r\n]+)'[ \t]*\\[ \t]*$",
+                source,
+            )
+            ssd_patterns = [
+                pattern
+                for pattern in active_patterns
+                if pattern.startswith(
+                    "^(EXPECTED_SSD_FILESYSTEM_UUID|"
+                    "EXPECTED_SSD_MOUNT_SOURCE)="
+                )
+            ]
+            with self.subTest(label=label, contract="exact predicate"):
+                self.assertEqual(ssd_patterns, [expected_pattern])
+                self.assertNotIn(
+                    "(EXPECTED_SSD_FILESYSTEM_UUID|EXPECTED_SSD_MOUNT_SOURCE)="
+                    "(|REPLACE_|UNRESOLVED)",
+                    source,
+                )
+            predicates.append((label, ssd_patterns[0]))
+
+        if not BASH:
+            self.skipTest("Bash is unavailable")
+        cases = (
+            ("EXPECTED_SSD_FILESYSTEM_UUID=1234-ABCD\n", False),
+            ("EXPECTED_SSD_MOUNT_SOURCE=/dev/reviewed-ssd\n", False),
+            ("EXPECTED_SSD_FILESYSTEM_UUID=\n", True),
+            ("EXPECTED_SSD_FILESYSTEM_UUID=REPLACE_UUID\n", True),
+            ("EXPECTED_SSD_FILESYSTEM_UUID=UNRESOLVED\n", True),
+            ("EXPECTED_SSD_MOUNT_SOURCE=\n", True),
+            ("EXPECTED_SSD_MOUNT_SOURCE=REPLACE_DEVICE\n", True),
+            ("EXPECTED_SSD_MOUNT_SOURCE=UNRESOLVED\n", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "decisions.env.local"
+            for label, pattern in predicates:
+                for content, unresolved in cases:
+                    with self.subTest(label=label, content=content.rstrip("\n")):
+                        fixture.write_text(content, encoding="utf-8")
+                        result = subprocess.run(
+                            [
+                                BASH,
+                                "-c",
+                                f"LC_ALL=C grep -Eq {shlex.quote(pattern)} \"$1\"",
+                                "recovery-ssd-gate",
+                                bash_path(fixture),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertEqual(
+                            result.returncode,
+                            0 if unresolved else 1,
+                            result.stderr,
+                        )
 
     def test_systemd_schedule_and_sandbox_are_explicit(self):
         for fragment in (

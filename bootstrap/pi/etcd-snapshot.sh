@@ -77,7 +77,7 @@ validate_decisions() {
   done
   [[ "$(decision DECISION_STATUS)" == approved-after-pi-discovery ]] || \
     die 'Pi decisions are not approved after discovery'
-  if grep -E '^(EXPECTED_SSD_FILESYSTEM_UUID|EXPECTED_SSD_MOUNT_SOURCE)=(|REPLACE_|UNRESOLVED)' \
+  if grep -E '^(EXPECTED_SSD_FILESYSTEM_UUID|EXPECTED_SSD_MOUNT_SOURCE)=($|REPLACE_|UNRESOLVED)' \
     "${decisions_path}" >/dev/null; then
     die 'reviewed SSD identity is unresolved'
   fi
