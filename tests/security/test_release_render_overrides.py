@@ -248,13 +248,91 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             'not_ready="HelmRelease ${website} is not marked ready"',
             'zero_digest="HelmRelease ${website} still names the all-zero image digest"',
             'uncanonical="HelmRelease ${website} does not name a canonical image digest"',
+            # A site root renders that site's chart source as well as its
+            # release, so the vocabulary is exhaustive only if it names the
+            # chart-source denials too. A correct chart source produces
+            # neither in any phase, so both are forbidden and never required.
+            'unverified="chart source ${website}/${website}-chart does not '
+            'require cosign verification"',
+            'unbound="chart source ${website}/${website}-chart does not bind '
+            'exactly one keyless publisher identity"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, helper)
         self.assertIn('required=("$suspended" "$not_ready" "$zero_digest")', helper)
-        self.assertIn('forbidden=("$not_ready" "$zero_digest" "$uncanonical")', helper)
+        self.assertIn(
+            'forbidden=("$uncanonical" "$unverified" "$unbound")', helper
+        )
+        self.assertIn(
+            'forbidden=("$not_ready" "$zero_digest" "$uncanonical" '
+            '"$unverified" "$unbound")',
+            helper,
+        )
         self.assertIn('for fragment in "${required[@]}"', helper)
         self.assertIn('for fragment in "${forbidden[@]}"', helper)
+
+    def test_every_site_release_denial_is_in_the_closed_phase_vocabulary(self):
+        """The vocabulary must name every denial a site root can produce.
+
+        `assert_site_release_phase` decides a phase is correct by matching a
+        closed set of fragments. A release-policy rule that can fire on a site
+        artifact but appears in neither the required nor the forbidden set is
+        invisible to that decision, so adding one silently widens what a
+        `staged` site is allowed to be denied for. This derives the site-scoped
+        rule set from the policy source and requires the helper to name it.
+        """
+
+        policy = (RELEASE_POLICY / "deployment-readiness.rego").read_text(
+            encoding="utf-8"
+        )
+        helper = self.script[self.script.index("assert_site_release_phase() {"):]
+        helper = helper[: helper.index("\n}\n")]
+        # The kinds a site root actually renders, derived from its own
+        # Kustomize inputs rather than hardcoded, so adding a third object to
+        # a site root widens this test automatically.
+        site_root = REPO_ROOT / "kubernetes" / "websites" / SITES[0]
+        rendered_kinds = {
+            match.group(1)
+            for path in sorted(site_root.glob("*.yaml"))
+            if path.name != "kustomization.yaml"
+            for match in re.finditer(
+                r"(?m)^kind: ([A-Za-z]+)$", path.read_text(encoding="utf-8")
+            )
+        }
+        self.assertEqual(rendered_kinds, {"HelmRelease", "OCIRepository"})
+        # Every sprintf message a site-scoped rule can emit for those kinds.
+        # A ResourceQuota rule is also site-scoped but renders from the
+        # platform prerequisites root, so it can never reach this artifact.
+        messages = set()
+        for block in policy.split("deny contains msg if {")[1:]:
+            body = block.split("\n}", 1)[0]
+            if "site_namespaces" not in body:
+                continue
+            kind = re.search(r'input\.kind\s*==\s*"([A-Za-z]+)"', body)
+            if kind is None or kind.group(1) not in rendered_kinds:
+                continue
+            match = re.search(r'msg\s*:=\s*sprintf\(\s*"([^"]+)"', body)
+            if match:
+                messages.add(match.group(1))
+        self.assertGreaterEqual(
+            len(messages), 5, "site-scoped denial extraction found too few rules"
+        )
+        for message in sorted(messages):
+            # Match on the literal tail after the LAST format specifier. The
+            # leading stem alone is not distinctive — every chart-source rule
+            # begins "chart source %s/%s" — so a stem comparison would accept
+            # any new rule in an existing family, which is precisely the case
+            # this test exists to catch.
+            tail = re.split(r"%[a-zA-Z]", message)[-1].strip()
+            with self.subTest(message=message):
+                self.assertTrue(
+                    tail, "denial message has no literal tail to match: " + message
+                )
+                self.assertIn(
+                    tail,
+                    helper,
+                    "site denial not in the closed phase vocabulary: " + message,
+                )
 
     def test_scaffold_proves_both_sites_through_the_same_phase_helper(self):
         scaffold = self.script[self.script.index("if [[ \"$MODE\" == '--scaffold' ]]"):]
@@ -689,6 +767,71 @@ class PromotedRenderStateTests(unittest.TestCase):
             "staged website naranjo-online still denies: HelmRelease "
             "naranjo-online still names the all-zero image digest",
             completed.stderr,
+        )
+
+    def test_a_render_that_strips_chart_signature_verification_fails_closed(self):
+        """The chart-source counterpart of the promotion-drop case above.
+
+        ``validate_signature_policy.py chart-source`` compares the committed
+        ``source.yaml`` byte-for-byte, but it reads the FILE. A Kustomize patch
+        can leave that file pristine and still emit an OCIRepository with no
+        ``verify`` block, which would let Flux accept an unsigned or
+        wrong-publisher chart. Only a check over the rendered artifact can see
+        that, so this proves the render gate does.
+        """
+
+        root = self.checkout()
+        demote(root)
+        kustomization = (
+            root / "kubernetes" / "websites" / "naranjo-online" / "kustomization.yaml"
+        )
+        kustomization.write_text(
+            kustomization.read_text(encoding="utf-8")
+            + textwrap.dedent(
+                """\
+                patches:
+                  - target:
+                      group: source.toolkit.fluxcd.io
+                      version: v1
+                      kind: OCIRepository
+                      name: naranjo-online-chart
+                    patch: |-
+                      - op: remove
+                        path: /spec/verify
+                """
+            ),
+            encoding="utf-8",
+        )
+        # The committed file is untouched, so the source-file contract still
+        # passes; the denial must come from the render.
+        source_gate = subprocess.run(
+            [
+                required_tool(PYTHON3, "python3 is required"),
+                "-B",
+                str(root / "scripts" / "validate_signature_policy.py"),
+                "chart-source",
+                "--file",
+                str(root / "kubernetes/websites/naranjo-online/source.yaml"),
+                "--site",
+                "naranjo-online",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(source_gate.returncode, 0, source_gate.stderr)
+
+        self.assertEqual(selected_mode(root), "scaffold")
+        completed = render(root, "scaffold")
+        self.assertNotEqual(
+            completed.returncode,
+            0,
+            "a render without chart signature verification was accepted",
+        )
+        self.assertIn(
+            "must verify chart signatures against this site's exact keyless "
+            "publisher identity",
+            completed.stdout + completed.stderr,
         )
 
     def test_a_site_proof_without_its_rendered_artifact_fails_closed(self):

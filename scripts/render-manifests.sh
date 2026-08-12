@@ -300,6 +300,14 @@ assert_site_release_phase() {
   local not_ready="HelmRelease ${website} is not marked ready"
   local zero_digest="HelmRelease ${website} still names the all-zero image digest"
   local uncanonical="HelmRelease ${website} does not name a canonical image digest"
+  # A site root also renders that site's chart source, so the closed
+  # vocabulary below is only exhaustive if it names that object's denials too.
+  # A correct chart source produces neither fragment in ANY phase, so both are
+  # forbidden everywhere rather than required anywhere: an unverified or
+  # misattributed chart source can never be an expected reason for this
+  # artifact to be denied.
+  local unverified="chart source ${website}/${website}-chart does not require cosign verification"
+  local unbound="chart source ${website}/${website}-chart does not bind exactly one keyless publisher identity"
   local result='' fragment=''
   local -a required=() forbidden=()
 
@@ -312,11 +320,11 @@ assert_site_release_phase() {
       # vocabulary in every arm is what makes the staged arm's forbidden set —
       # where these checks are load-bearing — obviously exhaustive.
       required=("$suspended" "$not_ready" "$zero_digest")
-      forbidden=("$uncanonical")
+      forbidden=("$uncanonical" "$unverified" "$unbound")
       ;;
     staged)
       required=("$suspended")
-      forbidden=("$not_ready" "$zero_digest" "$uncanonical")
+      forbidden=("$not_ready" "$zero_digest" "$uncanonical" "$unverified" "$unbound")
       ;;
     active)
       # An active site must satisfy the release policy outright; that single
