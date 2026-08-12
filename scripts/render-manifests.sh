@@ -266,6 +266,10 @@ expect_release_rejection() {
   local manifest="$1"
   local expected_fragment="$2"
   local result
+  # An absent artifact makes Conftest exit non-zero for a reason that is not a
+  # policy denial at all, which would otherwise be read as evidence of a
+  # fail-closed property this gate never actually proved.
+  [[ -s "$manifest" ]] || die "missing artifact for release proof: $(basename -- "$manifest")"
   if result="$(conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$manifest" 2>&1)"; then
     die "release policy unexpectedly accepted fail-closed artifact $(basename -- "$manifest")"
   fi
@@ -273,6 +277,60 @@ expect_release_rejection() {
     printf '%s\n' "$result" >&2
     die "release policy rejected $(basename -- "$manifest") without proving: ${expected_fragment}"
   fi
+}
+
+# Prove one site's rendered desired state denies exactly the fail-closed
+# reasons its classified phase predicts, over that site's closed denial
+# vocabulary. Required fragments alone cannot separate `initial` from `staged`
+# — both remain suspended — so the fragments a phase forbids are asserted
+# absent too. That absence is what proves a staged site's reviewed digest and
+# readiness actually reached the rendered artifact, which before the site
+# charts moved to their own repositories was proven by rendering the chart.
+assert_site_release_phase() {
+  local manifest="$1"
+  local website="$2"
+  local phase="$3"
+  local suspended="HelmRelease ${website} remains suspended"
+  local not_ready="HelmRelease ${website} is not marked ready"
+  local zero_digest="HelmRelease ${website} still names the all-zero image digest"
+  local uncanonical="HelmRelease ${website} does not name a canonical image digest"
+  local result='' fragment=''
+  local -a required=() forbidden=()
+
+  [[ -s "$manifest" ]] || die "missing rendered site artifact: $(basename -- "$manifest")"
+  case "$phase" in
+    initial)
+      required=("$suspended" "$not_ready" "$zero_digest")
+      forbidden=("$uncanonical")
+      ;;
+    staged)
+      required=("$suspended")
+      forbidden=("$not_ready" "$zero_digest" "$uncanonical")
+      ;;
+    active)
+      # An active site must satisfy the release policy outright; that single
+      # accepting pass already proves every forbidden fragment is absent.
+      conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$manifest"
+      return 0
+      ;;
+    *) die "website ${website} carries an unclassifiable phase: ${phase}" ;;
+  esac
+
+  if result="$(conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$manifest" 2>&1)"; then
+    die "release policy unexpectedly accepted ${phase} site artifact $(basename -- "$manifest")"
+  fi
+  for fragment in "${required[@]}"; do
+    if ! grep -Fq -- "$fragment" <<<"$result"; then
+      printf '%s\n' "$result" >&2
+      die "release policy rejected $(basename -- "$manifest") without proving: ${fragment}"
+    fi
+  done
+  for fragment in "${forbidden[@]}"; do
+    if grep -Fq -- "$fragment" <<<"$result"; then
+      printf '%s\n' "$result" >&2
+      die "${phase} website ${website} still denies: ${fragment}"
+    fi
+  done
 }
 
 if [[ "$MODE" == '--scaffold' ]]; then
@@ -291,8 +349,10 @@ if [[ "$MODE" == '--scaffold' ]]; then
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization platform-services remains suspended'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization naranjo-online remains suspended'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization lidersea-com remains suspended'
-  expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-websites-naranjo-online.yaml" 'HelmRelease naranjo-online remains suspended'
-  expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-websites-lidersea-com.yaml" 'HelmRelease lidersea-com remains suspended'
+  assert_site_release_phase "${ARTIFACT_ROOT}/kubernetes-websites-naranjo-online.yaml" \
+    naranjo-online "$naranjo_phase"
+  assert_site_release_phase "${ARTIFACT_ROOT}/kubernetes-websites-lidersea-com.yaml" \
+    lidersea-com "$lidersea_phase"
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-cloudflare-public-release.yaml" 'HelmRelease cloudflare-public remains suspended'
   expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-naranjo-online is not enforced'
   expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-lidersea-com is not enforced'
@@ -301,22 +361,20 @@ elif [[ "$MODE" == '--release' ]]; then
     conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$rendered"
   done
 else
-  # Transition mode validates each authoritative chart at its classified
-  # phase. Suspended parent/HelmRelease objects are accepted only because the
-  # strict classifier already proved their exact identity and relationship.
+  # Transition mode validates each authoritative site at its classified phase.
+  # Suspended parent/HelmRelease objects are accepted only because the strict
+  # classifier already proved their exact identity and relationship. The proof
+  # runs over the site's rendered Flux root, which is the desired state this
+  # repository still renders now that each site chart lives in its own
+  # repository and is gated by that repository's own CI.
   declare -A WEBSITE_PHASES=(
     [naranjo-online]="$naranjo_phase"
     [lidersea-com]="$lidersea_phase"
   )
   website=''
   for website in naranjo-online lidersea-com; do
-    output="${ARTIFACT_ROOT}/helm-${website}.yaml"
-    if [[ "${WEBSITE_PHASES[$website]}" == 'initial' ]]; then
-      expect_release_rejection "$output" "Deployment ${website} is not marked ready"
-      expect_release_rejection "$output" "container ${website} still uses the all-zero digest"
-    else
-      conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$output"
-    fi
+    assert_site_release_phase "${ARTIFACT_ROOT}/kubernetes-websites-${website}.yaml" \
+      "$website" "${WEBSITE_PHASES[$website]}"
   done
 
   if [[ "$cloudflare_phase" == 'initial' ]]; then
