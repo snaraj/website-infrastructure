@@ -108,12 +108,28 @@ findings. Read this list as "what stops working if Kyverno stops answering":
 
 - **Cluster-wide, in every namespace except `kube-system`, `flux-system`, and
   `kyverno`:** no non-`ClusterIP` Service, no `Ingress`, no Gateway API object,
-  no `PersistentVolume`, `PersistentVolumeClaim`, `StorageClass`, or
-  `CSIDriver`, and no `StatefulSet` with claim templates. `disallow-public-services`
-  and two rules of `disallow-undiscovered-storage` are not namespace-scoped.
-  The storage rules deny the *kind*, so a future CSI driver or StorageClass
-  install is refused until the policy is revised — that is intended today and
-  will need an explicit decision the day storage arrives.
+  and no storage object outside the enumerated allowlist — `PersistentVolume`,
+  `PersistentVolumeClaim`, `StorageClass`, `CSIDriver`,
+  `VolumeAttributesClass`, and `StatefulSet` claim templates are all matched.
+  `disallow-public-services` and the non-namespaced rules of
+  `disallow-undiscovered-storage` reach every namespace.
+- **The storage stance is an allowlist, not a kind denial.** The owner's ruling
+  of 2026-08-12 permits StorageClasses, PersistentVolumes, and
+  PersistentVolumeClaims; what is refused is storage reachable from outside the
+  cluster by any means that has not been enumerated. Pull request #96 implements
+  that pivot: the admitted volume sources are derived BY SUBTRACTION (only
+  `local` and `csi` survive), against enumerated classes, provisioners, CSI
+  drivers, and local roots. The CSI driver list is currently empty, so the
+  practical stage-2 posture for CSI is unchanged from the previous
+  deny-by-kind — a driver install is still refused, but now because it is not on
+  the allowlist rather than because the kind is forbidden, and admitting one is
+  an allowlist entry in a reviewed change rather than a policy rewrite. Read
+  `policies/kyverno/disallow-undiscovered-storage.yaml` for the exact rules
+  rather than a summary here; a runbook that restates a policy drifts from it.
+  (Known-stale names: the policy `disallow-undiscovered-storage` and its rule
+  `disallow-persistent-storage-resources` still describe the retired
+  deny-by-kind stance. A rename is queued as a follow-up — it would collide with
+  two other in-flight branches today.)
 - **In `cloudflare-public`, `naranjo-online`, `lidersea-com`:** the full
   restricted-workload, approved-image, exact-networking, media-payload,
   release-readiness, and zero-capacity contracts. A site Deployment whose
