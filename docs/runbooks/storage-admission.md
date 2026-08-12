@@ -169,6 +169,13 @@ reports `skip` or never evaluates an object at all — which is the same narrowi
 above, caught behaviourally. It runs in `scripts/render-manifests.sh`, beside the
 fixture runner, so `make check-kubernetes` and CI both execute it.
 
+It proves its own comparison on every run. Neutering that comparison — one
+`if` — was the single mutant that survived the whole matrix, because every other
+guard around the harness reads its text rather than its behaviour. The harness
+now runs the real comparison against a deliberately wrong expectation first and
+aborts unless exactly one divergence comes back, so a harness that compares
+nothing fails instead of passing.
+
 It also enforces ATTRIBUTION. Both fixture runners assert only that a file is
 rejected, so neutralizing one rule stays green whenever any other rule denies the
 same object — measured on the Rego SR-0 arm, whose fixture also fails SR-1 and

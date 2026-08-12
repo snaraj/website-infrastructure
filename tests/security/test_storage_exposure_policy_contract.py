@@ -780,6 +780,28 @@ class EngineParityHarnessContract(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, harness)
 
+    def test_the_harness_proves_its_own_comparison_every_run(self) -> None:
+        """The mutant that survives everything else, and its answer.
+
+        Neutering the harness's verdict comparison — one `if` — left it green on
+        a corpus that contained a real engine divergence, and no other check
+        noticed, because every other guard here reads the harness's TEXT. The
+        harness therefore runs its comparison against a deliberately wrong
+        expectation on every invocation and aborts unless exactly one divergence
+        comes back, so a comparison that compares nothing fails the run rather
+        than passing it. This test keeps that self-test from being deleted; the
+        self-test keeps the comparison honest. Neither alone is sufficient, and
+        no single edit defeats both.
+        """
+
+        harness = read(self.harness)
+        self.assertIn("self_test_delta", harness, "the harness no longer proves its own comparison")
+        self.assertIn(
+            "check_object \"${self_test_probe}\" 'allow'",
+            harness,
+            "the harness's self-test no longer exercises the real comparison path",
+        )
+
     def test_the_corpus_cannot_be_trimmed_below_the_floor(self) -> None:
         """The floor lives here as well as in the harness.
 

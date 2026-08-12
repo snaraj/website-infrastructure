@@ -134,6 +134,27 @@ check_object() {
   fi
 }
 
+# SELF-TEST, run before the corpus. The verdict comparison IS this harness, and
+# a harness that compares nothing reports success forever: neutering that one
+# `if` left the harness green on a corpus containing a real engine divergence
+# (mutant M19, measured on this file). So the comparison is exercised here
+# against a deliberately WRONG expectation — an object both engines deny,
+# declared as `allow` — and the run aborts unless exactly one divergence is
+# reported. The failure counter and the checked counter are restored afterwards
+# so the probe cannot colour the real result either way.
+self_test_probe="${repo_root}/tests/kubernetes/fixtures/deny/storage-nfs-persistent-volume.yaml"
+[[ -s "${self_test_probe}" ]] || { printf 'parity self-test probe is missing\n' >&2; exit 1; }
+self_test_before="${failures}"
+check_object "${self_test_probe}" 'allow' 2>/dev/null
+self_test_delta=$((failures - self_test_before))
+failures="${self_test_before}"
+checked=$((checked - 1))
+if (( self_test_delta != 1 )); then
+  printf 'PARITY HARNESS SELF-TEST FAILED: a wrong expected verdict produced %d divergences, not 1 — the comparison is not comparing\n' \
+    "${self_test_delta}" >&2
+  exit 1
+fi
+
 deny_objects=0
 for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/storage-*.yaml; do
   deny_objects=$((deny_objects + 1))
