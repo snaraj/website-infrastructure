@@ -1,19 +1,37 @@
 """Offline contracts for the reproducible, inert Flux controller install.
 
-Nothing here contacts a cluster. These tests pin the properties that make the
-install reviewable and the namespace fail-closed: the generated blanket egress
-allow is removed, the egress allowlist is exactly the reviewed set, Pod
+Nothing here contacts a real cluster. These tests pin the properties that make
+the install reviewable and the namespace fail-closed: the generated blanket
+egress allow is removed, the egress allowlist is exactly the reviewed set, Pod
 Security is enforced rather than warned about, the guarded installer cannot be
 pointed at the unsuspended bootstrap root, and the documentation states the
 ordering rather than implying it.
+
+``FreshClusterDryRunGateTests`` is the one *behavioural* class: it runs the real
+installer against stubbed ``kustomize``/``kubectl`` binaries on ``PATH`` (the
+same stubbing shape ``test_edge_probe_contract`` uses) and drives the pre-apply
+gate through the fresh-cluster shape it must accept — 14 cluster-scoped
+``created`` plus 11 children reporting ``namespaces "flux-system" not found``
+(kubernetes/kubernetes#83562, which the old "all 25 must be created" gate could
+never pass) — and the genuine failures it must still refuse.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
+
+BASH = shutil.which("bash")
+BASH_REQUIRED = "bash is required to exercise the installer gate"
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLERS = ROOT / "kubernetes" / "flux-system" / "controllers"
@@ -285,12 +303,18 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn("does not enforce restricted Pod Security", self.text)
 
     def test_it_dry_runs_before_it_applies_and_bounds_the_inventory(self):
+        # The gate keeps a server-side dry run and the exact-25 bound, and now
+        # also carries the fresh-cluster classification (14 cluster-scoped +
+        # 11 namespace-not-found children) and the namespace-independent
+        # corroboration (client-side strict validation). The behaviour is
+        # exercised in FreshClusterDryRunGateTests; these pins fail if the
+        # corrected gate is reverted to the old "all 25 must be created" shape.
         self.assertIn("--dry-run=server", self.text)
+        self.assertIn("--dry-run=client --validate=strict", self.text)
         self.assertIn("EXPECTED_OBJECTS=25", self.text)
-        self.assertIn(
-            "dry run reported an object outside the reviewed controller inventory",
-            self.text,
-        )
+        self.assertIn("EXPECTED_CLUSTER_SCOPED=14", self.text)
+        self.assertIn("EXPECTED_NAMESPACED=11", self.text)
+        self.assertIn('namespaces "flux-system" not found', self.text)
         plan_index = self.text.index('"$MODE" == \'--plan\'')
         apply_index = self.text.rindex("kubectl apply -f \"$rendered\"")
         self.assertLess(
@@ -317,6 +341,12 @@ class InstallDocumentationTests(unittest.TestCase):
             "Kyverno is not installed",
             "cluster-admin",
             "fulcio.sigstore.dev",
+            # The fresh-vs-existing dry-run semantics: the ns-not-found on the
+            # children is documented as expected, not a failure (the P3 fix).
+            'namespaces "flux-system" not found',
+            "kubernetes/kubernetes#83562",
+            "expected, healthy",
+            "client-side strict validation",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -340,6 +370,272 @@ class InstallDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+
+
+def _reviewed_render() -> str:
+    """A faithful 25-object skeleton of the reviewed controller render.
+
+    The stubbed ``kustomize`` prints this, so the installer's own content gates
+    (no Flux CR, no Secret, no blanket egress, restricted Pod Security enforced,
+    exactly 25 ``kind:`` lines) run against it, and the fresh-cluster absence
+    probe finds the exact reviewed ClusterRole/ClusterRoleBinding names in it.
+    Only structure matters here — ``kustomize`` is stubbed, so no field is
+    parsed for meaning.
+    """
+
+    docs = [
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: flux-system\n"
+        "  labels:\n    pod-security.kubernetes.io/enforce: restricted\n"
+    ]
+    for crd in (
+        "buckets.source.toolkit.fluxcd.io",
+        "externalartifacts.source.toolkit.fluxcd.io",
+        "gitrepositories.source.toolkit.fluxcd.io",
+        "helmcharts.source.toolkit.fluxcd.io",
+        "helmrepositories.source.toolkit.fluxcd.io",
+        "ocirepositories.source.toolkit.fluxcd.io",
+        "kustomizations.kustomize.toolkit.fluxcd.io",
+        "helmreleases.helm.toolkit.fluxcd.io",
+    ):
+        docs.append(
+            "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\n"
+            "metadata:\n  name: {}\n".format(crd)
+        )
+    for role in ("crd-controller-flux-system", "flux-edit-flux-system", "flux-view-flux-system"):
+        docs.append(
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: {}\n".format(role)
+        )
+    for binding in ("cluster-reconciler-flux-system", "crd-controller-flux-system"):
+        docs.append(
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\n"
+            "metadata:\n  name: {}\n".format(binding)
+        )
+    for policy in ("allow-egress", "allow-scraping", "allow-webhooks"):
+        docs.append(
+            "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
+            "  name: {}\n  namespace: flux-system\nspec:\n  podSelector: {{}}\n".format(policy)
+        )
+    docs.append(
+        "apiVersion: v1\nkind: ResourceQuota\nmetadata:\n"
+        "  name: critical-pods-flux-system\n  namespace: flux-system\n"
+    )
+    for sa in ("source-controller", "kustomize-controller", "helm-controller"):
+        docs.append(
+            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n"
+            "  name: {}\n  namespace: flux-system\n".format(sa)
+        )
+    docs.append(
+        "apiVersion: v1\nkind: Service\nmetadata:\n"
+        "  name: source-controller\n  namespace: flux-system\n"
+    )
+    for dep in ("source-controller", "kustomize-controller", "helm-controller"):
+        docs.append(
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  name: {}\n  namespace: flux-system\n".format(dep)
+        )
+    return "---\n".join(docs)
+
+
+# The stubbed kubectl. It reproduces the exact report shapes the real kubectl
+# emits, selected by FLUX_STUB_SCENARIO: the fresh/existing clean shapes and a
+# family of genuine failures. Nothing here contacts a cluster.
+_KUBECTL_STUB = r"""#!/usr/bin/env bash
+scenario="${FLUX_STUB_SCENARIO:-fresh-ok}"
+args="$*"
+cs_created() { local suf="$1"
+  printf 'namespace/flux-system created %s\n' "$suf"
+  for c in buckets.source.toolkit.fluxcd.io externalartifacts.source.toolkit.fluxcd.io \
+    gitrepositories.source.toolkit.fluxcd.io helmcharts.source.toolkit.fluxcd.io \
+    helmrepositories.source.toolkit.fluxcd.io ocirepositories.source.toolkit.fluxcd.io \
+    kustomizations.kustomize.toolkit.fluxcd.io helmreleases.helm.toolkit.fluxcd.io; do
+    printf 'customresourcedefinition.apiextensions.k8s.io/%s created %s\n' "$c" "$suf"; done
+  for r in crd-controller-flux-system flux-edit-flux-system flux-view-flux-system; do
+    printf 'clusterrole.rbac.authorization.k8s.io/%s created %s\n' "$r" "$suf"; done
+  for b in cluster-reconciler-flux-system crd-controller-flux-system; do
+    printf 'clusterrolebinding.rbac.authorization.k8s.io/%s created %s\n' "$b" "$suf"; done
+}
+ns_children() { local verb="$1" suf="$2"
+  for n in allow-egress allow-scraping allow-webhooks; do
+    printf 'networkpolicy.networking.k8s.io/%s %s %s\n' "$n" "$verb" "$suf"; done
+  printf 'resourcequota/critical-pods-flux-system %s %s\n' "$verb" "$suf"
+  for s in source-controller kustomize-controller helm-controller; do
+    printf 'serviceaccount/%s %s %s\n' "$s" "$verb" "$suf"; done
+  printf 'service/source-controller %s %s\n' "$verb" "$suf"
+  for d in source-controller kustomize-controller helm-controller; do
+    printf 'deployment.apps/%s %s %s\n' "$d" "$verb" "$suf"; done
+}
+ns_not_found() { local i; for i in 1 2 3 4 5 6 7 8 9 10 11; do
+  printf 'Error from server (NotFound): error when creating "STDIN": namespaces "flux-system" not found\n'; done; }
+
+case "$args" in
+  *"--dry-run=client"*)
+    [[ "$scenario" == client-invalid ]] && { echo 'error: strict decoding error: unknown field "spec.bogus"' >&2; exit 1; }
+    cs_created "(dry run)"; ns_children created "(dry run)"; exit 0 ;;
+  "get namespace flux-system"*)
+    if [[ "$scenario" == existing-* ]]; then echo 'namespace/flux-system'; exit 0
+    else echo 'Error from server (NotFound): namespaces "flux-system" not found' >&2; exit 1; fi ;;
+  "get customresourcedefinition"*)
+    if [[ "$scenario" == fresh-crd-present ]]; then
+      echo 'customresourcedefinition.apiextensions.k8s.io/gitrepositories.source.toolkit.fluxcd.io'; fi
+    exit 0 ;;
+  "get clusterrolebinding "*)
+    [[ "$scenario" == fresh-crb-present ]] && { echo 'clusterrolebinding.rbac.authorization.k8s.io/crd-controller-flux-system'; exit 0; }
+    echo 'Error from server (NotFound)' >&2; exit 1 ;;
+  "get clusterrole "*)
+    [[ "$scenario" == fresh-cr-present ]] && { echo 'clusterrole.rbac.authorization.k8s.io/crd-controller-flux-system'; exit 0; }
+    echo 'Error from server (NotFound)' >&2; exit 1 ;;
+  *"--dry-run=server"*)
+    case "$scenario" in
+      existing-ok) cs_created "(server dry run)"; ns_children configured "(server dry run)"; exit 0 ;;
+      fresh-ok) cs_created "(server dry run)"; ns_not_found; exit 1 ;;
+      fresh-foreign) cs_created "(server dry run)"; printf 'namespace/kube-system created (server dry run)\n'; ns_not_found; exit 1 ;;
+      fresh-configured) printf 'namespace/flux-system configured (server dry run)\n'
+        for c in buckets.source.toolkit.fluxcd.io externalartifacts.source.toolkit.fluxcd.io \
+          gitrepositories.source.toolkit.fluxcd.io helmcharts.source.toolkit.fluxcd.io \
+          helmrepositories.source.toolkit.fluxcd.io ocirepositories.source.toolkit.fluxcd.io \
+          kustomizations.kustomize.toolkit.fluxcd.io helmreleases.helm.toolkit.fluxcd.io; do
+          printf 'customresourcedefinition.apiextensions.k8s.io/%s created (server dry run)\n' "$c"; done
+        for r in crd-controller-flux-system flux-edit-flux-system flux-view-flux-system; do
+          printf 'clusterrole.rbac.authorization.k8s.io/%s created (server dry run)\n' "$r"; done
+        for b in cluster-reconciler-flux-system crd-controller-flux-system; do
+          printf 'clusterrolebinding.rbac.authorization.k8s.io/%s created (server dry run)\n' "$b"; done
+        ns_not_found; exit 1 ;;
+      fresh-genuine-error) cs_created "(server dry run)"
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          printf 'Error from server (NotFound): error when creating "STDIN": namespaces "flux-system" not found\n'; done
+        printf 'Error from server (Forbidden): error when creating "STDIN": deployments.apps is forbidden\n'; exit 1 ;;
+    esac ;;
+  "apply -f"*) printf 'namespace/flux-system created\n'; exit 0 ;;
+esac
+echo "stub kubectl: unhandled args: $args" >&2; exit 99
+"""
+
+
+@unittest.skipUnless(BASH, "bash is unavailable")
+class FreshClusterDryRunGateTests(unittest.TestCase):
+    """Behavioural: the pre-apply gate accepts the fresh-cluster dry-run shape.
+
+    The defect this exists for: the install creates its own flux-system
+    Namespace, and ``kubectl apply --dry-run=server`` does not persist it
+    (kubernetes/kubernetes#83562), so the 11 namespaced children report
+    ``namespaces "flux-system" not found`` and kubectl exits non-zero on a fresh
+    cluster. The previous gate demanded all 25 objects report ``created`` and so
+    could never pass the fresh install it exists to perform. These tests drive
+    the real installer against stubbed binaries and prove both directions: the
+    two legitimate shapes are accepted, and every genuine failure is refused.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stub_dir = Path(
+            tempfile.mkdtemp(prefix="flux-install-gate.", dir=os.environ.get("TMPDIR"))
+        )
+        render_path = cls.stub_dir / "controllers.yaml"
+        render_path.write_text(_reviewed_render(), encoding="utf-8")
+        kustomize = cls.stub_dir / "kustomize"
+        kustomize.write_text(
+            "#!/usr/bin/env bash\ncat {}\n".format(shlex.quote(str(render_path))),
+            encoding="utf-8",
+        )
+        kustomize.chmod(0o755)
+        kubectl = cls.stub_dir / "kubectl"
+        kubectl.write_text(_KUBECTL_STUB, encoding="utf-8")
+        kubectl.chmod(0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.stub_dir, ignore_errors=True)
+
+    def _run(self, scenario, mode="--plan"):
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join(
+            [str(self.stub_dir), environment.get("PATH", "")]
+        )
+        environment["FLUX_STUB_SCENARIO"] = scenario
+        return subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), str(INSTALLER), mode],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=str(ROOT),
+        )
+
+    def test_the_render_skeleton_passes_the_installers_own_content_gates(self):
+        # Vacuity floor: if the stubbed render did not satisfy the content gates,
+        # every acceptance test below would pass for the wrong reason (dying
+        # early), so pin the 25-object shape the gate actually classifies.
+        render = _reviewed_render()
+        self.assertEqual(render.count("\nkind:") + render.startswith("kind:"), 25)
+        self.assertIn("pod-security.kubernetes.io/enforce: restricted", render)
+        self.assertNotIn("kind: Secret", render)
+
+    def test_fresh_cluster_shape_is_accepted(self):
+        completed = self._run("fresh-ok")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn(
+            "fresh-cluster dry run clean (14 created + 11 expected namespace-not-found)",
+            completed.stdout,
+        )
+        self.assertIn("PLAN only; no mutation attempted", completed.stdout)
+
+    def test_existing_cluster_shape_is_accepted(self):
+        completed = self._run("existing-ok")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("existing-cluster dry run clean (25 objects)", completed.stdout)
+
+    def test_a_foreign_object_in_the_dry_run_fails_closed(self):
+        # A 26th line (another namespace) must break the fresh shape and stop.
+        completed = self._run("fresh-foreign")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fresh dry-run shape wrong", completed.stderr)
+        self.assertNotIn("dry run clean", completed.stdout)
+
+    def test_a_real_configured_fails_closed(self):
+        # A cluster-scoped object reporting "configured" instead of "created" on
+        # a fresh cluster means it already exists; the gate must refuse it.
+        completed = self._run("fresh-configured")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fresh dry-run shape wrong", completed.stderr)
+
+    def test_a_genuine_error_on_a_child_fails_closed(self):
+        # One child failing with something other than the flux-system
+        # namespace-not-found (a Forbidden here) must not be waved through.
+        completed = self._run("fresh-genuine-error")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fresh dry-run shape wrong", completed.stderr)
+        self.assertNotIn("dry run clean", completed.stdout)
+
+    def test_a_preexisting_fluxcd_crd_fails_closed(self):
+        completed = self._run("fresh-crd-present")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fluxcd CRD(s) already exist", completed.stderr)
+
+    def test_a_preexisting_clusterrole_fails_closed(self):
+        completed = self._run("fresh-cr-present")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("ClusterRole crd-controller-flux-system already exists", completed.stderr)
+
+    def test_a_preexisting_clusterrolebinding_fails_closed(self):
+        completed = self._run("fresh-crb-present")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "ClusterRoleBinding cluster-reconciler-flux-system already exists",
+            completed.stderr,
+        )
+
+    def test_an_invalid_render_fails_client_validation(self):
+        completed = self._run("client-invalid")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("client-side strict validation failed", completed.stderr)
+
+    def test_apply_reaches_the_real_apply_only_after_a_clean_fresh_gate(self):
+        # --apply runs the identical gate, then the one mutating apply. Proving
+        # the mutating path is reached on the accepted shape is what makes the
+        # acceptance tests above load-bearing rather than "everything exits 0".
+        completed = self._run("fresh-ok", mode="--apply")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("applied; Flux is installed and inert", completed.stdout)
 
 
 if __name__ == "__main__":

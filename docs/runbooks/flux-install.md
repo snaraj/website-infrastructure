@@ -86,10 +86,38 @@ workstation, with the `versions.env` pins of `kustomize` and `kubectl`:
 
 This renders the install root, refuses it if it contains any Flux custom
 resource, any Secret, or any NetworkPolicy egress rule, refuses it unless
-`flux-system` enforces restricted Pod Security, requires exactly 25 objects,
-runs a **server-side dry run**, and refuses if the dry run names anything
-outside the reviewed controller inventory. It prints the render's SHA-256 and
-mutates nothing.
+`flux-system` enforces restricted Pod Security, and requires exactly 25 objects.
+It then runs a read-only **pre-apply gate** — a client-side strict validation of
+all 25 objects, an existence probe of the objects the install creates, and a
+**server-side dry run** — and refuses if any of them names anything outside the
+reviewed controller inventory. It prints the render's SHA-256 and mutates
+nothing.
+
+### Why the server dry run reports "namespace not found" on a fresh cluster
+
+The install creates its own `flux-system` Namespace and 24 objects under it. A
+`kubectl apply --dry-run=server` does **not** persist the dry-run Namespace
+([kubernetes/kubernetes#83562](https://github.com/kubernetes/kubernetes/issues/83562)),
+so on a **fresh** cluster the server has nowhere to place the 11 namespaced
+children: each reports `namespaces "flux-system" not found` and `kubectl` exits
+non-zero. That is the **expected, healthy** shape of a clean fresh install, not a
+failure. The gate accepts exactly the 14 cluster-scoped objects (the Namespace,
+8 CRDs, 3 ClusterRoles, 2 ClusterRoleBindings) reporting `created` alongside the
+11 namespaced children (1 ResourceQuota, 3 ServiceAccounts, 1 Service, 3
+Deployments, 3 NetworkPolicies) reporting that one namespace-not-found error. It
+proves the create is clean two further ways that do not depend on the server dry
+run persisting the namespace: a client-side strict validation of all 25 objects,
+and a check that none of them already exists (`flux-system` absent, no fluxcd
+CRDs, the reviewed ClusterRoles and ClusterRoleBindings absent). An earlier gate
+that demanded all 25 report `created` could never pass a fresh cluster and would
+have blocked the very install this script performs.
+
+On a cluster where `flux-system` **already exists** — a re-run, or a
+reconcile-to-reviewed-bytes check — the server dry run instead reports all 25
+objects cleanly, and the gate accepts that shape too. Any other line — a foreign
+object, a different namespace, a `configured`/`unchanged` where a fresh `created`
+was expected, or any genuine error — fails the gate closed, and nothing is
+applied.
 
 Record the printed digest with the commit SHA. A digest that does not reproduce
 means the tree, the tool, or the commit is not the reviewed one, and the
