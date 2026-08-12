@@ -1223,16 +1223,32 @@ def flux_egress_contract_errors(root):
 # tests/security/test_flux_install_contract.py; these are the static coupling —
 # a constant edited on its own, a fail-closed refusal deleted, or a
 # cluster-scoped object dropped from the runbook's removal, all fail here.
+# Each entry is a fail-closed refusal that a commit must not be able to delete
+# quietly. A grep is NOT what pins them -- it only notices the deletion. What
+# proves each still WORKS is a behavioural test that feeds the installer the
+# input the refusal exists for, and
+# tests/security/test_flux_install_contract.py::RefusalCoverageTests requires
+# every entry here to name one. That coupling is deliberate: a refusal pinned
+# only by its own message string survived being replaced with a condition that
+# never matches, message intact -- which is how the phase-1 ordering guard was
+# found neutered with the whole suite green.
 FLUX_INSTALLER_REFUSALS = (
     "--kubeconfig is required",
     "--context is required",
     "--server is required",
     "--expect-render-sha256 is required",
+    "--expect-egress-sha256 is required",
+    "--expect-commit is required",
+    "the installer and its guards are not the reviewed ones",
+    "the egress bytes this would apply are not the reviewed ones",
     "matches no versions.env kubectl digest pin",
     "the install inputs carry uncommitted modifications",
     "is not owned by this install",
     "ROLLBACK INCOMPLETE",
     "the ordering that prevents the egress deadlock is broken",
+    "--apply installs only onto a fresh cluster",
+    "the controllers are reconciling, not idle",
+    "the live startup egress policies are not the reviewed shape",
 )
 FLUX_INSTALLER_PIN_KEYS = (
     "KUSTOMIZE_VERSION",

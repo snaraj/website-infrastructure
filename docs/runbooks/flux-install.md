@@ -108,23 +108,46 @@ is reachable from it.
 
 ## What every step is bound to
 
-Three bindings are required by every mode that touches a cluster, and the
-installer refuses to run without them. They are not conveniences: an install
-that trusts `PATH` and the ambient kubeconfig can be pointed at the wrong
-binary and the wrong cluster without anybody noticing.
+Every binding below is required by every mode that touches a cluster --
+`--plan`, `--apply` and `--open-public-egress` alike -- and the installer
+refuses to run without them. They are not conveniences: an install that trusts
+`PATH` and the ambient kubeconfig can be pointed at the wrong binary and the
+wrong cluster without anybody noticing.
 
 - **Tools.** `kustomize` must report the `versions.env` `KUSTOMIZE_VERSION`
   pin, and `kubectl` must report the `KUBERNETES_VERSION` pin **and** hash to
   one of the committed `KUBECTL_*_SHA256` digests. A shim earlier on `PATH`
   fails the digest check before any cluster is contacted.
 - **Bytes.** The checkout must be a Git checkout with no uncommitted change to
-  the install roots, `versions.env`, or the installer, and the render must hash
-  to the value passed as `--expect-render-sha256`. Take that value from the
-  reviewed pull request, not from the run you are about to perform.
+  the install roots, `versions.env`, or the installer, and **both** renders must
+  hash to the values passed as `--expect-render-sha256` (the controller bundle)
+  and `--expect-egress-sha256` (the egress overlay). Take both values from the
+  reviewed pull request, not from the run you are about to perform. Binding only
+  the controller render left the egress bundle -- the security half of what this
+  applies, and the only thing `--open-public-egress` applies at all -- unasserted:
+  a commit could widen an allow and still reproduce the reviewed controller
+  digest byte for byte.
+- **The installer itself.** `--expect-commit` must equal the checkout's `HEAD`. A
+  render digest binds the bytes rendered; it says nothing about the program that
+  rendered them, and every guard in this ceremony lives in that program.
 - **Target.** `--kubeconfig`, `--context`, and `--server` are all required and
   are passed on **every** API call. The installer proves the named context
   resolves to the named server before it does anything, and refuses a `--server`
   whose port is not the one the reviewed API-server allow names.
+
+Between the reviewed egress bytes and the applied ones sits exactly one
+substitution -- the API-server sentinel. The installer diffs the two and refuses
+if more than that one line differs, so the digest binds what was reviewed and
+the diff binds what is applied.
+
+**`--apply` installs onto a FRESH cluster only.** If `flux-system` already
+exists it refuses, by design and not as a limitation of effort. On an existing
+install every phase-1 object is rewritten in place and reported `configured`,
+with no prestate recorded anywhere: a ledger of *creations* cannot restore a
+*rewrite*, so a later failure would roll back nothing while reporting that the
+cluster was unchanged. Reconciling an existing install to reviewed bytes is a
+real need and a separate reviewed ceremony; `--plan` still classifies such a
+cluster read-only, which is how you inspect it.
 
 `--server` is also where the API-server egress destination comes from: the
 committed policy carries `192.0.2.0/32` (RFC 5737 TEST-NET-1) as a fail-closed
@@ -165,7 +188,9 @@ the renderer.
   --kubeconfig "$PROTECTED_KUBECONFIG" \
   --context "$REVIEWED_CONTEXT" \
   --server "$REVIEWED_SERVER" \
-  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256" \
+  --expect-egress-sha256 "$REVIEWED_EGRESS_SHA256" \
+  --expect-commit "$REVIEWED_COMMIT"
 ```
 
 Same offline guards, then a read-only **pre-apply gate**: a **client-side strict
@@ -208,7 +233,9 @@ applied.
   --kubeconfig "$PROTECTED_KUBECONFIG" \
   --context "$REVIEWED_CONTEXT" \
   --server "$REVIEWED_SERVER" \
-  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256" \
+  --expect-egress-sha256 "$REVIEWED_EGRESS_SHA256" \
+  --expect-commit "$REVIEWED_COMMIT"
 ```
 
 Same guards and the same gate, then the three ordered phases from the table
@@ -216,14 +243,31 @@ above. Note what the script does *not* do: it never runs `kubectl apply -k`,
 because `kubectl`'s embedded Kustomize is a different build than the pinned one,
 so `-k` would apply bytes nobody rendered and nobody hashed.
 
-**The apply is a transaction.** Every phase's output is parsed into a ledger of
-the objects *this attempt* created. If any phase fails — including a partial
-apply that created a prefix before erroring — the ledger is rolled back
-newest-first and the absence of every one of those objects is then re-probed and
-reported. Objects that already existed report `configured` and never enter the
-ledger, so a failed re-run cannot delete a working install. If a delete does not
-take, the script says `ROLLBACK INCOMPLETE` and names what is left rather than
-claiming a clean undo.
+**The apply is a transaction, and its scope is a fresh cluster.** If
+`flux-system` already exists the mode refuses before touching anything; see
+"What every step is bound to" for why a ledger of creations cannot undo an
+in-place rewrite. On the fresh path every object this attempt touches it
+created, so the undo is a delete.
+
+The ledger of what to delete is re-derived from the **API server**, not from
+`kubectl`'s stdout: an object enters it if `kubectl` reported it created *or* if
+it is in the cluster now. Both sources matter, because a dropped connection or a
+signal delivered between the create and the print would otherwise lose an object
+that exists — and 14 of them are cluster-scoped, which `kubectl delete namespace
+flux-system` cannot remove. Because the pre-apply gate proved every one of these
+objects absent, "it exists now" means "this attempt created it".
+
+If any phase fails — including a partial apply that created a prefix before
+erroring — the ledger is rolled back newest-first and the absence of every one of
+those objects is then re-probed and reported. If a delete does not take, the
+script says `ROLLBACK INCOMPLETE` and names what is left rather than claiming a
+clean undo.
+
+**Ctrl-C is handled, not ignored.** `INT`, `TERM` and `HUP` run the same rollback
+path a failed phase runs, and report through a saved stderr so the report reaches
+your terminal even when the signal lands inside an apply whose output was
+redirected. An interrupt before the first apply says so and does nothing. A
+second signal during a rollback is ignored rather than restarting it.
 
 ## Step 3 — verify the controllers, and verify they are idle
 
@@ -274,14 +318,34 @@ manifest and the verifier must move together.
   --kubeconfig "$PROTECTED_KUBECONFIG" \
   --context "$REVIEWED_CONTEXT" \
   --server "$REVIEWED_SERVER" \
-  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256" \
+  --expect-egress-sha256 "$REVIEWED_EGRESS_SHA256" \
+  --expect-commit "$REVIEWED_COMMIT"
 ```
 
-This refuses unless all three controllers report `1/1` and all four startup
-allows are present, then applies the one remaining policy from
+This is the step that lets a `flux-system` Pod reach off-cluster at all, so its
+preconditions are checked rather than assumed. It refuses unless **all** of:
+
+- all three controllers report `1/1` — *healthy*;
+- **zero Flux custom resources exist anywhere in the cluster** — *idle*. Step 3
+  asks the operator to check this; the mode now checks it itself, because an
+  out-of-order invocation is exactly when the manual check gets skipped, and
+  opening public HTTPS while something is already reconciling opens it to
+  whatever that object reconciles;
+- all four startup allows are present **and are still the reviewed shape**. The
+  mode re-applies the reviewed startup bundle as a server dry run and requires
+  every policy to come back `unchanged`. Existence by name could not tell the
+  reviewed API-server `/32` from one widened to a subnet; this can.
+
+Only then does it apply the one remaining policy from
 [`kubernetes/flux-system/egress/network-policies.yaml`](../../kubernetes/flux-system/egress/network-policies.yaml).
 After it, nothing else is reachable from a `flux-system` Pod: not the LAN, not
 the node, not another namespace, not plain HTTP.
+
+A refusal reporting that the live startup policies are not the reviewed shape
+most often means this run was bound to a different `--server` than the install
+was, since that address is substituted into the API-server allow. Re-check the
+binding before changing anything in the cluster.
 
 ### What the public-HTTPS allow is for
 

@@ -30,20 +30,32 @@
 #   ambient kubeconfig points at". kustomize and kubectl are checked against the
 #   versions.env pins (kubectl by version AND by binary sha256, so a hostile
 #   earlier-on-PATH shim cannot impersonate it); the render must come from a Git
-#   checkout with no uncommitted modification to any install input and must hash
-#   to the sha256 the reviewer signed off; and every single API operation
-#   carries an explicit --kubeconfig/--context/--server whose context is proven
-#   to resolve to exactly that server first.
+#   checkout at an ASSERTED commit with no uncommitted modification to any
+#   install input; BOTH rendered artifacts -- the controller bundle and the
+#   egress overlay -- must hash to the sha256s the reviewer signed off; and
+#   every single API operation carries an explicit --kubeconfig/--context/
+#   --server whose context is proven to resolve to exactly that server first.
+#   Binding only the controller render was not enough: the egress bundle is the
+#   SECURITY half of what this script applies, and an unasserted digest over it
+#   meant a commit could widen an allow while reproducing the reviewed
+#   controller digest exactly.
 #
 #   TRANSACTION. `kubectl apply -f` is not atomic: a failure part-way leaves an
 #   applied prefix, and 13 of this bundle's objects are CLUSTER-SCOPED (8 CRDs,
 #   3 ClusterRoles, 2 ClusterRoleBindings) which no `delete namespace` can
-#   remove. Every phase's apply output is parsed into an inventory ledger of the
-#   objects THIS attempt created; on any failure the ledger is rolled back
-#   newest-first and the absence of every one of them — cluster-scoped included
-#   — is then proven. Objects that already existed are never adopted and never
-#   deleted, and an object that exists under foreign ownership stops the install
-#   before anything is applied.
+#   remove. --apply therefore installs onto a FRESH cluster only. That is the
+#   scope in which the transaction is honest: every object it touches it
+#   created, so undoing it is a delete, and the ledger of what to delete is
+#   re-derived from the API server rather than trusted from kubectl's stdout.
+#   An apply over an EXISTING install would instead rewrite objects as
+#   `configured` -- a mutation with no recorded prestate, which no ledger of
+#   creations can undo and which would make the rollback report "the cluster is
+#   unchanged" after rewriting 22 objects. Rather than claim a restore this
+#   script cannot perform, the existing-install path is refused for --apply and
+#   stays available read-only through --plan. A signal (INT/TERM/HUP) takes the
+#   same rollback path a failed phase takes, because a Ctrl-C between phases
+#   would otherwise leave exactly the cluster-scoped residue the ledger exists
+#   to prevent.
 #
 # The offline guards refuse BEFORE contacting the cluster. The pre-apply gate
 # then makes only read-only, non-mutating calls -- an existence and ownership
@@ -52,14 +64,15 @@
 # fresh cluster (flux-system absent) and a reconcile of an existing one. See the
 # gate below and docs/runbooks/flux-install.md. Nothing mutates until --apply.
 #
-#   --render  render, verify, and print the render sha256; no cluster contact
+#   --render  render, verify, and print both render sha256s; no cluster contact
 #   --plan    the same, plus the read-only pre-apply gate; no mutation
-#   --apply   the same checks, then the ordered, ledger-backed apply
-#   --open-public-egress  the deferred public-HTTPS allow, once 3/3 are 1/1
+#   --apply   the same checks, then the ordered, ledger-backed apply (fresh only)
+#   --open-public-egress  the deferred public-HTTPS allow, once 3/3 are 1/1 and
+#                         the namespace still reconciles nothing
 #
-# --plan, --apply and --open-public-egress additionally require:
+# --plan, --apply and --open-public-egress ALL require every binding:
 #   --kubeconfig PATH --context NAME --server https://ADDRESS:6443
-#   --expect-render-sha256 HEX   (--plan and --apply)
+#   --expect-render-sha256 HEX --expect-egress-sha256 HEX --expect-commit HEX
 #
 # See docs/runbooks/flux-install.md for the surrounding ceremony.
 set -euo pipefail
@@ -153,10 +166,6 @@ CLUSTER_SCOPED_CREATED_LINE="^${_cluster_scoped_kind} created${_dry_suffix}\$"
 # Any reviewed object reporting any non-mutating verb: the shape of a clean
 # client validation and of an existing-cluster server dry run.
 INVENTORY_MUTATION_LINE="^(${_cluster_scoped_kind}|${_namespaced_kind}) ${_apply_verb}${_dry_suffix}\$"
-# The one line shape that puts an object into the rollback ledger. Only a real
-# apply prints an unsuffixed "created"; a dry run never does, so a dry run can
-# never enter anything into the ledger.
-LEDGER_CREATED_LINE="^(${_cluster_scoped_kind}|${_namespaced_kind}) created\$"
 # The EXPECTED fresh-cluster error on each of the 11 namespaced children: the
 # server dry run does not persist the dry-run Namespace (k8s #83562), so it has
 # nowhere to place them. Bounded to flux-system -- any other namespace, or any
@@ -181,16 +190,20 @@ usage() {
     'Usage: scripts/install-flux-controllers.sh MODE [binding options]' \
     '' \
     'Modes:' \
-    '  --render  render + verify + print the render sha256; contacts no cluster' \
+    '  --render  render + verify + print both render sha256s; contacts no cluster' \
     '  --plan    the same, plus the read-only pre-apply gate; no mutation' \
-    '  --apply   the same checks, then the ordered, ledger-backed apply' \
+    '  --apply   the same checks, then the ordered, ledger-backed apply (fresh only)' \
     '  --open-public-egress  the deferred public-HTTPS allow, once 3/3 are 1/1' \
     '' \
-    'Binding options (required by --plan, --apply, --open-public-egress):' \
+    'Binding options -- ALL are required by --plan, --apply, and' \
+    '--open-public-egress alike, and all are optional for --render, which' \
+    'asserts whichever of the two digests it is given:' \
     '  --kubeconfig PATH   the protected kubeconfig; never the ambient default' \
     '  --context NAME      the reviewed context; proven to resolve to --server' \
     '  --server URL        https://ADDRESS:6443 -- also the API-server allow' \
-    '  --expect-render-sha256 HEX   the reviewed render digest (--plan/--apply)'
+    '  --expect-render-sha256 HEX   the reviewed controller render digest' \
+    '  --expect-egress-sha256 HEX   the reviewed egress overlay render digest' \
+    '  --expect-commit HEX          the reviewed commit this must run from'
 }
 
 MODE=''
@@ -198,6 +211,8 @@ KUBECONFIG_PATH=''
 KUBE_CONTEXT=''
 KUBE_SERVER=''
 EXPECT_RENDER_SHA256=''
+EXPECT_EGRESS_SHA256=''
+EXPECT_COMMIT=''
 APISERVER_ADDRESS=''
 
 require_value() {
@@ -232,6 +247,16 @@ while (($#)); do
       EXPECT_RENDER_SHA256="$2"
       shift 2
       ;;
+    --expect-egress-sha256)
+      require_value "$1" "$#"
+      EXPECT_EGRESS_SHA256="$2"
+      shift 2
+      ;;
+    --expect-commit)
+      require_value "$1" "$#"
+      EXPECT_COMMIT="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -256,6 +281,15 @@ if [[ "$needs_cluster" == 'yes' ]]; then
   [[ -n "$KUBE_CONTEXT" ]] || die '--context is required; the install never uses the ambient current context'
   [[ -n "$KUBE_SERVER" ]] || die '--server is required; the install never uses the context default server'
   [[ -n "$EXPECT_RENDER_SHA256" ]] || die '--expect-render-sha256 is required; an unasserted render digest binds nothing'
+  # The egress overlay is the security half of what this script applies, and
+  # --open-public-egress applies nothing else. A digest that covered only the
+  # controller bundle left those bytes unbound: a commit could reproduce the
+  # reviewed controller digest exactly while widening an allow.
+  [[ -n "$EXPECT_EGRESS_SHA256" ]] || die '--expect-egress-sha256 is required; the egress bytes this applies would otherwise be unasserted'
+  # ... and a digest binds OUTPUT, not the program that produced it. The commit
+  # is what binds this script, its constants, and its guards to the reviewed
+  # ones.
+  [[ -n "$EXPECT_COMMIT" ]] || die '--expect-commit is required; a render digest binds the bytes rendered, not the installer that rendered them'
 fi
 
 # --- Tool identity -----------------------------------------------------------
@@ -336,6 +370,13 @@ GIT_BIN="$(resolve_tool git)"
 source_commit=''
 source_commit="$("$GIT_BIN" -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null)" || \
   die 'the install must run from a Git checkout of the reviewed commit'
+# Printing the commit told the operator which commit ran; it did not stop the
+# wrong one from running. Asserting it does, and it is the only binding that
+# covers this script itself -- the render digests bind the manifests, not the
+# guards that read them.
+if [[ -n "$EXPECT_COMMIT" && "$source_commit" != "$EXPECT_COMMIT" ]]; then
+  die "the checkout is at commit ${source_commit}, not the reviewed ${EXPECT_COMMIT}; the installer and its guards are not the reviewed ones"
+fi
 dirty_inputs=''
 dirty_inputs="$("$GIT_BIN" -C "$REPO_ROOT" status --porcelain -- \
   "$INSTALL_TARGET" "$EGRESS_TARGET" versions.env scripts/install-flux-controllers.sh)"
@@ -356,6 +397,48 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+# An INTERRUPT is not a clean stop. A Ctrl-C, a terminal hangup, or a `kill`
+# during the apply leaves everything the completed phases created -- including
+# all 14 cluster-scoped objects, which no `delete namespace` can remove -- with
+# nothing to remove them and no list of what to remove by hand. That is exactly
+# the residue the ledger exists to prevent, so the signal runs the SAME rollback
+# path a failed phase runs. Two hazards it must survive: arriving before any
+# apply (the transaction is not open, so there is nothing to undo and saying so
+# is the whole job), and arriving twice (the second must not restart a rollback
+# that is already in flight).
+TRANSACTION_OPEN='no'
+INTERRUPT_HANDLED='no'
+# A stable duplicate of the real stderr. Bash defers a trap until the running
+# foreground command finishes, and the applies run through the kube() SHELL
+# FUNCTION with `>"$output" 2>&1` on the call -- so a handler that fires there
+# inherits that redirection and writes its rollback report into a file inside
+# $work, which the EXIT trap then deletes. The operator would see an interrupt,
+# no report, and full residue. Reporting through this saved descriptor is what
+# makes the rollback report reach the terminal from anywhere in the script.
+exec 9>&2
+on_signal() {
+  local signal="$1"
+  if [[ "$INTERRUPT_HANDLED" == 'yes' ]]; then
+    warn "SIG${signal} arrived while the first interrupt was still being handled; ignoring it" 2>&9
+    return 0
+  fi
+  INTERRUPT_HANDLED='yes'
+  # Disarm before doing anything slow, so a repeat signal cannot re-enter.
+  trap - INT TERM HUP
+  {
+    warn "interrupted by SIG${signal}; an in-flight apply may already have created objects"
+    if [[ "$TRANSACTION_OPEN" == 'yes' ]]; then
+      rollback || true
+    else
+      warn 'rollback: the interrupt arrived before anything was applied; the cluster is unchanged'
+    fi
+  } 2>&9
+  exit 1
+}
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap 'on_signal HUP' HUP
 
 rendered="${work}/controllers.yaml"
 "$KUSTOMIZE_BIN" build "${REPO_ROOT}/${INSTALL_TARGET}" >"$rendered"
@@ -463,19 +546,45 @@ count_objects() {
 
 workloads="${work}/phase-3-workloads.yaml"
 prerequisites="${work}/phase-1-prerequisites.yaml"
-split_documents "$rendered" '^kind: Deployment[[:space:]]*$' "$workloads" "$prerequisites"
+# The splitter's pattern and the guard's pattern below are deliberately NOT the
+# same. A guard that asks the same question the splitter asked can only ever
+# agree with it, which is how it survives being disabled: nothing can reach it.
+# The guard's pattern is strictly BROADER -- it also recognizes a quoted or
+# oddly spaced `kind` -- so a Deployment the splitter failed to recognize lands
+# in phase 1 and the guard is the thing that catches it.
+DEPLOYMENT_SPLIT_PATTERN='^kind: Deployment[[:space:]]*$'
+DEPLOYMENT_ANY_PATTERN='^kind:[[:space:]]*['"'"'"]?Deployment['"'"'"]?[[:space:]]*$'
+split_documents "$rendered" "$DEPLOYMENT_SPLIT_PATTERN" "$workloads" "$prerequisites"
+# The whole point of the split is that no controller Pod exists before its
+# egress allows do; a Deployment left in phase 1 would silently restore the
+# deadlock this ordering exists to remove. Checked BEFORE the counts, so the
+# operator is told which invariant broke rather than being told an arithmetic
+# result that happens to follow from it.
+! grep -Eq "$DEPLOYMENT_ANY_PATTERN" "$prerequisites" || \
+  die 'a controller Deployment is still in the phase-1 bundle; the ordering that prevents the egress deadlock is broken'
 workload_count="$(count_objects "$workloads")"
 prerequisite_count="$(count_objects "$prerequisites")"
 [[ "$workload_count" -eq "$EXPECTED_WORKLOADS" && "$prerequisite_count" -eq "$EXPECTED_PREREQUISITES" \
    && $((workload_count + prerequisite_count)) -eq "$EXPECTED_OBJECTS" ]] || \
   die "phase split wrong: ${prerequisite_count} prerequisite object(s) + ${workload_count} workload(s) is not ${EXPECTED_PREREQUISITES} + ${EXPECTED_WORKLOADS}"
-# The whole point of the split is that no controller Pod exists before its
-# egress allows do; a Deployment left in phase 1 would silently restore the
-# deadlock this ordering exists to remove.
-! grep -Eq '^kind: Deployment[[:space:]]*$' "$prerequisites" || \
-  die 'a controller Deployment is still in the phase-1 bundle; the ordering that prevents the egress deadlock is broken'
-[[ "$(grep -cE '^kind: Deployment[[:space:]]*$' "$workloads" || true)" -eq "$EXPECTED_WORKLOADS" ]] || \
+[[ "$(grep -cE "$DEPLOYMENT_ANY_PATTERN" "$workloads" || true)" -eq "$EXPECTED_WORKLOADS" ]] || \
   die 'the phase-3 bundle is not exactly the controller Deployments'
+
+# The 11 objects that live INSIDE flux-system. The ownership probe used to stop
+# at the 14 cluster-scoped ones, which made the script's own claim -- that an
+# object under foreign ownership stops the install before anything is applied --
+# true of 14 of the 25 objects it applies. Derived from the render rather than
+# hand-listed, and then counted, so an export that adds or renames one is a hard
+# failure instead of a silently narrower probe.
+FLUX_NAMESPACED_OBJECTS=()
+for kind in ResourceQuota ServiceAccount Service Deployment NetworkPolicy; do
+  while IFS= read -r derived_name; do
+    [[ -n "$derived_name" ]] || continue
+    FLUX_NAMESPACED_OBJECTS+=("${kind,,}/${derived_name}")
+  done < <(inventory_names "$rendered" "$kind")
+done
+[[ "${#FLUX_NAMESPACED_OBJECTS[@]}" -eq "$EXPECTED_NAMESPACED" ]] || \
+  die "the render carries ${#FLUX_NAMESPACED_OBJECTS[@]} namespaced object(s); the reviewed install has ${EXPECTED_NAMESPACED} and the ownership probe would be narrower than the apply"
 # ... and the deny-all that makes the ordering necessary must be in phase 1,
 # where the controllers can be created into an already-isolated namespace.
 grep -Eq '^  name: allow-egress[[:space:]]*$' "$prerequisites" || \
@@ -495,7 +604,16 @@ for policy in "${STARTUP_EGRESS_POLICIES[@]}" "$PUBLIC_EGRESS_POLICY"; do
 done
 [[ "$(grep -cF -- "$APISERVER_SENTINEL_CIDR" "$egress_rendered" || true)" -eq 1 ]] || \
   die 'the committed API-server allow does not carry exactly one unresolved sentinel destination'
-note "egress overlay sha256 $(digest_of "$egress_rendered") (${egress_count} policies, API-server destination unresolved)"
+egress_digest="$(digest_of "$egress_rendered")"
+# The digest is taken over the COMMITTED bytes, before the API-server address is
+# substituted in: the substituted file carries host inventory, so it is not a
+# value a reviewer could ever have signed off. What the substitution then does
+# to those reviewed bytes is bounded separately below -- exactly one line may
+# differ.
+if [[ -n "$EXPECT_EGRESS_SHA256" && "$egress_digest" != "$EXPECT_EGRESS_SHA256" ]]; then
+  die "egress overlay sha256 ${egress_digest} is not the reviewed ${EXPECT_EGRESS_SHA256}; the egress bytes this would apply are not the reviewed ones"
+fi
+note "egress overlay sha256 ${egress_digest} (${egress_count} policies, API-server destination unresolved)"
 
 if [[ "$MODE" == '--render' ]]; then
   note 'RENDER only; no cluster was contacted and nothing was mutated'
@@ -557,6 +675,14 @@ awk -v sentinel="$APISERVER_SENTINEL_CIDR" -v replacement="$apiserver_cidr" '
   die 'the API-server sentinel survived substitution; the applied policy would grant nothing'
 [[ "$(grep -cF -- "$apiserver_cidr" "$egress_bound" || true)" -eq 1 ]] || \
   die 'the substituted API-server destination does not appear exactly once'
+# The digest above binds the bytes as reviewed; this binds the bytes as APPLIED.
+# Between the two sits one awk substitution, and the only thing it is allowed to
+# have done is change the one sentinel line. Anything else -- a rewritten rule,
+# a dropped exclusion, an added port -- shows up here as a second differing line
+# even though the reviewed digest still matched.
+substitution_delta="$(diff -- "$egress_rendered" "$egress_bound" | grep -c '^[<>]' || true)"
+[[ "$substitution_delta" -eq 2 ]] || \
+  die "the API-server substitution changed ${substitution_delta} line(s) of the reviewed egress render; exactly one line may differ"
 
 startup_egress="${work}/phase-2-startup-egress.yaml"
 public_egress="${work}/phase-4-public-egress.yaml"
@@ -587,7 +713,12 @@ fi
 
 if [[ "$MODE" == '--open-public-egress' ]]; then
   # The deferred step. It exists as a mode rather than a runbook paste so that
-  # "only after the controllers are healthy" is a check, not an instruction.
+  # "only after the controllers are healthy and idle" is a check, not an
+  # instruction. Each word of that claim is now one of the three probes below;
+  # before this round only the first existed, and "idle" was asserted in the
+  # message while nothing measured it.
+
+  # HEALTHY.
   for deployment in "${CONTROLLER_DEPLOYMENTS[@]}"; do
     readiness=''
     readiness="$(kube -n "$INSTALL_NAMESPACE" get deployment "$deployment" \
@@ -596,10 +727,42 @@ if [[ "$MODE" == '--open-public-egress' ]]; then
     [[ "$readiness" == '1/1' ]] || \
       die "Deployment ${deployment} reports ${readiness}, not 1/1; public egress stays shut until every controller is healthy and idle"
   done
+
+  # IDLE. Public HTTPS is the one flow that lets a controller reach the outside
+  # world, so it must not be opened while anything could already be reconciling.
+  # A Flux custom resource anywhere in the cluster means the controllers are not
+  # idle, whatever their Deployment status says.
+  for crd_name in "${FLUX_CRDS[@]}"; do
+    live_custom_resources=''
+    live_custom_resources="$(kube get "$crd_name" --all-namespaces -o name 2>/dev/null \
+      | grep -c '.' || true)"
+    [[ "$live_custom_resources" -eq 0 ]] || \
+      die "the cluster carries ${live_custom_resources} ${crd_name} object(s); the controllers are reconciling, not idle, and public egress stays shut"
+  done
+
+  # THE CLOSURE THIS EXTENDS. Existence by name proved only that four objects
+  # with the right names were there -- it could not tell the reviewed API-server
+  # /32 from one widened to a whole subnet. Re-applying the same reviewed bytes
+  # as a server dry run answers the shape question with the API server's own
+  # comparison: every startup policy must come back `unchanged`. A live policy
+  # that drifted from the reviewed render reports `configured`, and this refuses.
   for policy in "${STARTUP_EGRESS_POLICIES[@]}"; do
     kube -n "$INSTALL_NAMESPACE" get networkpolicy "$policy" -o name >/dev/null 2>&1 || \
       die "the startup egress policy ${policy} is not in the cluster; the namespace closure is not in the state this step extends"
   done
+  startup_shape="${work}/startup-shape.txt"
+  if ! kube apply -f "$startup_egress" --dry-run=server >"$startup_shape" 2>&1; then
+    cat -- "$startup_shape" >&2
+    die 'could not compare the live startup egress policies with the reviewed render'
+  fi
+  live_unchanged="$(grep -cE '^networkpolicy\.networking\.k8s\.io/[a-z0-9-]+ unchanged( \((server )?dry run\))?$' \
+    "$startup_shape" || true)"
+  live_lines="$(grep -cE '.' "$startup_shape" || true)"
+  if [[ "$live_unchanged" -ne "$EXPECTED_STARTUP_POLICIES" || "$live_lines" -ne "$EXPECTED_STARTUP_POLICIES" ]]; then
+    cat -- "$startup_shape" >&2
+    die "the live startup egress policies are not the reviewed shape (${live_unchanged} of ${EXPECTED_STARTUP_POLICIES} unchanged across ${live_lines} line(s)); public egress stays shut over a closure nobody reviewed"
+  fi
+
   kube apply -f "$public_egress" >"${work}/apply-public.txt" 2>&1 || {
     cat -- "${work}/apply-public.txt" >&2
     die 'the public-HTTPS allow failed to apply'
@@ -647,6 +810,22 @@ else
   die 'could not determine flux-system state; the API server did not answer NotFound'
 fi
 
+# (2b) --apply installs onto a FRESH cluster only.
+#
+# Not a convenience limit -- a scope limit on what the transaction below can
+# honestly undo. On an existing install every one of the 22 phase-1 objects
+# reports `configured`: bytes rewritten in place, with no prestate recorded
+# anywhere. A ledger of CREATIONS cannot restore them, so a phase-2 or phase-3
+# failure would roll back nothing and print "this attempt created nothing; the
+# cluster is unchanged" over a namespace whose RBAC, CRDs and NetworkPolicies
+# had just been rewritten. Refusing is the only answer that is true. Reconciling
+# an existing install to reviewed bytes is a real need and a separate reviewed
+# ceremony; --plan still classifies that cluster read-only, which is how the
+# operator sees what it would take.
+if [[ "$MODE" == '--apply' && "$cluster_state" == 'existing' ]]; then
+  die 'flux-system already exists; --apply installs only onto a fresh cluster, because an apply over an existing install rewrites objects this transaction has no prestate to restore (use --plan to inspect it; see docs/runbooks/flux-install.md)'
+fi
+
 # (3) Nothing the install creates may be adopted from somebody else. Every
 # cluster-scoped object is probed: absent is fine; present carrying THIS
 # install's ownership labels is a previous run of it; present without them
@@ -657,9 +836,16 @@ fi
 probe_labels() {
   local kind="$1"
   local name="$2"
+  local namespaced="${3:-}"
   local probe_err="${work}/probe.err"
   local labels=''
-  if labels="$(kube get "$kind" "$name" -o jsonpath='{.metadata.labels}' 2>"$probe_err")"; then
+  if [[ -n "$namespaced" ]]; then
+    if labels="$(kube -n "$INSTALL_NAMESPACE" get "$kind" "$name" \
+        -o jsonpath='{.metadata.labels}' 2>"$probe_err")"; then
+      printf '%s' "$labels"
+      return 0
+    fi
+  elif labels="$(kube get "$kind" "$name" -o jsonpath='{.metadata.labels}' 2>"$probe_err")"; then
     printf '%s' "$labels"
     return 0
   fi
@@ -674,8 +860,9 @@ probe_labels() {
 assert_not_foreign() {
   local kind="$1"
   local name="$2"
+  local namespaced="${3:-}"
   local labels=''
-  labels="$(probe_labels "$kind" "$name")"
+  labels="$(probe_labels "$kind" "$name" "$namespaced")"
   if [[ "$labels" == 'ABSENT' ]]; then
     return 0
   fi
@@ -691,10 +878,17 @@ if [[ "$cluster_state" == 'fresh' ]]; then
     | grep -c '\.fluxcd\.io$' || true)"
   [[ "$fluxcd_crds" -eq 0 ]] || \
     die "flux-system is absent but ${fluxcd_crds} fluxcd CRD(s) already exist"
+  # The 11 namespaced objects need no probe on this path and cannot get one: a
+  # namespaced object cannot exist without its namespace, and the namespace was
+  # just proven absent. Their absence is a consequence of that proof, not an
+  # assumption -- which is the other half of why --apply is fresh-only.
 else
   assert_not_foreign namespace "$INSTALL_NAMESPACE"
   for name in "${FLUX_CRDS[@]}"; do
     assert_not_foreign customresourcedefinition "$name"
+  done
+  for entry in "${FLUX_NAMESPACED_OBJECTS[@]}"; do
+    assert_not_foreign "${entry%%/*}" "${entry#*/}" namespaced
   done
 fi
 for name in "${FLUX_CLUSTER_ROLES[@]}"; do
@@ -755,16 +949,9 @@ fi
 
 LEDGER="${work}/created-by-this-attempt.txt"
 : >"$LEDGER"
-
-record_created() {
-  local output="$1"
-  local line=''
-  while IFS= read -r line; do
-    if [[ "$line" =~ ${LEDGER_CREATED_LINE} ]]; then
-      printf '%s\n' "${line%% created}" >>"$LEDGER"
-    fi
-  done <"$output"
-}
+# The manifests already applied, in the order they were applied. The ledger is
+# rebuilt from these on demand rather than appended to as we go.
+APPLIED_MANIFESTS=()
 
 entry_is_cluster_scoped() {
   [[ "$1" =~ ^(namespace|customresourcedefinition\.apiextensions\.k8s\.io|clusterrole\.rbac\.authorization\.k8s\.io|clusterrolebinding\.rbac\.authorization\.k8s\.io)/ ]]
@@ -788,6 +975,67 @@ entry_exists() {
   fi
 }
 
+# The objects a manifest declares, as the `<resource>/<name>` identifiers kubectl
+# prints and accepts, in the order the manifest declares them. That order is what
+# makes the rollback's reverse walk remove children before the Namespace.
+manifest_entries() {
+  awk '
+    function resource(k) {
+      if (k == "Namespace") { return "namespace" }
+      if (k == "CustomResourceDefinition") { return "customresourcedefinition.apiextensions.k8s.io" }
+      if (k == "ClusterRole") { return "clusterrole.rbac.authorization.k8s.io" }
+      if (k == "ClusterRoleBinding") { return "clusterrolebinding.rbac.authorization.k8s.io" }
+      if (k == "NetworkPolicy") { return "networkpolicy.networking.k8s.io" }
+      if (k == "ResourceQuota") { return "resourcequota" }
+      if (k == "ServiceAccount") { return "serviceaccount" }
+      if (k == "Service") { return "service" }
+      if (k == "Deployment") { return "deployment.apps" }
+      return tolower(k)
+    }
+    function flush() {
+      if (kind != "" && name != "") { printf "%s/%s\n", resource(kind), name }
+      kind = ""; name = ""
+    }
+    /^---[[:space:]]*$/ { flush(); next }
+    /^kind:[[:space:]]/ { if (kind == "") { kind = $2; gsub(/["'"'"']/, "", kind) } ; next }
+    /^  name:[[:space:]]/ { if (name == "") { name = $2 } ; next }
+    END { flush() }
+  ' "$1"
+}
+
+# Rebuild the ledger of what THIS attempt created, from two independent sources.
+#
+# Deliberately not bookkeeping kept up to date as we go, and deliberately not
+# kubectl's stdout alone. Two ways stdout loses an object: a signal can arrive
+# between the API server creating it and kubectl printing its line, and a
+# transport failure can drop the line entirely. Either leaves a ledger that says
+# "created nothing" while the object exists, i.e. exactly the unremovable
+# cluster-scoped residue this mechanism exists to prevent. So an object enters
+# the ledger if kubectl reported it created OR if it is in the cluster now --
+# and because --apply is fresh-only, every object of this render was proven
+# absent before the first apply, which is what makes "it exists now" mean "this
+# attempt created it". Re-derived immediately before any rollback, so the record
+# is correct no matter where the failure or the interrupt landed.
+harvest_ledger() {
+  local manifest=''
+  local output=''
+  local entry=''
+  : >"$LEDGER"
+  for manifest in ${APPLIED_MANIFESTS[@]+"${APPLIED_MANIFESTS[@]}"}; do
+    output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] || continue
+      # `grep -Fxq` matches the WHOLE line, so a dry run's "<entry> created
+      # (dry run)" can never satisfy it; only a real apply prints the bare form.
+      if [[ -f "$output" ]] && grep -Fxq -- "${entry} created" "$output"; then
+        printf '%s\n' "$entry" >>"$LEDGER"
+      elif entry_exists "$entry"; then
+        printf '%s\n' "$entry" >>"$LEDGER"
+      fi
+    done < <(manifest_entries "$manifest")
+  done
+}
+
 # Roll back exactly what this attempt created, newest first, and then PROVE the
 # absence rather than trusting the delete's exit status. `kubectl delete
 # namespace flux-system` -- the runbook's old whole-install undo -- cannot touch
@@ -798,6 +1046,7 @@ rollback() {
   local entry=''
   local index=0
   local -a residue=()
+  harvest_ledger
   mapfile -t created <"$LEDGER"
   if ((${#created[@]} == 0)); then
     warn 'rollback: this attempt created nothing; the cluster is unchanged'
@@ -830,15 +1079,19 @@ apply_phase() {
   local label="$1"
   local manifest="$2"
   local expected="$3"
-  local output="${work}/apply-${label}.txt"
+  # Named from the manifest, whose basename carries the phase index, so
+  # harvest_ledger can pair a phase's output with the manifest it applied.
+  local output=''
+  output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
   local rc=0
   local reported=''
   local total=''
   note "phase ${label}: applying ${expected} object(s)"
+  # Recorded BEFORE the call, not after: an interrupt delivered during the apply
+  # must still find this manifest in the list, or its objects are invisible to
+  # the rollback.
+  APPLIED_MANIFESTS+=("$manifest")
   kube apply -f "$manifest" >"$output" 2>&1 || rc=$?
-  # The ledger is written BEFORE the failure is acted on: a partial apply still
-  # created a prefix, and only a ledger that includes it can undo it.
-  record_created "$output"
   if ((rc != 0)); then
     cat -- "$output" >&2
     transaction_failed "phase ${label} apply failed (kubectl exit ${rc}); a partial apply may have created objects"
@@ -850,6 +1103,11 @@ apply_phase() {
     transaction_failed "phase ${label} reported ${reported} reviewed object(s) across ${total} line(s); expected exactly ${expected}"
   fi
 }
+
+# From here an interrupt has something to undo, and every function the rollback
+# path needs is defined. Set as late as possible and as one statement, so a
+# signal can never call into a half-built transaction.
+TRANSACTION_OPEN='yes'
 
 # 1 — the namespace, its deny-all, the CRDs, the RBAC, the quota, the accounts,
 #     and the Service. No Pod exists yet, so nothing is isolated yet either.
