@@ -29,7 +29,7 @@ spec:
       retries: 0
       strategy: rollback
   values:
-    deploymentReady: false
+    deploymentReady: true
     image:
       repository: ghcr.io/snaraj/naranjo-online
-      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      digest: sha256:3e36de5e72f2721dee4b0dd1f815ea4bbc961ef9b3bf78b7b452039699c10767
