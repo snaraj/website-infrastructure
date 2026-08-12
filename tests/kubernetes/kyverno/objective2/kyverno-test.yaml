@@ -14,7 +14,9 @@ policies:
 resources:
   - ../../fixtures/allow/lidersea-hardened.yaml
   - ../../fixtures/deny/objective2-bypasses.yaml
-  - ../../fixtures/deny/connector-token-cross-swap.yaml
+  - ../../fixtures/deny/connector-token-cross-swap-naranjo.yaml
+  - ../../fixtures/deny/connector-token-cross-swap-lidersea.yaml
+  - ../../fixtures/deny/tunnel-mount-superseded-token.yaml
   - ../../fixtures/kyverno-admission/connector-readiness-allow.yaml
   - ../../fixtures/kyverno-admission/connector-readiness-deny.yaml
   - ../../fixtures/allow/two-connector-networking.yaml
@@ -141,6 +143,15 @@ results:
     resources: [lidersea-connector-with-naranjo-token]
     kind: Pod
     result: fail
+  # The superseded shared token, asserted BEHAVIOURALLY in this engine too.
+  # A structural "the literal is absent from the policy" guard cannot see it
+  # re-entering by concatenation ('pi-websites' + '-tunnel-token'); this row
+  # can, because the Pod is refused on the mount it actually declares.
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [cloudflared-superseded-token]
+    kind: Pod
+    result: fail
   # P1-1: connector rollout must be POSSIBLE for the two renamed identities...
   - policy: require-release-readiness
     rule: require-replicaset-owned-by-exact-deployment
@@ -149,6 +160,13 @@ results:
     result: pass
   - policy: require-release-readiness
     rule: require-tunnel-token-revision
+    resources: [naranjo-online-tunnel, lidersea-com-tunnel]
+    kind: Deployment
+    result: pass
+  # ...including under the identity-root binding: a canonical connector states
+  # its own name in every instance label and mounts the Secret derived from it.
+  - policy: require-release-readiness
+    rule: require-connector-identity-tuple
     resources: [naranjo-online-tunnel, lidersea-com-tunnel]
     kind: Deployment
     result: pass

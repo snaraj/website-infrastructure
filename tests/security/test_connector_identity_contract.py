@@ -1,7 +1,7 @@
 """Prove each website's connector is one indivisible identity tuple.
 
 ADR 0015 gives every website its own public Tunnel, its own runtime token, and
-its own rotation. Three properties make that real in the rendered desired state
+its own rotation. Four properties make that real in the rendered desired state
 rather than only in prose, and each is a regression this battery pins:
 
 1. **Rotation isolation.** Every connector Deployment reads ITS OWN
@@ -11,7 +11,11 @@ rather than only in prose, and each is a regression this battery pins:
 2. **Token binding.** A connector's mounted Secret name is DERIVED from its own
    instance, so neither connector can mount the other's token even though both
    token names are individually approved.
-3. **Closed connector inventory.** The chart renders exactly the two reviewed
+3. **Identity root.** That instance label is itself bound to the Deployment
+   NAME, so a caller-supplied label can never become the root of trust: keeping
+   an allowlisted Deployment name while moving its labels AND its Secret to the
+   other site is refused, in both directions.
+4. **Closed connector inventory.** The chart renders exactly the two reviewed
    connector identities, each with its own token, so a third connector or a
    renamed one cannot appear silently.
 
@@ -38,9 +42,15 @@ CONNECTORS = {
     "naranjo-online": ("naranjo-online-tunnel", "naranjo-online-tunnel-token"),
     "lidersea-com": ("lidersea-com-tunnel", "lidersea-com-tunnel-token"),
 }
+CONNECTOR_INSTANCES = tuple(instance for instance, _ in CONNECTORS.values())
 # A canonical but deliberately synthetic revision: this battery proves the
 # chart's coupling, never a real rotation value.
 ROTATED_REVISION = "rev-rotation-isolation-probe"
+
+# One Kyverno rule opens at this exact prefix and every key it owns sits at
+# this exact indent; both are fixed by the policies' own committed layout.
+RULE_PREFIX = "    - name: "
+RULE_KEY_INDENT = "      "
 
 
 def render(*overrides: str) -> str:
@@ -91,6 +101,72 @@ def documents(rendered: str) -> dict[tuple[str, str], str]:
     return parsed
 
 
+def document(parsed: dict[tuple[str, str], str], kind: str, name: str) -> str:
+    """Return one rendered object, or fail naming the object that vanished.
+
+    Same reasoning as ``capture()``: a bare ``KeyError`` from ``parsed[...]``
+    is a crash where a coverage report belongs, and a crash reads far too
+    easily as an environment problem rather than the chart having stopped
+    rendering an object this contract requires.
+    """
+
+    try:
+        return parsed[(kind, name)]
+    except KeyError:
+        raise AssertionError(
+            "the chart no longer renders {} {} — rendered: {}".format(
+                kind, name, sorted(parsed)
+            )
+        ) from None
+
+
+def rule_sections(policy: Path, rule: str) -> dict[str, str]:
+    """Return one Kyverno rule's own sections, keyed by their YAML key.
+
+    Blank and comment-only lines are dropped because a YAML comment cannot
+    change what a rule matches; every line that CAN change matching survives
+    verbatim, so the callers below can pin whole stanzas by string equality.
+    """
+
+    lines = policy.read_text(encoding="utf-8").split("\n")
+    opening = RULE_PREFIX + rule
+    start = None
+    for index, line in enumerate(lines):
+        if line == opening:
+            start = index
+            break
+    if start is None:
+        raise AssertionError(
+            "this check silently stopped covering it: rule {} in {}".format(
+                rule, policy.name
+            )
+        )
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith(RULE_PREFIX) or (
+            line and not line.startswith(RULE_KEY_INDENT)
+        ):
+            end = index
+            break
+
+    sections: dict[str, list[str]] = {"name": [rule]}
+    body = sections["name"]
+    for line in lines[start + 1:end]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith(RULE_KEY_INDENT) and line[len(RULE_KEY_INDENT)] != " ":
+            key, _, inline = stripped.partition(":")
+            sections[key] = []
+            body = sections[key]
+            if inline.strip():
+                body.append(inline.strip())
+            continue
+        body.append(line)
+    return {key: "\n".join(value) for key, value in sections.items()}
+
+
 @unittest.skipUnless(HELM, "helm is required")
 class ConnectorRotationIsolationTests(unittest.TestCase):
     """Rotating one Tunnel must not disturb the other connector."""
@@ -98,10 +174,9 @@ class ConnectorRotationIsolationTests(unittest.TestCase):
     def test_each_connector_deployment_reads_its_own_revision(self):
         parsed = documents(render())
         for instance, _ in CONNECTORS.values():
-            deployment = parsed[("Deployment", instance)]
             self.assertIn(
                 'platform.snaraj.dev/tunnel-token-revision: "not-configured"',
-                deployment,
+                document(parsed, "Deployment", instance),
                 instance,
             )
 
@@ -119,24 +194,24 @@ class ConnectorRotationIsolationTests(unittest.TestCase):
                     )
                 )
                 self.assertNotEqual(
-                    baseline[("Deployment", instance)],
-                    rotated[("Deployment", instance)],
+                    document(baseline, "Deployment", instance),
+                    document(rotated, "Deployment", instance),
                     "the rotated connector must actually change",
                 )
                 self.assertIn(
                     'platform.snaraj.dev/tunnel-token-revision: "{}"'.format(
                         ROTATED_REVISION
                     ),
-                    rotated[("Deployment", instance)],
+                    document(rotated, "Deployment", instance),
                 )
                 # Every other rendered object — including the OTHER connector's
                 # Deployment — must be untouched, byte for byte.
-                for identity, document in baseline.items():
+                for identity, rendered in baseline.items():
                     if identity == ("Deployment", instance):
                         continue
                     self.assertEqual(
-                        document,
-                        rotated[identity],
+                        rendered,
+                        document(rotated, *identity),
                         "{} changed while rotating {}".format(identity, site),
                     )
 
@@ -158,7 +233,7 @@ class ConnectorTokenBindingTests(unittest.TestCase):
     def test_each_connector_mounts_only_its_own_token(self):
         parsed = documents(render())
         for instance, secret in CONNECTORS.values():
-            deployment = parsed[("Deployment", instance)]
+            deployment = document(parsed, "Deployment", instance)
             self.assertIn("secretName: {}".format(secret), deployment)
             self.assertIn(
                 "app.kubernetes.io/instance: {}".format(instance), deployment
@@ -169,6 +244,27 @@ class ConnectorTokenBindingTests(unittest.TestCase):
                     continue
                 self.assertNotIn(other_secret, deployment)
                 self.assertNotIn(other_instance, deployment)
+
+    def test_every_connector_instance_label_is_its_own_deployment_name(self):
+        """The identity root: the label may never disagree with the name.
+
+        Codex's bypass keeps an allowlisted Deployment NAME and moves the three
+        instance labels plus the Secret to the other site, so every
+        instance-derived check agrees with itself while that Deployment's Pods
+        consume the other website's credential. Admission refuses it; the chart
+        must never render it either.
+        """
+
+        parsed = documents(render())
+        for instance, _ in CONNECTORS.values():
+            deployment = document(parsed, "Deployment", instance)
+            claimed = re.findall(
+                r"app\.kubernetes\.io/instance: (\S+)", deployment
+            )
+            self.assertEqual(
+                len(claimed), 3, "metadata, selector and template labels"
+            )
+            self.assertEqual(set(claimed), {instance})
 
     def test_a_foreign_token_name_is_rejected_by_the_schema(self):
         """A connector may not be pointed at the other site's Secret."""
@@ -185,9 +281,7 @@ class ConnectorTokenBindingTests(unittest.TestCase):
         connectors = {
             name for kind, name in parsed if kind == "Deployment"
         }
-        self.assertEqual(
-            connectors, {instance for instance, _ in CONNECTORS.values()}
-        )
+        self.assertEqual(connectors, set(CONNECTOR_INSTANCES))
 
     def test_the_superseded_single_connector_deployment_is_gone(self):
         parsed = documents(render())
@@ -195,15 +289,22 @@ class ConnectorTokenBindingTests(unittest.TestCase):
 
 
 class ConnectorAdmissionCoverageTests(unittest.TestCase):
-    """Bind the admission match lists to the RENDERED connector inventory.
+    """Bind the admission match stanzas to the RENDERED connector inventory.
 
     ``kyverno test`` cannot prove this on its own: when a resource falls
     OUTSIDE a rule's ``match`` block the CLI reports the row as ``Pass``
-    (status ``Excluded``), so narrowing ``names:`` back to the superseded
-    ``cloudflared`` leaves every asserted row green while both real connectors
-    silently bypass the gate. That is precisely the defect this battery exists
-    to prevent, so the coverage assertion has to be structural: the identities
-    the policies match must EQUAL the connector identities the chart renders.
+    (status ``Excluded``), so a narrowed rule leaves every asserted row green
+    while both real connectors silently bypass the gate.
+
+    Pinning only the VALUE LISTS closed exactly one axis of that class. Seven
+    other narrowings survived a fully green suite: swapping the token-revision
+    rule's ``namespaces`` for a decoy, its ``kinds`` for ``StatefulSet``,
+    adding an ``exclude`` block, pointing the ReplicaSet rule at another
+    namespace, downgrading ``failureAction`` to ``Audit``, and the same
+    namespace/kind swaps on the storage rule. So the assertion has to pin the
+    WHOLE stanza of every connector-bearing rule by string equality — match,
+    the absence of any exclude, and the enforced failure action — with the
+    matched identities interpolated from the inventory the chart renders.
     """
 
     READINESS_POLICY = (
@@ -216,21 +317,146 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
         REPO_ROOT / "policies" / "kyverno" / "disallow-undiscovered-storage.yaml"
     )
 
-    def test_token_revision_rule_matches_exactly_the_rendered_connectors(self):
-        text = self.READINESS_POLICY.read_text(encoding="utf-8")
-        names = {
-            name.strip()
-            for name in capture(
-                r"(?m)^              names: \[([^\]]+)\]$",
-                text,
-                "the token-revision rule's connector name match list",
-            ).split(",")
-        }
-        self.assertEqual(
-            names,
-            {instance for instance, _ in CONNECTORS.values()},
-            "the token-revision gate must match every rendered connector",
+    # rule -> (policy attribute, exact reviewed match stanza). The connector
+    # names are interpolated, never spelled twice, so a chart rename that
+    # skipped the policies cannot be papered over by editing this file's
+    # expectation alone: ``CONNECTORS`` is proven equal to the rendered
+    # inventory by ``test_admission_identities_equal_the_rendered_identities``.
+    CONNECTOR_RULES = {
+        "require-tunnel-token-revision": (
+            "READINESS_POLICY",
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [Deployment]\n"
+            "              namespaces: [cloudflare-public]\n"
+            "              names: [{}]".format(", ".join(CONNECTOR_INSTANCES)),
+        ),
+        "require-connector-identity-tuple": (
+            "READINESS_POLICY",
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [Deployment]\n"
+            "              namespaces: [cloudflare-public]",
+        ),
+        "require-replicaset-owned-by-exact-deployment": (
+            "READINESS_POLICY",
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [ReplicaSet]\n"
+            "              namespaces: [cloudflare-public, naranjo-online, lidersea-com]",
+        ),
+        "allow-only-tunnel-token-volume": (
+            "STORAGE_POLICY",
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [Pod]\n"
+            "              namespaces: [cloudflare-public]",
+        ),
+    }
+    # The CEL of the rules that carry the inventory inside an expression rather
+    # than in ``names:``. Same binding, different syntax.
+    CEL_INVENTORIES = {
+        "require-connector-identity-tuple": "READINESS_POLICY",
+        "allow-only-tunnel-token-volume": "STORAGE_POLICY",
+    }
+
+    def test_every_connector_rule_matches_exactly_the_reviewed_stanza(self):
+        """Any narrowing of match — kinds, namespaces, names — goes red here."""
+
+        for rule, (attribute, expected) in self.CONNECTOR_RULES.items():
+            with self.subTest(rule=rule):
+                sections = rule_sections(getattr(self, attribute), rule)
+                self.assertEqual(
+                    sections.get("match"),
+                    expected,
+                    "the reviewed match stanza of {} changed; a narrowed match "
+                    "silently stops covering the connectors".format(rule),
+                )
+
+    def test_no_connector_rule_carries_an_exclude_or_extra_stanza(self):
+        """An added ``exclude`` narrows a rule without touching ``match``."""
+
+        for rule, (attribute, _) in self.CONNECTOR_RULES.items():
+            with self.subTest(rule=rule):
+                sections = rule_sections(getattr(self, attribute), rule)
+                self.assertEqual(
+                    list(sections),
+                    ["name", "match", "validate"],
+                    "{} gained or lost a stanza; only match and validate are "
+                    "reviewed".format(rule),
+                )
+
+    def test_every_connector_rule_fails_closed(self):
+        """``Audit`` would report the bypass instead of refusing it."""
+
+        for rule, (attribute, _) in self.CONNECTOR_RULES.items():
+            with self.subTest(rule=rule):
+                sections = rule_sections(getattr(self, attribute), rule)
+                self.assertIn(
+                    "        failureAction: Enforce",
+                    sections.get("validate", "").split("\n"),
+                    "{} must refuse, not merely audit".format(rule),
+                )
+
+    def test_both_connector_policies_fail_closed_at_the_policy_level(self):
+        for policy in (self.READINESS_POLICY, self.STORAGE_POLICY):
+            with self.subTest(policy=policy.name):
+                lines = policy.read_text(encoding="utf-8").split("\n")
+                self.assertIn("  validationFailureAction: Enforce", lines)
+                self.assertIn("    failurePolicy: Fail", lines)
+
+    def test_both_connector_policies_run_at_admission(self):
+        """``admission: false`` disables EVERY rule in the policy.
+
+        One word, invisible to both engines' suites: the policy still parses,
+        every asserted row still passes, and in-cluster nothing is evaluated at
+        admission at all — the policy degrades to a background scan. It is a
+        wider narrowing than any single rule's match block, so it is pinned at
+        the policy level.
+        """
+
+        for policy in (self.READINESS_POLICY, self.STORAGE_POLICY):
+            with self.subTest(policy=policy.name):
+                self.assertIn(
+                    "  admission: true",
+                    policy.read_text(encoding="utf-8").split("\n"),
+                    "{} must still run at admission".format(policy.name),
+                )
+
+    # Kyverno's userInfo selectors narrow a rule to principals, not resources.
+    # `clusterRoles: [no-such-role]` makes a rule match nobody in-cluster while
+    # `kyverno test` reports the row as Skip — and Skip counts as a PASS there,
+    # exactly like the Excluded rows an out-of-match resource produces. Neither
+    # engine's suite can see this, so it is pinned structurally.
+    FORBIDDEN_NARROWING_KEYS = ("clusterRoles", "subjects", "roles")
+
+    def test_no_connector_rule_narrows_by_principal(self):
+        for rule, (attribute, _) in self.CONNECTOR_RULES.items():
+            sections = rule_sections(getattr(self, attribute), rule)
+            for key in self.FORBIDDEN_NARROWING_KEYS:
+                with self.subTest(rule=rule, key=key):
+                    self.assertNotIn(
+                        key + ":",
+                        "\n".join(sections.values()),
+                        "{} must not narrow to principals: a userInfo "
+                        "selector makes it match nobody while the suite "
+                        "reports Skip".format(rule),
+                    )
+
+    def test_the_cel_connector_inventories_are_the_rendered_inventory(self):
+        """The rules whose inventory lives in an expression, not in names."""
+
+        expected = ", ".join(
+            "'{}'".format(instance) for instance in CONNECTOR_INSTANCES
         )
+        for rule, attribute in self.CEL_INVENTORIES.items():
+            with self.subTest(rule=rule):
+                sections = rule_sections(getattr(self, attribute), rule)
+                self.assertIn(
+                    "[{}]".format(expected),
+                    sections.get("validate", ""),
+                    "{} must name exactly the rendered connectors".format(rule),
+                )
 
     def test_replicaset_owner_rule_admits_exactly_the_rendered_connectors(self):
         text = self.READINESS_POLICY.read_text(encoding="utf-8")
@@ -244,7 +470,7 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
         }
         self.assertEqual(
             owners,
-            {instance for instance, _ in CONNECTORS.values()},
+            set(CONNECTOR_INSTANCES),
             "connector rollout must be possible for every rendered connector",
         )
 
@@ -258,7 +484,7 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
                 "the release policy's connector Deployment set",
             ).split(",")
         }
-        self.assertEqual(names, {instance for instance, _ in CONNECTORS.values()})
+        self.assertEqual(names, set(CONNECTOR_INSTANCES))
 
     def test_no_policy_still_names_the_superseded_shared_connector(self):
         """The single-connector identity must not survive anywhere."""
@@ -284,10 +510,14 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
             for kind, name in documents(render())
             if kind == "Deployment"
         }
-        text = self.READINESS_POLICY.read_text(encoding="utf-8")
+        self.assertEqual(
+            set(CONNECTOR_INSTANCES),
+            rendered,
+            "the reviewed connector inventory drifted from the rendered chart",
+        )
         matched = capture(
             r"(?m)^              names: \[([^\]]+)\]$",
-            text,
+            self.READINESS_POLICY.read_text(encoding="utf-8"),
             "the token-revision rule's connector name match list",
         )
         self.assertEqual(

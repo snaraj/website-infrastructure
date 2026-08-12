@@ -378,6 +378,34 @@ valid_tenant_volume(namespace, volume) if {
   }
 }
 
+# The reviewed connector Deployment inventory (ADR 0015): one per website.
+connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
+
+public_connector_deployment if {
+  input.kind == "Deployment"
+  object.get(input.metadata, "namespace", "") == "cloudflare-public"
+}
+
+# The connector identity tuple is ROOTED IN THE DEPLOYMENT NAME, never in a
+# caller-supplied label. Deriving the expected token from the instance label
+# alone leaves an internally self-consistent bypass: keep the allowlisted
+# `lidersea-com-tunnel` Deployment name, move its metadata/selector/template
+# instance labels AND its mounted Secret to the other site, and every
+# instance-derived check agrees with itself while that Deployment's Pods
+# consume the other website's runtime credential.
+#
+# Written as a POSITIVE proof that its denial NEGATES, never as a rule that
+# hunts for a mismatch. A missing, null, scalar, or list `labels` makes the
+# proof below UNDEFINED, and `not` then fires the denial. A mismatch-hunting
+# rule would instead go undefined itself on exactly those degenerate shapes —
+# under OPA's default non-strict mode a builtin type error silently drops the
+# deny body — and fail OPEN where the Kyverno mirror errors and denies.
+connector_identity_rooted_in_name if {
+  input.metadata.labels["app.kubernetes.io/instance"] == input.metadata.name
+  input.spec.selector.matchLabels["app.kubernetes.io/instance"] == input.metadata.name
+  input.spec.template.metadata.labels["app.kubernetes.io/instance"] == input.metadata.name
+}
+
 valid_source_controller_storage if {
   containers := object.get(input.spec.template.spec, "containers", [])
   count(containers) == 1
@@ -825,6 +853,23 @@ deny contains msg if {
   some volume in object.get(pod_spec, "volumes", [])
   not valid_tenant_volume(namespace, volume)
   msg := sprintf("volume %s is outside the exact ephemeral/credential volume allowlist for namespace %s", [volume.name, namespace])
+}
+
+# Only the two reviewed connector Deployments may exist in cloudflare-public,
+# so an invented third connector cannot claim a site's identity.
+deny contains msg if {
+  public_connector_deployment
+  not object.get(input.metadata, "name", "") in connector_deployments
+  msg := sprintf("Deployment cloudflare-public/%s is outside the reviewed connector inventory", [object.get(input.metadata, "name", "")])
+}
+
+# Every instance label a connector Deployment states must equal its own
+# Deployment name, so the label the mount rule derives the token from cannot
+# be restated by the caller (see connector_identity_rooted_in_name).
+deny contains msg if {
+  public_connector_deployment
+  not connector_identity_rooted_in_name
+  msg := sprintf("Deployment cloudflare-public/%s must state its own name as app.kubernetes.io/instance in its metadata labels, selector, and pod template; the connector identity tuple is rooted in the Deployment name", [object.get(input.metadata, "name", "")])
 }
 
 deny contains msg if {

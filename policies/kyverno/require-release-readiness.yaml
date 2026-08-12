@@ -29,10 +29,16 @@ spec:
                 owner.apiVersion == 'apps/v1' && owner.kind == 'Deployment' &&
                 has(owner.controller) && owner.controller == true &&
                 ((object.metadata.namespace == 'cloudflare-public' &&
-                owner.name in ['naranjo-online-tunnel', 'lidersea-com-tunnel']) ||
+                owner.name in ['naranjo-online-tunnel', 'lidersea-com-tunnel'] &&
+                has(object.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.metadata.labels &&
+                object.metadata.labels['app.kubernetes.io/instance'] == owner.name &&
+                has(object.spec.template.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.spec.template.metadata.labels &&
+                object.spec.template.metadata.labels['app.kubernetes.io/instance'] == owner.name) ||
                 (object.metadata.namespace in ['naranjo-online', 'lidersea-com'] &&
                 owner.name == object.metadata.namespace)))
-              message: Tenant ReplicaSets may be created only by their one exact reviewed Deployment.
+              message: Tenant ReplicaSets may be created only by their one exact reviewed Deployment, and a connector ReplicaSet must carry its own owner's instance.
     - name: require-site-deployment-readiness
       match:
         any:
@@ -69,3 +75,37 @@ spec:
                 object.spec.template.metadata.annotations['platform.snaraj.dev/tunnel-token-revision'] != 'not-configured' &&
                 object.spec.template.metadata.annotations['platform.snaraj.dev/tunnel-token-revision'] != 'UNRESOLVED'
               message: Each site connector requires its own reviewed non-sentinel tunnel token revision before admission.
+    - name: require-connector-identity-tuple
+      match:
+        any:
+          - resources:
+              kinds: [Deployment]
+              namespaces: [cloudflare-public]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            # The connector identity tuple is ROOTED IN THE DEPLOYMENT NAME.
+            # Deriving the mounted Secret from the instance label alone leaves
+            # an internally self-consistent bypass: keep the allowlisted
+            # `lidersea-com-tunnel` Deployment name, move its three instance
+            # labels AND its Secret to the other site, and every
+            # instance-derived check agrees with itself while that Deployment's
+            # Pods consume the other website's runtime credential. This rule
+            # matches EVERY cloudflare-public Deployment — no `names:` filter
+            # to narrow — so an invented connector is refused here too.
+            - expression: >-
+                object.metadata.name in ['naranjo-online-tunnel', 'lidersea-com-tunnel'] &&
+                has(object.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.metadata.labels &&
+                object.metadata.labels['app.kubernetes.io/instance'] == object.metadata.name &&
+                'app.kubernetes.io/instance' in object.spec.selector.matchLabels &&
+                object.spec.selector.matchLabels['app.kubernetes.io/instance'] == object.metadata.name &&
+                has(object.spec.template.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.spec.template.metadata.labels &&
+                object.spec.template.metadata.labels['app.kubernetes.io/instance'] == object.metadata.name &&
+                (!has(object.spec.template.spec.volumes) ||
+                object.spec.template.spec.volumes.all(volume,
+                has(volume.secret) &&
+                volume.secret.secretName == object.metadata.name + '-token'))
+              message: A connector Deployment's instance labels and mounted token Secret must be rooted in its own reviewed Deployment name.
