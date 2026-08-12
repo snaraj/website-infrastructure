@@ -91,6 +91,71 @@ class BlanketEgressRemovalTests(unittest.TestCase):
         )
 
 
+class ControllerFlagScopeTests(unittest.TestCase):
+    """Flags belong to the controller that implements them.
+
+    `--no-cross-namespace-refs` bounds cross-namespace `sourceRef` on the kinds
+    kustomize-controller and helm-controller reconcile. source-controller does
+    not implement it, and the binary exits 2 on an unknown flag, so adding it
+    there is not a hardening — it is a guaranteed crashloop. The repository
+    required it on all three, which meant every install of these manifests
+    would have failed.
+    """
+
+    RECONCILER_ONLY_FLAGS = (
+        "--no-cross-namespace-refs",
+        "--no-remote-bases",
+        "--default-service-account",
+    )
+
+    def test_source_controller_carries_no_reconciler_only_flag(self):
+        patch = read(CONTROLLERS / "patches" / "source-controller.yaml")
+        added = re.findall(r"(?m)^\s*value:\s*(--\S+)\s*$", patch)
+        for flag in added:
+            for reconciler_only in self.RECONCILER_ONLY_FLAGS:
+                with self.subTest(flag=flag, forbidden=reconciler_only):
+                    self.assertFalse(
+                        flag.startswith(reconciler_only),
+                        "source-controller does not accept " + reconciler_only,
+                    )
+
+    def test_the_reconcilers_still_carry_the_cross_namespace_bound(self):
+        # The tenancy boundary must not be lost while fixing where it lives.
+        for name, expected in (
+            (
+                "kustomize-controller",
+                (
+                    "--no-cross-namespace-refs=true",
+                    "--no-remote-bases=true",
+                    "--default-service-account=default",
+                ),
+            ),
+            (
+                "helm-controller",
+                ("--no-cross-namespace-refs=true", "--default-service-account=default"),
+            ),
+        ):
+            patch = read(CONTROLLERS / "patches" / (name + ".yaml"))
+            for flag in expected:
+                with self.subTest(controller=name, flag=flag):
+                    self.assertIn("value: " + flag, patch)
+
+    def test_the_live_state_expectation_matches_the_patched_arguments(self):
+        # bootstrap.sh both expects the reviewed argument set and re-probes the
+        # live Deployment. Either one still demanding the flag would fail a
+        # correctly installed source-controller.
+        bootstrap = read(ROOT / "bootstrap" / "flux" / "bootstrap.sh")
+        self.assertIn(
+            "! grep -q -- '--no-cross-namespace-refs' <<<\"${source_args}\" || fail",
+            bootstrap,
+        )
+        self.assertRegex(
+            bootstrap,
+            r'"source-controller": \(\s*\n\s*os\.environ\["FLUX_EXPECTED_SOURCE_IMAGE"\],'
+            r'(?:\s*\n\s*#[^\n]*)*\s*\n\s*\[\],',
+        )
+
+
 class EgressAllowlistTests(unittest.TestCase):
     def setUp(self):
         self.text = read(EGRESS / "network-policies.yaml")

@@ -1245,7 +1245,7 @@ def check_kubernetes(root):
     if flux.exists():
         required_fragments = {
             "flux-system/controllers/patches/source-controller.yaml": [
-                "--no-cross-namespace-refs=true", "runAsNonRoot", "RuntimeDefault",
+                "runAsNonRoot", "RuntimeDefault",
                 "requests/ephemeral-storage", "limits/ephemeral-storage", "sizeLimit",
             ],
             "flux-system/controllers/patches/kustomize-controller.yaml": [

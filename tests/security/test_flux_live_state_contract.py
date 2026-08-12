@@ -250,7 +250,7 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
         deployment_contract = {
             "source-controller": (
                 cls.base_environment["FLUX_EXPECTED_SOURCE_IMAGE"],
-                ["--no-cross-namespace-refs=true"],
+                [],
                 True,
                 10,
             ),

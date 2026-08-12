@@ -431,7 +431,23 @@ valid_source_controller_storage if {
   resources := object.get(manager, "resources", {})
   object.get(object.get(resources, "requests", {}), "ephemeral-storage", "") == "128Mi"
   object.get(object.get(resources, "limits", {}), "ephemeral-storage", "") == "1Gi"
-  "--no-cross-namespace-refs=true" in object.get(manager, "args", [])
+  # source-controller does not accept the reconciler-only flags. Requiring one
+  # here used to be the rule; the binary exits 2 on an unknown flag, so the
+  # requirement guaranteed a crashloop. Refusing them is the correct direction:
+  # the cross-namespace boundary is enforced on the controllers that own the
+  # referring kinds, and this keeps a well-meant copy-paste from landing here.
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--no-cross-namespace-refs")
+  ]) == 0
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--default-service-account")
+  ]) == 0
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--no-remote-bases")
+  ]) == 0
 
   volumes := object.get(input.spec.template.spec, "volumes", [])
   count(volumes) == 2
@@ -467,7 +483,7 @@ deny contains msg if {
   input.metadata.namespace == "flux-system"
   input.metadata.name == "source-controller"
   not valid_source_controller_storage
-  msg := "source-controller must bound /data and /tmp plus container ephemeral-storage and cross-namespace references"
+  msg := "source-controller must bound /data and /tmp plus container ephemeral-storage, and must carry no reconciler-only flag it cannot parse"
 }
 
 deny contains msg if {

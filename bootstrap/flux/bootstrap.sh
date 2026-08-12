@@ -798,7 +798,10 @@ def check_deployments(document):
     expected = {
         "source-controller": (
             os.environ["FLUX_EXPECTED_SOURCE_IMAGE"],
-            ["--no-cross-namespace-refs=true"],
+            # source-controller accepts none of the reconciler-only flags; the
+            # binary exits 2 on an unknown flag, so an extra argument here is a
+            # crashloop rather than a hardening.
+            [],
             True,
             10,
         ),
@@ -1389,7 +1392,7 @@ KUBECONFIG_FILE="${kubeconfig}" KUBECTL_BINARY="${kubectl}" \
 verify_reviewed_live_state full || fail
 
 source_args="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get deployment source-controller -o jsonpath='{.spec.template.spec.containers[0].args}')" || fail
-grep -q -- '--no-cross-namespace-refs=true' <<<"${source_args}" || fail
+! grep -q -- '--no-cross-namespace-refs' <<<"${source_args}" || fail
 kustomize_args="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get deployment kustomize-controller -o jsonpath='{.spec.template.spec.containers[0].args}')" || fail
 grep -q -- '--no-cross-namespace-refs=true' <<<"${kustomize_args}" || fail
 grep -q -- '--no-remote-bases=true' <<<"${kustomize_args}" || fail
