@@ -574,9 +574,12 @@ APPLY_VERBS = ("get", "list", "create", "update", "patch", "delete")
 # kinds this repository's reviewed desired state actually contains are listed;
 # an unlisted kind raises rather than being assumed harmless.
 KIND_RESOURCES = {
+    "Bucket": ("source.toolkit.fluxcd.io", "buckets", True),
     "ConfigMap": ("", "configmaps", True),
     "Deployment": ("apps", "deployments", True),
     "GitRepository": ("source.toolkit.fluxcd.io", "gitrepositories", True),
+    "HelmChart": ("source.toolkit.fluxcd.io", "helmcharts", True),
+    "HelmRepository": ("source.toolkit.fluxcd.io", "helmrepositories", True),
     "HelmRelease": ("helm.toolkit.fluxcd.io", "helmreleases", True),
     "Kustomization": ("kustomize.toolkit.fluxcd.io", "kustomizations", True),
     "LimitRange": ("", "limitranges", True),
@@ -598,9 +601,18 @@ KIND_RESOURCES = {
 # repository (AGENTS.md safety invariant 11), so the kinds it renders are
 # declared here per site. Each list is the chart's template set, and the two
 # sites are declared separately because their identity tuples never couple.
+#
+# The key is the owner's ``(kind, name)`` pair, never the bare name: a
+# Kustomization and a HelmRelease share a name for both sites, so a bare-name
+# table can be satisfied by the wrong object — the exact defect that let a
+# declared authorization gap survive a mutation earlier in this change.
 SITE_CHART_KINDS = {
-    "naranjo-online": ("Deployment", "Service", "ServiceAccount", "NetworkPolicy"),
-    "lidersea-com": ("Deployment", "Service", "ServiceAccount", "NetworkPolicy"),
+    ("HelmRelease", "naranjo-online"): (
+        "Deployment", "Service", "ServiceAccount", "NetworkPolicy",
+    ),
+    ("HelmRelease", "lidersea-com"): (
+        "Deployment", "Service", "ServiceAccount", "NetworkPolicy",
+    ),
 }
 
 # Helm keeps one release-state Secret per revision in the release namespace, so
@@ -639,6 +651,70 @@ CONTROLLER_BASELINE_GRANTS = (
     ("", "configmaps", ("get", "list", "watch"),
      "postBuild.substituteFrom and Helm valuesFrom read ConfigMaps"),
 )
+
+# MODEL, declared rather than derived from the desired state, and required of
+# every installed controller inside its OWN namespace. Nothing a reconciliation
+# applies implies these, so a desired-state derivation cannot reach them — but
+# they are what the controller process itself does at runtime, and a narrowing
+# that dropped them would pass a desired-state-only proof and then fail live.
+# Each row is asserted rather than argued: deleting the matching rule from
+# `kubernetes/flux-system/access.yaml` (and from the bootstrap mirror) turns the
+# suite red.
+#
+# Direction of the trade: requiring a grant the controller might not exercise
+# costs a red build for an unnecessary permission, while NOT requiring one it
+# does exercise costs a crashloop on a cluster nobody is watching. The peer
+# review of this change asked for the strict side, and this is it. The live
+# confirmation is the `kubectl auth can-i` sweep in the runbook, which carries a
+# row for each.
+CONTROLLER_RUNTIME_GRANTS = (
+    ("", "configmaps", ("create", "update", "patch", "delete"),
+     "controller-runtime owns ConfigMaps in its own namespace; the generated "
+     "export grants the write half cluster-wide and this change confines it to "
+     "flux-system rather than removing it"),
+    ("", "configmaps/status", ("get", "update", "patch"),
+     "the status subresource of the same controller-owned ConfigMaps"),
+)
+
+# DERIVED, from the pinned controller Deployments themselves: a Deployment that
+# carries `--enable-leader-election` takes a Lease in its own namespace before it
+# reconciles anything, so losing the Lease grant is a startup crashloop and zero
+# reconciliation — the loudest possible failure, and one no desired-state
+# enumeration would ever produce. Reading the flag out of the export means the
+# requirement follows the install: remove the flag and the requirement goes away,
+# remove the grant while the flag stands and the suite fails.
+#
+# The verbs are the ones client-go's LeaseLock issues (Get, Create, Update). The
+# export grants more; the surplus is declared slack in the narrowness proof
+# rather than silently absorbed here.
+LEADER_ELECTION_FLAG = "--enable-leader-election"
+LEADER_ELECTION_VERBS = ("get", "create", "update")
+
+# MODEL. The custom resources each controller REGISTERS a reconciler for at the
+# pinned version — not the objects that happen to exist in today's desired
+# state. A controller starts one informer per registered kind at startup and
+# exits if it cannot list/watch it, so "this repository declares no Bucket" is
+# not evidence that the Bucket grant is unused; it is only evidence that no
+# Bucket is reconciled. Deriving from this table instead of from the object
+# inventory is what makes deleting a source grant fail here.
+REGISTERED_CONTROLLERS = {
+    "source-controller": ("Bucket", "GitRepository", "HelmChart", "HelmRepository", "OCIRepository"),
+    "kustomize-controller": ("Kustomization",),
+    "helm-controller": ("HelmRelease",),
+}
+
+# With this flag every registered informer is a CLUSTER-wide list/watch, which
+# no Role can satisfy — the reason the own-resource grants stay in a ClusterRole
+# after everything else moved to namespaced Roles.
+WATCH_ALL_NAMESPACES_FLAG = "--watch-all-namespaces=true"
+
+# What a controller does to a custom resource it owns: reconcile it, own its
+# status, and manage its finalizer. Finalizer access is only consulted when the
+# API server runs OwnerReferencesPermissionEnforcement, but a missing grant
+# there produces a stuck deletion rather than a clear denial.
+OWNED_RESOURCE_VERBS = ("get", "list", "watch", "update", "patch")
+OWNED_STATUS_VERBS = ("get", "patch", "update")
+OWNED_FINALIZER_VERBS = ("update",)
 
 # Event reporting is namespaced in effect — an Event is written in the namespace
 # of the object it describes — so it is required in every reconciled namespace.
@@ -679,6 +755,20 @@ class DerivedRequirements(NamedTuple):
     applied: list
     #: Requests a controller makes under its own ServiceAccount.
     controller: list
+    #: Non-resource URL requests, which only a ClusterRole can authorize.
+    non_resource: list
+
+
+class NonResourceRequirement(NamedTuple):
+    """One non-resource URL authorization the controllers depend on."""
+
+    subject: Subject
+    verb: str
+    url: str
+    reason: str
+
+    def describe(self):
+        return "{} may {} {} ({})".format(self.subject, self.verb, self.url, self.reason)
 
 
 class Requirement(tuple):
@@ -755,6 +845,20 @@ def _kustomization_paths(root, relative):
     resources = documents[0].get("resources") or []
     files = []
     for entry in resources:
+        if not isinstance(entry, str):
+            # A remote base (`- https://github.com/…?ref=v1`) parses as a mapping
+            # here, and used to reach `Path / dict` and die as a TypeError — fail
+            # closed, but with a traceback nobody can act on. It is refused by
+            # name instead: objects from outside the reviewed tree would be
+            # applied with no derived permission at all. kustomize-controller
+            # additionally runs with `--no-remote-bases=true`, so this is the
+            # enumeration half of a refusal the cluster also makes.
+            raise AssertionError(
+                "Kustomize root {} lists a resource this enumeration cannot "
+                "follow: {!r}. Remote bases are refused, not resolved.".format(
+                    index, entry
+                )
+            )
         target = (base / entry).resolve()
         if target.is_dir():
             files.extend(_kustomization_paths(root, target.relative_to(root)))
@@ -788,16 +892,169 @@ def chart_kinds(root, relative):
     Helm templates are not YAML until Helm has run, so the kinds are read the
     way the repository's other gates read them: the ``kind:`` field of each
     template document.
+
+    ``rglob`` rather than ``glob``: Helm renders every template under
+    ``templates/`` at any depth, so a single-level glob made the same file
+    invisible purely by living in a subdirectory — `templates/cronjob.yaml`
+    raised "unmodelled kind" while `templates/jobs/cronjob.yaml` was silently
+    dropped from the derivation.
     """
 
     kinds = []
-    for path in sorted((root / relative / "templates").glob("*.yaml")):
+    for path in sorted((root / relative / "templates").rglob("*.yaml")):
         kinds.extend(re.findall(r"(?m)^kind:\s*(\S+)\s*$", path.read_text(encoding="utf-8")))
     return kinds
 
 
-def flux_custom_resources(root):
+# The reviewed controller patches are JSON patches that only APPEND arguments
+# (`op: add` on `.../args/-`). That is what makes deriving leader election from
+# the generated export sound — a patch that could REPLACE the argument list could
+# drop `--enable-leader-election` while this reader still saw it — so any other
+# shape of args patch is refused rather than reasoned about.
+CONTROLLER_DEPLOYMENT_PATCH_FILES = (
+    "kubernetes/flux-system/controllers/patches/source-controller.yaml",
+    "kubernetes/flux-system/controllers/patches/kustomize-controller.yaml",
+    "kubernetes/flux-system/controllers/patches/helm-controller.yaml",
+)
+
+CONTROLLER_EXPORT = "kubernetes/flux-system/controllers/gotk-components.yaml"
+
+
+def controller_arguments(root=REPO_ROOT):
+    """``{(namespace, name): [argument, …]}`` for every pinned controller.
+
+    Read from the generated export rather than declared, so the requirements
+    that depend on a flag track the install: the day a controller stops leader-
+    electing, its Lease grant stops being required here too.
+    """
+
+    root = Path(root)
+    for relative in CONTROLLER_DEPLOYMENT_PATCH_FILES:
+        text = (root / relative).read_text(encoding="utf-8")
+        for operation, target in re.findall(
+            r"(?m)^-\s*op:\s*(\S+)\s*$\n^\s*path:\s*(\S+)\s*$", text
+        ):
+            if "/args" not in target:
+                continue
+            if operation != "add" or not target.endswith("/args/-"):
+                raise AssertionError(
+                    "{} patches the controller argument list with `{} {}`. This "
+                    "enumeration reads --enable-leader-election out of the "
+                    "generated export, which is only sound while patches can add "
+                    "arguments and never remove or replace them.".format(
+                        relative, operation, target
+                    )
+                )
+    text = (root / CONTROLLER_EXPORT).read_text(encoding="utf-8")
+    arguments = {}
+    for chunk in re.split(r"(?m)^---\s*$", text):
+        if not re.search(r"(?m)^kind:\s*Deployment\s*$", chunk):
+            continue
+        name = re.search(r"(?m)^  name:\s*(\S+)\s*$", chunk)
+        namespace = re.search(r"(?m)^  namespace:\s*(\S+)\s*$", chunk)
+        if name is None or namespace is None:
+            raise AssertionError(
+                "a Deployment in " + CONTROLLER_EXPORT + " has no readable identity"
+            )
+        arguments[(namespace.group(1), name.group(1))] = re.findall(
+            r"(?m)^\s*-\s*(--\S+)\s*$", chunk
+        )
+    if not arguments:
+        raise AssertionError(
+            "no controller Deployment found in " + CONTROLLER_EXPORT
+        )
+    return arguments
+
+
+def leader_election_controllers(root=REPO_ROOT):
+    """``(namespace, name)`` for every pinned Deployment that leader-elects."""
+
+    electing = sorted(
+        key
+        for key, arguments in controller_arguments(root).items()
+        if LEADER_ELECTION_FLAG in arguments
+    )
+    if not electing:
+        # Every reviewed controller leader-elects today. Zero would silently
+        # delete a whole class of requirement, so it is refused rather than
+        # reported as "nothing needed".
+        raise AssertionError(
+            "no controller Deployment in {} carries {}: the leader-election "
+            "requirement cannot vanish silently".format(
+                CONTROLLER_EXPORT, LEADER_ELECTION_FLAG
+            )
+        )
+    return electing
+
+
+def cluster_watching_controllers(root=REPO_ROOT):
+    """``(namespace, name)`` for every controller whose informers are cluster-wide.
+
+    This is what makes a CLUSTER-scoped grant on a controller's own custom
+    resources derived rather than assumed: with ``--watch-all-namespaces=true``
+    the controller opens one cluster-wide list/watch per registered kind, which
+    a namespaced Role cannot satisfy at all. Drop the flag and the cluster-scoped
+    requirement disappears with it.
+    """
+
+    watching = sorted(
+        key
+        for key, arguments in controller_arguments(root).items()
+        if WATCH_ALL_NAMESPACES_FLAG in arguments
+    )
+    if not watching:
+        raise AssertionError(
+            "no controller Deployment in {} carries {}: the cluster-scoped "
+            "informer requirement cannot vanish silently".format(
+                CONTROLLER_EXPORT, WATCH_ALL_NAMESPACES_FLAG
+            )
+        )
+    return watching
+
+
+# apiVersion prefixes whose objects are Flux's own custom resources. A document
+# in one of these groups that this module cannot classify is REFUSED: it is a
+# reconciliation input — a source, an execution object, or an identity selector —
+# and treating it as an ordinary applied object would leave its controller-side
+# authority (impersonation, source resolution, status ownership) underived.
+FLUX_API_GROUP_SUFFIX = ".toolkit.fluxcd.io/"
+
+
+def _classify_flux_document(document, origin, kustomizations, helm_releases, sources):
+    kind = document.get("kind")
+    api_version = document.get("apiVersion") or ""
+    if kind == "Kustomization" and api_version.startswith("kustomize.toolkit.fluxcd.io/"):
+        kustomizations.append(document)
+        return True
+    if kind == "HelmRelease" and api_version.startswith("helm.toolkit.fluxcd.io/"):
+        helm_releases.append(document)
+        return True
+    if kind in SOURCE_KINDS and api_version.startswith("source.toolkit.fluxcd.io/"):
+        sources.append(document)
+        return True
+    if FLUX_API_GROUP_SUFFIX in api_version:
+        raise AssertionError(
+            "{} declares {} {}, a Flux custom resource this enumeration cannot "
+            "classify. Teach flux_custom_resources about it — an unclassified "
+            "reconciliation input reaches the cluster with no controller-side "
+            "authority derived for it at all.".format(
+                origin, api_version, kind
+            )
+        )
+    return False
+
+
+def flux_custom_resources(root=REPO_ROOT):
     """Every Flux custom resource in the reviewed desired state.
+
+    Discovered by FOLLOWING the reconciliation graph — the bootstrap-applied
+    root, then each Kustomization's ``spec.path`` through its Kustomize roots —
+    rather than by globbing known directories. A glob only finds custom
+    resources where someone remembered to look: a HelmRelease added under a
+    reconciled path that no glob covers reconciles for real, names a
+    ServiceAccount helm-controller may not impersonate, and leaves this proof
+    green. The walk reaches whatever the reconciliation reaches, and refuses
+    what it cannot classify.
 
     The sources matter on their own account: source-controller reconciles them
     under its own identity, and the other two controllers read them to resolve
@@ -805,27 +1062,36 @@ def flux_custom_resources(root):
     would leave underived the authority every reconciliation starts with.
     """
 
+    root = Path(root)
     kustomizations = []
     helm_releases = []
     sources = []
-    paths = [root / "kubernetes/flux-system/gotk-sync.yaml"]
-    paths.extend(sorted((root / "kubernetes/reconciliation").glob("*.yaml")))
-    paths.extend(sorted((root / "kubernetes/websites").glob("*/*.yaml")))
-    paths.extend(
-        sorted((root / "kubernetes/platform/cloudflare-public/release").glob("*.yaml"))
-    )
-    for path in paths:
-        for document in load_documents(path):
-            kind = document.get("kind")
-            api_version = document.get("apiVersion", "")
-            if kind == "Kustomization" and api_version.startswith(
-                "kustomize.toolkit.fluxcd.io/"
-            ):
-                kustomizations.append(document)
-            elif kind == "HelmRelease":
-                helm_releases.append(document)
-            elif kind in SOURCE_KINDS:
-                sources.append(document)
+    # The root Kustomization and its GitRepository are applied by bootstrap, not
+    # by a reconciliation, so they are the one hard-coded entry point.
+    entry = root / "kubernetes/flux-system/gotk-sync.yaml"
+    pending = []
+    for document in load_documents(entry):
+        if _classify_flux_document(document, entry, kustomizations, helm_releases, sources):
+            if document.get("kind") == "Kustomization":
+                pending.append(document)
+    if not pending:
+        raise AssertionError(
+            "no root Kustomization found in " + str(entry) + ": the reconciliation "
+            "graph has no entry point and every requirement below it would vanish"
+        )
+    seen_paths = set()
+    while pending:
+        kustomization = pending.pop()
+        relative = kustomization["spec"]["path"].lstrip("./")
+        if relative in seen_paths:
+            continue
+        seen_paths.add(relative)
+        for path in _kustomization_paths(root, relative):
+            for document in load_documents(path):
+                if _classify_flux_document(
+                    document, path, kustomizations, helm_releases, sources
+                ) and document.get("kind") == "Kustomization":
+                    pending.append(document)
     return FluxResources(kustomizations, helm_releases, sources)
 
 
@@ -881,7 +1147,11 @@ def derive_requirements(root=REPO_ROOT):
                 namespace, account, owner, reason,
             )
         )
-        for verb in ("get", "list", "update", "patch"):
+        # `watch` belongs here even though APPLY_VERBS omits it for applied
+        # objects: a controller's informer cache over its OWN custom resource is
+        # a list+watch, and a controller that cannot watch its CRs does not poll
+        # them, it exits.
+        for verb in ("get", "list", "watch", "update", "patch"):
             controller.append(
                 Requirement(
                     kustomize_controller, verb, "kustomize.toolkit.fluxcd.io",
@@ -951,7 +1221,7 @@ def derive_requirements(root=REPO_ROOT):
                 namespace, account, owner, reason,
             )
         )
-        for verb in ("get", "list", "update", "patch"):
+        for verb in ("get", "list", "watch", "update", "patch"):
             controller.append(
                 Requirement(
                     helm_controller, verb, "helm.toolkit.fluxcd.io", "helmreleases",
@@ -988,7 +1258,14 @@ def derive_requirements(root=REPO_ROOT):
             controller.extend(
                 source_reads(helm_controller, spec["chartRef"], namespace, owner, reason)
             )
-            kinds = SITE_CHART_KINDS[name]
+            if owner not in SITE_CHART_KINDS:
+                raise AssertionError(
+                    "{} {} resolves its chart from outside this repository and has "
+                    "no declared template kinds. Add it to SITE_CHART_KINDS — a "
+                    "release whose kinds are unknown needs no permission here and "
+                    "would satisfy every sufficiency assertion below.".format(*owner)
+                )
+            kinds = SITE_CHART_KINDS[owner]
 
         reconciled_namespaces.add(namespace)
         rendered = list(kinds)
@@ -1066,16 +1343,29 @@ def derive_requirements(root=REPO_ROOT):
     # Cluster metadata and event reporting, required of all three controllers so
     # that deleting any of them from the narrowed ClusterRole fails here rather
     # than being defended only by prose and the bootstrap mirror.
+    non_resource = []
     for subject in controllers:
         for group, resource, verbs, why in CONTROLLER_BASELINE_GRANTS:
             for verb in verbs:
                 controller.append(
                     Requirement(subject, verb, group, resource, None, None, ("Controller", "baseline"), why)
                 )
-        for target in sorted(
-            namespace for namespace in reconciled_namespaces if namespace
-        ):
-            for verb in EVENT_VERBS:
+        # The controller's own runtime authority, inside its own namespace. It
+        # comes from what the process does, not from what the desired state
+        # applies, so it is declared — and asserted, so a narrowing that drops it
+        # fails here instead of on the cluster.
+        for group, resource, verbs, why in CONTROLLER_RUNTIME_GRANTS:
+            for verb in verbs:
+                controller.append(
+                    Requirement(
+                        subject, verb, group, resource, subject.namespace, None,
+                        ("Controller", "runtime"), why,
+                    )
+                )
+        for verb in EVENT_VERBS:
+            for target in sorted(
+                namespace for namespace in reconciled_namespaces if namespace
+            ):
                 controller.append(
                     Requirement(
                         subject, verb, "", "events", target, None,
@@ -1083,18 +1373,65 @@ def derive_requirements(root=REPO_ROOT):
                         "an Event is written in the namespace of the object it describes",
                     )
                 )
+        non_resource.append(
+            NonResourceRequirement(
+                subject, "head", LIVENESS_URL,
+                "the API-server liveness probe distinguishes an unreachable "
+                "control plane from a failing reconciliation",
+            )
+        )
 
-    return DerivedRequirements(requirements, controller)
+    # The custom resources each controller reconciles under its own identity,
+    # at CLUSTER scope because `--watch-all-namespaces=true` makes every
+    # registered informer a cluster-wide list/watch. Derived from the registered
+    # kinds rather than from the objects that exist, so a source grant cannot be
+    # deleted just because today's desired state happens to contain no object of
+    # that kind — the controller would still fail to start.
+    watching = set(cluster_watching_controllers(root))
+    for namespace, name in sorted(watching):
+        subject = Subject(namespace, name)
+        for kind in REGISTERED_CONTROLLERS.get(name, ()):
+            group, resource, _ = _kind_tuple(kind)
+            for verb in OWNED_RESOURCE_VERBS:
+                controller.append(
+                    Requirement(
+                        subject, verb, group, resource, None, None,
+                        ("Controller", "registered"),
+                        "{} registers a {} reconciler and watches it across all "
+                        "namespaces".format(name, kind),
+                    )
+                )
+            for verb in OWNED_STATUS_VERBS:
+                controller.append(
+                    Requirement(
+                        subject, verb, group, resource + "/status", None, None,
+                        ("Controller", "registered"),
+                        "{} owns the status of every {}".format(name, kind),
+                    )
+                )
+            for verb in OWNED_FINALIZER_VERBS:
+                controller.append(
+                    Requirement(
+                        subject, verb, group, resource + "/finalizers", None, None,
+                        ("Controller", "registered"),
+                        "{} manages the finalizer of every {}".format(name, kind),
+                    )
+                )
 
+    # Leader election, derived from the pinned Deployments' own arguments.
+    for namespace, name in leader_election_controllers(root):
+        subject = Subject(namespace, name)
+        for verb in LEADER_ELECTION_VERBS:
+            controller.append(
+                Requirement(
+                    subject, verb, "coordination.k8s.io", "leases", namespace, None,
+                    ("Controller", "leader-election"),
+                    "{} runs with {} and takes its Lease before it reconciles "
+                    "anything".format(name, LEADER_ELECTION_FLAG),
+                )
+            )
 
-def suspended_kustomizations(root=REPO_ROOT):
-    """Names of the Kustomizations whose reconciliation is switched off."""
-
-    return {
-        item["metadata"]["name"]
-        for item in flux_custom_resources(Path(root)).kustomizations
-        if item["spec"].get("suspend") is True
-    }
+    return DerivedRequirements(requirements, controller, non_resource)
 
 
 def suspended_owners(root=REPO_ROOT):
@@ -1129,3 +1466,192 @@ def unmet(authorizer, requirements):
             requirement.name,
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# The other direction: granted ⊆ derived
+# ---------------------------------------------------------------------------
+#
+# Sufficiency alone says nothing about narrowness. A deny-list of forbidden
+# requests only refuses what somebody thought to enumerate, so `+delete` on
+# kustomizations, a cluster-wide `pods/exec` read, a `batch/jobs` write, or a
+# whole new Role granting Deployment writes to a controller all pass every
+# deny-list, every structural check, and the bootstrap mirror once the mutation
+# is applied to the mirror too. What closes it is the complement: every request
+# the committed authorization GRANTS must be one the derivation asks for, or an
+# explicitly declared piece of slack with a stated reason.
+
+
+class GrantedRequest(NamedTuple):
+    """One atomic authorization the committed RBAC actually confers."""
+
+    subject: Subject
+    #: The namespace a RoleBinding confines this to, or ``None`` for a
+    #: ClusterRoleBinding, which confers it in every namespace and at cluster
+    #: scope.
+    scope: object
+    verb: str
+    #: ``None`` marks a non-resource URL grant, where ``resource`` is the URL.
+    group: object
+    resource: str
+    name: object
+
+    def describe(self):
+        where = "cluster-wide" if self.scope is None else "in " + str(self.scope)
+        if self.group is None:
+            return "{} may {} the non-resource URL {} {}".format(
+                self.subject, self.verb, self.resource, where
+            )
+        named = "" if self.name is None else " named " + str(self.name)
+        return "{} may {} {}/{}{} {}".format(
+            self.subject, self.verb, self.group or "core", self.resource, named, where
+        )
+
+
+# Grants whose CLUSTER scope is a property of Kubernetes rather than a choice,
+# so a derived requirement in some namespace justifies the cluster-wide grant.
+# Everything else must be derived at cluster scope to be granted at cluster
+# scope, which is what stops a namespaced need from being satisfied by a
+# cluster-wide rule.
+CLUSTER_SCOPED_BY_DESIGN = {
+    "source.toolkit.fluxcd.io": "a controller's informer cache over its custom "
+    "resources is a cluster-wide list/watch; a namespaced grant cannot satisfy it",
+    "kustomize.toolkit.fluxcd.io": "same informer cache",
+    "helm.toolkit.fluxcd.io": "same informer cache",
+    ("", "events"): "an Event is written in the namespace of the object it "
+    "describes, which is every namespace a reconciliation touches",
+}
+
+
+def _cluster_scope_is_by_design(group, resource):
+    return group in CLUSTER_SCOPED_BY_DESIGN or (group, resource) in CLUSTER_SCOPED_BY_DESIGN
+
+
+def _rule_atoms(rule):
+    """Expand one RBAC rule into the atomic requests it authorizes.
+
+    A wildcard expands to the literal ``*``, which matches no derived
+    requirement — so a wildcard rule reaching a Flux account is reported as
+    ungrounded authority rather than quietly covering everything.
+    """
+
+    verbs = rule.get("verbs") or []
+    if "nonResourceURLs" in rule:
+        for verb in verbs:
+            for url in rule.get("nonResourceURLs") or []:
+                yield (verb, None, url, None)
+        return
+    for verb in verbs:
+        for group in rule.get("apiGroups") or []:
+            for resource in rule.get("resources") or []:
+                for name in rule.get("resourceNames") or [None]:
+                    yield (verb, group, resource, name)
+
+
+def rbac_subjects_and_namespaces(documents):
+    """Every account the reviewed RBAC can reach, and every namespace it binds in.
+
+    Both sets are read from the documents rather than declared, so a Role,
+    RoleBinding, or ServiceAccount added anywhere — including a namespace this
+    change never mentions — is inside the narrowness proof automatically.
+    """
+
+    def account(namespace, name):
+        if not isinstance(namespace, str) or not isinstance(name, str):
+            raise AssertionError(
+                "a ServiceAccount identity in the reviewed RBAC is incomplete: "
+                "{!r}/{!r}".format(namespace, name)
+            )
+        subjects.add(Subject(namespace, name))
+        namespaces.add(namespace)
+
+    subjects = set()
+    namespaces = set()
+    for document in documents:
+        kind = document.get("kind")
+        metadata = document.get("metadata") or {}
+        if kind == "ServiceAccount":
+            account(metadata.get("namespace"), metadata.get("name"))
+            continue
+        if kind not in {"RoleBinding", "ClusterRoleBinding"}:
+            continue
+        if kind == "RoleBinding":
+            namespaces.add(metadata.get("namespace"))
+        for entry in document.get("subjects") or []:
+            if entry.get("kind") == "ServiceAccount":
+                account(entry.get("namespace"), entry.get("name"))
+    return subjects, {namespace for namespace in namespaces if namespace}
+
+
+def granted_requests(authorizer, subjects, namespaces):
+    """Every atomic request the committed authorization confers on ``subjects``.
+
+    Cluster-scoped and namespaced grants are separated deliberately: a rule that
+    a ClusterRoleBinding confers everywhere is reported once, at cluster scope,
+    and only the SURPLUS a RoleBinding adds inside a namespace is reported
+    against that namespace. Without the subtraction every cluster-wide grant
+    would also be reported as a per-namespace grant and the two could not be
+    told apart.
+    """
+
+    granted = set()
+    for subject in sorted(subjects):
+        cluster = {
+            atom
+            for rule in authorizer.rules_for_subject(subject, None)
+            for atom in _rule_atoms(rule)
+        }
+        for atom in cluster:
+            granted.add(GrantedRequest(subject, None, *atom))
+        for namespace in sorted(namespaces):
+            local = {
+                atom
+                for rule in authorizer.rules_for_subject(subject, namespace)
+                for atom in _rule_atoms(rule)
+            } - cluster
+            for atom in local:
+                granted.add(GrantedRequest(subject, namespace, *atom))
+    return granted
+
+
+def ungrounded_grants(granted, derived):
+    """The granted requests no derived requirement asks for.
+
+    ``derived`` is a :class:`DerivedRequirements`. The result is what a
+    narrowness assertion must compare against a declared-slack allowlist: with
+    an empty allowlist the authorization is exactly the derivation, and every
+    row that is not exactly the derivation has to be written down and justified.
+    """
+
+    resource_index = set()
+    namespaces_by_key = {}
+    for requirement in list(derived.applied) + list(derived.controller):
+        key = (
+            requirement.subject, requirement.verb, requirement.group,
+            requirement.resource, requirement.name,
+        )
+        resource_index.add(key + (requirement.namespace,))
+        namespaces_by_key.setdefault(key, set()).add(requirement.namespace)
+    non_resource_index = {
+        (requirement.subject, requirement.verb, requirement.url)
+        for requirement in derived.non_resource
+    }
+
+    ungrounded = set()
+    for request in granted:
+        if request.group is None:
+            if (request.subject, request.verb, request.resource) in non_resource_index:
+                continue
+            ungrounded.add(request)
+            continue
+        key = (request.subject, request.verb, request.group, request.resource, request.name)
+        if key + (request.scope,) in resource_index:
+            continue
+        if (
+            request.scope is None
+            and _cluster_scope_is_by_design(request.group, request.resource)
+            and namespaces_by_key.get(key)
+        ):
+            continue
+        ungrounded.add(request)
+    return ungrounded

@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import NamedTuple
 
 from .support import load_script
 from .testsupport import rbac_model as model
@@ -85,6 +86,265 @@ DECLARED_INSUFFICIENCIES = {
     ("HelmRelease", "lidersea-com", "apps", "replicasets"),
     ("HelmRelease", "lidersea-com", "", "pods"),
 }
+
+# ---------------------------------------------------------------------------
+# Declared slack: the complement of the derivation, row by row
+# ---------------------------------------------------------------------------
+#
+# A deny-list only refuses what somebody thought to enumerate. The narrowness
+# claim is made real by the opposite assertion — every request the committed
+# RBAC GRANTS is either one the derivation asks for or one of the rows below,
+# each with the reason it is granted anyway. The comparison is exact in both
+# directions, so a new grant fails until it is derived or declared, and a
+# declared row fails once the grant it describes is gone.
+#
+# Written literally rather than computed: a table generated from the same
+# manifests it is supposed to bound would agree with anything.
+
+
+class SlackRow(NamedTuple):
+    """One class of granted-but-underived authority, with its justification."""
+
+    subject: Subject
+    #: Namespaces the grant is confined to, or ``(None,)`` for cluster scope.
+    scopes: tuple
+    group: str
+    resources: tuple
+    verbs: tuple
+    reason: str
+
+
+def _slack_requests(rows):
+    requests = set()
+    for row in rows:
+        for scope in row.scopes:
+            for resource in row.resources:
+                for verb in row.verbs:
+                    requests.add(
+                        model.GrantedRequest(
+                            row.subject, scope, verb, row.group, resource, None
+                        )
+                    )
+    return requests
+
+
+SOURCE_GROUP = "source.toolkit.fluxcd.io"
+KUSTOMIZE_GROUP = "kustomize.toolkit.fluxcd.io"
+HELM_GROUP = "helm.toolkit.fluxcd.io"
+NETWORKING_GROUP = "networking.k8s.io"
+CLUSTER = (None,)
+
+# Reason 1 — THE CONFUSED DEPUTY, and the one residual in this table that is a
+# real authorization finding rather than surplus verbs. `crd-controller-flux-system`
+# is one ClusterRole bound to all three controllers, so each controller holds
+# the other two's write authority over their execution objects and sources.
+# Splitting it into three role/binding pairs is tracked as its own change; until
+# then the residual is enumerated here exactly, so it cannot grow silently and
+# the split can be verified by watching these rows disappear.
+SHARED_ROLE = (
+    "the shared crd-controller-flux-system ClusterRole is bound to all three "
+    "controllers, so this controller holds authority derived for another one "
+    "(tracked: per-controller role split, issue #94)"
+)
+# Reason 2 — the generated export grants a source kind whose reconciler
+# registration at the pinned version this repository cannot confirm, so it is
+# declared rather than asserted as required in REGISTERED_CONTROLLERS.
+UNCONFIRMED_KIND = (
+    "the generated export grants ExternalArtifact, a kind no reviewed object "
+    "uses and whose reconciler registration at the pinned version this "
+    "repository cannot confirm; declared rather than asserted as required"
+)
+# Reason 3 — APPLY_VERBS deliberately omits `watch`: Flux polls the objects it
+# manages. The Roles grant one verb set per rule rather than trimming `watch`
+# out of each, so every applied resource carries it.
+APPLIED_WATCH = (
+    "APPLY_VERBS omits watch because Flux polls managed objects; the Role "
+    "grants one verb set per rule rather than trimming watch per resource"
+)
+
+DECLARED_SLACK = (
+    # ---- the shared controller ClusterRole -------------------------------
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations/status",), ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations/finalizers",), ("update",), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases/status",), ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases/finalizers",), ("update",), SHARED_ROLE),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("helmcharts",), ("create", "delete"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases/status",), ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
+             ("helmreleases/finalizers",), ("update",), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets", "helmrepositories", "ocirepositories"),
+             ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("gitrepositories",), ("update", "patch"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("helmcharts",), ("get", "list", "watch", "create", "update", "patch", "delete"),
+             SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets/status", "gitrepositories/status", "helmcharts/status",
+              "helmrepositories/status", "ocirepositories/status"),
+             ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets/finalizers", "gitrepositories/finalizers", "helmcharts/finalizers",
+              "helmrepositories/finalizers", "ocirepositories/finalizers"),
+             ("update",), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations/status",), ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
+             ("kustomizations/finalizers",), ("update",), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets", "helmrepositories"),
+             ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("gitrepositories", "ocirepositories"), ("update", "patch"), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP, ("helmcharts",), ("watch",), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets/status", "gitrepositories/status", "helmcharts/status",
+              "helmrepositories/status", "ocirepositories/status"),
+             ("get", "patch", "update"), SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("buckets/finalizers", "gitrepositories/finalizers", "helmcharts/finalizers",
+              "helmrepositories/finalizers", "ocirepositories/finalizers"),
+             ("update",), SHARED_ROLE),
+    # ---- a kind the export grants and this repository does not use --------
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
+             UNCONFIRMED_KIND),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/status",), ("get", "patch", "update"), UNCONFIRMED_KIND),
+    SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/finalizers",), ("update",), UNCONFIRMED_KIND),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/status",), ("get", "patch", "update"),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/finalizers",), ("update",),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/status",), ("get", "patch", "update"),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
+             ("externalartifacts/finalizers",), ("update",),
+             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
+    # ---- controller runtime ----------------------------------------------
+    SlackRow(SOURCE_CONTROLLER, ("flux-system",), "coordination.k8s.io", ("leases",),
+             ("list", "watch", "patch", "delete"),
+             "client-go's LeaseLock issues get/create/update only; the surplus "
+             "matches the verb set the generated export grants"),
+    SlackRow(KUSTOMIZE_CONTROLLER, ("flux-system",), "coordination.k8s.io", ("leases",),
+             ("list", "watch", "patch", "delete"),
+             "client-go's LeaseLock issues get/create/update only; the surplus "
+             "matches the verb set the generated export grants"),
+    SlackRow(HELM_CONTROLLER, ("flux-system",), "coordination.k8s.io", ("leases",),
+             ("list", "watch", "patch", "delete"),
+             "client-go's LeaseLock issues get/create/update only; the surplus "
+             "matches the verb set the generated export grants"),
+    SlackRow(KUSTOMIZE_CONTROLLER, ("flux-system",), "", ("secrets",),
+             ("get", "list", "watch"),
+             "the SOPS age key is the only Secret derived here, but resourceNames "
+             "cannot restrict list or watch, so the read is granted namespace-wide "
+             "in a namespace designed to hold no other Secret"),
+    # ---- reconciler Roles: surplus that predates this change --------------
+    SlackRow(Subject("flux-system", "platform-prerequisites-reconciler"),
+             ("cloudflare-public", "naranjo-online", "lidersea-com"), "",
+             ("serviceaccounts",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "pre-existing Role slack: this path applies only NetworkPolicies, "
+             "ResourceQuotas and LimitRanges, and the namespace ServiceAccounts "
+             "are bootstrap-owned"),
+    SlackRow(Subject("flux-system", "admission-reconciler"), ("kyverno",), "",
+             ("configmaps",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "pre-existing Role slack: the staged admission path declares no "
+             "ConfigMap today, and the Role is not widened for the promotion"),
+    SlackRow(Subject("flux-system", "platform-services-reconciler"),
+             ("cloudflare-public",), "", ("secrets",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "the connector's tunnel-token Secrets are deferred to the operator-run "
+             "SOPS custody change, so the grant precedes the objects it applies"),
+    SlackRow(Subject("cloudflare-public", "helm-reconciler"), ("cloudflare-public",), "",
+             ("configmaps", "services"),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "pre-existing Role slack: the connector chart renders neither a "
+             "ConfigMap nor a Service, and the Role is shared in shape with the "
+             "two site namespaces"),
+    SlackRow(Subject("naranjo-online", "helm-reconciler"), ("naranjo-online",), "",
+             ("configmaps",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "pre-existing Role slack: the site chart's declared kinds contain no "
+             "ConfigMap"),
+    SlackRow(Subject("lidersea-com", "helm-reconciler"), ("lidersea-com",), "",
+             ("configmaps",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "pre-existing Role slack: the site chart's declared kinds contain no "
+             "ConfigMap"),
+    # ---- `watch` on applied objects --------------------------------------
+    SlackRow(Subject("flux-system", "root-reconciler"), ("flux-system",),
+             KUSTOMIZE_GROUP, ("kustomizations",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "platform-prerequisites-reconciler"),
+             ("cloudflare-public", "naranjo-online", "lidersea-com"), "",
+             ("resourcequotas", "limitranges"), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "platform-prerequisites-reconciler"),
+             ("cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"),
+             NETWORKING_GROUP, ("networkpolicies",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "admission-reconciler"), ("kyverno",), "",
+             ("serviceaccounts", "services"), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "admission-reconciler"), ("kyverno",), "apps",
+             ("deployments",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "platform-services-reconciler"),
+             ("cloudflare-public",), HELM_GROUP, ("helmreleases",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "platform-services-reconciler"),
+             ("cloudflare-public",), SOURCE_GROUP, ("gitrepositories",), ("watch",),
+             APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "naranjo-online-reconciler"), ("naranjo-online",),
+             HELM_GROUP, ("helmreleases",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "naranjo-online-reconciler"), ("naranjo-online",),
+             SOURCE_GROUP, ("ocirepositories",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "lidersea-com-reconciler"), ("lidersea-com",),
+             HELM_GROUP, ("helmreleases",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("flux-system", "lidersea-com-reconciler"), ("lidersea-com",),
+             SOURCE_GROUP, ("ocirepositories",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("cloudflare-public", "helm-reconciler"), ("cloudflare-public",), "",
+             ("secrets", "serviceaccounts"), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("naranjo-online", "helm-reconciler"), ("naranjo-online",), "",
+             ("secrets", "serviceaccounts", "services"), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("lidersea-com", "helm-reconciler"), ("lidersea-com",), "",
+             ("secrets", "serviceaccounts", "services"), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("cloudflare-public", "helm-reconciler"), ("cloudflare-public",),
+             "apps", ("deployments",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("naranjo-online", "helm-reconciler"), ("naranjo-online",),
+             "apps", ("deployments",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("lidersea-com", "helm-reconciler"), ("lidersea-com",),
+             "apps", ("deployments",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("cloudflare-public", "helm-reconciler"), ("cloudflare-public",),
+             NETWORKING_GROUP, ("networkpolicies",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("naranjo-online", "helm-reconciler"), ("naranjo-online",),
+             NETWORKING_GROUP, ("networkpolicies",), ("watch",), APPLIED_WATCH),
+    SlackRow(Subject("lidersea-com", "helm-reconciler"), ("lidersea-com",),
+             NETWORKING_GROUP, ("networkpolicies",), ("watch",), APPLIED_WATCH),
+)
+
+DECLARED_SLACK_REQUESTS = _slack_requests(DECLARED_SLACK)
 
 # Requests the narrowed authorization must refuse. Each row is the concrete
 # shape of a way the deleted cluster-admin binding used to let a compromised
@@ -145,6 +405,7 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
         cls.documents = model.effective_flux_rbac(ROOT)
         cls.authorizer = Authorizer.from_documents(cls.documents)
         derived = model.derive_requirements(ROOT)
+        cls.derived = derived
         cls.requirements = derived.applied
         cls.controller_requirements = derived.controller
 
@@ -334,6 +595,122 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                     )
                 )
 
+    def test_leader_election_is_required_of_every_pinned_controller(self):
+        """The grant whose absence is a crashloop, not a half-reconciliation.
+
+        All three pinned Deployments run with ``--enable-leader-election``, so
+        each takes a Lease in flux-system before it reconciles anything. The
+        requirement is read out of the export's own arguments, so deleting the
+        Lease rule from ``access.yaml`` (and from the bootstrap mirror) fails
+        here rather than at startup on the cluster.
+        """
+
+        electing = model.leader_election_controllers(ROOT)
+        self.assertEqual(
+            electing,
+            [("flux-system", name) for name in sorted(INSTALLED_CONTROLLERS)],
+        )
+        leases = [
+            requirement
+            for requirement in self.controller_requirements
+            if requirement.resource == "leases"
+        ]
+        self.assertEqual(len(leases), len(electing) * len(model.LEADER_ELECTION_VERBS))
+        for requirement in leases:
+            with self.subTest(subject=str(requirement.subject), verb=requirement.verb):
+                self.assertEqual(requirement.namespace, "flux-system")
+                self.assertTrue(
+                    self.authorizer.allows(
+                        requirement.subject, requirement.verb, "coordination.k8s.io",
+                        "leases", "flux-system",
+                    ),
+                    requirement.describe(),
+                )
+
+    def test_the_controllers_own_runtime_authority_is_required(self):
+        """Controller-owned ConfigMaps: declared, and therefore assertable.
+
+        Nothing the desired state applies implies this authority, so a
+        desired-state-only derivation reaches zero requirements for it and the
+        whole `flux-controller-runtime` Role could be deleted with a green
+        suite. It is declared in CONTROLLER_RUNTIME_GRANTS instead, which is
+        what makes the deletion fail.
+        """
+
+        runtime = [
+            requirement
+            for requirement in self.controller_requirements
+            if requirement.owner == ("Controller", "runtime")
+        ]
+        self.assertEqual(
+            {requirement.resource for requirement in runtime},
+            {"configmaps", "configmaps/status"},
+        )
+        self.assertEqual(
+            {str(requirement.subject) for requirement in runtime},
+            {"system:serviceaccount:flux-system:" + name for name in INSTALLED_CONTROLLERS},
+        )
+        for requirement in runtime:
+            with self.subTest(
+                subject=str(requirement.subject),
+                verb=requirement.verb,
+                resource=requirement.resource,
+            ):
+                self.assertEqual(requirement.namespace, "flux-system")
+                self.assertTrue(
+                    self.authorizer.allows(
+                        requirement.subject, requirement.verb, requirement.group,
+                        requirement.resource, requirement.namespace,
+                    ),
+                    requirement.describe(),
+                )
+
+    def test_every_registered_controller_kind_is_authorized_without_an_object(self):
+        """A kind with no object today is still a running informer.
+
+        source-controller registers a reconciler per source kind whatever the
+        desired state contains, and every controller runs with
+        ``--watch-all-namespaces=true``, so each informer is a cluster-wide
+        list/watch that no Role can satisfy. Deriving these from the registered
+        kinds rather than from the object inventory is what stops "there is no
+        Bucket in this repository" from reading as "the Bucket grant is unused".
+        """
+
+        self.assertEqual(
+            model.cluster_watching_controllers(ROOT),
+            [("flux-system", name) for name in sorted(INSTALLED_CONTROLLERS)],
+        )
+        registered = [
+            requirement
+            for requirement in self.controller_requirements
+            if requirement.owner == ("Controller", "registered")
+        ]
+        self.assertEqual(
+            {(str(requirement.subject), requirement.resource) for requirement in registered}
+            & {
+                ("system:serviceaccount:flux-system:source-controller", "buckets"),
+                ("system:serviceaccount:flux-system:source-controller", "helmrepositories"),
+            },
+            {
+                ("system:serviceaccount:flux-system:source-controller", "buckets"),
+                ("system:serviceaccount:flux-system:source-controller", "helmrepositories"),
+            },
+        )
+        for requirement in registered:
+            with self.subTest(
+                subject=str(requirement.subject),
+                verb=requirement.verb,
+                resource=requirement.resource,
+            ):
+                self.assertIsNone(requirement.namespace, "the informer is cluster-wide")
+                self.assertTrue(
+                    self.authorizer.allows(
+                        requirement.subject, requirement.verb, requirement.group,
+                        requirement.resource, None,
+                    ),
+                    requirement.describe(),
+                )
+
     def test_controllers_can_probe_the_api_server_liveness_endpoint(self):
         # The one grant a Role cannot express, so it stays cluster-scoped and is
         # pinned rather than only justified in prose.
@@ -381,6 +758,91 @@ class FluxRbacNarrownessTests(unittest.TestCase):
     def setUpClass(cls):
         cls.documents = model.effective_flux_rbac(ROOT)
         cls.authorizer = Authorizer.from_documents(cls.documents)
+        cls.derived = model.derive_requirements(ROOT)
+        subjects, namespaces = model.rbac_subjects_and_namespaces(cls.documents)
+        cls.subjects = subjects
+        cls.namespaces = namespaces
+        cls.granted = model.granted_requests(cls.authorizer, subjects, namespaces)
+
+    def test_every_granted_request_is_derived_or_declared_slack(self):
+        """granted ⊆ derived ∪ declared slack — the narrowness proof itself.
+
+        Everything else in this class is a deny-list, and a deny-list only
+        refuses what somebody thought to write down: `+delete` on kustomizations,
+        a cluster-wide `pods/exec` read, a `batch/jobs` write, or a brand-new
+        Role granting Deployment writes to a controller all pass every other
+        assertion here — and pass the bootstrap mirror too, once the same
+        mutation is applied to the mirror. This is the assertion that fails.
+
+        The comparison is exact in BOTH directions on purpose. Slack that is no
+        longer granted fails exactly like slack that was never declared: a stale
+        justification is the failure mode this repository treats as a defect
+        (delivery-lane requirement 5).
+        """
+
+        # The enumeration itself is pinned: an empty or tiny granted set would
+        # satisfy the subset assertion while proving nothing.
+        self.assertGreater(len(self.granted), 500)
+        self.assertEqual(
+            {str(subject) for subject in self.subjects} & {
+                "system:serviceaccount:flux-system:source-controller",
+                "system:serviceaccount:flux-system:kustomize-controller",
+                "system:serviceaccount:flux-system:helm-controller",
+            },
+            {
+                "system:serviceaccount:flux-system:source-controller",
+                "system:serviceaccount:flux-system:kustomize-controller",
+                "system:serviceaccount:flux-system:helm-controller",
+            },
+        )
+        self.assertEqual(
+            self.namespaces,
+            {"flux-system", "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"},
+        )
+
+        ungrounded = model.ungrounded_grants(self.granted, self.derived)
+        self.assertEqual(
+            sorted(
+                request.describe() for request in ungrounded - DECLARED_SLACK_REQUESTS
+            ),
+            [],
+            "the committed RBAC grants authority the derivation does not ask for; "
+            "derive it, remove it, or declare it in DECLARED_SLACK with the reason "
+            "it is granted anyway",
+        )
+        self.assertEqual(
+            sorted(
+                request.describe() for request in DECLARED_SLACK_REQUESTS - ungrounded
+            ),
+            [],
+            "a declared-slack row no longer describes a granted request: remove the "
+            "row, because a stale justification hides the next real one",
+        )
+
+    def test_the_declared_slack_is_bounded_and_attributed(self):
+        # The inventory is only useful while it is small enough to read and
+        # every row carries a reason. Both are asserted so the table cannot
+        # quietly become the place authority goes to hide.
+        self.assertLess(len(DECLARED_SLACK_REQUESTS), len(self.granted) // 2)
+        for row in DECLARED_SLACK:
+            with self.subTest(subject=str(row.subject), resources=row.resources):
+                self.assertTrue(row.verbs and row.resources and row.scopes)
+                self.assertGreater(len(row.reason), 40, "every slack row states why")
+        # The confused-deputy residual is the one finding in the table rather
+        # than surplus verbs, so it is counted separately: it may shrink to zero
+        # when the shared role is split, and it must never grow silently.
+        shared = _slack_requests(
+            tuple(row for row in DECLARED_SLACK if SHARED_ROLE in row.reason)
+        )
+        self.assertEqual(len(shared), 135)
+        self.assertEqual(
+            {str(request.subject) for request in shared},
+            {
+                "system:serviceaccount:flux-system:source-controller",
+                "system:serviceaccount:flux-system:kustomize-controller",
+                "system:serviceaccount:flux-system:helm-controller",
+            },
+        )
 
     def test_cluster_admin_is_bound_to_nothing(self):
         for document in self.documents:
@@ -589,9 +1051,15 @@ class FluxRbacCompositionTests(unittest.TestCase):
             for document in documents
             if document.get("kind") == "Role"
         }
-        for key, expected in contract["access_role_rules"]().items():
+        expected_roles = contract["access_role_rules"]()
+        # EXACT set equality, in both directions. `assertIn` alone checked only
+        # that every mirrored Role exists in the manifests, so DELETING a Role
+        # from the mirror left the suite green — and a Role absent from the
+        # mirror is a Role `--verify` never compares against anything, which is
+        # the live half of this whole proof.
+        self.assertEqual(set(roles), set(expected_roles))
+        for key, expected in expected_roles.items():
             with self.subTest(role=key):
-                self.assertIn(key, roles)
                 self.assertEqual(
                     normalize_rules(roles[key].get("rules")), normalize_rules(expected)
                 )
@@ -601,9 +1069,10 @@ class FluxRbacCompositionTests(unittest.TestCase):
             for document in documents
             if document.get("kind") == "ClusterRole"
         }
-        for name, expected in contract["cluster_role_rules"]().items():
+        expected_cluster_roles = contract["cluster_role_rules"]()
+        self.assertEqual(set(cluster_roles), set(expected_cluster_roles))
+        for name, expected in expected_cluster_roles.items():
             with self.subTest(cluster_role=name):
-                self.assertIn(name, cluster_roles)
                 self.assertEqual(
                     normalize_rules(cluster_roles[name].get("rules")), normalize_rules(expected)
                 )
@@ -642,6 +1111,37 @@ class FluxRbacCompositionTests(unittest.TestCase):
                     normalized_subjects(cluster_bindings[name]["subjects"]),
                     normalized_subjects(expected[1]),
                 )
+
+    def test_every_role_a_verified_binding_names_is_itself_verified(self):
+        """The mirror's own closure, which is what `--verify` can rely on live.
+
+        Exact set equality above is only available here, against the reviewed
+        manifests; live, `kubectl get roles --all-namespaces` returns the whole
+        cluster's Roles, so the verifier cannot compare sets. What it CAN
+        require — and now does, in `check_rbac` — is that every Role and
+        ClusterRole named by a binding it verifies is itself in the rules
+        mirror. Without that, deleting a Role from the mirror leaves its binding
+        checked, its subjects checked, and its RULES unchecked: the live object
+        could grant anything at all.
+        """
+
+        contract = self._bootstrap_contract()
+        access_roles = contract["access_role_rules"]()
+        cluster_roles = contract["cluster_role_rules"]()
+        checked = 0
+        for (namespace, _), expected in contract["expected_bindings"]().items():
+            role_ref = expected[0]
+            with self.subTest(binding=(namespace, role_ref["name"])):
+                self.assertEqual(role_ref["kind"], "Role")
+                self.assertIn((namespace, role_ref["name"]), access_roles)
+                checked += 1
+        for name, expected in contract["expected_cluster_bindings"]().items():
+            role_ref = expected[0]
+            with self.subTest(cluster_binding=name):
+                self.assertEqual(role_ref["kind"], "ClusterRole")
+                self.assertIn(role_ref["name"], cluster_roles)
+                checked += 1
+        self.assertEqual(checked, 19)
 
     def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")
@@ -733,6 +1233,156 @@ class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError) as raised:
             model.objects_applied_by(root, "kubernetes/example")
         self.assertIn("no objects enumerated", str(raised.exception))
+
+    def test_a_remote_base_is_refused_by_name(self):
+        # `- https://github.com/…?ref=v1` parses as a mapping in this reader, so
+        # it used to reach `Path / dict` and die as a TypeError — fail-closed,
+        # but with a traceback that names nothing. It refuses by name now.
+        root = self.build_root(
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources:\n"
+            "  - https://github.com/example/repository.git\n"
+        )
+        with self.assertRaises(AssertionError) as raised:
+            model.objects_applied_by(root, "kubernetes/example")
+        self.assertIn("Remote bases are refused", str(raised.exception))
+
+    def test_a_chart_template_in_a_subdirectory_is_not_invisible(self):
+        # Helm renders every template under `templates/` at any depth. A
+        # single-level glob made `templates/jobs/cronjob.yaml` contribute
+        # nothing while the identical file one level up raised "unmodelled
+        # kind" — so a chart could grow a whole workload the derivation never
+        # saw, purely by living in a subdirectory.
+        directory = tempfile.mkdtemp(prefix="flux-rbac-chart.")
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = Path(directory).resolve()
+        nested = root / "chart" / "templates" / "jobs"
+        nested.mkdir(parents=True)
+        (nested / "cronjob.yaml").write_text(
+            "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: example\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(model.chart_kinds(root, "chart"), ["CronJob"])
+        # And an unmodelled kind is what the derivation then refuses.
+        with self.assertRaises(AssertionError) as raised:
+            model._kind_tuple("CronJob")
+        self.assertIn("unmodelled kind", str(raised.exception))
+
+    def test_a_custom_resource_outside_the_known_directories_is_still_found(self):
+        # The enumeration follows the reconciliation graph rather than globbing
+        # known directories. A HelmRelease added under a reconciled path that no
+        # glob covers reconciles for real — and names a ServiceAccount
+        # helm-controller may not be able to impersonate — so it must appear in
+        # the derivation wherever it lives.
+        found = model.flux_custom_resources(ROOT)
+        self.assertEqual(len(found.kustomizations), 6)
+        self.assertEqual(len(found.helm_releases), 3)
+        self.assertEqual(len(found.sources), 4)
+        directory = tempfile.mkdtemp(prefix="flux-rbac-graph.")
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = Path(directory).resolve()
+        for relative in (
+            "kubernetes/flux-system/gotk-sync.yaml",
+            "kubernetes/reconciliation",
+            "kubernetes/websites",
+            "kubernetes/platform",
+            "kubernetes/flux-system/controllers",
+            "policies/kyverno",
+        ):
+            source = ROOT / relative
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy(source, target)
+        extra = root / "kubernetes/websites/naranjo-online/extra"
+        extra.mkdir()
+        (extra / "release.yaml").write_text(
+            "apiVersion: helm.toolkit.fluxcd.io/v2\n"
+            "kind: HelmRelease\n"
+            "metadata:\n"
+            "  name: extra\n"
+            "  namespace: naranjo-online\n"
+            "spec:\n"
+            "  interval: 10m0s\n"
+            "  serviceAccountName: extra-reconciler\n"
+            "  suspend: true\n"
+            "  chartRef:\n"
+            "    kind: OCIRepository\n"
+            "    name: naranjo-online-chart\n",
+            encoding="utf-8",
+        )
+        index = root / "kubernetes/websites/naranjo-online/kustomization.yaml"
+        index.write_text(
+            index.read_text(encoding="utf-8") + "  - extra/release.yaml\n", encoding="utf-8"
+        )
+        reached = model.flux_custom_resources(root)
+        self.assertEqual(len(reached.helm_releases), 4)
+        self.assertIn(
+            "extra", {release["metadata"]["name"] for release in reached.helm_releases}
+        )
+
+    def test_a_flux_custom_resource_the_walk_cannot_classify_is_refused(self):
+        # Fail closed on the reconciliation inputs, not just on the objects: an
+        # ImageUpdateAutomation or a Receiver selects what runs and under whose
+        # identity, so treating one as an ordinary applied object would leave
+        # its controller-side authority underived.
+        root = self.build_root(
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources:\n  - automation.yaml\n",
+            {
+                "automation.yaml": "apiVersion: image.toolkit.fluxcd.io/v1beta2\n"
+                "kind: ImageUpdateAutomation\n"
+                "metadata:\n  name: example\n  namespace: flux-system\n",
+            },
+        )
+        documents = model.load_documents(root / "kubernetes/example/automation.yaml")
+        with self.assertRaises(AssertionError) as raised:
+            model._classify_flux_document(documents[0], "automation.yaml", [], [], [])
+        self.assertIn("cannot classify", str(raised.exception))
+
+    def test_an_argument_patch_that_could_drop_a_flag_is_refused(self):
+        # Leader election is read out of the generated export's arguments, which
+        # is only sound while the reviewed patches can add arguments and never
+        # replace the list. A patch that could remove `--enable-leader-election`
+        # must therefore break the reader rather than be reasoned about.
+        directory = tempfile.mkdtemp(prefix="flux-rbac-args.")
+        self.addCleanup(shutil.rmtree, directory, True)
+        root = Path(directory).resolve()
+        for relative in (
+            model.CONTROLLER_EXPORT,
+        ) + model.CONTROLLER_DEPLOYMENT_PATCH_FILES:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+        self.assertTrue(model.leader_election_controllers(root))
+        patch = root / model.CONTROLLER_DEPLOYMENT_PATCH_FILES[0]
+        patch.write_text(
+            patch.read_text(encoding="utf-8").replace(
+                "- op: add\n  path: /spec/template/spec/containers/0/args/-\n"
+                "  value: --no-cross-namespace-refs=true\n",
+                "- op: replace\n  path: /spec/template/spec/containers/0/args\n"
+                "  value: [--log-level=info]\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(AssertionError) as raised:
+            model.leader_election_controllers(root)
+        self.assertIn("patches the controller argument list", str(raised.exception))
+
+    def test_a_release_with_no_declared_chart_kinds_is_refused(self):
+        # SITE_CHART_KINDS is the one input this repository cannot derive, and
+        # it is keyed on the owner's (kind, name) pair because a Kustomization
+        # and a HelmRelease share a name for both sites. A release missing from
+        # it needs no permission, which would satisfy every assertion above.
+        self.assertEqual(
+            set(model.SITE_CHART_KINDS),
+            {("HelmRelease", "naranjo-online"), ("HelmRelease", "lidersea-com")},
+        )
 
     def test_the_reviewed_roots_are_all_enumerable(self):
         # The strictness above must not be satisfied by refusing everything.

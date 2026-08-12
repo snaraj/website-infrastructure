@@ -1252,6 +1252,22 @@ def binding_reaches_protected_account(value):
 def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, scope):
     roles = index(role_doc, "Role")
     access_roles = access_role_rules()
+    cluster_role_expectations = cluster_role_rules()
+    # CLOSURE. Live, `get roles --all-namespaces` returns the whole cluster's
+    # Roles, so this verifier cannot compare sets the way the repository test
+    # does. What it can require is that every Role and ClusterRole named by a
+    # binding it verifies is itself in the rules mirror above: without this,
+    # deleting a Role from `access_role_rules` left its binding verified, its
+    # subjects verified, and its RULES compared against nothing at all — so the
+    # live object could grant anything and `--verify` would still pass.
+    for (namespace, _), expected in expected_bindings().items():
+        role_ref = expected[0]
+        require(role_ref.get("kind") == "Role")
+        require((namespace, role_ref.get("name")) in access_roles)
+    for expected in expected_cluster_bindings().values():
+        role_ref = expected[0]
+        require(role_ref.get("kind") == "ClusterRole")
+        require(role_ref.get("name") in cluster_role_expectations)
     if scope == "full":
         for key, expected in access_roles.items():
             require(key in roles)
@@ -1261,7 +1277,7 @@ def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, sco
             check_role(roles[key], key, access_roles[key])
 
     cluster_roles = index(cluster_role_doc, "ClusterRole", namespaced=False)
-    for name, expected in cluster_role_rules().items():
+    for name, expected in cluster_role_expectations.items():
         require(name in cluster_roles)
         check_role(cluster_roles[name], name, expected, cluster=True)
 
