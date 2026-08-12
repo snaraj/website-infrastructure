@@ -7,9 +7,9 @@ command — and so that the review of those bytes can happen now, in a pull
 request, instead of at the terminal.
 
 **Scope.** Installing the three pinned Flux controllers as an *inert* control
-plane, then closing `flux-system` egress. Out of scope, deliberately and by
-separate authorization: the `sops-age` ceremony, the root sync objects, and
-every `suspend` flip. Those are
+plane, in an order that closes `flux-system` egress *around* them rather than
+underneath them. Out of scope, deliberately and by separate authorization: the
+`sops-age` ceremony, the root sync objects, and every `suspend` flip. Those are
 [`docs/runbooks/flux-recovery.md`](flux-recovery.md) and the separate reviewed
 pull request described under "What stays suspended" below.
 
@@ -31,6 +31,34 @@ of any decision about what Flux should eventually manage. Both websites are
 served through their tunnels regardless: no site delivery path passes through
 Flux at any point in this runbook.
 
+## Why the apply is ordered, and what happens if it is not
+
+The reviewed bundle applies `allow-egress` with its blanket `egress: [{}]`
+removed by
+[`patches/allow-egress.yaml`](../../kubernetes/flux-system/controllers/patches/allow-egress.yaml).
+What survives is `podSelector: {}` with `policyTypes: [Ingress, Egress]` and no
+rules — on a NetworkPolicy-enforcing CNI, a **namespace-wide deny**. That is the
+intended posture, and it is also a trap: create the three controller Deployments
+in the same apply and their Pods start egress-isolated. No DNS, no API server,
+so no leader election and no cache sync — the Pods never reach `1/1`, the
+readiness step below can never pass, and the install **deadlocks** in a state
+that looks like a broken controller rather than a missing allow.
+
+`scripts/install-flux-controllers.sh` therefore applies in phases, and the
+phases are the script's, not this document's:
+
+| Phase | What | Why here |
+| --- | --- | --- |
+| 1 | the 22 non-workload objects: Namespace, 8 CRDs, RBAC, ResourceQuota, ServiceAccounts, Service, and the three generated NetworkPolicies including the deny-all | no Pod exists yet, so nothing is isolated yet |
+| 2 | `default-deny`, `flux-controllers-dns`, `flux-controllers-artifacts`, `flux-controllers-kube-apiserver` — the API-server allow bound to the very `--server` this run targets | the flows a controller needs to *become* healthy |
+| 3 | the three controller Deployments | Pods start into a namespace where those flows already exist |
+| 4 | `flux-controllers-public-https`, via `--open-public-egress` | only after the controllers are observed healthy **and** idle |
+
+Public HTTPS is last on purpose. Nothing in phases 1–3 needs it — the
+controllers are inert, so they fetch nothing — and deferring it means the
+namespace never has a path off the cluster while the install is still being
+verified.
+
 ## Preconditions
 
 Platform-lane preconditions, none of which this runbook performs or asserts:
@@ -39,8 +67,11 @@ Platform-lane preconditions, none of which this runbook performs or asserts:
    protected operator workstation.
 2. A CNI that **enforces `NetworkPolicy`** is installed. The deployment-state
    table in [`README.md`](../../README.md) records the current decision and its
-   install state; a CNI without policy enforcement makes step 4 desired state
-   with no effect, which must not be mistaken for a closed namespace.
+   install state; a CNI without policy enforcement makes the closure desired
+   state with no effect, which must not be mistaken for a closed namespace. It
+   also means the ordering above is invisible in practice on a non-enforcing
+   CNI: the install appears to work, and the same bytes deadlock the day the
+   CNI lands. Order it correctly regardless.
 3. The protected-custody preconditions in
    [`bootstrap/flux/README.md`](../../bootstrap/flux/README.md) hold: the
    reviewed-blob launcher exists, the trusted Linux operator platform and its
@@ -75,23 +106,74 @@ The installer below cannot be pointed at that root: its target is a constant,
 and `scripts/validate_repository.py` refuses a tree in which the egress overlay
 is reachable from it.
 
-## Step 0 — plan
+## What every step is bound to
 
-From a clean checkout of the exact reviewed `main` commit, on the operator
-workstation, with the `versions.env` pins of `kustomize` and `kubectl`:
+Three bindings are required by every mode that touches a cluster, and the
+installer refuses to run without them. They are not conveniences: an install
+that trusts `PATH` and the ambient kubeconfig can be pointed at the wrong
+binary and the wrong cluster without anybody noticing.
+
+- **Tools.** `kustomize` must report the `versions.env` `KUSTOMIZE_VERSION`
+  pin, and `kubectl` must report the `KUBERNETES_VERSION` pin **and** hash to
+  one of the committed `KUBECTL_*_SHA256` digests. A shim earlier on `PATH`
+  fails the digest check before any cluster is contacted.
+- **Bytes.** The checkout must be a Git checkout with no uncommitted change to
+  the install roots, `versions.env`, or the installer, and the render must hash
+  to the value passed as `--expect-render-sha256`. Take that value from the
+  reviewed pull request, not from the run you are about to perform.
+- **Target.** `--kubeconfig`, `--context`, and `--server` are all required and
+  are passed on **every** API call. The installer proves the named context
+  resolves to the named server before it does anything, and refuses a `--server`
+  whose port is not the one the reviewed API-server allow names.
+
+`--server` is also where the API-server egress destination comes from: the
+committed policy carries `192.0.2.0/32` (RFC 5737 TEST-NET-1) as a fail-closed
+sentinel, and the installer substitutes the address out of `--server` in a
+mode-0700 temporary directory that it deletes on exit. The address is never
+written into the checkout and never printed. Keep the installer's own output on
+the operator terminal: `kubectl` connection errors quote the endpoint, so that
+output is operator-private like everything else in this ceremony.
+
+## Step 0 — reproduce the render offline
+
+From a clean checkout of the exact reviewed commit, with the `versions.env` pin
+of `kustomize`:
 
 ```sh
-./scripts/install-flux-controllers.sh --plan
+./scripts/install-flux-controllers.sh --render
 ```
 
-This renders the install root, refuses it if it contains any Flux custom
-resource, any Secret, or any NetworkPolicy egress rule, refuses it unless
-`flux-system` enforces restricted Pod Security, and requires exactly 25 objects.
-It then runs a read-only **pre-apply gate** — a client-side strict validation of
-all 25 objects, an existence probe of the objects the install creates, and a
-**server-side dry run** — and refuses if any of them names anything outside the
-reviewed controller inventory. It prints the render's SHA-256 and mutates
-nothing.
+This contacts no cluster and needs no kubeconfig. It renders both roots, refuses
+the controller render if it contains any Flux custom resource, any Secret, or
+any NetworkPolicy egress rule, refuses it unless `flux-system` enforces
+restricted Pod Security, requires exactly 25 objects, cross-checks the rendered
+CRD/ClusterRole/ClusterRoleBinding/Deployment names against the reviewed
+inventory, proves the 22 + 3 and 4 + 1 phase splits, and prints both render
+digests with the commit they came from.
+
+Record the printed digests with the commit SHA, and compare them against the
+reviewed pull request. A digest that does not reproduce means the tree, the
+tool, or the commit is not the reviewed one, and the ceremony stops.
+`scripts/ci/verify-render-determinism.sh` already proves in CI that renders are
+byte-identical, so a mismatch is a fact about the operator's inputs, never about
+the renderer.
+
+## Step 1 — plan against the named cluster
+
+```sh
+./scripts/install-flux-controllers.sh --plan \
+  --kubeconfig "$PROTECTED_KUBECONFIG" \
+  --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" \
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
+```
+
+Same offline guards, then a read-only **pre-apply gate**: a **client-side strict
+validation** of all 25 objects and of the five egress policies, an existence and
+ownership probe of every cluster-scoped object the install creates, and a
+**server-side dry run**. Nothing mutates. The gate refuses if any reported name
+falls outside the reviewed controller inventory, and it refuses outright if an
+object it would create already exists under foreign ownership.
 
 ### Why the server dry run reports "namespace not found" on a fresh cluster
 
@@ -116,39 +198,58 @@ On a cluster where `flux-system` **already exists** — a re-run, or a
 reconcile-to-reviewed-bytes check — the server dry run instead reports all 25
 objects cleanly, and the gate accepts that shape too. Any other line — a foreign
 object, a different namespace, a `configured`/`unchanged` where a fresh `created`
-was expected, or any genuine error — fails the gate closed, and nothing is
+was expected, or any other error — fails the gate closed, and nothing is
 applied.
 
-Record the printed digest with the commit SHA. A digest that does not reproduce
-means the tree, the tool, or the commit is not the reviewed one, and the
-ceremony stops. `scripts/ci/verify-render-determinism.sh` already proves in CI
-that renders are byte-identical, so a mismatch is a fact about the operator's
-inputs, never about the renderer.
-
-## Step 1 — apply the controllers
+## Step 2 — apply, in phases
 
 ```sh
-./scripts/install-flux-controllers.sh --apply
+./scripts/install-flux-controllers.sh --apply \
+  --kubeconfig "$PROTECTED_KUBECONFIG" \
+  --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" \
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
 ```
 
-Same guards, then the apply. Note what the script does *not* do: it never runs
-`kubectl apply -k`, because `kubectl`'s embedded Kustomize is a different build
-than the pinned one, so `-k` would apply bytes nobody rendered and nobody
-hashed.
+Same guards and the same gate, then the three ordered phases from the table
+above. Note what the script does *not* do: it never runs `kubectl apply -k`,
+because `kubectl`'s embedded Kustomize is a different build than the pinned one,
+so `-k` would apply bytes nobody rendered and nobody hashed.
 
-## Step 2 — verify the controllers, and verify they are idle
+**The apply is a transaction.** Every phase's output is parsed into a ledger of
+the objects *this attempt* created. If any phase fails — including a partial
+apply that created a prefix before erroring — the ledger is rolled back
+newest-first and the absence of every one of those objects is then re-probed and
+reported. Objects that already existed report `configured` and never enter the
+ledger, so a failed re-run cannot delete a working install. If a delete does not
+take, the script says `ROLLBACK INCOMPLETE` and names what is left rather than
+claiming a clean undo.
+
+## Step 3 — verify the controllers, and verify they are idle
 
 ```sh
-kubectl -n flux-system get deploy source-controller kustomize-controller helm-controller
-kubectl -n flux-system get pods
-kubectl get crd | grep toolkit.fluxcd.io
-kubectl get gitrepositories,kustomizations,helmreleases,ocirepositories -A
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" -n flux-system get deploy \
+  source-controller kustomize-controller helm-controller
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" -n flux-system get pods,networkpolicies
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" get gitrepositories,kustomizations,helmreleases,ocirepositories -A
 ```
 
-Expected: three Deployments `1/1`, three Pods `Running`, the CRDs present, and
-the **last command returns no resources in any namespace**. A Flux custom
-resource at this point means something outside this ceremony created it; stop
-and investigate before continuing.
+Expected: three Deployments `1/1`, three Pods `Running`, seven NetworkPolicies
+(`allow-egress`, `allow-scraping`, `allow-webhooks` from the export; plus
+`default-deny` and the three startup allows), and the **last command returns no
+resources in any namespace**. A Flux custom resource at this point means
+something outside this ceremony created it; stop and investigate before
+continuing.
+
+Pods that come up but never reach `1/1`, with logs full of API-server or DNS
+timeouts, mean the startup allows do not match the real dataplane — the
+substituted address is wrong, or the installed CNI evaluates the policy against
+a destination other than the API server's own address. That is the failure the
+phase ordering makes *diagnosable*: the allows are already there, so a stuck
+controller is a policy-matching problem and not a missing policy.
 
 Confirm the running images are the three digests pinned in `versions.env` and
 that no fourth controller exists — `image-reflector-controller` and
@@ -166,50 +267,21 @@ is a separate reviewed change: `bootstrap/flux/bootstrap.sh` verifies live
 cluster role bindings against a reviewed set that currently includes it, so the
 manifest and the verifier must move together.
 
-## Step 3 — the API-server allow, from private custody
-
-The controllers reach the API server at the control-plane node's own address.
-That address is host inventory: safety invariant 12 keeps it out of this public
-index permanently, so the committed policy
-[`kubernetes/flux-system/egress/network-policies.yaml`](../../kubernetes/flux-system/egress/network-policies.yaml)
-carries the reviewed *shape* — these Pods, TCP 6443, one exact `/32` — with
-`192.0.2.0/32` (RFC 5737 TEST-NET-1) as its fail-closed sentinel destination.
-An address that can never match anything real is the point: applied as
-committed, the policy grants nothing.
-
-Before step 4, produce the substituted copy **inside the protected root** —
-never in the checkout, never in shell history:
+## Step 4 — open public HTTPS, last
 
 ```sh
-umask 077
-kustomize build kubernetes/flux-system/egress \
-  | sed "s#192\.0\.2\.0/32#${CONTROL_PLANE_ADDRESS}/32#" \
-  >"$PROTECTED_ROOT/flux-egress.yaml"
-grep -c '192\.0\.2\.0/32' "$PROTECTED_ROOT/flux-egress.yaml"   # must print 0
+./scripts/install-flux-controllers.sh --open-public-egress \
+  --kubeconfig "$PROTECTED_KUBECONFIG" \
+  --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" \
+  --expect-render-sha256 "$REVIEWED_RENDER_SHA256"
 ```
 
-`CONTROL_PLANE_ADDRESS` comes from the protected kubeconfig's reviewed server
-value, not from a lookup. The substituted file is applied in step 4 and then
-deleted; it never enters Git, CI, chat, or a shared clipboard.
-
-If the substitution is skipped, step 4 still closes the namespace and the
-controllers lose the API server. That failure is safe — nothing is reconciling
-— and it is recovered by the rollback below, but it is not a state to leave
-behind.
-
-## Step 4 — close the namespace
-
-```sh
-kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
-  --server "$REVIEWED_SERVER" apply -f "$PROTECTED_ROOT/flux-egress.yaml"
-shred -u "$PROTECTED_ROOT/flux-egress.yaml"
-```
-
-This applies, in one document: `default-deny` for the namespace, then the four
-enumerated allows — cluster DNS, the intra-namespace artifact fetch, public
-HTTPS on TCP 443, and the API server on TCP 6443. Nothing else is reachable
-from a `flux-system` Pod afterward: not the LAN, not the node, not another
-namespace, not plain HTTP.
+This refuses unless all three controllers report `1/1` and all four startup
+allows are present, then applies the one remaining policy from
+[`kubernetes/flux-system/egress/network-policies.yaml`](../../kubernetes/flux-system/egress/network-policies.yaml).
+After it, nothing else is reachable from a `flux-system` Pod: not the LAN, not
+the node, not another namespace, not plain HTTP.
 
 ### What the public-HTTPS allow is for
 
@@ -230,44 +302,70 @@ an offline operation, and a chart source configured with `verify` fails closed
 **image** pulls are not in this table at all: the kubelet pulls images from the
 node's network namespace, where a Pod NetworkPolicy has no effect.
 
-The blanket allow that upstream ships is already gone at this point. Step 1
-applied `allow-egress` with its `egress: [{}]` rule removed by
-[`kubernetes/flux-system/controllers/patches/allow-egress.yaml`](../../kubernetes/flux-system/controllers/patches/allow-egress.yaml),
-so the namespace never has a window in which every Pod can reach everything.
-
 ## Step 5 — verify the closure
 
 ```sh
-kubectl -n flux-system get networkpolicies
-kubectl -n flux-system get networkpolicy allow-egress -o yaml   # no `egress:` key
-kubectl -n flux-system get pods
-kubectl -n flux-system logs deploy/source-controller --tail=50
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" -n flux-system get networkpolicies
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" -n flux-system get networkpolicy allow-egress -o yaml
+kubectl --kubeconfig "$PROTECTED_KUBECONFIG" --context "$REVIEWED_CONTEXT" \
+  --server "$REVIEWED_SERVER" -n flux-system logs deploy/source-controller --tail=50
 ```
 
 Expected: eight policies (`allow-egress`, `allow-scraping`, `allow-webhooks`
 from the export; `default-deny` and the four `flux-controllers-*` allows from
-this step), `allow-egress` carrying no `egress` key, three Pods still `Running`
-and not restarting, and controller logs free of API-server connection errors.
-
-Pods that begin restarting here mean the API-server allow does not match the
-real endpoint — step 3 was skipped, or the address was wrong, or the installed
-CNI evaluates the policy against a destination other than the one substituted.
-Roll back, correct, reapply.
+this ceremony), `allow-egress` carrying no `egress` key, three Pods still
+`Running` and not restarting, and controller logs free of API-server connection
+errors.
 
 ## Rollback
 
 Safe at every step, because nothing is reconciling.
 
-- Undo the closure only: `kubectl -n flux-system delete networkpolicy
-  default-deny flux-controllers-dns flux-controllers-artifacts
-  flux-controllers-public-https flux-controllers-kube-apiserver`. The
-  controllers regain egress immediately; `allow-egress` still carries no
+**A failed `--apply` has already rolled itself back.** The installer removes
+exactly what that attempt created and proves the removal; the procedures below
+are for undoing a *successful* install.
+
+- **Undo the closure only:**
+
+  ```sh
+  kubectl -n flux-system delete networkpolicy default-deny \
+    flux-controllers-dns flux-controllers-artifacts \
+    flux-controllers-public-https flux-controllers-kube-apiserver
+  ```
+
+  The controllers regain egress immediately; `allow-egress` still carries no
   blanket rule, so re-apply the export if unrestricted egress is genuinely
   needed for diagnosis, and treat that as a temporary, recorded exception.
-- Undo everything: `kubectl delete namespace flux-system`. Deleting the
-  namespace while Flux owns no resource destroys nothing else — there are no
-  Flux custom resources, no finalizers on foreign objects, and no workload
-  under Flux management. Re-running steps 1–4 restores the exact same state
+
+- **Undo everything.** `kubectl delete namespace flux-system` is **not
+  sufficient**: 13 of this bundle's objects are cluster-scoped and survive it.
+  Remove them explicitly, and in this order:
+
+  ```sh
+  kubectl delete namespace flux-system
+  kubectl delete clusterrolebinding cluster-reconciler-flux-system \
+    crd-controller-flux-system
+  kubectl delete clusterrole crd-controller-flux-system \
+    flux-edit-flux-system flux-view-flux-system
+  kubectl delete crd buckets.source.toolkit.fluxcd.io \
+    externalartifacts.source.toolkit.fluxcd.io \
+    gitrepositories.source.toolkit.fluxcd.io \
+    helmcharts.source.toolkit.fluxcd.io \
+    helmreleases.helm.toolkit.fluxcd.io \
+    helmrepositories.source.toolkit.fluxcd.io \
+    kustomizations.kustomize.toolkit.fluxcd.io \
+    ocirepositories.source.toolkit.fluxcd.io
+  ```
+
+  (Each of those carries the same `--kubeconfig`/`--context`/`--server` binding
+  as every other command in this runbook; it is elided above only so the object
+  lists stay readable.) Deleting the namespace while Flux owns no resource
+  destroys nothing else — there are no Flux custom resources, no finalizers on
+  foreign objects, and no workload under Flux management. Deleting the CRDs
+  would delete any Flux custom resource of those kinds; there are none, which is
+  exactly what step 3 verified. Re-running steps 0–4 restores the same state
   from the same reviewed commit.
 
 Neither rollback touches the websites. They are served by their tunnels
@@ -285,9 +383,9 @@ carry their all-zero digest and `deploymentReady` sentinels.
 Flipping any of them is a **separate reviewed pull request**, and it has
 prerequisites this runbook does not satisfy:
 
-1. The controllers are installed and healthy — steps 1–2 above, evidenced.
-2. `flux-system` egress is closed and verified — steps 3–5 above, evidenced,
-   on a CNI that actually enforces policy.
+1. The controllers are installed and healthy — steps 2–3 above, evidenced.
+2. `flux-system` egress is closed and verified — steps 2, 4, and 5 above,
+   evidenced, on a CNI that actually enforces policy.
 3. **The admission decision is made explicitly.** Kyverno is not installed:
    [`kubernetes/reconciliation/admission.yaml`](../../kubernetes/reconciliation/admission.yaml)
    is `suspend: true` and annotated

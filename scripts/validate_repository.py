@@ -1216,6 +1216,129 @@ def flux_egress_contract_errors(root):
     return errors
 
 
+# The install's three cross-file properties, joined here because no single file
+# can hold them: the ORDER the controllers and their allows are applied in, the
+# BINDING of the tools and the target the apply runs against, and the
+# completeness of the documented REMOVAL. Each has an executable regression in
+# tests/security/test_flux_install_contract.py; these are the static coupling —
+# a constant edited on its own, a fail-closed refusal deleted, or a
+# cluster-scoped object dropped from the runbook's removal, all fail here.
+FLUX_INSTALLER_REFUSALS = (
+    "--kubeconfig is required",
+    "--context is required",
+    "--server is required",
+    "--expect-render-sha256 is required",
+    "matches no versions.env kubectl digest pin",
+    "the install inputs carry uncommitted modifications",
+    "is not owned by this install",
+    "ROLLBACK INCOMPLETE",
+    "the ordering that prevents the egress deadlock is broken",
+)
+FLUX_INSTALLER_PIN_KEYS = (
+    "KUSTOMIZE_VERSION",
+    "KUBERNETES_VERSION",
+    "KUBECTL_LINUX_AMD64_SHA256",
+    "KUBECTL_ARM64_SHA256",
+)
+
+
+def cluster_scoped_flux_objects(root):
+    """Return the generated export's cluster-scoped object names.
+
+    These are the objects a `kubectl delete namespace flux-system` cannot
+    remove, so they are exactly the set the runbook's removal procedure and the
+    installer's rollback both have to cover.
+    """
+
+    export = root / "kubernetes/flux-system/controllers/gotk-components.yaml"
+    if not export.is_file():
+        return []
+    names = []
+    for document in re.split(r"(?m)^---\s*$", read(export)):
+        kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
+        name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+        if not kind or not name:
+            continue
+        if kind.group(1) in {
+            "CustomResourceDefinition",
+            "ClusterRole",
+            "ClusterRoleBinding",
+        }:
+            names.append(name.group(1))
+    return names
+
+
+def flux_install_ceremony_errors(root):
+    """Require the ordered, bound, reversible install ceremony to stay intact."""
+
+    errors = []
+    installer = root / "scripts/install-flux-controllers.sh"
+    runbook = root / "docs/runbooks/flux-install.md"
+    if not installer.is_file():
+        return ["the sanctioned Flux controller installer is missing"]
+    text = read(installer)
+
+    # The phase constants must partition the reviewed inventory. Editing one in
+    # isolation is the mistake that would silently drop an object out of a phase
+    # -- or move a Deployment back into the phase that runs before its allows.
+    constants = {}
+    for key in (
+        "EXPECTED_OBJECTS",
+        "EXPECTED_PREREQUISITES",
+        "EXPECTED_WORKLOADS",
+        "EXPECTED_EGRESS_POLICIES",
+        "EXPECTED_STARTUP_POLICIES",
+    ):
+        found = re.search(r"(?m)^{}=(\d+)\s*$".format(key), text)
+        if not found:
+            errors.append("Flux installer no longer declares " + key)
+        else:
+            constants[key] = int(found.group(1))
+    if len(constants) == 5:
+        if (
+            constants["EXPECTED_PREREQUISITES"] + constants["EXPECTED_WORKLOADS"]
+            != constants["EXPECTED_OBJECTS"]
+        ):
+            errors.append(
+                "Flux install phases do not partition the reviewed controller inventory"
+            )
+        if constants["EXPECTED_STARTUP_POLICIES"] + 1 != constants["EXPECTED_EGRESS_POLICIES"]:
+            errors.append(
+                "Flux egress phases do not partition the reviewed egress overlay"
+            )
+
+    for refusal in FLUX_INSTALLER_REFUSALS:
+        if refusal not in text:
+            errors.append("Flux installer no longer refuses: " + refusal)
+    for key in FLUX_INSTALLER_PIN_KEYS:
+        if key not in text:
+            errors.append("Flux installer no longer binds the versions.env pin " + key)
+        versions = root / "versions.env"
+        if versions.is_file() and not re.search(
+            r"(?m)^{}=\S+$".format(re.escape(key)), read(versions)
+        ):
+            errors.append("versions.env no longer carries the pin " + key)
+
+    if not runbook.is_file():
+        errors.append("the Flux install runbook is missing")
+        return errors
+    # Whitespace-normalized so a reflowed paragraph is not a false failure.
+    prose = " ".join(read(runbook).split())
+    for fragment in (
+        "--open-public-egress",
+        "--expect-render-sha256",
+        "`kubectl delete namespace flux-system` is **not sufficient**",
+    ):
+        if fragment not in prose:
+            errors.append("the Flux install runbook no longer states: " + fragment)
+    for name in cluster_scoped_flux_objects(root):
+        if name not in prose:
+            errors.append(
+                "the Flux install runbook's removal omits the cluster-scoped object " + name
+            )
+    return errors
+
+
 def check_kubernetes(root):
     errors = []
     forbidden = {
@@ -1310,6 +1433,7 @@ def check_kubernetes(root):
                 if policy_name not in text:
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
         errors.extend(flux_egress_contract_errors(root))
+        errors.extend(flux_install_ceremony_errors(root))
     errors.extend(signature_policy_source_errors(root))
     return errors
 
