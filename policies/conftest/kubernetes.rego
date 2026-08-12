@@ -281,6 +281,106 @@ valid_public_tunnel_policy if {
   target == namespace
 }
 
+# The Flux controller install ships three NetworkPolicies of its own. Two are
+# ingress-only as generated; `allow-egress` is generated with a blanket
+# `egress: [{}]` that this repository removes by patch, so accepting any of the
+# three with an egress rule would accept exactly the regression the patch
+# exists to prevent.
+flux_generated_network_policies := {"allow-egress", "allow-scraping", "allow-webhooks"}
+
+# Every deliberate flux-system egress allow selects the controller Pods by the
+# label the generated export puts on all three, grants Egress only, and carries
+# exactly one rule. One rule per policy is what keeps each allow separately
+# reviewable and separately revocable.
+flux_controller_egress_shape if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/part-of": "flux",
+  }
+  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
+  count(object.get(input.spec, "ingress", [])) == 0
+  count(object.get(input.spec, "egress", [])) == 1
+}
+
+valid_flux_artifact_rule(rule) if {
+  object.get(rule, "to", []) == [{
+    "podSelector": {"matchLabels": {"app.kubernetes.io/part-of": "flux"}},
+  }]
+  {port | some port in object.get(rule, "ports", [])} == {
+    {"port": 80, "protocol": "TCP"},
+    {"port": 9090, "protocol": "TCP"},
+  }
+}
+
+valid_flux_public_https_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  peer := peers[0]
+  object.keys(peer) == {"ipBlock"}
+  ip_block := object.get(peer, "ipBlock", {})
+  object.get(ip_block, "cidr", "") == "0.0.0.0/0"
+  {cidr | some cidr in object.get(ip_block, "except", [])} == {
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+  }
+  object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
+}
+
+# The API-server destination is host inventory and never enters this index, so
+# the committed rule is pinned to the RFC 5737 documentation address that can
+# never match a real endpoint. Pinning it here also means a real control-plane
+# address committed by mistake is a policy failure, not just a privacy failure.
+valid_flux_apiserver_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  peer := peers[0]
+  object.keys(peer) == {"ipBlock"}
+  object.get(peer, "ipBlock", {}) == {"cidr": "192.0.2.0/32"}
+  object.get(rule, "ports", []) == [{"port": 6443, "protocol": "TCP"}]
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-dns"
+  valid_public_dns_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-artifacts"
+  valid_flux_artifact_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-public-https"
+  valid_flux_public_https_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-kube-apiserver"
+  object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/readiness", "") == "sentinel-until-reviewed-control-plane-endpoint"
+  valid_flux_apiserver_rule(input.spec.egress[0])
+}
+
+flux_network_policy_allowlisted if {
+  input.metadata.name in flux_generated_network_policies
+}
+
+flux_network_policy_allowlisted if {
+  input.metadata.name == "default-deny"
+}
+
+flux_network_policy_allowlisted if {
+  valid_flux_egress_policy
+}
+
 valid_zero_capacity_quota if {
   input.metadata.name == "capacity-not-ready"
   object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/readiness", "") == "blocked-until-pi-capacity-evidence"
@@ -786,6 +886,32 @@ deny contains msg if {
   input.metadata.name == "default-deny"
   not valid_default_deny_policy
   msg := sprintf("NetworkPolicy %s/default-deny must isolate every Pod for ingress and egress", [input.metadata.namespace])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name == "default-deny"
+  not valid_default_deny_policy
+  msg := "NetworkPolicy flux-system/default-deny must isolate every Pod for ingress and egress"
+}
+
+# The regression this rule exists for: regenerating gotk-components.yaml
+# without the allow-egress patch restores `egress: [{}]`, which would silently
+# reopen every flux-system Pod to every destination.
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name in flux_generated_network_policies
+  count(object.get(input.spec, "egress", [])) > 0
+  msg := sprintf("NetworkPolicy flux-system/%s must carry no egress rule; the generated blanket allow is removed by patch", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  not flux_network_policy_allowlisted
+  msg := sprintf("NetworkPolicy flux-system/%s is outside the exact Flux controller DNS, artifact, public-HTTPS, and API-server egress allowlist", [input.metadata.name])
 }
 
 deny contains msg if {

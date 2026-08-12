@@ -1,0 +1,206 @@
+# Negative controls for the flux-system egress contract. Each document is one
+# way the fail-closed posture could be reopened; every one of them must be
+# rejected on its own, not merely as part of the file.
+#
+# 1. default-deny that no longer denies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: flux-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - {}
+---
+# 2. The generated blanket allow restored — the exact regression the
+#    allow-egress patch removes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: flux-system
+spec:
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - {}
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# 3. Public egress widened past TLS to cleartext HTTP.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-public-https
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+---
+# 4. One private range dropped from the exclusion set, opening the home LAN to
+#    the controllers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-public-https
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP
+---
+# 5. The API-server sentinel replaced by a concrete address. The address here is
+#    RFC 5737 documentation space, but the rule pins the exact sentinel, so any
+#    substitution — including a real control-plane endpoint — fails the gate
+#    before it can reach a reviewer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-kube-apiserver
+  namespace: flux-system
+  annotations:
+    platform.snaraj.dev/readiness: sentinel-until-reviewed-control-plane-endpoint
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.10/32
+      ports:
+        - port: 6443
+          protocol: TCP
+---
+# 6. The API-server allow stripped of its unresolved-sentinel annotation, which
+#    is how the sentinel would stop being visible to release-check.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-kube-apiserver
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/32
+      ports:
+        - port: 6443
+          protocol: TCP
+---
+# 7. The intra-namespace artifact fetch widened to every destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-artifacts
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to: []
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 9090
+          protocol: TCP
+---
+# 8. DNS granted to every Pod in the namespace rather than the controllers,
+#    which would extend the allow to anything later scheduled there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-dns
+  namespace: flux-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# 9. An invented allow that no reviewed flow needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-node-ssh
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.0/24
+      ports:
+        - port: 22
+          protocol: TCP

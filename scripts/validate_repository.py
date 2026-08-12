@@ -1114,6 +1114,84 @@ def flux_components_errors(root):
     return errors
 
 
+# The exact flux-system egress inventory. Conftest pins the shape of whichever
+# policies a render contains; this pins that they are all present and reachable
+# from the roots the install ceremony applies, because a policy file that no
+# Kustomization references is desired state nobody ever applies.
+FLUX_EGRESS_POLICIES = (
+    "default-deny",
+    "flux-controllers-dns",
+    "flux-controllers-artifacts",
+    "flux-controllers-public-https",
+    "flux-controllers-kube-apiserver",
+)
+FLUX_CONTROL_PLANE_SENTINEL = "sentinel-until-reviewed-control-plane-endpoint"
+
+
+def flux_egress_contract_errors(root):
+    """Require the fail-closed flux-system egress set and its wiring."""
+
+    errors = []
+    policies = root / "kubernetes/flux-system/egress/network-policies.yaml"
+    if not policies.is_file():
+        return ["fail-closed flux-system egress NetworkPolicies are missing"]
+    text = read(policies)
+    for name in FLUX_EGRESS_POLICIES:
+        if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(name)), text):
+            errors.append("required flux-system egress NetworkPolicy missing: " + name)
+    documents = re.split(r"(?m)^---\s*$", text)
+    exact_default_deny = [doc for doc in documents if (
+        re.search(r"(?m)^\s*name:\s*default-deny\s*$", doc) and
+        re.search(r"(?m)^\s*namespace:\s*flux-system\s*$", doc) and
+        re.search(r"(?ms)^\s*policyTypes:\s*\n\s*-\s*Ingress\s*\n\s*-\s*Egress\s*$", doc)
+    )]
+    if len(exact_default_deny) != 1:
+        errors.append("exact ingress+egress default-deny missing for flux-system")
+    if FLUX_CONTROL_PLANE_SENTINEL not in text:
+        errors.append("flux-system API-server egress must keep its unresolved control-plane sentinel")
+
+    # The blanket `egress: [{}]` the Flux CLI generates is removed by patch;
+    # an unreferenced patch file would leave the export unmodified while the
+    # repository still looked hardened.
+    patch = root / "kubernetes/flux-system/controllers/patches/allow-egress.yaml"
+    if not patch.is_file():
+        errors.append("generated allow-egress blanket rule is not patched away")
+    elif not re.search(r"(?m)^-\s*op:\s*remove\s*$", read(patch)) or (
+        "path: /spec/egress" not in read(patch)
+    ):
+        errors.append("allow-egress patch must remove /spec/egress and nothing else")
+    controllers_index = root / "kubernetes/flux-system/controllers/kustomization.yaml"
+    if not controllers_index.is_file():
+        errors.append("Flux controller install root is missing")
+    elif "patches/allow-egress.yaml" not in read(controllers_index):
+        errors.append("Flux controller install root does not apply the allow-egress patch")
+    egress_index = root / "kubernetes/flux-system/egress/kustomization.yaml"
+    if not egress_index.is_file():
+        errors.append("Flux egress Kustomization root is missing")
+    elif not active_kustomization_resource(read(egress_index), "network-policies.yaml"):
+        errors.append("Flux egress resource is not reachable from its root")
+
+    # The egress overlay is deliberately NOT a resource of
+    # kubernetes/flux-system: that root also carries gotk-sync.yaml, whose
+    # Kustomization is unsuspended, so applying it would start live
+    # reconciliation. Rendering the overlay as its own target is what keeps it
+    # schema- and policy-checked without making the dangerous root the only
+    # path to it.
+    renderer = root / "scripts/render-manifests.sh"
+    if not renderer.is_file():
+        errors.append("canonical renderer is missing")
+    else:
+        renderer_text = read(renderer)
+        if not re.search(r"(?m)^\s*kubernetes/flux-system/egress\s*$", renderer_text):
+            errors.append("flux-system egress overlay is not a rendered target")
+    root_index = root / "kubernetes/flux-system/kustomization.yaml"
+    if root_index.is_file() and active_kustomization_resource(read(root_index), "egress"):
+        errors.append(
+            "flux-system egress must not be reachable from the unsuspended bootstrap root"
+        )
+    return errors
+
+
 def check_kubernetes(root):
     errors = []
     forbidden = {
@@ -1153,6 +1231,9 @@ def check_kubernetes(root):
             "flux-system/controllers/patches/helm-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--default-service-account=default",
                 "runAsNonRoot", "RuntimeDefault",
+            ],
+            "flux-system/controllers/patches/allow-egress.yaml": [
+                "- op: remove", "path: /spec/egress",
             ],
             "flux-system/access.yaml": [
                 "namespace: cloudflare-public", "namespace: naranjo-online",
@@ -1204,6 +1285,7 @@ def check_kubernetes(root):
             for policy_name in policy_names:
                 if policy_name not in text:
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
+        errors.extend(flux_egress_contract_errors(root))
     errors.extend(signature_policy_source_errors(root))
     return errors
 
@@ -1602,6 +1684,19 @@ def check_release(root):
     for name in required_generated:
         if not (root / name).is_file():
             errors.append("required reviewed/generated file missing: " + name)
+
+    # The committed API-server egress allow points at RFC 5737 documentation
+    # space until an operator substitutes the real endpoint from private
+    # custody at apply time. A release claim while that sentinel is still the
+    # committed desired state would claim a reachable control plane that the
+    # repository has never described.
+    flux_egress = root / "kubernetes/flux-system/egress/network-policies.yaml"
+    if not flux_egress.is_file():
+        errors.append("required reviewed file missing: " + flux_egress.name)
+    elif FLUX_CONTROL_PLANE_SENTINEL in read(flux_egress):
+        errors.append(
+            "flux-system API-server egress still carries the unresolved control-plane sentinel"
+        )
 
     sops_config = read(root / ".sops.yaml")
     if "REPLACE_WITH_PUBLIC_RECIPIENT" in sops_config:
