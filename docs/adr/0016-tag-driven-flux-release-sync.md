@@ -118,7 +118,7 @@ closed, and each step below is separately authorized:
 
 | # | Step | Repository | Authorized by |
 | --- | --- | --- | --- |
-| 0 | Desired state moves to tag-driven chart sync; `suspend: true` everywhere; sentinels retained | this repository | reviewed PR (this change) |
+| 0 | Desired state moves to tag-driven chart sync; `suspend: true` everywhere; the platform's readiness/digest gate retained at its reviewed value | this repository | reviewed PR (this change) |
 | 1 | Site publishers embed the built image digest into the published chart | site repositories | reviewed PR per site |
 | 2 | Flux controllers installed on the cluster; `flux-system` egress to GHCR/GitHub opened inside the default-deny posture | platform lane | platform-stable signal, then owner |
 | 3 | `spec.suspend` flipped to `false` on the parent `Kustomization` and the `HelmRelease` | this repository | reviewed PR, after step 2 |
@@ -129,11 +129,15 @@ The order matters and is not negotiable: the digest must exist inside the chart
 (step 1) before the platform's own digest override may be removed (step 4), so
 there is never a moment when no artifact carries the digest.
 
-Until step 4, `spec.values.deploymentReady: false` and the all-zeros
-`sha256:000...0` digest remain in each site's `release.yaml` exactly as before.
-They are the state `validate_release_state.py` classifies as `initial`, the
-state `policies/release-conftest` rejects, and the state `promote-image.sh`
-advances under review. This ADR deletes no fail-closed guard: it adds the
+Until step 4, `spec.values.deploymentReady` and `spec.values.image.digest`
+remain in each site's `release.yaml` exactly as before, keeping exactly the
+meaning they already had. Readiness shut over the all-zeros `sha256:000...0`
+digest is the state `validate_release_state.py` classifies as `initial` and
+`policies/release-conftest` rejects; a reviewed digest with readiness open is
+the `promoted` state `promote-image.sh` advances into under review, which is
+where both sites stand for `v0.1.9`. Neither phase reconciles anything while
+`spec.suspend` is `true` on both layers, which step 3 alone changes. This ADR
+deletes no fail-closed guard: it adds the
 chart-source contract beside the existing sentinel and re-points every
 validator that described the old chart binding to the new one, with negative
 coverage that is equal or stronger at each re-point.
