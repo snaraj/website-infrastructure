@@ -25,6 +25,7 @@ design. ``RealRepositoryTests`` pins exactly that refusal.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -115,15 +116,35 @@ def lock_value(key):
     raise AssertionError("render.lock has no " + key)
 
 
-def kustomize_is_pinned():
-    """The lock's digests belong to one renderer; a different one may differ."""
+def kustomize_version():
+    """The ambient kustomize's own version string, or None when it is absent."""
 
     if KUSTOMIZE is None:
-        return False
+        return None
     completed = subprocess.run(
         [KUSTOMIZE, "version"], capture_output=True, text=True, check=False
     )
-    return completed.stdout.strip() == lock_value("render.tool.version")
+    return completed.stdout.strip()
+
+
+def kustomize_is_pinned():
+    """Whether the ambient renderer is the one versions.env pins.
+
+    The threshold is `versions.env`, NEVER `render.lock`. Reading it from the
+    lock made the gate decide whether the gate ran: editing one token of
+    `render.tool.version` desynchronised the comparison, every render-dependent
+    test SKIPPED, and the suite reported OK while five load-bearing checks —
+    including the only killer of a silently edited render — stopped running. A
+    verification gate must not read its threshold from the artifact it verifies.
+
+    `RendererBindingTests` closes the other half: it pins lock == versions.env
+    unconditionally, and turns a present-but-mismatched kustomize into a FAILURE
+    rather than a skip, because a skip on mismatch is a self-disabling guard.
+    """
+
+    if KUSTOMIZE is None:
+        return False
+    return kustomize_version() == pinned_version("KUSTOMIZE_VERSION")
 
 
 def render(stage):
@@ -171,9 +192,22 @@ def kubectl_is_pinned():
     return match.group(1) == pinned_version("KUBERNETES_VERSION")
 
 
+KUSTOMIZE_VERSION = kustomize_version()
 PINNED_RENDERER = kustomize_is_pinned()
 PINNED_KUBECTL = kubectl_is_pinned()
-NEEDS_RENDERER = "the pinned kustomize is unavailable; render comparisons skipped"
+NEEDS_RENDERER = "kustomize is not installed; render comparisons skipped"
+NEEDS_KUSTOMIZE = "kustomize is not installed"
+
+# The stage difference the runbook and the pull request body both claim, as
+# numbers. Asserting only that each differing line is one of these three fields
+# is blind to a field that STOPS differing — a stage-1 rule silently flipped to
+# the enforcing value disappears from the difference list instead of failing it.
+# The counts are what make a disappearance loud.
+STAGE_DIFFERENCE_COUNTS = {
+    "failureAction": 30,
+    "failurePolicy": 10,
+    "validationFailureAction": 8,
+}
 
 
 class ParseGuardTests(unittest.TestCase):
@@ -203,6 +237,41 @@ class ParseGuardTests(unittest.TestCase):
         # above red, but a helper that returned the wrong group would be silent.
         self.assertEqual(capture(r"phase-(\w+)\.yaml", "apply -f phase-network.yaml", "x"), "network")
         self.assertEqual(first_index(["a", "b", "c"], "c", "x"), 2)
+
+
+class RendererBindingTests(unittest.TestCase):
+    """The renderer identity is pinned INDEPENDENTLY of the file it gates.
+
+    ``render.lock`` records which kustomize produced its digests, and the whole
+    render-dependent half of this battery only runs when the ambient renderer
+    matches. Deriving "matches" from the lock let the lock decide whether the
+    lock was checked: one token edited inside it and five load-bearing tests
+    skipped while the suite printed OK. The pin is `versions.env`, which those
+    tests do not verify and a render change has no reason to touch.
+    """
+
+    def test_the_lock_records_the_independently_pinned_renderer(self):
+        # No skip: this must be true on every machine, with or without
+        # kustomize installed, because it is a statement about two committed
+        # files and nothing else.
+        self.assertEqual(lock_value("render.tool.name"), "kustomize")
+        self.assertEqual(
+            lock_value("render.tool.version"),
+            pinned_version("KUSTOMIZE_VERSION"),
+            "render.lock must record the renderer versions.env pins; a lock that "
+            "names a different one silently disables every render comparison",
+        )
+
+    @unittest.skipIf(KUSTOMIZE is None, NEEDS_KUSTOMIZE)
+    def test_an_installed_kustomize_must_be_the_pinned_one(self):
+        # FAIL, not skip. A machine that has kustomize but the wrong one used to
+        # skip five checks and report OK; now the mismatch is the finding.
+        self.assertEqual(
+            KUSTOMIZE_VERSION,
+            pinned_version("KUSTOMIZE_VERSION"),
+            "this machine renders with a kustomize versions.env does not pin; "
+            "the render comparisons cannot be trusted and are not skipped away",
+        )
 
 
 class StagedRolloutTests(unittest.TestCase):
@@ -288,6 +357,21 @@ class StagedRolloutTests(unittest.TestCase):
                     {"failureAction", "validationFailureAction", "failurePolicy"},
                 )
                 self.assertIn(right.split(":", 1)[1].strip(), {"Audit", "Ignore"})
+        # A field that STOPS differing is invisible to the loop above: a stage-1
+        # rule flipped to the enforcing value simply leaves the difference list.
+        # The counts are what make that disappearance a failure, and they are the
+        # same three numbers the pull request body and the runbook state.
+        counted = {}
+        for left, _ in differences:
+            field = left.split(":", 1)[0]
+            counted[field] = counted.get(field, 0) + 1
+        self.assertEqual(
+            counted,
+            STAGE_DIFFERENCE_COUNTS,
+            "the two stages differ in a different NUMBER of action fields than "
+            "reviewed; a field that stopped differing is a stage-1 rule that no "
+            "longer downgrades",
+        )
 
     @unittest.skipUnless(PINNED_RENDERER, NEEDS_RENDERER)
     def test_neither_stage_can_be_mistaken_for_the_other(self):
@@ -487,6 +571,116 @@ class OrderingContractTests(unittest.TestCase):
         self.assertIn("SENTINEL_CIDR='192.0.2.0/32'", self.installer)
 
 
+class AdmissionNetworkShapeTests(unittest.TestCase):
+    """The reviewed admission flows, pinned HERE and not only in the rego.
+
+    `policies/conftest/kubernetes.rego` denies a widened admission NetworkPolicy,
+    and the deny fixture proves the denial fires. But the rego is the thing doing
+    the denying, so a change that widens a rego arm AND the real manifest
+    together passes conftest by construction — the reviewer reproduced exactly
+    that, opening the public-HTTPS egress to all of 172.16.0.0/12 with every
+    gate green. A policy layer cannot be the sole guard of the bytes it judges.
+
+    These assertions read the committed manifest directly. They stay red under
+    that composed change no matter what the rego says, which is what makes the
+    rego's kills unconditional rather than conditional on the rego being intact.
+    """
+
+    # The private, loopback, link-local, CGNAT, multicast, and reserved blocks
+    # the public-HTTPS egress excludes. Every entry removed is a LAN, node, or
+    # neighbouring-namespace destination granted to a rule whose only reason to
+    # exist is Sigstore and GHCR.
+    EXCLUDED_RANGES = [
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    ]
+
+    def setUp(self):
+        self.documents = {}
+        for document in re.split(
+            r"(?m)^---\s*$", read(ENFORCE / "network-policies.yaml")
+        ):
+            match = re.search(r"(?m)^  name: (\S+)\s*$", document)
+            if match is not None:
+                self.documents[match.group(1)] = document
+
+    def _document(self, name):
+        self.assertIn(name, self.documents, "the reviewed network contract lost " + name)
+        return self.documents[name]
+
+    @staticmethod
+    def _values(document, field):
+        # `- port: 443` and `  protocol: TCP` are both list-item bodies, so the
+        # sequence dash is optional rather than absent.
+        return re.findall(r"(?m)^\s+(?:- )?" + field + r":\s+(\S+)\s*$", document)
+
+    def test_the_reviewed_flows_are_exactly_these_five(self):
+        self.assertEqual(
+            sorted(self.documents),
+            [
+                "default-deny",
+                "kyverno-admission-webhook",
+                "kyverno-dns",
+                "kyverno-kube-apiserver",
+                "kyverno-public-https",
+            ],
+        )
+
+    def test_the_default_deny_isolates_both_directions(self):
+        # Ingress-only isolation leaves egress unrestricted for every Pod in the
+        # namespace and makes the four allows below decorative.
+        document = self._document("default-deny")
+        self.assertIn("podSelector: {}", document)
+        self.assertEqual(
+            re.findall(r"(?m)^\s+- (Ingress|Egress)\s*$", document),
+            ["Ingress", "Egress"],
+        )
+
+    def test_the_webhook_ingress_is_one_host_on_one_port(self):
+        document = self._document("kyverno-admission-webhook")
+        self.assertEqual(self._values(document, "cidr"), ["192.0.2.0/32"])
+        self.assertNotIn("except:", document)
+        self.assertEqual(self._values(document, "port"), ["9443"])
+        self.assertEqual(self._values(document, "protocol"), ["TCP"])
+
+    def test_the_api_server_egress_is_one_host_on_one_port(self):
+        # "While we are here, let it also reach the kubelet" is how 10250 gets
+        # granted; a second port here would be exactly that change.
+        document = self._document("kyverno-kube-apiserver")
+        self.assertEqual(self._values(document, "cidr"), ["192.0.2.0/32"])
+        self.assertNotIn("except:", document)
+        self.assertEqual(self._values(document, "port"), ["6443"])
+        self.assertEqual(self._values(document, "protocol"), ["TCP"])
+
+    def test_the_public_https_egress_excludes_every_reviewed_range(self):
+        document = self._document("kyverno-public-https")
+        cidrs = self._values(document, "cidr")
+        self.assertEqual(cidrs, ["0.0.0.0/0"])
+        excluded = re.findall(r"(?m)^\s+- (\d\S+/\d+)\s*$", document)
+        self.assertEqual(
+            excluded,
+            self.EXCLUDED_RANGES,
+            "a shorter exclusion list is a wider allow: every entry removed is a "
+            "LAN or node destination granted",
+        )
+        self.assertEqual(self._values(document, "port"), ["443"])
+        self.assertEqual(self._values(document, "protocol"), ["TCP"])
+
+    def test_the_dns_egress_is_the_cluster_resolver_only(self):
+        document = self._document("kyverno-dns")
+        self.assertIn("kubernetes.io/metadata.name: kube-system", document)
+        self.assertIn("k8s-app: kube-dns", document)
+        self.assertNotIn("cidr:", document)
+        self.assertEqual(self._values(document, "port"), ["53", "53"])
+        self.assertEqual(self._values(document, "protocol"), ["TCP", "UDP"])
+
+
 class ResourceBoundsTests(unittest.TestCase):
     """Admission is bounded by the API server, not by a comment."""
 
@@ -501,9 +695,42 @@ class ResourceBoundsTests(unittest.TestCase):
             "requests.memory: 768Mi",
             'limits.cpu: "2"',
             "limits.memory: 1536Mi",
+            # The Secret bound was written down and left unpinned: a regenerated
+            # lock could raise it without a single test noticing, which is
+            # exactly the "certificate rotation defect becomes unbounded etcd
+            # growth" case the file's own comment says it exists to stop.
+            'secrets: "8"',
         ):
             with self.subTest(entry=entry):
                 self.assertIn(entry, self.bounds)
+
+    def test_the_limit_range_defaults_stay_inside_the_namespace_budget(self):
+        """The LimitRange is what an unresourced container inherits, so its
+        ceiling is a real allocation, not documentation.
+
+        Unpinned, a promotion pull request could set the default limit to the
+        whole namespace budget — contradicting the file's own comment that the
+        defaults MATCH the patched controller values — and every gate would stay
+        green. Both halves are pinned, and pinned to the SAME numbers the
+        controller patch carries, so the two cannot drift apart silently.
+        """
+
+        limits = capture(
+            r"(?ms)^\s+- default:\s*\n(.*?)\n\s+type: Container\s*$",
+            self.bounds,
+            "the container-defaults LimitRange",
+        )
+        self.assertEqual(
+            [line.strip() for line in limits.splitlines() if line.strip()],
+            [
+                "cpu: 500m",
+                "memory: 384Mi",
+                "defaultRequest:",
+                "cpu: 100m",
+                "memory: 192Mi",
+            ],
+            "the LimitRange defaults must equal the patched controller values",
+        )
 
     def test_the_patched_requests_fit_the_quota_twice_over(self):
         # Two controllers at these requests, plus the same again as rolling
@@ -754,18 +981,34 @@ case "$args" in
     echo 'Error from server (NotFound)' >&2; exit 1 ;;
   *"get deployment -l app.kubernetes.io/part-of=kyverno"*)
     case "$scenario" in
-      enforce-ready|enforce-no-reports) printf 'kyverno-admission-controller=1\n'; exit 0 ;;
+      enforce-ready|enforce-no-reports|enforce-already|enforce-rule-enforcing|enforce-foreign-reports)
+        printf 'kyverno-admission-controller=1\n'; exit 0 ;;
       enforce-unhealthy) printf 'kyverno-admission-controller=\n'; exit 0 ;;
     esac
     exit 0 ;;
-  *"get clusterpolicy "*jsonpath*)
+  # The DEPRECATED spec-level action, and the rule-level one Kyverno actually
+  # prefers, are answered separately so a scenario can disagree between them —
+  # which is the whole shape a gate reading only the spec level cannot see.
+  *"get clusterpolicy "*validationFailureAction*)
     case "$scenario" in
-      enforce-ready|enforce-no-reports) printf 'Audit\n'; exit 0 ;;
+      enforce-ready|enforce-no-reports|enforce-rule-enforcing|enforce-foreign-reports)
+        printf 'Audit\n'; exit 0 ;;
       enforce-already) printf 'Enforce\n'; exit 0 ;;
     esac
     exit 0 ;;
+  *"get clusterpolicy "*"rules[*]"*)
+    case "$scenario" in
+      enforce-rule-enforcing) printf 'Audit\nEnforce\n'; exit 0 ;;
+      enforce-ready|enforce-no-reports|enforce-foreign-reports) printf 'Audit\n\n'; exit 0 ;;
+    esac
+    exit 0 ;;
+  # Report RESULTS name the policy that produced them, so evidence can be bound
+  # to the reviewed policy set instead of counted.
   *"get policyreports"*)
-    if [[ "$scenario" == enforce-ready ]]; then printf 'policyreport/one\n'; fi
+    case "$scenario" in
+      enforce-ready|enforce-rule-enforcing|enforce-already) printf 'alpha\nbeta\n' ;;
+      enforce-foreign-reports) printf 'some-unrelated-policy\n' ;;
+    esac
     exit 0 ;;
   *"wait "*) exit 0 ;;
   *"apply -f"*)
@@ -776,15 +1019,28 @@ case "$args" in
     done
     if [[ -f "$target" ]]; then
       grep -h 'cidr:' "$target" 2>/dev/null | sed 's/^/CIDR /' >>"${KYVERNO_STUB_LOG:-/dev/null}" || true
+      # What was APPLIED, not what was announced: the recorded action fields are
+      # how a test can tell a demotion that shipped the fail-open bytes from one
+      # that shipped the enforcing bytes and printed the fail-open message.
+      grep -hE '(failurePolicy|failureAction):' "$target" 2>/dev/null |
+        sed -E 's/^[[:space:]]*/ACTION /' >>"${KYVERNO_STUB_LOG:-/dev/null}" || true
     fi
     if [[ -n "${KYVERNO_STUB_FAIL_PHASE:-}" && "$args" == *"phase-${KYVERNO_STUB_FAIL_PHASE}.yaml"* ]]; then
       echo 'Error from server: simulated apply failure' >&2; exit 1; fi
+    # Ctrl-C / a supervisor TERM / a closed session, arriving mid-transaction.
+    # bash defers the signal until this command returns, so the installer takes
+    # it exactly between two applies — the state the handler exists for.
+    if [[ -n "${KYVERNO_STUB_SIGNAL_PHASE:-}" && "$args" == *"phase-${KYVERNO_STUB_SIGNAL_PHASE}.yaml"* ]]; then
+      kill -TERM "$PPID" 2>/dev/null || true; fi
     printf 'applied\n'; exit 0 ;;
   *"delete "*) printf 'deleted\n'; exit 0 ;;
   *"get validatingwebhookconfiguration"*|*"get mutatingwebhookconfiguration"*)
     if [[ "$scenario" == residue ]]; then printf 'validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg\n'; fi
     exit 0 ;;
-  *"get customresourcedefinition"*) exit 0 ;;
+  *"get customresourcedefinition"*)
+    if [[ "$scenario" == residue-crd ]]; then
+      printf 'customresourcedefinition.apiextensions.k8s.io/clusterpolicies.kyverno.io\n'; fi
+    exit 0 ;;
 esac
 echo "stub kubectl: unhandled args: $args" >&2
 exit 99
@@ -830,8 +1086,12 @@ class InstallerGuardTests(unittest.TestCase):
                     "inventory.namespaced=11",
                     "inventory.cluster-scoped.names=" + SYNTHETIC_CLUSTER_SCOPED,
                     "runtime.webhooks.label=webhook.kyverno.io/managed-by=kyverno",
-                    "runtime.webhooks.validating=kyverno-resource-validating-webhook-cfg",
-                    "runtime.webhooks.mutating=kyverno-resource-mutating-webhook-cfg",
+                    # TWO names per kind, deliberately: with one, a sweep that
+                    # only ever removed the first entry would look complete.
+                    "runtime.webhooks.validating=kyverno-resource-validating-webhook-cfg,"
+                    "kyverno-policy-validating-webhook-cfg",
+                    "runtime.webhooks.mutating=kyverno-resource-mutating-webhook-cfg,"
+                    "kyverno-policy-mutating-webhook-cfg",
                     "",
                 ]
             ),
@@ -905,6 +1165,67 @@ class InstallerGuardTests(unittest.TestCase):
 
     def _invocations(self):
         return (self.base / "invocations.log").read_text(encoding="utf-8").splitlines()
+
+    def _deletes(self):
+        return [line for line in self._invocations() if " delete " in line]
+
+    def _applied_actions(self):
+        """The policy-action lines of every file the stub was asked to apply.
+
+        Asserting a mode's MESSAGE proves only that it reached the message. This
+        is what it actually sent.
+        """
+
+        return [
+            line[len("ACTION ") :]
+            for line in self._invocations()
+            if line.startswith("ACTION ")
+        ]
+
+    @contextlib.contextmanager
+    def _render_case(self, text, stage="report-only", **lock_overrides):
+        """Drive the installer against a hand-built render, lock re-derived.
+
+        The digest and inventory guards run FIRST, so a behavioural probe of any
+        later guard has to present bytes the lock accepts — otherwise the test
+        would pass by dying at the digest comparison and prove nothing about the
+        guard it was written for. The lock is restored unconditionally.
+        """
+
+        path = self.base / "render-case.yaml"
+        path.write_text(text, encoding="utf-8")
+        lock = self.repo / "kubernetes" / "platform" / "admission-install" / "render.lock"
+        original = lock.read_text(encoding="utf-8")
+        overrides = dict(lock_overrides)
+        overrides.setdefault(
+            stage + ".sha256", hashlib.sha256(text.encode("utf-8")).hexdigest()
+        )
+        overrides.setdefault(
+            stage + ".objects", str(len(re.findall(r"(?m)^kind:", text)))
+        )
+        rewritten = []
+        for line in original.splitlines():
+            key = line.split("=", 1)[0]
+            if key in overrides:
+                line = key + "=" + overrides.pop(key)
+            rewritten.append(line)
+        rewritten.extend(key + "=" + value for key, value in overrides.items())
+        lock.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        try:
+            yield str(path)
+        finally:
+            lock.write_text(original, encoding="utf-8")
+
+    @contextlib.contextmanager
+    def _versions_case(self, old, new):
+        versions = self.repo / "versions.env"
+        original = versions.read_text(encoding="utf-8")
+        self.assertIn(old, original, "the synthetic versions.env changed shape")
+        versions.write_text(original.replace(old, new), encoding="utf-8")
+        try:
+            yield
+        finally:
+            versions.write_text(original, encoding="utf-8")
 
     # --- the accepted shapes, so every refusal below is load-bearing ---------
 
@@ -1240,18 +1561,518 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("demoted to stage report-only", completed.stdout)
         self.assertEqual(
-            [line for line in self._invocations() if " delete " in line],
+            self._deletes(),
             [],
             "a failed promotion must not delete the installation",
         )
+        # And the automatic recovery must have applied the FAIL-OPEN bytes, not
+        # merely announced them: this is the same path --demote takes by hand.
+        actions = self._applied_actions()
+        self.assertIn("failurePolicy: Ignore", actions)
+        self.assertIn("failureAction: Audit", actions)
         journal.unlink()
 
     def test_demote_reapplies_the_report_only_bytes(self):
         completed = self._run("--demote")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("the webhook is fail-open", completed.stdout)
+        self.assertEqual(self._deletes(), [])
+
+    def test_demote_applies_the_fail_open_bytes_and_not_the_enforcing_ones(self):
+        """`--demote` is the documented undo for stage 2 AND the automatic
+        recovery from a failed promotion, so it is the emergency de-escalation
+        path. Asserting its exit code, its message, and that it deleted nothing
+        never looks at WHAT IT APPLIED: pointed at the enforcing render it would
+        ship the fail-CLOSED bytes and still print "the webhook is fail-open".
+        """
+
+        completed = self._run("--demote")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        actions = self._applied_actions()
+        self.assertTrue(actions, "the demotion applied no policy-action bytes at all")
+        self.assertIn("failurePolicy: Ignore", actions)
+        self.assertIn("failureAction: Audit", actions)
+        self.assertNotIn("failurePolicy: Fail", actions)
+        self.assertNotIn("failureAction: Enforce", actions)
+
+    # --- the refusals, driven by INPUT rather than by the source text --------
+    #
+    # Every guard below was previously "pinned" by grepping the installer for
+    # its own die message. That kills a mutant which DELETES the block — the
+    # string goes with it — and survives one that replaces the condition with a
+    # constant that never matches, or that deletes the CALL SITE while leaving
+    # the function intact. These feed the input that should trip each guard.
+
+    WEBHOOK_DOCUMENT = (
+        "apiVersion: admissionregistration.k8s.io/v1\n"
+        "kind: ValidatingWebhookConfiguration\n"
+        "metadata:\n  name: kyverno-resource-validating-webhook-cfg\n"
+    )
+
+    def test_an_enforcing_render_is_refused_under_the_report_only_stage(self):
+        # The stage is a property of the BYTES, not of the flag. This is the
+        # guard that caught the stage-1-fail-closed mutant, and it had no test
+        # of its own feeding it a render that should trip it.
+        with self._render_case(SYNTHETIC_ENFORCE_RENDER) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("still contains an Enforce rule action", completed.stderr)
+
+    def test_a_fail_open_render_is_refused_under_the_enforce_stage(self):
+        with self._render_case(SYNTHETIC_RENDER, stage="enforce") as rendered:
+            completed = self._run(
+                "--stage",
+                "enforce",
+                "--plan",
+                KYVERNO_STUB_RENDER_ENFORCE=rendered,
+                KYVERNO_STUB_SCENARIO="enforce-ready",
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("declares no fail-closed webhook policy", completed.stderr)
+
+    def test_a_render_missing_a_lockout_exclusion_is_refused(self):
+        for namespace in LOCKOUT_NAMESPACES:
+            text = SYNTHETIC_RENDER.replace(
+                "[*/*,{},*]".format(namespace), "[*/*,some-tenant,*]"
+            )
+            with self._render_case(text) as rendered:
+                completed = self._run(
+                    "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+                )
+            with self.subTest(namespace=namespace):
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "does not filter the {} namespace".format(namespace),
+                    completed.stderr,
+                )
+
+    def test_a_render_whose_selector_is_an_inclusion_is_refused(self):
+        # An inclusion list is fail-open for every namespace created later.
+        text = SYNTHETIC_RENDER.replace('"operator":"NotIn"', '"operator":"In"')
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("is not a NotIn exclusion", completed.stderr)
+
+    def test_a_render_that_declares_a_webhook_configuration_is_refused(self):
+        text = SYNTHETIC_RENDER + "---\n" + self.WEBHOOK_DOCUMENT
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("webhook registration is the controller's act", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+
+    def test_a_render_that_carries_a_secret_is_refused(self):
+        text = SYNTHETIC_RENDER + (
+            "---\napiVersion: v1\nkind: Secret\nmetadata:\n"
+            "  name: kyverno-svc-tls\n  namespace: kyverno\n"
+        )
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("this install carries no credential", completed.stderr)
+
+    def test_a_render_with_an_unclassified_kind_is_refused(self):
+        text = SYNTHETIC_RENDER + (
+            "---\napiVersion: batch/v1\nkind: CronJob\nmetadata:\n"
+            "  name: sweeper\n  namespace: kyverno\n"
+        )
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unclassified kind: CronJob", completed.stderr)
+
+    def test_an_unreviewed_cluster_scoped_object_in_the_render_is_refused(self):
+        text = SYNTHETIC_RENDER + (
+            "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\n"
+            "metadata:\n  name: kyverno-extra\n"
+        )
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "render has 4 cluster-scoped objects; render.lock records 3",
+            completed.stderr,
+        )
+
+    def test_a_render_whose_documents_do_not_split_is_refused(self):
+        # Two objects concatenated with no separator: the render counts two
+        # `kind:` lines and the splitter produces one document, so an object
+        # would be applied that no journal entry could ever roll back.
+        text = SYNTHETIC_RENDER + (
+            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n"
+            "  name: kyverno-extra\n  namespace: kyverno\n"
+        )
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("journaled 14 identities for 15 rendered objects", completed.stderr)
+
+    def test_an_inventory_name_absent_from_the_render_is_refused(self):
+        # A ghost name in the reviewed inventory would otherwise shrink the
+        # absence probe to objects that happen to exist in the bytes.
+        with self._render_case(
+            SYNTHETIC_RENDER,
+            **{
+                "inventory.cluster-scoped.names": SYNTHETIC_CLUSTER_SCOPED
+                + ",ClusterPolicy/ghost"
+            }
+        ) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "reviewed inventory names ClusterPolicy/ghost but the render does not "
+            "contain it",
+            completed.stderr,
+        )
+
+    def test_a_self_inconsistent_lock_is_refused(self):
+        # The object-count comparison can only disagree with the digest on a
+        # lock somebody hand-edited — which is precisely the case a reviewer
+        # regenerating one field and not the other produces.
+        with self._render_case(SYNTHETIC_RENDER, **{"report-only.objects": "13"}) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "render has 14 objects; render.lock records 13", completed.stderr
+        )
+
+    def test_a_renderer_that_did_not_produce_the_lock_is_refused(self):
+        # versions.env and render.lock agreeing is a separate property from the
+        # ambient tool matching versions.env; both are guards, and this is the
+        # one that catches a lock regenerated by a different kustomize.
+        with self._versions_case("KUSTOMIZE_VERSION=v5.8.1", "KUSTOMIZE_VERSION=v5.9.0"):
+            completed = self._run(
+                "--stage",
+                "report-only",
+                "--plan",
+                KYVERNO_STUB_KUSTOMIZE_VERSION="v5.9.0",
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("render.lock digests were produced by v5.8.1", completed.stderr)
+
+    def test_a_pin_carrying_the_all_zero_sentinel_digest_is_refused(self):
+        # The guard that stops today's committed sentinel from being installed.
+        sentinel = PINNED_IMAGE.rsplit("@", 1)[0] + "@sha256:" + "0" * 64
+        with self._versions_case(
+            "KYVERNO_ADMISSION_CONTROLLER_IMAGE=" + PINNED_IMAGE,
+            "KYVERNO_ADMISSION_CONTROLLER_IMAGE=" + sentinel,
+        ):
+            completed = self._run("--stage", "report-only", "--plan")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("still carries the all-zero sentinel digest", completed.stderr)
+
+    def test_a_bound_server_inside_the_sentinel_range_is_refused(self):
+        # The substitution's own failure mode, and the reason the survival check
+        # is not decorative: a server that IS the RFC 5737 sentinel makes the
+        # substitution a no-op and would close the namespace against an address
+        # that matches nothing.
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--plan",
+            KYVERNO_STUB_KUBECONFIG_SERVER="https://192.0.2.0:6443",
+            KYVERNO_INSTALL_SERVER="https://192.0.2.0:6443",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "the fail-closed sentinel destination survived substitution",
+            completed.stderr,
+        )
+
+    def test_a_render_that_already_names_the_bound_server_is_refused(self):
+        # The post-substitution count fires when the render ALREADY carries the
+        # bound address somewhere nobody reviewed as an API-server flow.
+        text = SYNTHETIC_RENDER.replace(
+            "  name: kyverno-public-https\n  namespace: kyverno\n",
+            "  name: kyverno-public-https\n  namespace: kyverno\nspec:\n"
+            "  egress:\n  - to:\n    - ipBlock:\n        cidr: 198.51.100.7/32\n",
+        )
+        with self._render_case(text) as rendered:
+            completed = self._run(
+                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "substituted render carries 3 API-server destinations; expected 2",
+            completed.stderr,
+        )
+
+    def test_a_server_whose_octets_are_out_of_range_is_refused(self):
+        # `[0-9]{1,3}` accepts 999.999.999.999 and would substitute it into the
+        # NetworkPolicies as a destination.
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--plan",
+            KYVERNO_STUB_KUBECONFIG_SERVER="https://999.999.999.999:6443",
+            KYVERNO_INSTALL_SERVER="https://999.999.999.999:6443",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must name an IPv4 address", completed.stderr)
+
+    # --- the journal is untrusted input --------------------------------------
+
+    def test_rollback_refuses_a_journal_naming_a_foreign_cluster_scoped_object(self):
+        """The journal outlives the process by design, so it is the one input to
+        a privileged delete that something other than an apply can author. Read
+        verbatim, `--rollback` is "delete whatever this file names"."""
+
+        journal = self.base / "foreign.journal"
+        journal.write_text(
+            "Namespace||kube-system\nClusterRole||cluster-admin\n", encoding="utf-8"
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("render.lock's reviewed inventory does not contain", completed.stderr)
         self.assertEqual(
-            [line for line in self._invocations() if " delete " in line], []
+            self._deletes(),
+            [],
+            "a refused rollback must not have deleted a prefix of the journal first",
+        )
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_naming_another_namespace(self):
+        journal = self.base / "foreign-namespaced.journal"
+        journal.write_text(
+            "ClusterPolicy||alpha\nConfigMap|kube-system|kube-root-ca.crt\n",
+            encoding="utf-8",
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("outside the kyverno namespace", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_malformed_journal(self):
+        journal = self.base / "malformed.journal"
+        journal.write_text("Namespace||kyverno|extra\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("is not kind|namespace|name", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_a_plan_never_writes_the_operators_journal(self):
+        # A mode that mutates nothing on the cluster must not truncate the
+        # record of an earlier attempt either.
+        journal = self.base / "preserved.journal"
+        journal.write_text("Namespace||kyverno\n", encoding="utf-8")
+        completed = self._run(
+            "--stage", "report-only", "--plan", "--journal", str(journal)
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertEqual(journal.read_text(encoding="utf-8"), "Namespace||kyverno\n")
+        journal.unlink()
+
+    def test_an_apply_refuses_a_symlinked_journal(self):
+        # The journal path is a write primitive: this process truncates it and
+        # then writes the identities a later --rollback will delete.
+        target = self.base / "journal-symlink-target"
+        target.write_text("", encoding="utf-8")
+        link = self.base / "journal-symlink"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target)
+        try:
+            completed = self._run(
+                "--stage", "report-only", "--apply", "--journal", str(link)
+            )
+        finally:
+            link.unlink()
+            target.unlink()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("journal path is a symlink", completed.stderr)
+
+    def test_an_interrupted_apply_rolls_back_rather_than_leaving_a_partial_cluster(self):
+        """`trap cleanup EXIT` swept the work directory and nothing else, so a
+        Ctrl-C, a supervisor TERM, or a closed session between two phases left a
+        half-installed cluster with no automatic undo."""
+
+        journal = self.base / "interrupted.journal"
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--apply",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SIGNAL_PHASE="network",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("received SIGTERM during the transaction", completed.stderr)
+        self.assertIn("interrupted attempt rolled back", completed.stderr)
+        deletes = self._deletes()
+        self.assertTrue(
+            any("delete Namespace kyverno" in line for line in deletes),
+            "an interrupted attempt must undo the namespace it created",
+        )
+        journal.unlink()
+
+    def test_an_interrupted_apply_demands_recovery_when_residue_remains(self):
+        # The half that matters more: an interrupt whose rollback cannot PROVE
+        # it finished must not exit quietly on an unproven state.
+        journal = self.base / "interrupted-residue.journal"
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--apply",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SIGNAL_PHASE="network",
+            KYVERNO_STUB_SCENARIO="residue",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("RECOVERY REQUIRED", completed.stderr)
+        self.assertIn(str(journal), completed.stderr)
+        journal.unlink()
+
+    def test_rollback_sweeps_every_reviewed_runtime_webhook_name(self):
+        journal = self.base / "sweep.journal"
+        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        deletes = self._deletes()
+        for kind, names in (
+            (
+                "validatingwebhookconfiguration",
+                (
+                    "kyverno-resource-validating-webhook-cfg",
+                    "kyverno-policy-validating-webhook-cfg",
+                ),
+            ),
+            (
+                "mutatingwebhookconfiguration",
+                (
+                    "kyverno-resource-mutating-webhook-cfg",
+                    "kyverno-policy-mutating-webhook-cfg",
+                ),
+            ),
+        ):
+            for name in names:
+                with self.subTest(name=name):
+                    self.assertTrue(
+                        any(
+                            "delete {} {}".format(kind, name) in line
+                            for line in deletes
+                        ),
+                        "the reviewed runtime webhook sweep lost " + name,
+                    )
+            with self.subTest(label=kind):
+                self.assertTrue(
+                    any(
+                        "delete {} -l webhook.kyverno.io/managed-by=kyverno".format(kind)
+                        in line
+                        for line in deletes
+                    ),
+                    "the label sweep is the backstop when a name changes upstream",
+                )
+        journal.unlink()
+
+    def test_rollback_fails_closed_when_a_kyverno_crd_remains(self):
+        journal = self.base / "crd-residue.journal"
+        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        completed = self._run(
+            "--rollback", "--journal", str(journal), KYVERNO_STUB_SCENARIO="residue-crd"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("kyverno.io CRD(s) remain", completed.stderr)
+        journal.unlink()
+
+    def test_rollback_fails_closed_when_the_namespace_remains(self):
+        journal = self.base / "namespace-residue.journal"
+        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        completed = self._run(
+            "--rollback",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SCENARIO="namespace-present",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("the kyverno namespace remains", completed.stderr)
+        journal.unlink()
+
+    # --- break-glass ---------------------------------------------------------
+
+    def test_break_glass_does_not_require_an_addressable_server(self):
+        """The IPv4 constraint exists for the NetworkPolicy substitution, and
+        break-glass applies no NetworkPolicy. Inheriting it let the emergency
+        path refuse at exactly the moment the cluster was refusing writes."""
+
+        completed = self._run(
+            "--break-glass",
+            KYVERNO_STUB_KUBECONFIG_SERVER="https://control-plane.invalid:6443",
+            KYVERNO_INSTALL_SERVER="https://control-plane.invalid:6443",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("the API server no longer calls admission", completed.stdout)
+
+    def test_break_glass_still_binds_the_target_identity(self):
+        # Relaxing the address requirement must not relax WHICH cluster.
+        completed = self._run(
+            "--break-glass", KYVERNO_STUB_KUBECONFIG_SERVER="https://203.0.113.9:6443"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("targets a different server", completed.stderr)
+
+    def test_break_glass_proves_the_webhooks_are_actually_gone(self):
+        # Every deletion in the sweep is best-effort by design, so success has
+        # to be a proven absence: a permission error would otherwise produce
+        # exit 0 and a false recovery instruction while fail-closed hooks stay.
+        completed = self._run("--break-glass", KYVERNO_STUB_SCENARIO="residue")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("break-glass did NOT clear admission", completed.stderr)
+
+    # --- the promotion gate reads the authoritative field --------------------
+
+    def test_enforce_is_refused_when_a_policy_already_enforces(self):
+        completed = self._run(
+            "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-already"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("the cluster is not in the report-only stage", completed.stderr)
+
+    def test_enforce_is_refused_when_the_authoritative_rule_action_enforces(self):
+        """`.spec.validationFailureAction` is the DEPRECATED field, and
+        report-only/kustomization.yaml says so: Kyverno prefers the rule's own
+        `validate.failureAction`. A cluster reading `Audit` at the spec level
+        with every rule enforcing is exactly what the promotion gate must not
+        accept as proof that stage 1 is what is running."""
+
+        completed = self._run(
+            "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-rule-enforcing"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "authoritative validate.failureAction is Enforce", completed.stderr
+        )
+
+    def test_enforce_is_refused_when_no_report_names_a_reviewed_policy(self):
+        # A stale report from something else entirely is not evidence that this
+        # policy set was ever evaluated.
+        completed = self._run(
+            "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-foreign-reports"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "no policy report naming a reviewed policy", completed.stderr
         )
 
 

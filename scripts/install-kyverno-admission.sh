@@ -36,7 +36,10 @@
 #                     runs, and any failure rolls back exactly the journal —
 #                     including the cluster-scoped objects and the webhook
 #                     configurations Kyverno registers for itself, which are not
-#                     in the render at all. Rollback then proves zero residue.
+#                     in the render at all. The journal is UNTRUSTED input on
+#                     the way back in: every identity in it is proven to be one
+#                     this install could have created, over the whole file,
+#                     before the first delete. Rollback then proves zero residue.
 #
 # STAGES — the rollout is two reviewed steps and cannot be collapsed into one.
 #
@@ -77,6 +80,10 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 INSTALL_ROOT='kubernetes/platform/admission-install'
 LOCK_FILE="${REPO_ROOT}/${INSTALL_ROOT}/render.lock"
 VERSIONS_FILE="${REPO_ROOT}/versions.env"
+# The one namespace this transaction is allowed to create anything in. Rollback
+# validates every namespaced journal entry against it, so a journal cannot name
+# an object in kube-system and have it deleted.
+INSTALL_NAMESPACE='kyverno'
 
 # The pins this install is bound to. They are platform-lane values and this
 # script never invents them: their absence is the reason an apply is refused
@@ -192,6 +199,11 @@ case "$MODE" in
     # undoable by hand. A temporary path would be swept by the exit trap exactly
     # when it is needed most.
     [[ -n "$JOURNAL" ]] || die '--apply requires --journal <file> so the transaction record survives the process'
+    # The journal is truncated and then written by this process, so the path
+    # itself is a write primitive: a symlink there would redirect the write, and
+    # a non-empty file would mean an earlier attempt's record is about to be
+    # destroyed. Both are refusals, not warnings.
+    [[ ! -L "$JOURNAL" ]] || die "journal path is a symlink and will not be written through: ${JOURNAL}"
     [[ ! -s "$JOURNAL" ]] || die "journal already records an attempt: ${JOURNAL}"
     ;;&
   *)
@@ -397,7 +409,13 @@ verify_stage_actions() {
 # context the kubeconfig does not define, or a server the context does not name
 # all stop here: an admission install that mutates "whatever kubectl was
 # pointing at" is not a reviewed change.
-bind_target() {
+#
+# This half is the TARGET IDENTITY and nothing else, so every mode that talks to
+# a cluster can demand it. The NetworkPolicy destination is derived separately
+# below, because only the modes that APPLY the network contract need it — and
+# requiring an IPv4 server for the others would let an unrelated constraint
+# refuse the emergency path.
+bind_target_identity() {
   [[ -n "${KUBECONFIG:-}" ]] || die 'KUBECONFIG must name the reviewed kubeconfig'
   [[ -f "${KUBECONFIG}" ]] || die "KUBECONFIG does not exist: ${KUBECONFIG}"
   [[ -n "${KYVERNO_INSTALL_CONTEXT:-}" ]] || die 'KYVERNO_INSTALL_CONTEXT must name the exact context'
@@ -410,18 +428,28 @@ bind_target() {
   [[ -n "$server" ]] || die "the kubeconfig context ${KYVERNO_INSTALL_CONTEXT} names no server"
   [[ "$server" == "${KYVERNO_INSTALL_SERVER}" ]] || \
     die "context ${KYVERNO_INSTALL_CONTEXT} targets a different server than KYVERNO_INSTALL_SERVER"
+}
 
-  # The reviewed server value is also the only source for the NetworkPolicy
-  # destination, so the address is never typed, never guessed, and never
-  # diverges from the cluster actually being installed into.
-  local host=''
-  host="${server#*://}"
+# The reviewed server value is also the only source for the NetworkPolicy
+# destination, so the address is never typed, never guessed, and never diverges
+# from the cluster actually being installed into. Each octet is bounded: a
+# `[0-9]{1,3}` shape accepts 999.999.999.999, which is not an address at all and
+# would be substituted into the NetworkPolicies as one.
+bind_apiserver_cidr() {
+  local host="${KYVERNO_INSTALL_SERVER#*://}"
   host="${host%%:*}"
   host="${host#[}"
   host="${host%]}"
-  [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || \
+  local octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  local ipv4="^${octet}\\.${octet}\\.${octet}\\.${octet}\$"
+  [[ "$host" =~ $ipv4 ]] || \
     die "the reviewed server must name an IPv4 address, not ${host}; a name cannot be turned into a NetworkPolicy destination"
   APISERVER_CIDR="${host}/32"
+}
+
+bind_target() {
+  bind_target_identity
+  bind_apiserver_cidr
 }
 
 KUBECTL() {
@@ -523,7 +551,8 @@ probe_absence() {
 # the evidence stage 1 exists to produce: controllers that came up, policies
 # that loaded, and reports that prove the engine actually evaluated traffic.
 require_report_only_evidence() {
-  local available='' entry='' name='' action='' reports=''
+  local available='' entry='' name='' action='' reports='' inventory=''
+  local rule_actions='' rule_action='' report_policy='' reviewed_reports=0
   available="$(KUBECTL -n kyverno get deployment -l app.kubernetes.io/part-of=kyverno \
     -o 'jsonpath={range .items[*]}{.metadata.name}={.status.availableReplicas}{"\n"}{end}' 2>/dev/null || true)"
   [[ -n "$available" ]] || \
@@ -536,35 +565,110 @@ require_report_only_evidence() {
 
   local names=''
   names="$(lock_value inventory.cluster-scoped.names)"
+  inventory=",${names},"
   local IFS=','
   for entry in $names; do
     [[ "${entry%%/*}" == 'ClusterPolicy' ]] || continue
     name="${entry#*/}"
+    unset IFS
+    # `.spec.validationFailureAction` is the DEPRECATED spec-level field, and
+    # report-only/kustomization.yaml documents it as non-authoritative in as
+    # many words: Kyverno prefers the rule's own `validate.failureAction`, so a
+    # policy can read `Audit` at the spec level while every rule enforces.
+    # Proving "the cluster is in report-only" from the deprecated field alone
+    # would accept exactly that cluster. BOTH are read, and the rule-level one
+    # is the one that decides.
     action="$(KUBECTL get clusterpolicy "$name" -o 'jsonpath={.spec.validationFailureAction}' 2>/dev/null || true)"
     [[ -n "$action" ]] || die "stage report-only did not install ClusterPolicy ${name}"
     [[ "$action" == 'Audit' ]] || \
       die "ClusterPolicy ${name} is already ${action}; the cluster is not in the report-only stage"
+    rule_actions="$(KUBECTL get clusterpolicy "$name" \
+      -o 'jsonpath={range .spec.rules[*]}{.validate.failureAction}{"\n"}{end}' 2>/dev/null || true)"
+    while IFS= read -r rule_action; do
+      # verifyImages rules carry no validate block at all, so an empty value is
+      # the expected shape for them rather than a missing answer.
+      [[ -n "$rule_action" ]] || continue
+      [[ "$rule_action" == 'Audit' ]] || \
+        die "ClusterPolicy ${name} has a rule whose authoritative validate.failureAction is ${rule_action}; the cluster is not in the report-only stage"
+    done <<<"$rule_actions"
+    IFS=','
   done
   unset IFS
 
+  # A report is evidence only if it is a report ABOUT A POLICY THIS INSTALL
+  # REVIEWED. Counting every report object in every namespace would accept a
+  # stale artifact of something else entirely as proof that stage 1 evaluated
+  # this policy set.
   reports="$(KUBECTL get policyreports.wgpolicyk8s.io,clusterpolicyreports.wgpolicyk8s.io \
-    --all-namespaces -o name 2>/dev/null | grep -c . || true)"
-  [[ "$reports" -gt 0 ]] || \
-    die 'stage report-only produced no policy report; enforcement would be promoted on unmeasured blast radius'
-  note "stage report-only evidence accepted (${reports} policy report object(s))"
+    --all-namespaces -o 'jsonpath={range .items[*]}{range .results[*]}{.policy}{"\n"}{end}{end}' 2>/dev/null || true)"
+  while IFS= read -r report_policy; do
+    [[ -n "$report_policy" ]] || continue
+    [[ "$inventory" == *",ClusterPolicy/${report_policy},"* ]] || continue
+    reviewed_reports=$((reviewed_reports + 1))
+  done <<<"$reports"
+  [[ "$reviewed_reports" -gt 0 ]] || \
+    die 'stage report-only produced no policy report naming a reviewed policy; enforcement would be promoted on unmeasured blast radius'
+  note "stage report-only evidence accepted (${reviewed_reports} reviewed-policy report result(s))"
 }
 
 # --- rollback ----------------------------------------------------------------
 
+# Prove every identity in a journal is one this install could have created,
+# BEFORE any delete runs.
+#
+# The journal is a plain text file that deliberately outlives the process, which
+# makes it the one input to a privileged `kubectl delete` that something other
+# than an apply can author. Reading it verbatim would turn `--rollback` into
+# "delete whatever this file names on the bound cluster". Provenance is
+# therefore proven rather than assumed: a cluster-scoped entry must be in
+# render.lock's reviewed `inventory.cluster-scoped.names`, and a namespaced
+# entry must live in the admission namespace, which is the only namespace this
+# transaction creates anything in.
+#
+# The WHOLE journal is validated before the FIRST delete. Validating as we go
+# would delete a valid prefix and only then discover the foreign entry — the
+# rollback would be half-done and the refusal would arrive too late to matter.
+validate_journal() {
+  local journal="$1" line='' kind='' namespace='' name='' rest='' inventory=''
+  inventory=",$(lock_value inventory.cluster-scoped.names),"
+  local -a lines=()
+  mapfile -t lines <"$journal"
+  local index=0 entries=0
+  for ((index = 0; index < ${#lines[@]}; index++)); do
+    line="${lines[index]}"
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r kind namespace name rest <<<"$line"
+    [[ -z "$rest" ]] || \
+      die "journal line $((index + 1)) is not kind|namespace|name: ${line}"
+    [[ "$kind" =~ ^[A-Za-z][A-Za-z0-9]*$ ]] || \
+      die "journal line $((index + 1)) names no kind: ${line}"
+    [[ "$name" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || \
+      die "journal line $((index + 1)) names no object: ${line}"
+    if [[ -z "$namespace" ]]; then
+      [[ "$inventory" == *",${kind}/${name},"* ]] || \
+        die "journal names cluster-scoped ${kind}/${name}, which render.lock's reviewed inventory does not contain; refusing the entire rollback without deleting anything"
+    else
+      [[ "$namespace" == "$INSTALL_NAMESPACE" ]] || \
+        die "journal names ${kind} ${namespace}/${name} outside the ${INSTALL_NAMESPACE} namespace; refusing the entire rollback without deleting anything"
+    fi
+    entries=$((entries + 1))
+  done
+  ((entries > 0)) || die "journal records no object: ${journal}"
+  note "journal validated: ${entries} identity(ies), every one inside the reviewed inventory"
+}
+
 # Remove exactly what an attempt created, in reverse order, and nothing else.
-# Every identity comes from the journal, which was written from the render's own
-# metadata after the absence probe proved none of it pre-existed — so a delete
-# here can never reach a foreign object. Kyverno's self-registered webhook
-# configurations are not in the journal (the controller writes them at runtime),
-# so they are swept separately by the reviewed names and by label.
+# Every identity is checked against render.lock's reviewed inventory (and, for
+# namespaced objects, against the admission namespace) by validate_journal
+# above before a single delete is issued — the journal is untrusted input, not a
+# trusted record, because the file can be edited by anything that can write to
+# its path. Kyverno's self-registered webhook configurations are not in the
+# journal (the controller writes them at runtime), so they are swept separately
+# by the reviewed names and by label — after the journal has been proven.
 rollback_journal() {
   local journal="$1" line='' kind='' namespace='' name=''
   [[ -f "$journal" ]] || die "journal does not exist: ${journal}"
+  validate_journal "$journal"
   remove_runtime_webhooks
   local -a entries=()
   mapfile -t entries <"$journal"
@@ -599,14 +703,24 @@ remove_runtime_webhooks() {
   done
 }
 
-# A rollback that does not prove the cluster is clean is a hope, not a rollback.
-prove_no_residue() {
-  local kind='' remaining=''
+# The webhook configurations are the piece of residue that keeps REFUSING WRITES
+# after the controller behind them is gone, so their absence is proven for every
+# path that claims to have removed them — including break-glass, whose whole
+# promise is that the API server has stopped calling admission. A best-effort
+# sweep that reports success without checking is an unproven emergency action.
+prove_no_webhook_residue() {
+  local remedy="$1" kind='' remaining=''
   for kind in validatingwebhookconfiguration mutatingwebhookconfiguration; do
     remaining="$(KUBECTL get "$kind" -o name 2>/dev/null | grep -c 'kyverno' || true)"
     [[ "$remaining" -eq 0 ]] || \
-      die "residue: ${remaining} Kyverno ${kind} object(s) remain; run --break-glass"
+      die "residue: ${remaining} Kyverno ${kind} object(s) remain; ${remedy}"
   done
+}
+
+# A rollback that does not prove the cluster is clean is a hope, not a rollback.
+prove_no_residue() {
+  local remaining=''
+  prove_no_webhook_residue 'run --break-glass'
   remaining="$(KUBECTL get customresourcedefinition -o name 2>/dev/null | grep -c '\.kyverno\.io$' || true)"
   [[ "$remaining" -eq 0 ]] || die "residue: ${remaining} kyverno.io CRD(s) remain"
   remaining="$(KUBECTL get namespace kyverno -o name 2>&1 || true)"
@@ -630,8 +744,14 @@ if [[ "$MODE" == '--break-glass' ]]; then
   # policies, and the namespace all stay, so the state is diagnosable afterwards
   # — but the API server stops calling out, and writes resume immediately.
   bind_tools
-  bind_target
+  # IDENTITY only: break-glass applies no NetworkPolicy, so demanding an IPv4
+  # server here would let a substitution constraint it does not use refuse the
+  # emergency path at exactly the moment the cluster is refusing writes.
+  bind_target_identity
   remove_runtime_webhooks
+  # The deletions above are best-effort by design (a partial sweep must not stop
+  # the rest), so success is a PROVEN absence, never an assumed one.
+  prove_no_webhook_residue 'break-glass did NOT clear admission; the API server may still be refusing writes — see the raw commands in docs/runbooks/kyverno-install.md'
   note 'break-glass complete: Kyverno webhook configurations removed; the API server no longer calls admission'
   note 'the controllers and policies remain installed and inert; diagnose before re-registering'
   exit 0
@@ -656,6 +776,12 @@ demote_to_report_only() {
   verify_lock report-only "$rendered"
   verify_stage_actions report-only "$rendered"
   substitute_endpoint "$rendered" "$bound"
+  # Verify the bytes that are actually SENT, not only the ones that were
+  # rendered. This is the emergency de-escalation path and the automatic
+  # recovery from a failed promotion: "what I checked" and "what I applied" have
+  # to be the same file, or a demotion can announce fail-open while applying the
+  # enforcing bytes.
+  verify_stage_actions report-only "$bound"
   KUBECTL apply -f "$bound" >/dev/null || \
     die 'demotion to report-only failed; run --break-glass to stop the API server calling admission'
   note 'demoted to stage report-only: the webhook is fail-open and the policies report again'
@@ -700,8 +826,14 @@ split_render "$SUBSTITUTED" "$DOCUMENTS"
 # Classify every document into exactly one phase and journal its identity. An
 # unclassified kind stops here rather than being applied in whatever order the
 # renderer happened to emit it.
-JOURNAL="${JOURNAL:-${WORK}/journal}"
-: >"$JOURNAL"
+# Only --apply may write the operator's record. A --plan mutates nothing on the
+# cluster and must not truncate the journal of an earlier attempt either: a plan
+# that silently rewrote that file would hand the next --rollback a delete
+# program the operator never authored.
+[[ "$MODE" == '--apply' ]] || JOURNAL="${WORK}/journal"
+# Created narrow: the record of what a privileged apply touched is not
+# world-writable, and the next --rollback reads it as its delete program.
+(umask 077; : >"$JOURNAL")
 for phase in "${PHASE_NAMES[@]}"; do
   : >"${WORK}/phase-${phase}.yaml"
 done
@@ -772,6 +904,28 @@ fi
 # --- the transaction ---------------------------------------------------------
 
 APPLIED=''
+# A transaction that only handles its own failures is not interrupt-safe: Ctrl-C,
+# a TERM from a supervisor, or a closed SSH session between two phases leaves a
+# half-installed cluster with nothing that knows to undo it. The EXIT trap above
+# only sweeps the work directory. These handlers roll the attempt back, and when
+# the rollback cannot PROVE it finished they say RECOVERY REQUIRED and name the
+# journal rather than exiting quietly on an unproven state.
+on_interrupt() {
+  local signal="$1"
+  trap - INT TERM HUP
+  printf 'install-kyverno-admission: received SIG%s during the transaction\n' "$signal" >&2
+  # The rollback runs in a subshell with the EXIT trap detached so a `die`
+  # inside it fails the subshell instead of tearing down this handler before it
+  # can report that recovery is required.
+  if (trap - EXIT; rollback_journal "$JOURNAL"); then
+    printf 'install-kyverno-admission: interrupted attempt rolled back; the cluster is as it was\n' >&2
+    exit 1
+  fi
+  printf 'install-kyverno-admission: RECOVERY REQUIRED: the interrupted attempt could not be proven rolled back; the journal at %s is the record — re-run --rollback --journal %s, then --break-glass if writes are failing\n' \
+    "$JOURNAL" "$JOURNAL" >&2
+  exit 1
+}
+
 transaction_failed() {
   printf 'install-kyverno-admission: phase %s failed; rolling back\n' "$1" >&2
   if [[ "$STAGE" == 'enforce' ]]; then
@@ -781,6 +935,10 @@ transaction_failed() {
   fi
   exit 1
 }
+
+trap 'on_interrupt INT' INT
+trap 'on_interrupt TERM' TERM
+trap 'on_interrupt HUP' HUP
 
 for phase in "${PHASE_NAMES[@]}"; do
   file="${WORK}/phase-${phase}.yaml"
