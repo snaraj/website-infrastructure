@@ -119,6 +119,45 @@ delivery-lane changes never edit platform-lane files, and platform
 decisions (the safety invariants above, including PLAT-DEC-001) are
 referenced from here, never restated or reworded.
 
+**Lane-surface rulings (owner, 2026-08-12).** Load-bearing surfaces the two
+lists above never named, each assigned once so the question stops being
+re-adjudicated per pull request:
+
+- `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
+  docs. `bootstrap.sh` embeds the inventory and desired-state assertions
+  covering the delivery-owned `kubernetes/flux-system/**` manifests, and
+  that model is the mechanism that proves the cluster matches them. Its
+  live-apply custody surface stays PLATFORM-owned and stays blocked: the
+  `--apply-controllers` / `--apply-sync` / `--verify` stop, the trusted
+  reviewed-blob launcher requirement, and the credential-custody
+  preconditions. The split is by responsibility, not by line range — a
+  delivery-lane change may correct what the model asserts about reviewed
+  state, never what the stop permits.
+- `policies/**` — DELIVERY, covering `policies/conftest/**`,
+  `policies/kyverno/**`, and `policies/release-conftest/**`: these are the
+  executable expression of the gates this lane already owns. One caveat:
+  a change to ADMISSION policy semantics needs peer/platform validation
+  before enforcement is enabled anywhere.
+- `.githooks/**` — DELIVERY: the pre-push hook implements delivery-lane
+  requirements 2 and 3. Changing what it PERMITS is a security-control
+  change and needs an owner decision, not a lane call (issue #83).
+- `kubernetes/flux-system/**` — DELIVERY: the GitOps desired state this
+  lane authors, and what the reviewed-state model above pins.
+- `kubernetes/websites/*/release.yaml` — DELIVERY when changed by a
+  reviewed `scripts/promote-image.sh` pull request, under the owner's
+  standing deploy grant. That promotion surface is the only part of
+  `kubernetes/**` outside `kubernetes/flux-system/**` this lane writes;
+  `kubernetes/platform/**`, `kubernetes/reconciliation/**`, and the
+  remaining `kubernetes/websites/**` files are unchanged by this ruling
+  and stay platform-adjacent — reach them only through the rule below.
+
+**A path in neither list is not implicitly delivery.** Silence is not
+permission. Declare the crossing in the pull request body before touching
+the path, obtain an owner or peer ruling, and then — this part is an
+obligation, not a courtesy — amend the rulings above with the answer, in
+the same pull request or the next one you open. A ruling left in a review
+thread is a question the next agent has to ask again.
+
 Delivery-lane requirements, explicit and numbered:
 
 1. Zero spend, no external processors: checks run with pinned local tools
