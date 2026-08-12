@@ -405,6 +405,47 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
                 self.assertIn("  validationFailureAction: Enforce", lines)
                 self.assertIn("    failurePolicy: Fail", lines)
 
+    def test_no_connector_policy_short_circuits_rule_processing(self):
+        """``applyRules: One`` re-opens the identity bypass in one line.
+
+        Kyverno processes rules in declaration order and, under
+        ``spec.applyRules: One``, stops after the FIRST rule that matches and
+        produces a result. The identity-root bypass carries a RESOLVED token
+        revision by construction, so it satisfies the token-revision rule — and
+        if that rule ran first under a short circuit, the identity rule would
+        never be reached. It is a recognised field, so the CLI schema-validates
+        it happily; every engine row, this battery and the fixtures stay green.
+        Two independent pins: the value here, and the declaration ORDER below.
+        """
+
+        for policy in (self.READINESS_POLICY, self.STORAGE_POLICY):
+            for line in policy.read_text(encoding="utf-8").split("\n"):
+                if line.startswith("  applyRules:"):
+                    with self.subTest(policy=policy.name):
+                        self.assertEqual(
+                            line,
+                            "  applyRules: All",
+                            "{} must evaluate every rule; a short circuit "
+                            "skips whichever rule is declared later".format(
+                                policy.name
+                            ),
+                        )
+
+    def test_the_identity_rule_is_declared_first(self):
+        """So a short circuit would fail safe rather than open."""
+
+        declared = [
+            line[len(RULE_PREFIX):]
+            for line in self.READINESS_POLICY.read_text(encoding="utf-8").split("\n")
+            if line.startswith(RULE_PREFIX)
+        ]
+        self.assertEqual(
+            declared[:1],
+            ["require-connector-identity-tuple"],
+            "the identity root must be evaluated before any rule a bypass "
+            "object can satisfy",
+        )
+
     def test_both_connector_policies_run_at_admission(self):
         """``admission: false`` disables EVERY rule in the policy.
 

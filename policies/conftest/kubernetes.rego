@@ -855,6 +855,23 @@ deny contains msg if {
   msg := sprintf("volume %s is outside the exact ephemeral/credential volume allowlist for namespace %s", [volume.name, namespace])
 }
 
+# `volumes: null` is a STORED null, not an absent key: object.get returns that
+# null rather than its default and `some volume in null` iterates nothing, so
+# every volume denial above silently stops firing. CEL's has() is true on an
+# explicitly-null field and .all() errors on it, so Kyverno refuses the same
+# object — the one shape in a 16-shape sweep where the two engines disagreed.
+# Refusing every non-list `volumes` here closes that divergence at the only
+# place it can be closed without weakening anything: normalizing the field to
+# an empty list instead would ALSO skip the walk of a map-shaped value, which
+# `some volume in` does iterate today. Scoped to the tenant namespaces because
+# that is exactly where Kyverno's two volume rules match.
+deny contains msg if {
+  is_workload
+  restricted_namespace
+  not is_array(object.get(pod_spec, "volumes", []))
+  msg := sprintf("%s %s/%s declares a non-list volumes field", [input.kind, input.metadata.namespace, input.metadata.name])
+}
+
 # Only the two reviewed connector Deployments may exist in cloudflare-public,
 # so an invented third connector cannot claim a site's identity.
 deny contains msg if {

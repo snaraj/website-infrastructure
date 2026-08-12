@@ -17,6 +17,7 @@ resources:
   - ../../fixtures/deny/connector-token-cross-swap-naranjo.yaml
   - ../../fixtures/deny/connector-token-cross-swap-lidersea.yaml
   - ../../fixtures/deny/tunnel-mount-superseded-token.yaml
+  - ../../fixtures/deny/connector-null-volumes.yaml
   - ../../fixtures/kyverno-admission/connector-readiness-allow.yaml
   - ../../fixtures/kyverno-admission/connector-readiness-deny.yaml
   - ../../fixtures/allow/two-connector-networking.yaml
@@ -150,6 +151,15 @@ results:
   - policy: disallow-undiscovered-storage
     rule: allow-only-tunnel-token-volume
     resources: [cloudflared-superseded-token]
+    kind: Pod
+    result: fail
+  # An explicitly-null `volumes`: CEL's has() is true on it and .all() errors,
+  # so this engine refuses it. Conftest refuses it too, by an explicit non-list
+  # rule rather than by silently iterating nothing — the one shape where the
+  # two engines used to disagree.
+  - policy: disallow-undiscovered-storage
+    rule: allow-only-tunnel-token-volume
+    resources: [cloudflared-null-volumes]
     kind: Pod
     result: fail
   # P1-1: connector rollout must be POSSIBLE for the two renamed identities...
