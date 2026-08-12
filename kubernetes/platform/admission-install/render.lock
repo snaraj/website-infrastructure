@@ -25,6 +25,30 @@
 render.tool.name=kustomize
 render.tool.version=v5.8.1
 
+# STAGE-2 AUTHORIZATION — the promotion to enforce is NOT authorized.
+#
+# Authorization is a REVIEWED DECISION, recorded here rather than remembered,
+# because a document that says "not authorized" is weaker than a script that
+# refuses. The installer reads this before anything else: `--stage enforce`
+# with `--apply` is refused outright and names the blockers, and `--plan`
+# (which mutates nothing and is how the promotion gate is rehearsed and tested)
+# prints the same refusal as a warning and continues.
+#
+# Three findings block it, each tracked, each independently reproduced:
+#   #99   both require-signed-* policies render Audit with no rule-level action
+#         in the enforce root, so stage 2 does not enforce image signatures
+#   #100  the engine filters every ReplicaSet, so the release-readiness
+#         ownership boundary is inert at admission
+#   #102  the promotion has no canary and its evidence is not bound to the
+#         exact installation
+# And two must land first: #87 (connector identity) and #96 (the storage pivot).
+#
+# Flipping this to `yes` is a reviewed change with peer/platform validation
+# recorded on the pull request that does it — never an edit made during a
+# ceremony.
+stage.enforce.authorized=no
+stage.enforce.blocked-by=#99, #100, #102 (and #87, #96 must land first)
+
 # STAGE 1 — kubernetes/platform/admission-install/report-only
 report-only.sha256=39375a5ffc156e1891fd426e175d1c7ff46d481159889542792a2d81e074694d
 report-only.objects=22

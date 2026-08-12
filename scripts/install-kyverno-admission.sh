@@ -227,6 +227,33 @@ lock_value() {
   printf '%s' "${line#*=}"
 }
 
+# --- stage-2 authorization ---------------------------------------------------
+
+# Promotion to stage 2 is a reviewed DECISION and it is not authorized today.
+# The decision lives in render.lock, not in this script and not in a runbook
+# paragraph, because a document that says "not authorized" is weaker than a
+# script that refuses — and the operator who reaches for the promotion is
+# exactly the reader least likely to have re-read the document.
+#
+# `--plan` stays reachable: it mutates nothing, it is how the promotion gate is
+# rehearsed, and refusing it would delete the only way to exercise that gate.
+# It prints the refusal as a warning instead.
+require_stage_two_authorization() {
+  local authorized='' blockers=''
+  authorized="$(lock_value stage.enforce.authorized)"
+  [[ "$authorized" != 'yes' ]] || return 0
+  blockers="$(lock_value stage.enforce.blocked-by)"
+  case "$MODE" in
+    --apply)
+      die "stage enforce is NOT AUTHORIZED: promotion is blocked on ${blockers}; see docs/runbooks/kyverno-install.md. Authorization is a reviewed change to render.lock, never an edit made during a ceremony"
+      ;;
+    *)
+      note "WARNING: stage enforce is NOT AUTHORIZED; this is a rehearsal and nothing may be applied"
+      note "promotion is blocked on ${blockers}"
+      ;;
+  esac
+}
+
 digest_of() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum <"$1" | cut -d' ' -f1
@@ -792,6 +819,10 @@ if [[ "$MODE" == '--demote' ]]; then
   demote_to_report_only
   exit 0
 fi
+
+# Before any tool is bound and long before anything is rendered: an unauthorized
+# promotion stops here, having touched nothing at all.
+[[ "$STAGE" != 'enforce' ]] || require_stage_two_authorization
 
 bind_tools
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"

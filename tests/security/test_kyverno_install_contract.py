@@ -883,6 +883,56 @@ class RealRepositoryTests(unittest.TestCase):
             with self.subTest(pin=pin):
                 self.assertIn(pin, installer)
 
+    def test_stage_two_is_recorded_as_not_authorized(self):
+        """The split this pull request landed under, made executable.
+
+        Round A lands the transaction; promoting to stage 2 is blocked on three
+        tracked findings and is NOT authorized by this branch. That decision
+        lives in `render.lock` rather than only in the runbook, because the
+        operator reaching for the promotion is the reader least likely to have
+        re-read the runbook.
+        """
+
+        self.assertEqual(lock_value("stage.enforce.authorized"), "no")
+        blockers = lock_value("stage.enforce.blocked-by")
+        for issue in ("#99", "#100", "#102", "#87", "#96"):
+            with self.subTest(issue=issue):
+                self.assertIn(issue, blockers)
+
+    def test_the_runbook_states_that_stage_two_is_not_authorized(self):
+        runbook = read(RUNBOOK)
+        self.assertIn("NOT AUTHORIZED", runbook)
+        for issue in ("#99", "#100", "#102", "#87", "#96"):
+            with self.subTest(issue=issue):
+                self.assertIn(issue, runbook)
+
+    @unittest.skipUnless(BASH, BASH_REQUIRED)
+    def test_applying_stage_two_in_the_real_repository_is_refused_by_name(self):
+        """A script that refuses beats a document that asks. The refusal fires
+        before any tool is bound, so it does not depend on the machine."""
+
+        completed = subprocess.run(
+            [
+                required_tool(BASH, BASH_REQUIRED),
+                str(INSTALLER),
+                "--stage",
+                "enforce",
+                "--apply",
+                "--journal",
+                os.path.join(
+                    os.environ.get("TMPDIR", "/tmp"), "never-written.journal"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("stage enforce is NOT AUTHORIZED", completed.stderr)
+        for issue in ("#99", "#100", "#102"):
+            with self.subTest(issue=issue):
+                self.assertIn(issue, completed.stderr)
+
     def test_the_staged_controller_digest_is_still_the_all_zero_sentinel(self):
         controllers = read(ADMISSION / "kyverno" / "controllers.yaml")
         self.assertIn("@sha256:" + "0" * 64, controllers)
@@ -1141,6 +1191,11 @@ class InstallerGuardTests(unittest.TestCase):
                     "inventory.cluster-scoped=3",
                     "inventory.namespaced=11",
                     "inventory.cluster-scoped.names=" + SYNTHETIC_CLUSTER_SCOPED,
+                    # The synthetic repository is where the promotion gate is
+                    # exercised, so it is authorized. The REAL repository is not,
+                    # and RealRepositoryTests pins that refusal.
+                    "stage.enforce.authorized=yes",
+                    "stage.enforce.blocked-by=nothing (synthetic fixture)",
                     "runtime.webhooks.label=webhook.kyverno.io/managed-by=kyverno",
                     # TWO names per kind, deliberately: with one, a sweep that
                     # only ever removed the first entry would look complete.

@@ -7,6 +7,46 @@ command — and so that the review of those bytes, and of the ordering, can happ
 now, in a pull request, instead of at the terminal at the moment of highest
 consequence.
 
+## STAGE 2 IS **NOT AUTHORIZED**
+
+Read this before anything else in this document.
+
+The pull request that introduced this runbook landed the install **transaction**
+and **stage 1 only**. Stage 1 is `Audit` and `failurePolicy: Ignore` — fail-open,
+enforcing nothing, degrading at worst to the cluster's state today. **Promoting
+to stage 2 (`--stage enforce`) is not authorized by it**, and three independently
+reproduced findings block the promotion:
+
+| Blocker | What is wrong | Status |
+| --- | --- | --- |
+| **#99** | Both `require-signed-*` policies render `validationFailureAction: Audit` with **no rule-level `failureAction`** in the `enforce` root, so stage 2 **does not enforce image signatures** — an unsigned or wrong-identity image is reported and admitted while the installer announces admission is fail-closed. | CONFIRMED against the rendered `enforce` root |
+| **#100** | The engine configuration filters `[ReplicaSet,*,*]` and `[ReplicaSet/?*,*,*]`, so `require-release-readiness`'s exact-Deployment-owner rule is **inert at admission**. Unfiltering it widens the enforcing webhook's blast radius on a one-node cluster and is an owner decision. | CONFIRMED against `enforce/config.yaml` |
+| **#102** | The promotion has **no admission canary** on either side of the flip, and its evidence is not bound to the exact installation. | CONFIRMED as a gap |
+
+**#87** (connector identity) and **#96** (the storage-gate pivot) must also land
+first. #101 tracks two further defects on the same execution path.
+
+This is not only written down. `render.lock` records
+`stage.enforce.authorized=no`, and
+[`scripts/install-kyverno-admission.sh`](../../scripts/install-kyverno-admission.sh)
+reads it **before it binds a single tool**:
+
+```
+$ ./scripts/install-kyverno-admission.sh --stage enforce --apply --journal /tmp/j
+install-kyverno-admission: stage enforce is NOT AUTHORIZED: promotion is blocked
+on #99, #100, #102 (and #87, #96 must land first); see
+docs/runbooks/kyverno-install.md. Authorization is a reviewed change to
+render.lock, never an edit made during a ceremony
+$ echo $?
+1
+```
+
+`--stage enforce --plan` still runs — it mutates nothing and is how the promotion
+gate is rehearsed and tested — and prints the same refusal as a warning.
+Authorizing stage 2 means a reviewed pull request that flips
+`stage.enforce.authorized`, with peer/platform validation recorded on it. It is
+never an edit made during a ceremony.
+
 ## Why this is the most dangerous install in this repository
 
 Every other component here fails by not working. An admission controller fails
