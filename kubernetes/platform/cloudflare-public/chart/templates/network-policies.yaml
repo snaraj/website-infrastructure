@@ -1,13 +1,13 @@
 {{- /*
-Connector order is pinned by values.schema.json (0 = naranjo-online,
-1 = lidersea-com). The two per-connector origin egress policies are written
-explicitly, one per site, with their literal cloudflared-<site> names, so each
-site's egress leg stays auditable in place and the reconciliation cannot
-silently drop one. Each is the egress half of the double-pin; the site chart
-pins the reciprocal ingress peer to the same <site>-tunnel instance.
+The two per-connector origin egress policies are written explicitly, one per
+site, looked up by their exact site key and carrying their literal
+cloudflared-<site> names, so each site's egress leg stays auditable in place
+and the reconciliation cannot silently drop one. Each is the egress half of the
+double-pin; the site chart pins the reciprocal ingress peer to the same
+<site>-tunnel instance.
 */ -}}
-{{- $naranjo := index .Values.connectors 0 -}}
-{{- $lidersea := index .Values.connectors 1 -}}
+{{- $naranjo := index .Values.connectors "naranjo-online" -}}
+{{- $lidersea := index .Values.connectors "lidersea-com" -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -63,6 +63,28 @@ pod_spec := input.spec.template.spec if {
   input.kind in {"Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job"}
 }
 
+# The Pod-level metadata that carries the workload identity labels. Volume
+# admission needs it because a connector's mounted Secret must be bound to that
+# connector's own instance, not merely to the set of known token names.
+pod_metadata := object.get(input, "metadata", {}) if {
+  input.kind == "Pod"
+}
+
+pod_metadata := object.get(input.spec.jobTemplate.spec.template, "metadata", {}) if {
+  input.kind == "CronJob"
+}
+
+pod_metadata := object.get(input.spec.template, "metadata", {}) if {
+  input.kind in {"Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job"}
+}
+
+# The site connector identity this Pod claims (empty when absent).
+connector_instance := object.get(
+  object.get(pod_metadata, "labels", {}),
+  "app.kubernetes.io/instance",
+  "",
+)
+
 restricted_namespace if {
   object.get(object.get(input, "metadata", {}), "namespace", "default") in tenant_namespaces
 }
@@ -336,20 +358,22 @@ valid_tenant_volume(namespace, volume) if {
   }
 }
 
-# Each connector mounts only its own site's tunnel-token Secret, referenced by
-# name. The superseded shared pi-websites-tunnel-token is no longer accepted.
+# Each connector mounts ONLY ITS OWN site's tunnel-token Secret: the expected
+# name is DERIVED from the connector's own instance label (<site>-tunnel ->
+# <site>-tunnel-token), so a connector mounting the other site's token is
+# denied even though that token is otherwise a known, approved Secret. Merely
+# allowlisting the two names would let either connector mount either token and
+# break ADR 0015's per-site identity tuple. The superseded shared
+# pi-websites-tunnel-token matches no connector instance and is denied.
 valid_tenant_volume(namespace, volume) if {
   namespace == "cloudflare-public"
-  object.get(object.get(volume, "secret", {}), "secretName", "") in {
-    "naranjo-online-tunnel-token",
-    "lidersea-com-tunnel-token",
-  }
+  connector_instance in {"naranjo-online-tunnel", "lidersea-com-tunnel"}
   volume == {
     "name": "tunnel-token",
     "secret": {
       "defaultMode": 288,
       "items": [{"key": "token", "path": "token"}],
-      "secretName": volume.secret.secretName,
+      "secretName": sprintf("%s-token", [connector_instance]),
     },
   }
 }

@@ -8,25 +8,30 @@ image:
 
 tunnel:
   secretKey: token
-  # Change this non-secret revision in the same reviewed PR as a token rotation.
-  # Shared by both connectors so a coordinated rotation restarts both Pods; a
-  # per-site rotation still lands as its own reviewed change to this value.
-  tokenRevision: not-configured
 
-# One connector per website, each an independent Cloudflare Tunnel with its own
-# runtime token Secret (ADR 0015). The instance is the site-scoped identity the
-# NetworkPolicies pin on both legs; the secretName is referenced by NAME only —
-# the token value lives only in a cluster Secret, never in this chart.
+# One connector per website, each an independent Cloudflare Tunnel (ADR 0015).
+# Keyed by site so Helm merges per connector: a HelmRelease may rotate ONE
+# connector's tokenRevision without touching the other's rendered Deployment.
+# Each entry is one exact identity tuple — instance, its own token Secret
+# (referenced by NAME only; the token value lives solely in a cluster Secret),
+# its own rotation revision, and its own origin — so no field of one site's
+# connector can be paired with another site's.
 connectors:
-  - instance: naranjo-online-tunnel
+  naranjo-online:
+    instance: naranjo-online-tunnel
     secretName: naranjo-online-tunnel-token
+    # Change this non-secret revision in the same reviewed PR as that ONE
+    # Tunnel's token rotation; the other connector is untouched.
+    tokenRevision: not-configured
     origin:
       namespace: naranjo-online
       podLabels:
         app.kubernetes.io/name: naranjo-online
       port: 8080
-  - instance: lidersea-com-tunnel
+  lidersea-com:
+    instance: lidersea-com-tunnel
     secretName: lidersea-com-tunnel-token
+    tokenRevision: not-configured
     origin:
       namespace: lidersea-com
       podLabels:

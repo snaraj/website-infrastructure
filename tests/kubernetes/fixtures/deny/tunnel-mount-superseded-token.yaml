@@ -9,6 +9,9 @@ kind: Pod
 metadata:
   name: cloudflared-superseded-token
   namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
 spec:
   automountServiceAccountToken: false
   serviceAccountName: cloudflared

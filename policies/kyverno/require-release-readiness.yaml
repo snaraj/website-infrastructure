@@ -28,7 +28,8 @@ spec:
                 object.metadata.ownerReferences.all(owner,
                 owner.apiVersion == 'apps/v1' && owner.kind == 'Deployment' &&
                 has(owner.controller) && owner.controller == true &&
-                ((object.metadata.namespace == 'cloudflare-public' && owner.name == 'cloudflared') ||
+                ((object.metadata.namespace == 'cloudflare-public' &&
+                owner.name in ['naranjo-online-tunnel', 'lidersea-com-tunnel']) ||
                 (object.metadata.namespace in ['naranjo-online', 'lidersea-com'] &&
                 owner.name == object.metadata.namespace)))
               message: Tenant ReplicaSets may be created only by their one exact reviewed Deployment.
@@ -53,7 +54,10 @@ spec:
           - resources:
               kinds: [Deployment]
               namespaces: [cloudflare-public]
-              names: [cloudflared]
+              # One connector Deployment per website (ADR 0015). Both identities
+              # are matched so neither connector can bypass the token-revision
+              # gate; the superseded shared `cloudflared` name is gone.
+              names: [naranjo-online-tunnel, lidersea-com-tunnel]
       validate:
         failureAction: Enforce
         cel:
@@ -64,4 +68,4 @@ spec:
                 object.spec.template.metadata.annotations['platform.snaraj.dev/tunnel-token-revision'] != '' &&
                 object.spec.template.metadata.annotations['platform.snaraj.dev/tunnel-token-revision'] != 'not-configured' &&
                 object.spec.template.metadata.annotations['platform.snaraj.dev/tunnel-token-revision'] != 'UNRESOLVED'
-              message: cloudflared requires a reviewed non-sentinel tunnel token revision before admission.
+              message: Each site connector requires its own reviewed non-sentinel tunnel token revision before admission.

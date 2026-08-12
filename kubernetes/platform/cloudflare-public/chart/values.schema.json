@@ -19,25 +19,27 @@
     "tunnel": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["secretKey", "tokenRevision"],
+      "required": ["secretKey"],
       "properties": {
-        "secretKey": {"type": "string", "const": "token"},
-        "tokenRevision": {"type": "string", "minLength": 1}
+        "secretKey": {"type": "string", "const": "token"}
       }
     },
     "connectors": {
-      "type": "array",
-      "minItems": 2,
-      "maxItems": 2,
-      "items": false,
-      "prefixItems": [
-        {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["naranjo-online", "lidersea-com"],
+      "properties": {
+        "naranjo-online": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["instance", "secretName", "origin"],
+          "required": ["instance", "secretName", "tokenRevision", "origin"],
           "properties": {
             "instance": {"type": "string", "const": "naranjo-online-tunnel"},
             "secretName": {"type": "string", "const": "naranjo-online-tunnel-token"},
+            "tokenRevision": {
+              "type": "string",
+              "pattern": "^(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})$"
+            },
             "origin": {
               "type": "object",
               "additionalProperties": false,
@@ -55,13 +57,17 @@
             }
           }
         },
-        {
+        "lidersea-com": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["instance", "secretName", "origin"],
+          "required": ["instance", "secretName", "tokenRevision", "origin"],
           "properties": {
             "instance": {"type": "string", "const": "lidersea-com-tunnel"},
             "secretName": {"type": "string", "const": "lidersea-com-tunnel-token"},
+            "tokenRevision": {
+              "type": "string",
+              "pattern": "^(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})$"
+            },
             "origin": {
               "type": "object",
               "additionalProperties": false,
@@ -79,7 +85,7 @@
             }
           }
         }
-      ]
+      }
     },
     "resources": {"type": "object"}
   }

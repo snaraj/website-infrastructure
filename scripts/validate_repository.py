@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from validate_image_release import repository_errors as image_release_errors
 from validate_release_state import (
     CanonicalYamlError,
+    PUBLIC_CONNECTOR_SITES,
     RELEASE_CONTRACTS,
     ZERO_DIGEST,
     _parse_simple_mapping,
@@ -1631,8 +1632,13 @@ def check_release(root):
         public_release = load_helm_release("cloudflare-public", root)
         if public_release.suspended:
             errors.append("HelmRelease remains suspended: cloudflare-public")
-        token_revision = public_release.values.get(("tunnel", "tokenRevision"))
-        if token_revision in {None, "not-configured", "UNRESOLVED"}:
+        # Every website's connector must carry its own resolved revision; an
+        # unresolved revision on either one keeps the release unresolved.
+        if any(
+            public_release.values.get(("connectors", site, "tokenRevision"))
+            in {None, "not-configured", "UNRESOLVED"}
+            for site in PUBLIC_CONNECTOR_SITES
+        ):
             errors.append("public tunnel tokenRevision is unresolved")
         if load_parent_suspension("cloudflare-public", root):
             errors.append("parent Kustomization remains suspended: platform-services")

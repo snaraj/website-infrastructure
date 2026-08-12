@@ -1004,8 +1004,20 @@ def _cloudflare_phase(root: Path, platform_suspended: bool) -> str:
     """Classify the connector while allowing its parent to serve sites first."""
 
     release = STATE.load_helm_release("cloudflare-public", root)
-    token_revision = str(release.values[("tunnel", "tokenRevision")])
-    configured = token_revision not in {"not-configured", "UNRESOLVED"}
+    # Each website's connector owns its own revision. A half-configured pair is
+    # not a safe intermediate — it would mean one Tunnel was staged while the
+    # other still carries a sentinel — so it fails closed rather than being
+    # classified.
+    configured_flags = {
+        str(release.values[("connectors", site, "tokenRevision")])
+        not in {"not-configured", "UNRESOLVED"}
+        for site in STATE.PUBLIC_CONNECTOR_SITES
+    }
+    if len(configured_flags) != 1:
+        raise STATE.CanonicalYamlError(
+            "connector token revisions must be uniformly configured"
+        )
+    configured = configured_flags.pop()
     secret_state = cloudflare_secret_state(root)
 
     if release.suspended and not configured and secret_state == "absent":

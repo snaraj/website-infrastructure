@@ -507,8 +507,11 @@ class SiteReleasePolicyTests(unittest.TestCase):
             spec:
               suspend: true
               values:
-                tunnel:
-                  tokenRevision: not-configured
+                connectors:
+                  naranjo-online:
+                    tokenRevision: not-configured
+                  lidersea-com:
+                    tokenRevision: not-configured
             """
         )
         with tempfile.TemporaryDirectory() as directory:

@@ -133,11 +133,13 @@ def cloudflare_release_text(*, suspended=True, token_revision="not-configured"):
         "      retries: 0\n"
         "      strategy: rollback\n"
         "  values:\n"
-        "    tunnel:\n"
-        "      tokenRevision: {token_revision}\n"
+        "    connectors:\n"
+        + "".join(
+            "      {}:\n        tokenRevision: {}\n".format(site, token_revision)
+            for site in MODULE.PUBLIC_CONNECTOR_SITES
+        )
     ).format(
         suspended=str(suspended).lower(),
-        token_revision=token_revision,
     )
 
 
@@ -632,10 +634,11 @@ class StrictReleaseStateTests(unittest.TestCase):
                         cloudflare_release_text(token_revision=token),
                     )
                     state = MODULE.load_helm_release("cloudflare-public", root)
-                    self.assertEqual(
-                        state.values[("tunnel", "tokenRevision")],
-                        token,
-                    )
+                    for site in MODULE.PUBLIC_CONNECTOR_SITES:
+                        self.assertEqual(
+                            state.values[("connectors", site, "tokenRevision")],
+                            token,
+                        )
 
     def test_reader_rejects_non_regular_and_oversized_inputs(self):
         with tempfile.TemporaryDirectory() as directory:

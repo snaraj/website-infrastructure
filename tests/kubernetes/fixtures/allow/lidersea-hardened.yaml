@@ -89,6 +89,9 @@ kind: Pod
 metadata:
   name: cloudflared-volume-allowed
   namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
 spec:
   automountServiceAccountToken: false
   serviceAccountName: cloudflared

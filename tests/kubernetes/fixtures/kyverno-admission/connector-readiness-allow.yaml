@@ -1,0 +1,220 @@
+# P1-1 positive control: once Kyverno enforces, connector rollout must be
+# POSSIBLE. Each connector's ReplicaSet is owned by its own exact Deployment,
+# and each connector Deployment carries its own resolved (non-sentinel) token
+# revision. These prove the readiness policy's connector identities are the two
+# renamed per-site Deployments, not the superseded shared `cloudflared`.
+#
+# These resources live outside fixtures/allow because Conftest deliberately
+# denies every raw tenant ReplicaSet and does not evaluate token revisions at
+# all; they are admission-engine controls, exercised only by `kyverno test`.
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: naranjo-online-tunnel-7d9f
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: naranjo-online-tunnel
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: naranjo-online-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflare-public
+        app.kubernetes.io/instance: naranjo-online-tunnel
+      annotations:
+        platform.snaraj.dev/tunnel-token-revision: rev-reviewed-fixture
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: cloudflared
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tunnel-token
+              mountPath: /etc/cloudflared/token
+              readOnly: true
+      volumes:
+        - name: tunnel-token
+          secret:
+            secretName: naranjo-online-tunnel-token
+            defaultMode: 288
+            items:
+              - key: token
+                path: token
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: lidersea-com-tunnel-6b2c
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: lidersea-com-tunnel
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: lidersea-com-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflare-public
+        app.kubernetes.io/instance: lidersea-com-tunnel
+      annotations:
+        platform.snaraj.dev/tunnel-token-revision: rev-reviewed-fixture
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: cloudflared
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tunnel-token
+              mountPath: /etc/cloudflared/token
+              readOnly: true
+      volumes:
+        - name: tunnel-token
+          secret:
+            secretName: lidersea-com-tunnel-token
+            defaultMode: 288
+            items:
+              - key: token
+                path: token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: naranjo-online-tunnel
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: naranjo-online-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflare-public
+        app.kubernetes.io/instance: naranjo-online-tunnel
+      annotations:
+        platform.snaraj.dev/tunnel-token-revision: rev-reviewed-fixture
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: cloudflared
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tunnel-token
+              mountPath: /etc/cloudflared/token
+              readOnly: true
+      volumes:
+        - name: tunnel-token
+          secret:
+            secretName: naranjo-online-tunnel-token
+            defaultMode: 288
+            items:
+              - key: token
+                path: token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lidersea-com-tunnel
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: lidersea-com-tunnel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflare-public
+        app.kubernetes.io/instance: lidersea-com-tunnel
+      annotations:
+        platform.snaraj.dev/tunnel-token-revision: rev-reviewed-fixture
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: cloudflared
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tunnel-token
+              mountPath: /etc/cloudflared/token
+              readOnly: true
+      volumes:
+        - name: tunnel-token
+          secret:
+            secretName: lidersea-com-tunnel-token
+            defaultMode: 288
+            items:
+              - key: token
+                path: token

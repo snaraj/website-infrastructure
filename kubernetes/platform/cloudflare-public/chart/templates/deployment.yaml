@@ -1,4 +1,11 @@
-{{- range $connector := .Values.connectors }}
+{{- /*
+Explicit site order keeps the rendered document sequence fixed and auditable.
+Each connector's annotation reads ITS OWN tokenRevision, so rotating one
+Tunnel leaves the other Deployment byte-for-byte unchanged (ADR 0015's
+one-Tunnel-at-a-time rotation).
+*/ -}}
+{{- range $site := list "naranjo-online" "lidersea-com" }}
+{{- $connector := index $.Values.connectors $site }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -24,7 +31,7 @@ spec:
       labels:
         {{- include "cloudflare-public.connectorLabels" (dict "root" $ "instance" $connector.instance) | nindent 8 }}
       annotations:
-        platform.snaraj.dev/tunnel-token-revision: {{ $.Values.tunnel.tokenRevision | quote }}
+        platform.snaraj.dev/tunnel-token-revision: {{ $connector.tokenRevision | quote }}
     spec:
       automountServiceAccountToken: false
       serviceAccountName: cloudflared
