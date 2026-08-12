@@ -53,8 +53,9 @@ DECLARED_INSUFFICIENCIES = {
     # The Kyverno staging stop: the admission reconciler is namespaced on
     # purpose, so it can own the inert controller shell but cannot create the
     # cluster-scoped policy objects the same path declares.
-    ("admission", "kyverno.io", "clusterpolicies"),
-    ("admission", "admissionregistration.k8s.io", "validatingwebhookconfigurations"),
+    ("Kustomization", "admission", "kyverno.io", "clusterpolicies"),
+    ("Kustomization", "admission", "admissionregistration.k8s.io",
+     "validatingwebhookconfigurations"),
     # READINESS READ-BACK, pre-existing and NOT introduced by the narrowing
     # (these Roles are unchanged from main). A `wait: true` Kustomization and a
     # HelmRelease that has not disabled Helm's wait both evaluate readiness by
@@ -69,14 +70,20 @@ DECLARED_INSUFFICIENCIES = {
     # and turning the waits off, not something this change may quietly pick.
     # Until then every affected object stays suspended, which the test below
     # requires.
-    ("admission", "apps", "replicasets"),
-    ("admission", "", "pods"),
-    ("cloudflare-public", "apps", "replicasets"),
-    ("cloudflare-public", "", "pods"),
-    ("naranjo-online", "apps", "replicasets"),
-    ("naranjo-online", "", "pods"),
-    ("lidersea-com", "apps", "replicasets"),
-    ("lidersea-com", "", "pods"),
+    #
+    # The owner is a (kind, name) PAIR, not a name: a Kustomization and a
+    # HelmRelease may share a name — both sites do — and each is suspended by
+    # its own spec.suspend. Keyed by name alone, unsuspending the
+    # naranjo-online HelmRelease left the still-suspended naranjo-online
+    # Kustomization satisfying the check, and the mutation survived.
+    ("Kustomization", "admission", "apps", "replicasets"),
+    ("Kustomization", "admission", "", "pods"),
+    ("HelmRelease", "cloudflare-public", "apps", "replicasets"),
+    ("HelmRelease", "cloudflare-public", "", "pods"),
+    ("HelmRelease", "naranjo-online", "apps", "replicasets"),
+    ("HelmRelease", "naranjo-online", "", "pods"),
+    ("HelmRelease", "lidersea-com", "apps", "replicasets"),
+    ("HelmRelease", "lidersea-com", "", "pods"),
 }
 
 # Requests the narrowed authorization must refuse. Each row is the concrete
@@ -149,8 +156,15 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
         self.assertEqual(
             owners,
             {
-                "flux-system", "platform-prerequisites", "admission", "platform-services",
-                "naranjo-online", "lidersea-com", "cloudflare-public",
+                ("Kustomization", "flux-system"),
+                ("Kustomization", "platform-prerequisites"),
+                ("Kustomization", "admission"),
+                ("Kustomization", "platform-services"),
+                ("Kustomization", "naranjo-online"),
+                ("Kustomization", "lidersea-com"),
+                ("HelmRelease", "naranjo-online"),
+                ("HelmRelease", "lidersea-com"),
+                ("HelmRelease", "cloudflare-public"),
             },
         )
         applied = {
@@ -188,7 +202,7 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
 
     def test_every_applied_object_is_permitted_or_a_declared_staging_stop(self):
         gaps = {
-            (requirement.owner, requirement.group, requirement.resource)
+            requirement.owner + (requirement.group, requirement.resource)
             for requirement in model.unmet(self.authorizer, self.requirements)
         }
         self.assertEqual(
@@ -203,14 +217,14 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
         # Both kinds are checked: a HelmRelease is switched off by its own
         # spec.suspend, independently of the Kustomization that delivers it.
         suspended = model.suspended_owners(ROOT)
-        for owner, group, resource in sorted(DECLARED_INSUFFICIENCIES):
-            with self.subTest(owner=owner, resource=resource):
+        for kind, name, group, resource in sorted(DECLARED_INSUFFICIENCIES):
+            with self.subTest(owner="{}/{}".format(kind, name), resource=resource):
                 self.assertIn(
-                    owner,
+                    (kind, name),
                     suspended,
-                    "{} is no longer suspended but still cannot use {}/{}: "
+                    "{} {} is no longer suspended but still cannot use {}/{}: "
                     "unsuspending it would fail halfway".format(
-                        owner, group or "core", resource
+                        kind, name, group or "core", resource
                     ),
                 )
 
@@ -270,8 +284,15 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
         self.assertEqual(
             owners,
             {
-                "flux-system", "platform-prerequisites", "admission", "platform-services",
-                "naranjo-online", "lidersea-com", "cloudflare-public",
+                ("Kustomization", "flux-system"),
+                ("Kustomization", "platform-prerequisites"),
+                ("Kustomization", "admission"),
+                ("Kustomization", "platform-services"),
+                ("Kustomization", "naranjo-online"),
+                ("Kustomization", "lidersea-com"),
+                ("HelmRelease", "naranjo-online"),
+                ("HelmRelease", "lidersea-com"),
+                ("HelmRelease", "cloudflare-public"),
             },
         )
         for requirement in reads:

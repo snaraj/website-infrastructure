@@ -697,7 +697,12 @@ class Requirement(tuple):
     resource = property(lambda self: self[3])
     namespace = property(lambda self: self[4])
     name = property(lambda self: self[5])
-    #: The Flux custom resource whose reconciliation needs this authorization.
+    #: The Flux custom resource whose reconciliation needs this authorization,
+    #: as a ``(kind, name)`` pair. The kind is load-bearing: a Kustomization and
+    #: a HelmRelease may share a name (both sites do), and each is suspended by
+    #: its OWN spec.suspend — so a bare name cannot say which object a declared
+    #: authorization gap belongs to, and unsuspending one of the pair would not
+    #: be noticed.
     owner = property(lambda self: self[6])
     reason = property(lambda self: self[7])
 
@@ -867,25 +872,26 @@ def derive_requirements(root=REPO_ROOT):
         namespace = metadata.get("namespace", FLUX_SYSTEM)
         account = spec["serviceAccountName"]
         subject = Subject(namespace, account)
+        owner = ("Kustomization", name)
         reason = "Kustomization " + name
 
         controller.append(
             Requirement(
                 kustomize_controller, "impersonate", "", "serviceaccounts",
-                namespace, account, name, reason,
+                namespace, account, owner, reason,
             )
         )
         for verb in ("get", "list", "update", "patch"):
             controller.append(
                 Requirement(
                     kustomize_controller, verb, "kustomize.toolkit.fluxcd.io",
-                    "kustomizations", namespace, None, name, reason,
+                    "kustomizations", namespace, None, owner, reason,
                 )
             )
         controller.append(
             Requirement(
                 kustomize_controller, "patch", "kustomize.toolkit.fluxcd.io",
-                "kustomizations/status", namespace, None, name, reason,
+                "kustomizations/status", namespace, None, owner, reason,
             )
         )
         decryption = (spec.get("decryption") or {}).get("secretRef") or {}
@@ -893,13 +899,13 @@ def derive_requirements(root=REPO_ROOT):
             controller.append(
                 Requirement(
                     kustomize_controller, "get", "", "secrets", namespace,
-                    decryption.get("name"), name, reason + " SOPS decryption",
+                    decryption.get("name"), owner, reason + " SOPS decryption",
                 )
             )
 
         controller.extend(
             source_reads(
-                kustomize_controller, spec["sourceRef"], namespace, name, reason
+                kustomize_controller, spec["sourceRef"], namespace, owner, reason
             )
         )
 
@@ -912,7 +918,7 @@ def derive_requirements(root=REPO_ROOT):
             for verb in APPLY_VERBS:
                 requirements.append(
                     Requirement(
-                        subject, verb, group, resource, target, None, name,
+                        subject, verb, group, resource, target, None, owner,
                         "{} applies {} {}".format(reason, kind, object_name),
                     )
                 )
@@ -924,7 +930,7 @@ def derive_requirements(root=REPO_ROOT):
                         requirements.append(
                             Requirement(
                                 subject, verb, read_group, read_resource, target,
-                                None, name,
+                                None, owner,
                                 "{} waits on {} {}".format(reason, kind, object_name),
                             )
                         )
@@ -936,25 +942,26 @@ def derive_requirements(root=REPO_ROOT):
         namespace = metadata["namespace"]
         account = spec["serviceAccountName"]
         subject = Subject(namespace, account)
+        owner = ("HelmRelease", name)
         reason = "HelmRelease " + name
 
         controller.append(
             Requirement(
                 helm_controller, "impersonate", "", "serviceaccounts",
-                namespace, account, name, reason,
+                namespace, account, owner, reason,
             )
         )
         for verb in ("get", "list", "update", "patch"):
             controller.append(
                 Requirement(
                     helm_controller, verb, "helm.toolkit.fluxcd.io", "helmreleases",
-                    namespace, None, name, reason,
+                    namespace, None, owner, reason,
                 )
             )
         controller.append(
             Requirement(
                 helm_controller, "patch", "helm.toolkit.fluxcd.io", "helmreleases/status",
-                namespace, None, name, reason,
+                namespace, None, owner, reason,
             )
         )
         chart = spec.get("chart")
@@ -966,20 +973,20 @@ def derive_requirements(root=REPO_ROOT):
             source = (chart_spec.get("sourceRef") or {}).get("namespace", namespace)
             controller.extend(
                 source_reads(
-                    helm_controller, chart_spec["sourceRef"], namespace, name, reason
+                    helm_controller, chart_spec["sourceRef"], namespace, owner, reason
                 )
             )
             for verb in ("get", "list", "create", "update", "patch", "delete"):
                 controller.append(
                     Requirement(
                         helm_controller, verb, "source.toolkit.fluxcd.io", "helmcharts",
-                        source, None, name, reason + " chart",
+                        source, None, owner, reason + " chart",
                     )
                 )
             kinds = chart_kinds(root, chart_spec["chart"].lstrip("./"))
         else:
             controller.extend(
-                source_reads(helm_controller, spec["chartRef"], namespace, name, reason)
+                source_reads(helm_controller, spec["chartRef"], namespace, owner, reason)
             )
             kinds = SITE_CHART_KINDS[name]
 
@@ -991,7 +998,7 @@ def derive_requirements(root=REPO_ROOT):
             for verb in APPLY_VERBS:
                 requirements.append(
                     Requirement(
-                        subject, verb, group, resource, target, None, name,
+                        subject, verb, group, resource, target, None, owner,
                         "{} renders {}".format(reason, kind)
                         if kind != HELM_STORAGE_KIND
                         else reason + " stores its release state",
@@ -1010,7 +1017,7 @@ def derive_requirements(root=REPO_ROOT):
                     requirements.append(
                         Requirement(
                             subject, verb, read_group, read_resource, namespace, None,
-                            name, reason + " waits for its release to become ready",
+                            owner, reason + " waits for its release to become ready",
                         )
                     )
 
@@ -1025,14 +1032,14 @@ def derive_requirements(root=REPO_ROOT):
             controller.append(
                 Requirement(
                     source_controller, verb, group, resource, source_namespace, None,
-                    metadata["name"],
+                    (kind, metadata["name"]),
                     source_reason + " is reconciled by source-controller",
                 )
             )
         controller.append(
             Requirement(
                 source_controller, "patch", group, resource + "/status",
-                source_namespace, None, metadata["name"],
+                source_namespace, None, (kind, metadata["name"]),
                 source_reason + " status is owned by source-controller",
             )
         )
@@ -1051,7 +1058,7 @@ def derive_requirements(root=REPO_ROOT):
             controller.append(
                 Requirement(
                     source_controller, verb, "source.toolkit.fluxcd.io", "helmcharts",
-                    chart_namespace, None, release["metadata"]["name"],
+                    chart_namespace, None, ("HelmChart", release["metadata"]["name"]),
                     "the HelmChart helm-controller derives from this release",
                 )
             )
@@ -1063,7 +1070,7 @@ def derive_requirements(root=REPO_ROOT):
         for group, resource, verbs, why in CONTROLLER_BASELINE_GRANTS:
             for verb in verbs:
                 controller.append(
-                    Requirement(subject, verb, group, resource, None, None, "baseline", why)
+                    Requirement(subject, verb, group, resource, None, None, ("Controller", "baseline"), why)
                 )
         for target in sorted(
             namespace for namespace in reconciled_namespaces if namespace
@@ -1071,7 +1078,8 @@ def derive_requirements(root=REPO_ROOT):
             for verb in EVENT_VERBS:
                 controller.append(
                     Requirement(
-                        subject, verb, "", "events", target, None, "baseline",
+                        subject, verb, "", "events", target, None,
+                        ("Controller", "baseline"),
                         "an Event is written in the namespace of the object it describes",
                     )
                 )
@@ -1100,7 +1108,7 @@ def suspended_owners(root=REPO_ROOT):
 
     resources = flux_custom_resources(Path(root))
     return {
-        item["metadata"]["name"]
+        (item["kind"], item["metadata"]["name"])
         for item in list(resources.kustomizations) + list(resources.helm_releases)
         if item["spec"].get("suspend") is True
     }
