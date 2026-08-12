@@ -42,6 +42,34 @@ SITE_SOURCE_LABELS = {
 }
 PLATFORM_REPOSITORY_LABEL = "https://github.com/snaraj/website-infrastructure"
 
+# RATCHET (#58): the per-site cosign-attestation requirement may only ever be
+# edited 'false' -> 'true', one site at a time, once that site's
+# release-publisher attaches cosign slsaprovenance1 attestations. This pin IS
+# the ratchet record: the flip PR updates the expected value here alongside
+# the tuple, and a value moving back to 'false' has no legitimate diff.
+EXPECTED_ATTESTATIONS_REQUIRED = {
+    "naranjo-online": "false",
+    "lidersea-com": "false",
+}
+ATTESTATIONS_REQUIRED_RE = re.compile(
+    r"(?m)^    attestations_required='([^']*)'$"
+)
+GATED_ATTESTATION_CHECK = (
+    "if [[ \"${attestations_required}\" == 'true' ]]; then\n"
+    "  cosign verify-attestation --type slsaprovenance1 "
+    '--certificate-identity "${identity}" '
+    '--certificate-oidc-issuer "${issuer}" "${reference}" >/dev/null\n'
+    "fi"
+)
+
+# The embedded-provenance battery executes this exact shipped function; the
+# regex is anchored on the function's own name and closing brace at column 0.
+PROVENANCE_FUNCTION_RE = re.compile(
+    r"(?ms)^verify_embedded_provenance\(\) \{\n.*?\n\}$"
+)
+STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+PROVENANCE_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
+
 
 class PromotionContractTests(unittest.TestCase):
     """Protect each site's independent provenance and values boundary."""
@@ -121,10 +149,55 @@ class PromotionContractTests(unittest.TestCase):
                 pins = EXPECTED_SOURCE_RE.findall(match.group("body"))
                 self.assertEqual(pins, [label])
 
+    def test_attestation_ratchet_is_tuple_pinned_and_one_way(self):
+        """The cosign-attestation requirement ratchets per site, never back.
+
+        Bridge state (#58): the site publishers attach BuildKit-embedded SLSA
+        provenance but no cosign attestation, so each identity tuple carries
+        `attestations_required='false'` and the embedded-provenance review is
+        the required evidence. The flag's only legitimate edit is
+        'false' -> 'true' (per site, once its publisher ships cosign
+        attestations); EXPECTED_ATTESTATIONS_REQUIRED pins the current value
+        so any flip is a reviewed, visible diff here, and any reversal has no
+        legitimate diff at all. The gated verify-attestation command must
+        survive verbatim so the ratchet re-arms it without rewording, and the
+        unconditional embedded-provenance call must run before it.
+        """
+
+        assignments = ATTESTATIONS_REQUIRED_RE.findall(self.script)
+        self.assertEqual(len(assignments), len(EXPECTED_ATTESTATIONS_REQUIRED))
+        for site, expected_value in EXPECTED_ATTESTATIONS_REQUIRED.items():
+            with self.subTest(site=site):
+                self.assertIn(expected_value, ("false", "true"))
+                match = re.search(
+                    SITE_BODY_TEMPLATE.format(re.escape(site)), self.script
+                )
+                if match is None:
+                    raise AssertionError("missing identity tuple for " + site)
+                self.assertEqual(
+                    ATTESTATIONS_REQUIRED_RE.findall(match.group("body")),
+                    [expected_value],
+                )
+        self.assertIn(GATED_ATTESTATION_CHECK, self.script)
+        definitions = self.script.count("verify_embedded_provenance() {")
+        self.assertEqual(definitions, 1)
+        calls = re.findall(r"(?m)^verify_embedded_provenance$", self.script)
+        self.assertEqual(len(calls), 1)
+        self.assertLess(
+            self.script.index("\nverify_embedded_provenance\n"),
+            self.script.index(GATED_ATTESTATION_CHECK),
+        )
+
     def test_promotion_stays_review_only_and_digest_bound(self):
         for fragment in (
             "cosign verify --certificate-identity",
             "cosign verify-attestation --type slsaprovenance1",
+            "verify_embedded_provenance",
+            "attestation-manifest",
+            "in-toto.io/predicate-type",
+            STATEMENT_TYPE,
+            PROVENANCE_PREDICATE_TYPE,
+            'oras blob fetch "${image}@${slsa_layer_digest}" --output -',
             '[[ "${digest}" != "sha256:',
             "working tree must be clean before a release change",
             "validate_release_state.py",
@@ -439,6 +512,363 @@ class SourceLabelVerificationBatteryTests(unittest.TestCase):
                             expected, self.forged_labels(source)
                         )
                     )
+
+
+@unittest.skipUnless(
+    BASH and JQ, "bash and jq are required for the provenance battery"
+)
+class EmbeddedProvenanceVerificationBatteryTests(unittest.TestCase):
+    """Execute the shipped embedded-provenance verifier against forged trees.
+
+    ``verify_embedded_provenance`` (the #58 bridge) is extracted verbatim
+    from the script and executed under ``bash`` with a stub ``oras`` serving
+    a test-controlled content-addressed tree — index, attestation manifests,
+    and in-toto statements — so every allow/deny verdict below is produced by
+    the shipped bytes. The synthetic site identity keeps the battery
+    hermetic; the binding of each REAL site to its own expected source is
+    already pinned by the static tuple tests above.
+    """
+
+    IMAGE = "registry.invalid/example/site"
+    TAG = "v9.9.9"
+    SOURCE = "https://github.com/example/site"
+    REVISION = "a" * 40
+    INDEX_HEX = "1" * 64
+    PLATFORM_HEX = {"amd64": "a" * 64, "arm64": "b" * 64}
+    ATTESTATION_HEX = {"amd64": "c" * 64, "arm64": "d" * 64}
+    LAYER_HEX = {"amd64": "e" * 64, "arm64": "f" * 64}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = required_tool(
+            BASH, "bash is required for the provenance battery"
+        )
+        required_tool(JQ, "jq is required for the provenance battery")
+        script = PROMOTION.read_text(encoding="utf-8")
+        function_match = PROVENANCE_FUNCTION_RE.search(script)
+        if function_match is None:
+            raise AssertionError(
+                "promote-image.sh no longer defines verify_embedded_provenance"
+            )
+        cls.function_text = function_match.group(0)
+        for anchor in (
+            STATEMENT_TYPE,
+            PROVENANCE_PREDICATE_TYPE,
+            "vnd.docker.reference.digest",
+            "startswith($builder_prefix)",
+        ):
+            if anchor not in cls.function_text:
+                raise AssertionError(
+                    "the embedded-provenance verifier lost its anchor: "
+                    + anchor
+                )
+
+    def statement(self, arch, **overrides):
+        """One faithful SLSA statement for ``arch``, with targeted forgeries."""
+
+        subject_name = overrides.pop(
+            "subject_name",
+            "pkg:docker/{}@{}?platform=linux%2F{}".format(
+                self.IMAGE, self.TAG, arch
+            ),
+        )
+        subject_digest = overrides.pop(
+            "subject_digest", self.PLATFORM_HEX[arch]
+        )
+        builder_id = overrides.pop(
+            "builder_id", self.SOURCE + "/actions/runs/12345/attempts/1"
+        )
+        vcs_source = overrides.pop("vcs_source", self.SOURCE)
+        vcs_revision = overrides.pop("vcs_revision", self.REVISION)
+        if overrides:
+            raise AssertionError(
+                "unknown statement overrides: %r" % sorted(overrides)
+            )
+        return {
+            "_type": STATEMENT_TYPE,
+            "subject": [
+                {
+                    "name": subject_name,
+                    "digest": {"sha256": subject_digest},
+                }
+            ],
+            "predicateType": PROVENANCE_PREDICATE_TYPE,
+            "predicate": {
+                "buildDefinition": {
+                    "buildType": (
+                        "https://github.com/moby/buildkit/blob/master/docs/"
+                        "attestations/slsa-definitions.md"
+                    )
+                },
+                "runDetails": {
+                    "builder": {"id": builder_id},
+                    "metadata": {
+                        "buildkit_metadata": {
+                            "vcs": {
+                                "source": vcs_source,
+                                "revision": vcs_revision,
+                            }
+                        }
+                    },
+                },
+            },
+        }
+
+    def index_document(
+        self, drop_attestation_for=None, duplicate_attestation_for=None
+    ):
+        manifests = []
+        for arch in ("amd64", "arm64"):
+            manifests.append(
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:" + self.PLATFORM_HEX[arch],
+                    "platform": {"os": "linux", "architecture": arch},
+                }
+            )
+        for arch in ("amd64", "arm64"):
+            if arch == drop_attestation_for:
+                continue
+            entry = {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:" + self.ATTESTATION_HEX[arch],
+                "platform": {"os": "unknown", "architecture": "unknown"},
+                "annotations": {
+                    "vnd.docker.reference.type": "attestation-manifest",
+                    "vnd.docker.reference.digest": (
+                        "sha256:" + self.PLATFORM_HEX[arch]
+                    ),
+                },
+            }
+            manifests.append(entry)
+            if arch == duplicate_attestation_for:
+                manifests.append(dict(entry))
+        return {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": manifests,
+        }
+
+    def attestation_document(self, arch, include_provenance_layer=True):
+        layers = [
+            {
+                "mediaType": "application/vnd.in-toto+json",
+                "digest": (
+                    "sha256:"
+                    + "9" * 63
+                    + {"amd64": "0", "arm64": "1"}[arch]
+                ),
+                "size": 1,
+                "annotations": {
+                    "in-toto.io/predicate-type": "https://spdx.dev/Document"
+                },
+            }
+        ]
+        if include_provenance_layer:
+            layers.append(
+                {
+                    "mediaType": "application/vnd.in-toto+json",
+                    "digest": "sha256:" + self.LAYER_HEX[arch],
+                    "size": 1,
+                    "annotations": {
+                        "in-toto.io/predicate-type": PROVENANCE_PREDICATE_TYPE
+                    },
+                }
+            )
+        return {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": layers,
+        }
+
+    def good_documents(self, statements=None):
+        statements = statements or {}
+        documents = {self.INDEX_HEX: self.index_document()}
+        for arch in ("amd64", "arm64"):
+            documents[self.ATTESTATION_HEX[arch]] = self.attestation_document(
+                arch
+            )
+            documents[self.LAYER_HEX[arch]] = statements.get(
+                arch, self.statement(arch)
+            )
+        return documents
+
+    def run_verifier(self, documents):
+        """Run the shipped function against a content-addressed stub tree."""
+
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            stub_root = root / "content"
+            stub_root.mkdir()
+            for hex_digest, document in documents.items():
+                payload = (
+                    document
+                    if isinstance(document, str)
+                    else json.dumps(document)
+                )
+                (stub_root / (hex_digest + ".json")).write_text(
+                    payload, encoding="utf-8"
+                )
+            stub_directory = root / "bin"
+            stub_directory.mkdir()
+            stub = stub_directory / "oras"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'for argument in "$@"; do\n'
+                '  case "${argument}" in\n'
+                "    *@sha256:*)"
+                ' exec cat -- "${PROMOTION_STUB_ROOT}/${argument##*@sha256:}.json"'
+                " ;;\n"
+                "  esac\n"
+                "done\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = (
+                str(stub_directory) + os.pathsep + environment.get("PATH", "")
+            )
+            environment["PROMOTION_STUB_ROOT"] = str(stub_root)
+            prelude = (
+                "set -Eeuo pipefail\n"
+                "image=" + shlex.quote(self.IMAGE) + "\n"
+                "reference="
+                + shlex.quote(self.IMAGE + "@sha256:" + self.INDEX_HEX)
+                + "\n"
+                "release_tag=" + shlex.quote(self.TAG) + "\n"
+                "expected_source=" + shlex.quote(self.SOURCE) + "\n"
+                "release_revision=" + shlex.quote(self.REVISION) + "\n"
+            )
+            return subprocess.run(
+                [
+                    self.bash,
+                    "-c",
+                    prelude
+                    + self.function_text
+                    + "\nverify_embedded_provenance\n",
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+                check=False,
+            )
+
+    def assert_denied(self, completed, message):
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(message, completed.stderr)
+
+    def test_faithful_provenance_tree_is_allowed(self):
+        completed = self.run_verifier(self.good_documents())
+        self.assertEqual(
+            completed.returncode, 0, completed.stdout + completed.stderr
+        )
+
+    def test_missing_attestation_manifest_is_denied(self):
+        documents = self.good_documents()
+        documents[self.INDEX_HEX] = self.index_document(
+            drop_attestation_for="arm64"
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/arm64 attestation manifest is absent or not unique",
+        )
+
+    def test_duplicated_attestation_manifest_is_denied(self):
+        documents = self.good_documents()
+        documents[self.INDEX_HEX] = self.index_document(
+            duplicate_attestation_for="amd64"
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/amd64 attestation manifest is absent or not unique",
+        )
+
+    def test_wrong_source_repository_is_denied(self):
+        """Neither VCS source nor builder identity may point elsewhere."""
+
+        forgeries = (
+            ("vcs_source", PLATFORM_REPOSITORY_LABEL),
+            (
+                "builder_id",
+                PLATFORM_REPOSITORY_LABEL + "/actions/runs/1/attempts/1",
+            ),
+        )
+        for field, forged_value in forgeries:
+            with self.subTest(field=field):
+                documents = self.good_documents(
+                    statements={
+                        "amd64": self.statement(
+                            "amd64", **{field: forged_value}
+                        )
+                    }
+                )
+                self.assert_denied(
+                    self.run_verifier(documents),
+                    "linux/amd64 SLSA provenance statement does not match "
+                    "the reviewed release identity",
+                )
+
+    def test_wrong_release_tag_is_denied(self):
+        documents = self.good_documents(
+            statements={
+                "amd64": self.statement(
+                    "amd64",
+                    subject_name=(
+                        "pkg:docker/{}@v0.0.1?platform=linux%2Famd64".format(
+                            self.IMAGE
+                        )
+                    ),
+                )
+            }
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/amd64 SLSA provenance statement does not match "
+            "the reviewed release identity",
+        )
+
+    def test_wrong_subject_digest_is_denied(self):
+        documents = self.good_documents(
+            statements={
+                "amd64": self.statement("amd64", subject_digest="9" * 64)
+            }
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/amd64 SLSA provenance statement does not match "
+            "the reviewed release identity",
+        )
+
+    def test_wrong_release_revision_is_denied(self):
+        documents = self.good_documents(
+            statements={
+                "arm64": self.statement("arm64", vcs_revision="b" * 40)
+            }
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/arm64 SLSA provenance statement does not match "
+            "the reviewed release identity",
+        )
+
+    def test_missing_provenance_layer_is_denied(self):
+        documents = self.good_documents()
+        documents[self.ATTESTATION_HEX["amd64"]] = self.attestation_document(
+            "amd64", include_provenance_layer=False
+        )
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/amd64 SLSA provenance layer is absent or not unique",
+        )
+
+    def test_malformed_statement_is_denied(self):
+        documents = self.good_documents(statements={"amd64": '{"not'})
+        self.assert_denied(
+            self.run_verifier(documents),
+            "linux/amd64 SLSA provenance statement does not match "
+            "the reviewed release identity",
+        )
 
 
 if __name__ == "__main__":

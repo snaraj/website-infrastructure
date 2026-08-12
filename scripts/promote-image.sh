@@ -34,6 +34,7 @@ case "${site}" in
     parent="${repo_root}/kubernetes/reconciliation/naranjo-online.yaml"
     identity="https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
     expected_source='https://github.com/snaraj/naranjo.online'
+    attestations_required='false'
     chart_oci='oci://ghcr.io/snaraj/charts/naranjo-online'
     release='naranjo-online'
     namespace='naranjo-online'
@@ -46,6 +47,7 @@ case "${site}" in
     parent="${repo_root}/kubernetes/reconciliation/lidersea-com.yaml"
     identity="https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
     expected_source='https://github.com/snaraj/lidersea.com'
+    attestations_required='false'
     chart_oci='oci://ghcr.io/snaraj/charts/lidersea-com'
     release='lidersea-com'
     namespace='lidersea-com'
@@ -264,8 +266,118 @@ for platform in linux/amd64 linux/arm64; do
     }
   fi
 done
+
+# Verify the BuildKit-embedded SLSA provenance the site publishers attach
+# inside the promoted OCI index (#58 bridge). Every artifact examined here is
+# fetched by a content address reachable only from the promoted index digest,
+# so the cosign signature verified below transitively covers each byte. For
+# each platform manifest the index must carry exactly one attestation
+# manifest, holding exactly one SLSA provenance statement that names this
+# exact image and release tag, binds that platform manifest digest as its only
+# subject, was built by a GitHub Actions run of the site repository from the
+# tuple's expected source, and records the same release revision the image
+# labels carried. Any absent, duplicated, or mismatched field fails closed.
+verify_embedded_provenance() {
+  local provenance_index platform architecture platform_digest
+  local attestation_digest attestation_manifest slsa_layer_digest statement
+  local expected_subject statement_checks
+  if ! provenance_index="$(oras manifest fetch "${reference}")"; then
+    printf 'provenance: index could not be fetched for embedded attestation review\n' >&2
+    return 1
+  fi
+  for platform in linux/amd64 linux/arm64; do
+    architecture="${platform#linux/}"
+    if ! platform_digest="$(
+      jq -er --arg arch "${architecture}" '
+        [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)]
+        | select(length == 1) | .[0].digest
+      ' <<<"${provenance_index}"
+    )"; then
+      printf 'provenance: %s platform manifest could not be selected exactly\n' "${platform}" >&2
+      return 1
+    fi
+    [[ "${platform_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+      printf 'provenance: %s platform manifest digest is not canonical\n' "${platform}" >&2
+      return 1
+    }
+    if ! attestation_digest="$(
+      jq -er --arg target "${platform_digest}" '
+        [.manifests[] | select(
+          (.annotations["vnd.docker.reference.type"]? == "attestation-manifest") and
+          (.annotations["vnd.docker.reference.digest"]? == $target)
+        )] | select(length == 1) | .[0].digest
+      ' <<<"${provenance_index}"
+    )"; then
+      printf 'provenance: %s attestation manifest is absent or not unique in the index\n' "${platform}" >&2
+      return 1
+    fi
+    [[ "${attestation_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+      printf 'provenance: %s attestation manifest digest is not canonical\n' "${platform}" >&2
+      return 1
+    }
+    if ! attestation_manifest="$(oras manifest fetch "${image}@${attestation_digest}")"; then
+      printf 'provenance: %s attestation manifest could not be fetched\n' "${platform}" >&2
+      return 1
+    fi
+    if ! slsa_layer_digest="$(
+      jq -er '
+        [.layers[] | select(
+          (.mediaType == "application/vnd.in-toto+json") and
+          (.annotations["in-toto.io/predicate-type"]? == "https://slsa.dev/provenance/v1")
+        )] | select(length == 1) | .[0].digest
+      ' <<<"${attestation_manifest}"
+    )"; then
+      printf 'provenance: %s SLSA provenance layer is absent or not unique\n' "${platform}" >&2
+      return 1
+    fi
+    [[ "${slsa_layer_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+      printf 'provenance: %s SLSA provenance layer digest is not canonical\n' "${platform}" >&2
+      return 1
+    }
+    if ! statement="$(oras blob fetch "${image}@${slsa_layer_digest}" --output -)"; then
+      printf 'provenance: %s SLSA provenance statement could not be fetched\n' "${platform}" >&2
+      return 1
+    fi
+    expected_subject="pkg:docker/${image}@${release_tag}?platform=linux%2F${architecture}"
+    if ! statement_checks="$(
+      jq -er \
+        --arg statement_type 'https://in-toto.io/Statement/v1' \
+        --arg predicate_type 'https://slsa.dev/provenance/v1' \
+        --arg subject_name "${expected_subject}" \
+        --arg subject_digest "${platform_digest#sha256:}" \
+        --arg builder_prefix "${expected_source}/actions/runs/" \
+        --arg vcs_source "${expected_source}" \
+        --arg vcs_revision "${release_revision}" '
+        (._type == $statement_type)
+        and (.predicateType == $predicate_type)
+        and ((.subject | length) == 1)
+        and (.subject[0].name == $subject_name)
+        and (.subject[0].digest.sha256 == $subject_digest)
+        and ((.predicate.runDetails.builder.id | type) == "string")
+        and (.predicate.runDetails.builder.id | startswith($builder_prefix))
+        and (.predicate.runDetails.metadata.buildkit_metadata.vcs.source == $vcs_source)
+        and (.predicate.runDetails.metadata.buildkit_metadata.vcs.revision == $vcs_revision)
+      ' <<<"${statement}"
+    )" || [[ "${statement_checks}" != 'true' ]]; then
+      printf 'provenance: %s SLSA provenance statement does not match the reviewed release identity\n' "${platform}" >&2
+      return 1
+    fi
+  done
+}
+
 cosign verify --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}" >/dev/null
-cosign verify-attestation --type slsaprovenance1 --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}" >/dev/null
+verify_embedded_provenance
+# RATCHET(#58): the site publishers do not yet attach cosign attestations, so
+# attestations_required is 'false' in both identity tuples and the embedded
+# BuildKit provenance review above is the required provenance evidence. Once a
+# site's release-publisher ships cosign-attached slsaprovenance1 attestations
+# (planned from its next tagged release), a follow-up PR flips that site's
+# tuple to 'true' and this verification re-arms as REQUIRED in addition to the
+# embedded review. The flag only ever moves 'false' to 'true'; the contract
+# battery pins both current values and the gated command below.
+if [[ "${attestations_required}" == 'true' ]]; then
+  cosign verify-attestation --type slsaprovenance1 --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}" >/dev/null
+fi
 # Resolve the human tag again immediately before candidate construction. The review
 # refuses a concurrent or administrative tag reassignment between provenance
 # verification and the digest-addressed patch.
