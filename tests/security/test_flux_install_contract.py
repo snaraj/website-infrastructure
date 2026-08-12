@@ -781,12 +781,25 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
         # The stub answers allow fixtures the way a passing policy would, so the
         # only behaviour under test is the deny loop's per-reason assertion.
         allow_arm = "case \"$*\" in *fixtures/allow/*) exit 0 ;; esac\n"
-        for stub, expected in (
+        rejecting = (
+            "printf 'FAIL - fixture - main - "
+            "NetworkPolicy flux-system/allow-egress must carry no egress rule; "
+            "the generated blanket allow is removed by patch\\n'; exit 1"
+        )
+        for stub, expected, second_document in (
+            # Rejected, but for a reason the fixture did not declare.
             (
                 "printf 'FAIL - fixture - main - some other rule fired\\n'; exit 1",
                 "not for the declared reason",
+                False,
             ),
-            ("exit 0", "deny fixture unexpectedly passed"),
+            # Not rejected at all.
+            ("exit 0", "deny fixture unexpectedly passed", False),
+            # Rejected for its one declared reason -- but the file carries TWO
+            # documents, so one reason cannot speak for both. Without this the
+            # split could be undone by concatenating files back together while
+            # the runner kept printing PASS, which is the original defect.
+            (rejecting, "declare exactly one per document", True),
         ):
             with self.subTest(stub=expected):
                 base = Path(
@@ -807,10 +820,18 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
                 (
                     base / "tests" / "kubernetes" / "fixtures" / "allow" / "one.yaml"
                 ).write_text("kind: ConfigMap\n", encoding="utf-8")
-                shutil.copy2(
-                    self._fixture(self.FIXTURES[1]),
-                    base / "tests" / "kubernetes" / "fixtures" / "deny" / "one.yaml",
-                )
+                deny = base / "tests" / "kubernetes" / "fixtures" / "deny" / "one.yaml"
+                shutil.copy2(self._fixture(self.FIXTURES[1]), deny)
+                if second_document:
+                    # The appended document carries no declaration of its own,
+                    # which is exactly the shape the check exists to refuse: one
+                    # reason speaking for two documents.
+                    extra = "".join(
+                        line + "\n"
+                        for line in read(self._fixture(self.FIXTURES[3])).splitlines()
+                        if not line.startswith("# expect-deny:")
+                    )
+                    deny.write_text(read(deny) + "---\n" + extra, encoding="utf-8")
                 (base / "policies" / "conftest").mkdir(parents=True)
                 environment = dict(os.environ)
                 environment["PATH"] = os.pathsep.join(
@@ -1995,6 +2016,31 @@ class ToolAndTargetBindingTests(InstallerBehaviourTestCase):
             "the egress bytes this would apply are not the reviewed ones",
             completed.stderr,
         )
+
+    def test_a_substitution_that_changes_more_than_the_sentinel_is_refused(self):
+        # The digest is taken over the render as REVIEWED; the bytes that reach
+        # the cluster are the render after one substitution. Nothing but the
+        # sentinel line may differ between them, and the reviewed digest cannot
+        # say so -- it was computed before the substitution ran.
+        #
+        # The input here is an egress render with no trailing newline, which the
+        # substitution's awk normalizes: the digest still matches the reviewed
+        # value, and the applied bytes differ from it on a second line.
+        normalized = self.base / "assets-unnormalized-egress"
+        normalized.mkdir(exist_ok=True)
+        shutil.copy2(self.assets / "controllers.yaml", normalized / "controllers.yaml")
+        body = _reviewed_egress_render().rstrip("\n")
+        (normalized / "egress.yaml").write_text(body, encoding="utf-8")
+        completed = self._run(
+            assets=normalized,
+            egress_digest=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "line(s) of the reviewed egress render; exactly one line may differ",
+            completed.stderr,
+        )
+        self.assertEqual(read(Path(completed.state) / "calls.log").count("apply"), 0)
 
     def test_a_commit_other_than_the_reviewed_one_is_refused(self):
         # A render digest binds the bytes rendered, never the program that

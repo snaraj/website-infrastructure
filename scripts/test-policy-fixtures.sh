@@ -28,11 +28,18 @@ policy="${repo_root}/policies/conftest"
 
 command -v conftest >/dev/null 2>&1 || { printf 'conftest is required\n' >&2; exit 2; }
 
+# Every fixture is read by REDIRECTION rather than passed as a filename. `--`
+# is not a portable option terminator: BSD `sed` treats it as a file, printing
+# "sed: --: No such file or directory" and exiting non-zero -- and inside a
+# process substitution that exit status is invisible, so the loop it feeds would
+# silently iterate over nothing on one platform while working on another. A
+# redirect has no such ambiguity and is hyphen-proof by construction.
+#
 # `---` at column 0 is a YAML document separator; kustomize and every fixture
 # here use that form. Counting them bounds how many reasons a file must declare.
 count_documents() {
   local separators=0
-  separators="$(grep -cE '^---[[:space:]]*$' -- "$1" || true)"
+  separators="$(grep -cE '^---[[:space:]]*$' <"$1" || true)"
   printf '%s' "$((separators + 1))"
 }
 
@@ -49,7 +56,7 @@ for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
     exit 1
   fi
   expected_count=0
-  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' -- "${fixture}" || true)"
+  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
   if ((expected_count == 0)); then
     printf 'PASS rejected (file-level only, no expect-deny declared) %s\n' "${fixture}"
     continue
@@ -68,6 +75,6 @@ for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
         "${fixture}" "${expected}" >&2
       exit 1
     fi
-  done < <(sed -n 's/^#[[:space:]]*expect-deny:[[:space:]]*//p' -- "${fixture}")
+  done < <(sed -n 's/^#[[:space:]]*expect-deny:[[:space:]]*//p' <"${fixture}")
   printf 'PASS rejected %s (%s declared reason(s) proven)\n' "${fixture}" "${expected_count}"
 done
