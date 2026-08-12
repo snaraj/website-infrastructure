@@ -58,18 +58,18 @@ one.
 
 ## Recorded proposal — connector availability (implementation: platform lane)
 
-Owner-verified observation (2026-08-11 evening, `kubectl`): the two per-site
-connector Deployments run in `cloudflare-public` with one Pod each and a
-`maxSurge: 0` / `maxUnavailable: 1` rollout, which can briefly interrupt a
-site during connector replacement. The superseded shared chart in Git
-specifies `replicaCount` 2 with `maxSurge: 1` / `maxUnavailable: 0`, so Git
-and the live objects disagree. The per-site connectors are not yet reconciled
-into Git; the recorded proposal is to carry the surge-first shape
-(`maxSurge: 1` / `maxUnavailable: 0`) into the two per-site connector
-Deployments during platform-lane reconciliation. That shape, and a measured
-second connector Pod per Tunnel, are process-availability only: two Pods on
-one Pi are not node, power, ISP, or home-network high availability, and must
-never be described as such.
+Owner-verified observation (2026-08-11 evening, `kubectl`; to be revalidated
+read-only): the two per-site connector Deployments run in `cloudflare-public`
+with one Pod each and a `maxSurge: 0` / `maxUnavailable: 1` rollout, which can
+briefly interrupt a site during connector replacement. The superseded shared
+chart in Git specifies `replicaCount` 2 with `maxSurge: 1` /
+`maxUnavailable: 0`, so Git and the live objects disagree. The per-site
+connectors are not yet reconciled into Git; the recorded proposal is to carry
+the surge-first shape (`maxSurge: 1` / `maxUnavailable: 0`) into the two
+per-site connector Deployments during platform-lane reconciliation. That
+shape, and a measured second connector Pod per Tunnel, are
+process-availability only: two Pods on one Pi are not node, power, ISP, or
+home-network high availability, and must never be described as such.
 
 ## Open decision — www behavior (owner)
 
