@@ -66,6 +66,7 @@ ZONE_SETTING_TARGETS = (
     ("min_tls_version", "1.2"),
     ("tls_1_3", "on"),
     ("zero_rtt", "off"),
+    ("http3", "on"),
     ("ssl", "full"),
 )
 
@@ -312,6 +313,58 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, POLICY)
+        # Reviewer finding F1: a third clause admitting ["create"] passed the
+        # whole suite, because the only create-shaped fixture also nulled its
+        # prior object and the before-null denial masked the weakening. The
+        # clause count is pinned, and the create-with-prior-object fixture is
+        # the behavioural half of the same guard.
+        self.assertEqual(POLICY.count("adoption_action(actions) if {"), 2)
+        self.assertIn("create-with-prior-object", POLICY_TEST)
+        self.assertIn('"create-with-prior-object"', MUTATOR)
+
+    def test_apex_and_config_are_bound_to_the_planned_tunnel_value(self):
+        """A reference-only binding accepts a forged plan (reviewer F2).
+
+        The plan JSON is exactly what this policy adjudicates, so the apex
+        content and the configuration's tunnel id must equal the Tunnel's
+        PLANNED id, not merely reference the right address.
+        """
+
+        self.assertIn(
+            'apex.content == sprintf("%s.cfargotunnel.com", [tunnel_id])', POLICY
+        )
+        self.assertIn("edge.tunnel_id == tunnel_id", POLICY)
+        self.assertIn('tunnel_id := object.get(tunnel, "id", "")', POLICY)
+        for mutation in ("apex-foreign-tunnel-uuid", "config-foreign-tunnel-uuid"):
+            with self.subTest(mutation=mutation):
+                self.assertIn(mutation, POLICY_TEST)
+
+    def test_token_receipt_matrix_lists_exactly_the_tracked_phase_roots(self):
+        """An operator minting from a stale table gets the wrong scope.
+
+        Reviewer finding F4. The runbook's phase column is bound to the tracked
+        root inventory so the ceremony reconciliation (issue #82) has to move
+        it in lockstep rather than leaving an under-scoped row behind.
+        """
+
+        receipt = (
+            REPO_ROOT / "docs" / "runbooks" / "cloudflare-token-receipt.md"
+        ).read_text(encoding="utf-8")
+        rows = re.findall(r"(?m)^\| `([a-z0-9-]+)` \|", receipt)
+        self.assertTrue(rows, "fail closed: no phase rows found in the matrix")
+        tracked = {
+            path.name for path in PHASE_ROOT.iterdir() if path.is_dir()
+        }
+        # `audit` is the read-only token, not a phase root.
+        self.assertEqual(set(rows) - {"audit"}, tracked)
+        self.assertIn("audit", rows)
+        for phase in ("site-naranjo-online", "site-lidersea-com"):
+            with self.subTest(phase=phase):
+                row = next(line for line in receipt.splitlines()
+                           if line.startswith("| `" + phase + "`"))
+                self.assertIn("Zone Settings Write", row)
+                self.assertIn("DNS Write", row)
+        self.assertIn("#82", receipt)
 
     def test_allow_fixtures_exactly_match_phase_graphs(self):
         for phase, fixture in self.fixtures.items():

@@ -174,6 +174,27 @@
       }
     },
     {
+      "address": "cloudflare_zone_setting.naranjo_online_http3",
+      "mode": "managed",
+      "type": "cloudflare_zone_setting",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "http3",
+          "value": "on"
+        },
+        "after": {
+          "zone_id": "22222222222222222222222222222222",
+          "setting_id": "http3",
+          "value": "on"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
       "address": "cloudflare_zone_setting.naranjo_online_zero_rtt",
       "mode": "managed",
       "type": "cloudflare_zone_setting",
@@ -312,6 +333,20 @@
         },
         {
           "address": "cloudflare_zone_setting.naranjo_online_tls_1_3",
+          "mode": "managed",
+          "type": "cloudflare_zone_setting",
+          "expressions": {
+            "zone_id": {
+              "references": [
+                "var.cloudflare_naranjo_online_zone_id"
+              ]
+            },
+            "setting_id": {},
+            "value": {}
+          }
+        },
+        {
+          "address": "cloudflare_zone_setting.naranjo_online_http3",
           "mode": "managed",
           "type": "cloudflare_zone_setting",
           "expressions": {

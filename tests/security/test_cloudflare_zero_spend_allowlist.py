@@ -48,6 +48,77 @@ _REGO_EXPECTED_ENTRY = re.compile(
 _REGO_CRITICAL_BLOCK = re.compile(r"(?ms)^critical_fields := \{$(.+?)^\}$")
 _REGO_CRITICAL_KEY = re.compile(r'(?m)^\s+"(cloudflare_[a-z0-9_]+)": \{')
 
+# The cost policy is a reviewed contract, not commentary: every value it pins
+# about the zone security target state or the Tunnel inventory must be the
+# SAME value some executable check reads, or the file is decoration that can
+# drift without anything going red.
+_REGO_ZONE_SETTINGS_BLOCK = re.compile(
+    r"(?ms)^zone_setting_contracts := \{$(.+?)^\}$"
+)
+_REGO_ZONE_SETTING_ENTRY = re.compile(
+    r'(?m)^\s+"[a-z0-9_]+": \{"setting_id": "([a-z0-9_]+)", "value": "([^"]+)"\},$'
+)
+_COST_TARGET_BLOCK = re.compile(
+    r"(?m)^    zoneSettingTargetState:\n((?:      [^\n]+\n)+)"
+)
+_COST_TARGET_ENTRY = re.compile(r'(?m)^      ([a-z0-9_]+): "?([^"\n]+)"?$')
+_TOFU_SETTING = re.compile(
+    r'(?m)^  setting_id = "([a-z0-9_]+)"\n  value      = "([^"]+)"$'
+)
+# Non-setting keys allowed inside zoneSettingTargetState. A new one would be a
+# fresh inert pin, so the set is closed.
+_COST_TARGET_NON_SETTING_KEYS = {"sslStrictVariants", "cloudflareManagedHsts"}
+
+
+def rego_zone_setting_targets(rego_text):
+    """Extract the executable zone-setting target map from the rego source."""
+
+    block = _REGO_ZONE_SETTINGS_BLOCK.search(rego_text)
+    if block is None:
+        raise AssertionError(
+            "fail closed: no zone_setting_contracts block extracted from the "
+            "rego source"
+        )
+    targets = dict(_REGO_ZONE_SETTING_ENTRY.findall(block.group(1)))
+    if not targets:
+        raise AssertionError(
+            "fail closed: the rego zone_setting_contracts block yielded no "
+            "targets"
+        )
+    return targets
+
+
+def cost_policy_zone_setting_targets(cost_policy_text):
+    """Extract every declared zoneSettingTargetState block, failing closed."""
+
+    blocks = _COST_TARGET_BLOCK.findall(cost_policy_text)
+    if not blocks:
+        raise AssertionError(
+            "fail closed: no zoneSettingTargetState block found in the cost "
+            "policy"
+        )
+    extracted = []
+    for block in blocks:
+        entries = dict(_COST_TARGET_ENTRY.findall(block))
+        if not entries:
+            raise AssertionError(
+                "fail closed: a zoneSettingTargetState block yielded no entries"
+            )
+        unknown = set(entries) - _COST_TARGET_NON_SETTING_KEYS
+        extracted.append({key: entries[key] for key in sorted(unknown)})
+    return extracted
+
+
+def tofu_zone_setting_targets(main_tf_text):
+    """Extract the setting/value pairs a website root actually declares."""
+
+    pairs = _TOFU_SETTING.findall(main_tf_text)
+    if not pairs:
+        raise AssertionError(
+            "fail closed: no zone settings extracted from a website root"
+        )
+    return dict(pairs)
+
 # Any line whose first token is ``resource`` or ``module`` must be a
 # well-formed block header; anything else in that position is treated as
 # an evasion attempt and fails the scan outright.
@@ -208,7 +279,7 @@ def cost_policy_violations(cost_policy_text):
     pins = (
         ("defaultDecision", "defaultDecision: deny"),
         ("infrastructureCostUsd", "infrastructureCostUsd: 0"),
-        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 21"),
+        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 23"),
     )
     lines = cost_policy_text.splitlines()
     violations = []
@@ -281,8 +352,10 @@ def tofu_inventory_violations(tracked_paths):
 def single_pinned_integer(cost_policy_text, key):
     """Extract one integer pin from the cost policy, failing closed."""
 
+    separator = "" if key.endswith("=") else ":"
     matches = re.findall(
-        r"(?m)^\s*{}:\s*(\d+)\s*$".format(key), cost_policy_text
+        r"(?m)^\s*{}{}\s*(\d+)\s*$".format(re.escape(key), separator),
+        cost_policy_text,
     )
     if len(matches) != 1:
         raise AssertionError(
@@ -373,6 +446,84 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
                 "cloudflare_zone_setting",
             }),
         )
+
+    def test_cost_policy_target_state_is_the_executed_target_state(self):
+        """The cost policy must pin what the rego and the roots really apply.
+
+        Reviewer finding F6: these keys were inert — weakening every one of
+        them left the suite green. Binding all three representations means a
+        drifted pin fails here instead of documenting a fiction.
+        """
+
+        rego_targets = rego_zone_setting_targets(self.rego)
+        self.assertEqual(len(rego_targets), 6)
+        declared = cost_policy_zone_setting_targets(self.cost_policy)
+        self.assertEqual(len(declared), 2, "one target block per website root")
+        for block in declared:
+            self.assertEqual(block, rego_targets)
+        roots = sorted(
+            path for path in PHASE_ROOT.iterdir()
+            if path.is_dir() and path.name.startswith("site-")
+        )
+        self.assertEqual(len(roots), 2)
+        for root in roots:
+            with self.subTest(root=root.name):
+                self.assertEqual(
+                    tofu_zone_setting_targets(
+                        (root / "main.tf").read_text(encoding="utf-8")
+                    ),
+                    rego_targets,
+                )
+
+    def test_cost_policy_tunnel_counts_match_the_enforcing_constants(self):
+        """`exactPublicTunnelCount` must equal the number actually enforced."""
+
+        validator = (
+            REPO_ROOT / "scripts" / "validate_release_transition.py"
+        ).read_text(encoding="utf-8")
+        enforced_public = single_pinned_integer(
+            validator, "CLOUDFLARE_PUBLIC_TUNNEL_COUNT ="
+        )
+        enforced_admin = single_pinned_integer(
+            validator, "CLOUDFLARE_ADMIN_TUNNEL_COUNT ="
+        )
+        self.assertEqual(
+            single_pinned_integer(self.cost_policy, "exactPublicTunnelCount"),
+            enforced_public,
+        )
+        self.assertEqual(
+            single_pinned_integer(self.cost_policy, "exactTunnelCount"),
+            enforced_admin + enforced_public,
+        )
+
+    def test_cost_policy_resource_type_allowlist_matches_the_rego(self):
+        """Two allowlists that can disagree are one allowlist too many."""
+
+        block = re.search(
+            r"(?ms)^allowedResourceTypes:\n((?:  - \S+\n)+)", self.cost_policy
+        )
+        if block is None:
+            raise AssertionError(
+                "fail closed: no allowedResourceTypes block in the cost policy"
+            )
+        declared = frozenset(re.findall(r"(?m)^  - (\S+)$", block.group(1)))
+        self.assertTrue(declared)
+        self.assertEqual(declared, self.allowed_types)
+
+    def test_cost_policy_site_resource_counts_match_the_roots(self):
+        """`exactResourceCount` per website root must be what the root declares."""
+
+        counts = re.findall(
+            r"(?ms)^  (site-[a-z-]+):\n.*?^    exactResourceCount: (\d+)$",
+            self.cost_policy,
+        )
+        self.assertEqual(len(counts), 2)
+        for phase, declared in counts:
+            with self.subTest(phase=phase):
+                text = (PHASE_ROOT / phase / "main.tf").read_text(encoding="utf-8")
+                self.assertEqual(
+                    int(declared), len(re.findall(r'(?m)^resource "', text))
+                )
 
     def test_no_tracked_opentofu_file_exists_outside_the_phase_roots(self):
         """Out-of-tree resources must not be able to dodge the scanner."""
@@ -552,8 +703,8 @@ class CloudflareZeroSpendDenyPathTests(unittest.TestCase):
             ("defaultDecision: deny", "defaultDecision: allow"),
             ("infrastructureCostUsd: 0", "infrastructureCostUsd: 1"),
             (
-                "  maximumManagedResourceCount: 21",
-                "  maximumManagedResourceCount: 22",
+                "  maximumManagedResourceCount: 23",
+                "  maximumManagedResourceCount: 24",
             ),
             ("defaultDecision: deny", ""),
             (

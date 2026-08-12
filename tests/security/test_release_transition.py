@@ -432,6 +432,25 @@ class ReleaseTransitionTests(unittest.TestCase):
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
+    def test_a_variable_file_inside_a_phase_root_is_rejected(self):
+        """The runbooks must never send an operator to a location that fails.
+
+        Reviewer finding F3: the docs told the owner to place the protected
+        variable file beside the root, which the closed file inventory rejects
+        — breaking the `make check` the same runbook requires. The docs now say
+        "outside the repository, passed with -var-file"; this pins the
+        behaviour that makes that the only workable instruction.
+        """
+
+        path = (
+            self.root
+            / "infrastructure/cloudflare/phases/site-naranjo-online"
+            / "private.auto.tfvars"
+        )
+        path.write_text("cloudflare_account_id = \"placeholder\"\n", encoding="utf-8")
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
     def test_website_root_must_not_reference_the_other_website(self):
         """One website root reaching the other is the shared-Tunnel regression.
 

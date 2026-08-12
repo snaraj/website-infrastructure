@@ -57,6 +57,7 @@ zone_setting_contracts := {
   "min_tls_version": {"setting_id": "min_tls_version", "value": "1.2"},
   "tls_1_3": {"setting_id": "tls_1_3", "value": "on"},
   "zero_rtt": {"setting_id": "0rtt", "value": "off"},
+  "http3": {"setting_id": "http3", "value": "on"},
   "ssl": {"setting_id": "ssl", "value": "full"},
 }
 
@@ -94,6 +95,7 @@ expected_types := {
     "cloudflare_zone_setting.naranjo_online_min_tls_version": "cloudflare_zone_setting",
     "cloudflare_zone_setting.naranjo_online_tls_1_3": "cloudflare_zone_setting",
     "cloudflare_zone_setting.naranjo_online_zero_rtt": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.naranjo_online_http3": "cloudflare_zone_setting",
     "cloudflare_zone_setting.naranjo_online_ssl": "cloudflare_zone_setting",
   },
   "site-lidersea-com": {
@@ -104,6 +106,7 @@ expected_types := {
     "cloudflare_zone_setting.lidersea_com_min_tls_version": "cloudflare_zone_setting",
     "cloudflare_zone_setting.lidersea_com_tls_1_3": "cloudflare_zone_setting",
     "cloudflare_zone_setting.lidersea_com_zero_rtt": "cloudflare_zone_setting",
+    "cloudflare_zone_setting.lidersea_com_http3": "cloudflare_zone_setting",
     "cloudflare_zone_setting.lidersea_com_ssl": "cloudflare_zone_setting",
   },
 }
@@ -130,6 +133,7 @@ expected_expression_fields := {
   "cloudflare_zone_setting.naranjo_online_min_tls_version": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.naranjo_online_tls_1_3": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.naranjo_online_zero_rtt": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.naranjo_online_http3": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.naranjo_online_ssl": {"zone_id", "setting_id", "value"},
   "cloudflare_zero_trust_tunnel_cloudflared.lidersea_com": {"account_id", "name", "config_src"},
   "cloudflare_zero_trust_tunnel_cloudflared_config.lidersea_com": {"account_id", "tunnel_id", "source", "config"},
@@ -138,6 +142,7 @@ expected_expression_fields := {
   "cloudflare_zone_setting.lidersea_com_min_tls_version": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.lidersea_com_tls_1_3": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.lidersea_com_zero_rtt": {"zone_id", "setting_id", "value"},
+  "cloudflare_zone_setting.lidersea_com_http3": {"zone_id", "setting_id", "value"},
   "cloudflare_zone_setting.lidersea_com_ssl": {"zone_id", "setting_id", "value"},
 }
 
@@ -439,6 +444,8 @@ site_root_exact(name) if {
   tunnel.name == contract.tunnel_name
   tunnel.config_src == "cloudflare"
   object.get(tunnel, "tunnel_secret", null) == null
+  tunnel_id := object.get(tunnel, "id", "")
+  valid_uuid(tunnel_id)
   has_exact_reference(tunnel_address, "account_id", "var.cloudflare_account_id")
 
   config_address := sprintf("cloudflare_zero_trust_tunnel_cloudflared_config.%s", [contract.slug])
@@ -450,6 +457,7 @@ site_root_exact(name) if {
   edge.config.ingress[0] == {"hostname": contract.hostname, "service": contract.origin}
   edge.config.ingress[1] == {"service": "http_status:404"}
   has_exact_reference(config_address, "account_id", "var.cloudflare_account_id")
+  edge.tunnel_id == tunnel_id
   has_only_id_tree(config_address, "tunnel_id", tunnel_address)
 
   apex_address := sprintf("cloudflare_dns_record.%s_apex", [contract.slug])
@@ -459,10 +467,7 @@ site_root_exact(name) if {
   apex.type == "CNAME"
   apex.proxied == true
   apex.ttl == 1
-  regex.match(
-    `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[.]cfargotunnel[.]com$`,
-    apex.content,
-  )
+  apex.content == sprintf("%s.cfargotunnel.com", [tunnel_id])
   has_exact_reference(apex_address, "zone_id", sprintf("var.%s", [contract.zone_variable]))
   has_only_id_tree(apex_address, "content", tunnel_address)
 

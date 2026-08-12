@@ -60,9 +60,13 @@ the two-root shape.
 1. Initialize only that one root, with its own protected state path passed via
    `-backend-config`, and its own `TF_DATA_DIR` under the protected volume.
    Never initialize live state beside the repository.
-2. Supply the account ID, that zone's ID, and the adoption-audit hash from the
-   ignored protected variable file beside that root. The tracked
-   `terraform.tfvars.example` carries placeholders only.
+2. Supply the account ID, that zone's ID, and the adoption-audit hash from a
+   variable file on the protected volume **outside the repository**, passed
+   explicitly with `-var-file`. Never place one inside a phase root: the
+   committed file-inventory contract is closed, so an extra file there fails
+   `make check` — which this runbook requires green — before any plan runs.
+   The tracked `terraform.tfvars.example` carries placeholders only and is
+   never the file you fill in.
 3. Import the eight objects one at a time, in the order given in
    `imports/README.md`, running a refresh-only plan after each.
 4. Produce the reviewed saved plan and walk the review checklist below.

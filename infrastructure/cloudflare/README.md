@@ -206,11 +206,14 @@ Use six different state paths on a protected encrypted volume:
 ```
 
 Every value that is a private identifier — the account ID, each zone ID, and
-the fresh adoption-audit hash — is supplied only from an ignored, protected
-variable file beside that one root. The tracked `terraform.tfvars.example` in
-each root carries obvious placeholders and never a real identifier, and
-`.gitignore` covers `*.tfstate*`, `terraform.tfvars`, `*.auto.tfvars`, and
-`.terraform/` so neither state nor inputs can be published.
+the fresh adoption-audit hash — is supplied from a variable file on the same
+protected volume, outside the repository, passed with `-var-file`. A variable
+file inside a phase root is rejected by the closed file inventory, so the
+protected path is the only working location as well as the only safe one. The
+tracked `terraform.tfvars.example` in each root carries obvious placeholders,
+is never the file you fill in, and never holds a real identifier. `.gitignore`
+additionally covers `*.tfstate*`, `terraform.tfvars`, `*.auto.tfvars`, and
+`.terraform/` as defence in depth.
 
 Pass the phase-specific path with local-backend configuration when initializing
 only that root. Use the phase's dedicated protected

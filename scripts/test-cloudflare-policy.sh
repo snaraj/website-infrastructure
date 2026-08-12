@@ -112,6 +112,12 @@ assert_mutation_denied admin-api wrong-account-variable
 # surface, or walk the zone security target state backwards.
 for phase in site-naranjo-online site-lidersea-com; do
   assert_mutation_denied "${phase}" fabricated-create
+  assert_mutation_denied "${phase}" create-with-prior-object
+  assert_mutation_denied "${phase}" apex-foreign-tunnel-uuid
+  assert_mutation_denied "${phase}" config-foreign-tunnel-uuid
+  assert_mutation_denied "${phase}" cross-site-plan-value
+  assert_mutation_denied "${phase}" cross-site-ingress-value
+  assert_mutation_denied "${phase}" cross-site-config-reference
   assert_mutation_denied "${phase}" recreate-adopted-tunnel
   assert_mutation_denied "${phase}" renamed-tunnel
   assert_mutation_denied "${phase}" extra-public-tunnel
@@ -136,6 +142,7 @@ for phase in site-naranjo-online site-lidersea-com; do
   assert_mutation_denied "${phase}" min-tls-downgrade
   assert_mutation_denied "${phase}" tls13-off
   assert_mutation_denied "${phase}" zero-rtt-on
+  assert_mutation_denied "${phase}" http3-off
   assert_mutation_denied "${phase}" ssl-strict
   assert_mutation_denied "${phase}" ssl-flexible
   assert_mutation_denied "${phase}" rebound-zone-setting

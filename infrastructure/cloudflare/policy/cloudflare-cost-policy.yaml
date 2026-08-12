@@ -13,9 +13,9 @@ phaseArchitecture:
     - site-naranjo-online
     - site-lidersea-com
   finalActivationPhase: site-lidersea-com
-  baseManagedResourceCount: 20
+  baseManagedResourceCount: 22
   optionalAdminApiResourceCount: 1
-  maximumManagedResourceCount: 21
+  maximumManagedResourceCount: 23
   combinedRoot: forbidden
   sharedState: forbidden
   sharedApplyToken: forbidden
@@ -191,7 +191,7 @@ phaseContracts:
 
   site-naranjo-online:
     required: true
-    exactResourceCount: 8
+    exactResourceCount: 9
     allowedResourceAddresses:
       - cloudflare_zero_trust_tunnel_cloudflared.naranjo_online
       - cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online
@@ -200,6 +200,7 @@ phaseContracts:
       - cloudflare_zone_setting.naranjo_online_min_tls_version
       - cloudflare_zone_setting.naranjo_online_tls_1_3
       - cloudflare_zone_setting.naranjo_online_zero_rtt
+      - cloudflare_zone_setting.naranjo_online_http3
       - cloudflare_zone_setting.naranjo_online_ssl
     forbiddenResourceTypes:
       - cloudflare_zero_trust_gateway_policy
@@ -228,6 +229,7 @@ phaseContracts:
       min_tls_version: "1.2"
       tls_1_3: "on"
       0rtt: "off"
+      http3: "on"
       ssl: full
       sslStrictVariants: reject
       cloudflareManagedHsts: forbidden-application-owned
@@ -243,7 +245,7 @@ phaseContracts:
 
   site-lidersea-com:
     required: true
-    exactResourceCount: 8
+    exactResourceCount: 9
     allowedResourceAddresses:
       - cloudflare_zero_trust_tunnel_cloudflared.lidersea_com
       - cloudflare_zero_trust_tunnel_cloudflared_config.lidersea_com
@@ -252,6 +254,7 @@ phaseContracts:
       - cloudflare_zone_setting.lidersea_com_min_tls_version
       - cloudflare_zone_setting.lidersea_com_tls_1_3
       - cloudflare_zone_setting.lidersea_com_zero_rtt
+      - cloudflare_zone_setting.lidersea_com_http3
       - cloudflare_zone_setting.lidersea_com_ssl
     forbiddenResourceTypes:
       - cloudflare_zero_trust_gateway_policy
@@ -280,6 +283,7 @@ phaseContracts:
       min_tls_version: "1.2"
       tls_1_3: "on"
       0rtt: "off"
+      http3: "on"
       ssl: full
       sslStrictVariants: reject
       cloudflareManagedHsts: forbidden-application-owned

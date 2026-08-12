@@ -125,6 +125,23 @@ resource "cloudflare_zone_setting" "lidersea_com_zero_rtt" {
   }
 }
 
+# HTTP/3 is advertised on every response from this zone today. Pinning it is
+# the same kind of claim as TLS 1.3: an externally attested value that is
+# already at target and must not be able to regress unnoticed.
+resource "cloudflare_zone_setting" "lidersea_com_http3" {
+  zone_id    = var.cloudflare_lidersea_com_zone_id
+  setting_id = "http3"
+  value      = "on"
+
+  lifecycle {
+    prevent_destroy = true
+    precondition {
+      condition     = var.approve_site_lidersea_com_phase
+      error_message = "Set approve_site_lidersea_com_phase=true only for an approved lidersea.com plan."
+    }
+  }
+}
+
 resource "cloudflare_zone_setting" "lidersea_com_ssl" {
   zone_id    = var.cloudflare_lidersea_com_zone_id
   setting_id = "ssl"

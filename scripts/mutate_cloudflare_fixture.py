@@ -31,6 +31,7 @@ SITE_CONTEXT = {
         "foreign_origin": (
             "http://lidersea-com.lidersea-com.svc.cluster.local:8080"
         ),
+        "foreign_variable": "var.cloudflare_lidersea_com_zone_id",
     },
     "site-lidersea-com": {
         "slug": "lidersea_com",
@@ -42,6 +43,7 @@ SITE_CONTEXT = {
         "foreign_origin": (
             "http://naranjo-online.naranjo-online.svc.cluster.local:8080"
         ),
+        "foreign_variable": "var.cloudflare_naranjo_online_zone_id",
     },
 }
 
@@ -99,6 +101,17 @@ def mutate(plan, name):
 
     def zone_setting(key):
         return "cloudflare_zone_setting.{}_{}".format(site()["slug"], key)
+
+    def foreign_tunnel_identifier():
+        """Return an identifier this root does not own.
+
+        Derived from the plan's own identifier rather than written down: the
+        repository privacy gate allows exactly one UUID literal in tracked
+        text, and a forged target must never become the second one.
+        """
+
+        own = after(tunnel_address())["id"]
+        return own[:-1] + ("1" if own[-1] != "1" else "2")
 
     if name == "false-approval":
         variables[APPROVAL_VARIABLE[phase]]["value"] = False
@@ -412,6 +425,46 @@ def mutate(plan, name):
         extra_config = copy.deepcopy(exactly_one(configured, zone_setting("ssl")))
         extra_config["address"] = address
         configured.append(extra_config)
+    elif name == "create-with-prior-object":
+        # F1 isolation: a create action that KEEPS its prior object. The
+        # before-null denial cannot see it and the adopted-identity rule does
+        # not apply to a zone setting, so only the adoption-action rule stands
+        # between this plan and a duplicated live object.
+        exactly_one(changes, zone_setting("ssl"))["change"]["actions"] = ["create"]
+    elif name == "apex-foreign-tunnel-uuid":
+        # F2 isolation: the configuration still references this root's own
+        # Tunnel; only the planned VALUE is foreign. A reference-only binding
+        # accepts this forged plan.
+        after(dns_address())["content"] = (
+            foreign_tunnel_identifier() + ".cfargotunnel.com"
+        )
+    elif name == "config-foreign-tunnel-uuid":
+        after(
+            "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
+                site()["slug"]
+            )
+        )["tunnel_id"] = foreign_tunnel_identifier()
+    elif name == "http3-off":
+        after(zone_setting("http3"))["value"] = "off"
+    elif name == "cross-site-plan-value":
+        # F7 isolation for the planned-value rule: an unpinned provider field
+        # carrying the other site's name. Nothing in the exact contract reads
+        # it, so this input is otherwise valid.
+        after(tunnel_address())["comment"] = "shared with {} until cutover".format(
+            site()["foreign_hostname"]
+        )
+    elif name == "cross-site-ingress-value":
+        # F7 isolation for the ingress rule: an ingress block attached to a
+        # resource whose exact contract does not pin extra keys.
+        after(tunnel_address())["config"] = {
+            "ingress": [{"service": site()["foreign_origin"]}]
+        }
+    elif name == "cross-site-config-reference":
+        # F7 isolation for the reference rule: a field whose references no
+        # exact-reference assertion inspects.
+        config(tunnel_address())["expressions"]["name"] = {
+            "references": [site()["foreign_variable"]]
+        }
     elif name == "missing-adoption-audit":
         variables[site()["audit_variable"]]["value"] = ""
     elif name == "zero-adoption-audit":

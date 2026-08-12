@@ -54,15 +54,21 @@ receipt contents.
 
 ## Closed phase and authority matrix
 
+The phase column below is the tracked phase-root inventory and is pinned to it
+by test. The rest of this document — receipt schema, ceremony order, and the
+predecessor chain — still describes the superseded shared-Tunnel sequencing and
+is reconciled to the two website roots under issue #82. Mint from the table
+below, not from the surrounding prose: a website root needs `Zone Settings
+Write` in addition to `DNS Write`, and a token missing it fails mid-ceremony.
+
 | Phase | Token permission | Cloudflare resource selector | Unavoidable permission reach |
 |---|---|---|---|
 | `admin-tunnel` | `Cloudflare One Connector: cloudflared Write` | exact account | all Cloudflared connectors and Tunnels in the account |
 | `admin-policies` | `Zero Trust Write` | exact account | all Zero Trust resources in the account |
 | `admin-route` | `Cloudflare One Networks Write` | exact account | all private routes and virtual networks in the account |
 | `admin-api` | `Zero Trust Write` | exact account | all Zero Trust resources in the account |
-| `public-edge` | `Cloudflare One Connector: cloudflared Write` | exact account | all Cloudflared connectors and Tunnels in the account |
-| `public-dns-naranjo` | `DNS Write` | that exact zone | all DNS records in that one zone |
-| `public-dns-lidersea` | `DNS Write` | that exact zone | all DNS records in that one zone |
+| `site-naranjo-online` | `Cloudflare One Connector: cloudflared Write` **and** `DNS Write` **and** `Zone Settings Write` | exact account for the connector permission; the `naranjo.online` zone for both zone permissions | all Cloudflared connectors and Tunnels in the account; every DNS record and every zone setting in that one zone |
+| `site-lidersea-com` | `Cloudflare One Connector: cloudflared Write` **and** `DNS Write` **and** `Zone Settings Write` | exact account for the connector permission; the `lidersea.com` zone for both zone permissions | all Cloudflared connectors and Tunnels in the account; every DNS record and every zone setting in that one zone |
 | `audit` | the exact read set below | exact account and all account zones | all listed read surfaces |
 
 Cloudflare's token resource selectors do not narrow the write permissions above

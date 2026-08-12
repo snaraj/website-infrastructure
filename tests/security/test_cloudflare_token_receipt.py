@@ -758,7 +758,12 @@ class CloudflareTokenReceiptTests(unittest.TestCase):
             "60 minutes",
             "outside the repository",
             "all Cloudflared connectors and Tunnels in the account",
-            "all DNS records in that one zone",
+            # A website token also carries Zone Settings Write, so the reach
+            # sentence must say so: the previous "all DNS records in that one
+            # zone" understated it and an operator minting from it would have
+            # produced an under-scoped token.
+            "every DNS record and every zone setting in that one zone",
+            "Zone Settings Write",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)

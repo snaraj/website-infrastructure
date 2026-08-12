@@ -125,6 +125,23 @@ resource "cloudflare_zone_setting" "naranjo_online_zero_rtt" {
   }
 }
 
+# HTTP/3 is advertised on every response from this zone today. Pinning it is
+# the same kind of claim as TLS 1.3: an externally attested value that is
+# already at target and must not be able to regress unnoticed.
+resource "cloudflare_zone_setting" "naranjo_online_http3" {
+  zone_id    = var.cloudflare_naranjo_online_zone_id
+  setting_id = "http3"
+  value      = "on"
+
+  lifecycle {
+    prevent_destroy = true
+    precondition {
+      condition     = var.approve_site_naranjo_online_phase
+      error_message = "Set approve_site_naranjo_online_phase=true only for an approved naranjo.online plan."
+    }
+  }
+}
+
 resource "cloudflare_zone_setting" "naranjo_online_ssl" {
   zone_id    = var.cloudflare_naranjo_online_zone_id
   setting_id = "ssl"

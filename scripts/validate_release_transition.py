@@ -75,6 +75,7 @@ CLOUDFLARE_PHASE_CONTRACTS = {
             ("cloudflare_zone_setting", "naranjo_online_min_tls_version"),
             ("cloudflare_zone_setting", "naranjo_online_tls_1_3"),
             ("cloudflare_zone_setting", "naranjo_online_zero_rtt"),
+            ("cloudflare_zone_setting", "naranjo_online_http3"),
             ("cloudflare_zone_setting", "naranjo_online_ssl"),
         }),
         "source_files": frozenset({
@@ -91,6 +92,7 @@ CLOUDFLARE_PHASE_CONTRACTS = {
             ("cloudflare_zone_setting", "lidersea_com_min_tls_version"),
             ("cloudflare_zone_setting", "lidersea_com_tls_1_3"),
             ("cloudflare_zone_setting", "lidersea_com_zero_rtt"),
+            ("cloudflare_zone_setting", "lidersea_com_http3"),
             ("cloudflare_zone_setting", "lidersea_com_ssl"),
         }),
         "source_files": frozenset({
