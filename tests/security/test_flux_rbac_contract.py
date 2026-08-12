@@ -144,7 +144,7 @@ CLUSTER = (None,)
 SHARED_ROLE = (
     "the shared crd-controller-flux-system ClusterRole is bound to all three "
     "controllers, so this controller holds authority derived for another one "
-    "(tracked: per-controller role split, issue #94)"
+    "(tracked: per-controller role split, issue #98)"
 )
 # Reason 2 — the generated export grants a source kind whose reconciler
 # registration at the pinned version this repository cannot confirm, so it is
