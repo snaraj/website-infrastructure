@@ -26,7 +26,14 @@
 #      is worse: `kyverno test` counts Skip as a PASS, so a match block narrowed
 #      by namespace, name, or a userInfo field (clusterRoles/roles/subjects)
 #      leaves the behavioural suite entirely green while the policy matches
-#      nobody.
+#      nobody;
+#   5. the denial came from the RULE THE FIXTURE CLAIMS. Each deny fixture
+#      declares the message fragment its rule emits, in a `# rego-message:`
+#      header, and this harness requires that fragment in the Conftest output.
+#      Without it a per-rule mutation is invisible whenever any OTHER rule also
+#      denies the object: neutralizing the SR-0 arm left every gate green,
+#      because its fixture also fails SR-1 and SR-7 and the runners only assert
+#      that the FILE is rejected.
 #
 # SCOPE. Storage kinds only. The Kyverno policy's Pod rules are deliberately
 # namespace-scoped while the Conftest mirror's pod-volume rules are repo-wide, so
@@ -58,14 +65,33 @@ report_divergence() {
 }
 
 check_object() {
-  local fixture="$1" expected="$2" name conftest_verdict kyverno_output kyverno_verdict
-  local pass fail error skip
+  local fixture="$1" expected="$2" name conftest_verdict conftest_output kyverno_output kyverno_verdict
+  local pass fail error skip expected_message
   name="$(basename -- "${fixture}")"
 
-  if conftest test --policy "${policy_dir}" "${fixture}" >/dev/null 2>&1; then
+  if conftest_output="$(conftest test --policy "${policy_dir}" "${fixture}" 2>&1)"; then
     conftest_verdict='allow'
   else
     conftest_verdict='deny'
+  fi
+
+  # The claimed rule must be the rule that fired. A fixture with no declared
+  # message is a fixture whose rule cannot be mutation-tested, so its absence is
+  # a failure rather than a skip.
+  if [[ "${expected}" == 'deny' ]]; then
+    expected_message="$(sed -n 's/^# rego-message: //p' "${fixture}" | head -n 1)"
+    if [[ -z "${expected_message}" ]]; then
+      printf 'PARITY FAILURE %s: deny fixture declares no rego-message header to attribute its denial to\n' \
+        "${name}" >&2
+      failures=$((failures + 1))
+      return
+    fi
+    if ! grep -Fq -- "${expected_message}" <<<"${conftest_output}"; then
+      printf '%s\n' "${conftest_output}" >&2
+      report_divergence "${name}" "${expected}" "${conftest_verdict}" 'n/a' \
+        "the Conftest mirror never emitted the claimed denial: ${expected_message}"
+      return
+    fi
   fi
 
   # kyverno apply exits non-zero whenever a resource fails a rule, which is the

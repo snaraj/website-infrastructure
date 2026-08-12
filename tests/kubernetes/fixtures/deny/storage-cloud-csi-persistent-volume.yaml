@@ -1,4 +1,5 @@
 # proves: SR-3
+# rego-message: names a CSI driver outside the enumerated local-provisioner allowlist
 # SR-3. The csi source is admitted as a shape, but only for a driver on the
 # enumerated local-provisioner allowlist. A cloud block-store driver publishes
 # the volume into a provider account, which is the definition of outside.

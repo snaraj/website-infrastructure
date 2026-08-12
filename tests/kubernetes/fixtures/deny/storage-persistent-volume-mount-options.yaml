@@ -1,4 +1,5 @@
 # proves: SR-16
+# rego-message: must declare no mountOptions; that is where a remote endpoint would be named
 # SR-10's rationale, applied where it equally holds. The volume is local, rooted
 # under the enumerated root, node-pinned and enumerated-classed — and its mount
 # options name a remote server and an NFS protocol version. mountOptions is where

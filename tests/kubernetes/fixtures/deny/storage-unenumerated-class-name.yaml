@@ -1,4 +1,5 @@
 # proves: SR-9
+# rego-message: is not an enumerated class identity
 # SR-9. The provisioner is the enumerated static local one, so nothing about
 # this class is remote — and it is still denied, because the class inventory is
 # enumerated too and a second class must not appear without review.

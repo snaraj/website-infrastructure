@@ -1,4 +1,5 @@
 # proves: SR-15
+# rego-message: references a VolumeAttributesClass outside the enumerated allowlist
 # The claim side of the same reference. storageClassName gets both object and
 # reference treatment; volumeAttributesClassName now does too.
 apiVersion: v1

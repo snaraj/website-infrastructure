@@ -1,4 +1,5 @@
 # proves: SR-4
+# rego-message: uses local path outside the enumerated local root
 # Degenerate shape. `local:` is a STRING naming the control-plane configuration
 # directory rather than a mapping with a path. Nothing about it is admissible,
 # and nothing about it may be skipped.

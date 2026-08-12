@@ -1,4 +1,5 @@
 # proves: SR-12
+# rego-message: must not populate itself from
 # Degenerate shape. `dataSourceRef:` is DECLARED with a null value. Kyverno's
 # has() calls that field present and denies; a Rego arm that compared the value
 # against null admitted it. Declaration, not non-nullness, is the test.

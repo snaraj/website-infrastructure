@@ -1,4 +1,5 @@
 # proves: SR-0
+# rego-message: has no usable spec mapping and cannot be evaluated
 # SR-0. The document parses as YAML but the spec is a scalar, not a mapping, so
 # no field access can succeed. A rule that silently becomes undefined on such an
 # object is an allow; this one denies explicitly.

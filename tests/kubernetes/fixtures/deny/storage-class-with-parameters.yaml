@@ -1,4 +1,5 @@
 # proves: SR-10
+# rego-message: must declare no parameters and no mountOptions
 # SR-10. The identity and provisioner are both enumerated, and the class still
 # names a remote server and share in its parameters. Parameters and mountOptions
 # are exactly where an external endpoint hides, and a statically provisioned

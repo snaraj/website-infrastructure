@@ -1,4 +1,5 @@
 # proves: SR-12
+# rego-message: must not populate itself from
 # SR-12. The class is enumerated and the claim still imports its contents from
 # somewhere else — a snapshot object, and with dataSourceRef potentially another
 # namespace. That is a data flow the enumeration never described.

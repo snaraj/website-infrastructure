@@ -1,4 +1,5 @@
 # proves: SR-6
+# rego-message: must pin itself to named nodes with a bounded required nodeAffinity
 # SR-6's actual claim, proven. Required node affinity is PRESENT and structurally
 # complete, and `operator: Exists` on kubernetes.io/hostname is satisfied by every
 # node that ever joins the cluster — so one reviewed directory is still a

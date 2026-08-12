@@ -1,4 +1,5 @@
 # proves: SR-13
+# rego-message: is outside the enumerated local-provisioner allowlist
 # SR-13. Installing a CSI driver installs a whole new means at once, before any
 # volume exists. The enumerated driver allowlist is empty today, so every
 # CSIDriver object is denied — by enumeration now, not by kind.

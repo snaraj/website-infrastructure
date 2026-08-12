@@ -1,4 +1,5 @@
 # proves: SR-1
+# rego-message: must declare exactly one volume source
 # SR-1 in isolation. Zero sources: the spec parses, every other enumerated
 # constraint is satisfied, and the object still cannot be reasoned about as a
 # means. It is denied rather than skipped.

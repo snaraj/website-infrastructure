@@ -1,4 +1,5 @@
 # proves: SR-3
+# rego-message: names a CSI driver outside the enumerated local-provisioner allowlist
 # SR-3, fail-closed direction. The driver name is one this repository has never
 # seen. An allow-by-default policy would admit it; the enumeration denies it
 # precisely because nobody enumerated it.

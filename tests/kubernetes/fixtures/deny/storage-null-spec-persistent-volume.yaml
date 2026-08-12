@@ -1,4 +1,5 @@
 # proves: SR-0
+# rego-message: has no usable spec mapping and cannot be evaluated
 # Degenerate shape. `spec:` is declared with a null value rather than omitted.
 # Multi-rule by construction: with no readable spec, SR-1 (zero sources) and
 # SR-7 (no enumerated class) legitimately fire beside SR-0.

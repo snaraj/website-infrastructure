@@ -1,4 +1,5 @@
 # proves: SR-5
+# rego-message: uses a local path containing a parent traversal segment
 # SR-5. This path passes the enumerated-root prefix test and still resolves
 # outside it. Prefix matching alone is not a containment proof, which is why the
 # traversal denial is a separate rule rather than a clause of the root rule.

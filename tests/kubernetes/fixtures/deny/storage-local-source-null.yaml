@@ -1,4 +1,5 @@
 # proves: SR-4
+# rego-message: uses local path outside the enumerated local root
 # Degenerate shape, fail-closed direction. `local:` is DECLARED with a null
 # value. Rego reads the path through a nested object.get, which raises a builtin
 # type error on null and — under OPA's default non-strict handling — leaves the

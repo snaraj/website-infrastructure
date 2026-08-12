@@ -604,6 +604,56 @@ class RuleIdentityLock(unittest.TestCase):
             "that no longer exists",
         )
 
+    def test_every_deny_fixture_declares_the_message_its_rule_emits(self) -> None:
+        """Attribution, not just rejection.
+
+        Both fixture runners assert only that a FILE is rejected, so a rule can
+        be neutralized and stay green whenever any OTHER rule also denies the
+        same object. Measured: the Rego SR-0 arm was replaced with a condition
+        that never matches, message string left byte-identical, and the
+        structural battery, the fixture runner, and the Kyverno suite all stayed
+        green — its fixture also fails SR-1 and SR-7.
+
+        Each fixture therefore declares the exact message fragment its claimed
+        rule emits, and ``scripts/test-storage-engine-parity.sh`` requires that
+        fragment in the Conftest output. This test keeps the declarations from
+        being dropped, and keeps them from degenerating into fragments so short
+        that any denial would satisfy them.
+        """
+
+        declared: dict[str, list[str]] = {}
+        for path in self.deny_fixtures:
+            text = read(path)
+            claim = require(
+                re.match(r"# proves: (SR-\d+)\n# rego-message: (.+)\n", text),
+                "`# proves:` and `# rego-message:` headers on deny fixture " + path.name,
+            )
+            fragment = claim.group(2).strip()
+            with self.subTest(fixture=path.name):
+                self.assertGreaterEqual(
+                    len(fragment),
+                    20,
+                    "the declared denial message is too short to attribute anything: " + fragment,
+                )
+                self.assertNotIn("SR-", fragment, "declare the MESSAGE, not the rule identifier")
+            declared.setdefault(claim.group(1), []).append(fragment)
+        self.assertEqual(
+            set(declared),
+            set(EXPECTED_RULE_IDS),
+            "a rule has no fixture declaring the message it emits",
+        )
+        for rule_id, fragments in declared.items():
+            with self.subTest(rule=rule_id):
+                for fragment in fragments:
+                    self.assertIn(
+                        fragment,
+                        self.rego,
+                        "no Conftest rule emits the message fixture "
+                        + rule_id
+                        + " claims: "
+                        + fragment,
+                    )
+
     def test_admission_and_the_mirror_agree_rule_for_rule(self) -> None:
         """The lockstep the two engines must keep even if both were rewritten."""
 

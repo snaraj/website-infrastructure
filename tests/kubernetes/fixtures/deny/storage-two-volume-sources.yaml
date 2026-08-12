@@ -1,4 +1,5 @@
 # proves: SR-1
+# rego-message: must declare exactly one volume source
 # SR-1 (arity) plus SR-2 (the second source). A reviewer skimming for a local
 # path would find one; the object still carries a network source beside it, so
 # the arity rule exists to make "the source" a single, readable fact.

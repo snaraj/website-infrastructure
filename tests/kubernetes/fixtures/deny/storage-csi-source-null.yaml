@@ -1,4 +1,5 @@
 # proves: SR-3
+# rego-message: names a CSI driver outside the enumerated local-provisioner allowlist
 # Degenerate shape. `csi:` is declared with a null value, so there is no driver
 # name to check against the enumeration. An unreadable driver is not an absent
 # driver: the source is still a csi source.

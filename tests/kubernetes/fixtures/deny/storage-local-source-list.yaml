@@ -1,4 +1,5 @@
 # proves: SR-4
+# rego-message: uses local path outside the enumerated local root
 # Degenerate shape. `local:` is a LIST whose one element names the control-plane
 # state directory. A reader skimming for `path:` finds one; no field access the
 # policy performs can reach it, so the object must deny rather than evaluate to

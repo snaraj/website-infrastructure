@@ -1,4 +1,5 @@
 # proves: SR-15
+# rego-message: references a VolumeAttributesClass outside the enumerated allowlist
 # The reference, not the object. Every other field is admissible; the volume
 # names a VolumeAttributesClass, which carries a driver name plus a free-form
 # parameter map and can retarget the volume at a backend. SR-14 refuses the

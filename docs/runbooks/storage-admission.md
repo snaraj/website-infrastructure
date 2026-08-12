@@ -169,6 +169,15 @@ reports `skip` or never evaluates an object at all — which is the same narrowi
 above, caught behaviourally. It runs in `scripts/render-manifests.sh`, beside the
 fixture runner, so `make check-kubernetes` and CI both execute it.
 
+It also enforces ATTRIBUTION. Both fixture runners assert only that a file is
+rejected, so neutralizing one rule stays green whenever any other rule denies the
+same object — measured on the Rego SR-0 arm, whose fixture also fails SR-1 and
+SR-7. Every deny fixture therefore declares the message fragment its rule emits
+in a `# rego-message:` header, the harness requires that fragment in the Conftest
+output, and the test battery requires the fragment to be a real message some
+Conftest rule can emit. Every rule in the mirror is pinned behaviourally, not by
+the presence of its comment.
+
 ## What this gate does not cover — stated, not papered over
 
 - **A manifest cannot say what a node path really is.** `/mnt/local-pie-ssd`

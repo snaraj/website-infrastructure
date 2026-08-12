@@ -1,4 +1,5 @@
 # proves: SR-3
+# rego-message: names a CSI driver outside the enumerated local-provisioner allowlist
 # Degenerate shape. `csi:` is a STRING that happens to spell a cloud driver
 # name. The policy never reads a driver out of it, so the enumeration check
 # would have been skipped entirely rather than failed.
