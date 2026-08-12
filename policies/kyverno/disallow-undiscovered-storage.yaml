@@ -4,7 +4,12 @@ metadata:
   name: disallow-undiscovered-storage
   annotations:
     policies.kyverno.io/category: Storage Security
-    policies.kyverno.io/description: Keep persistent and node-coupled storage unavailable until Pi discovery and restore evidence are approved.
+    policies.kyverno.io/description: >-
+      Storage objects are admitted; externally reachable storage is not. A storage object may
+      exist only through a means the owner has enumerated in this policy's allowlist variables,
+      and anything unrecognized — an unknown volume source, an un-enumerated CSI driver or
+      provisioner, a path outside the enumerated local root, a structurally unusable object — is
+      denied. "Undiscovered" in this policy's name now means "not in the owner's enumeration".
 spec:
   admission: true
   background: true
@@ -13,6 +18,17 @@ spec:
     failurePolicy: Fail
     timeoutSeconds: 10
   rules:
+    # THE ENUMERATION. Every list in `variables` below is the owner's explicit,
+    # reviewable allowlist of means by which storage may exist in this cluster.
+    # Adding a means is a one-line reviewed diff here (mirrored in
+    # policies/conftest/kubernetes.rego); it is never a policy rewrite. Every
+    # expression is written so that a missing, empty, or structurally unusable
+    # field evaluates FALSE and therefore DENIES: no input may reach an implicit
+    # allow. The kinds matched here are pinned to the kinds the expressions
+    # reason about by tests/security/test_storage_exposure_policy_contract.py,
+    # because a Kyverno resource that falls outside `match` is reported as a
+    # pass, not a failure — behavioural fixtures alone cannot detect a narrowed
+    # match block.
     - name: disallow-persistent-storage-resources
       match:
         any:
@@ -22,15 +38,144 @@ spec:
                 - PersistentVolumeClaim
                 - StorageClass
                 - CSIDriver
+                - VolumeAttributesClass
       validate:
         failureAction: Enforce
-        message: Persistent storage resources are forbidden until discovery and restore evidence are approved.
-        deny:
-          conditions:
-            any:
-              - key: "{{ request.object.kind || '' }}"
-                operator: NotEquals
-                value: ""
+        cel:
+          variables:
+            # The only StorageClass identities that may exist. local-pie-ssd is
+            # the owner's single designed class; it is statically provisioned on
+            # a data partition separate from the control-plane/etcd filesystem.
+            - name: enumeratedStorageClasses
+              expression: "['local-pie-ssd']"
+            # Static local provisioning only. A dynamic provisioner decides where
+            # bytes land without a reviewed diff, which is exactly the property
+            # this policy exists to withhold.
+            - name: enumeratedProvisioners
+              expression: "['kubernetes.io/no-provisioner']"
+            # Empty by design: no CSI driver is an enumerated means today, so
+            # every csi volume source, CSIDriver object, and VolumeAttributesClass
+            # is denied. The list, not the policy, is what changes when the owner
+            # admits a local provisioner.
+            - name: enumeratedCsiDrivers
+              expression: "[]"
+            # The only host root a local PersistentVolume may name. It is a
+            # policy-declared mount contract, not discovered inventory: it carries
+            # no device name, filesystem identifier, node identity, or capacity
+            # (ADR 0012 keeps those local), and it is deliberately not under
+            # /var/lib, where etcd and kubelet state live.
+            - name: enumeratedLocalRoots
+              expression: "['/mnt/local-pie-ssd']"
+            # Every PersistentVolumeSpec field that is NOT a volume source. The
+            # policy derives the object's volume sources by subtraction, so any
+            # source this repository has never heard of — a new upstream source,
+            # a cloud source, a network filesystem — is a source by construction
+            # and is denied without anyone maintaining a blocklist.
+            - name: nonSourceFields
+              expression: >-
+                ['accessModes', 'capacity', 'claimRef', 'mountOptions', 'nodeAffinity',
+                'persistentVolumeReclaimPolicy', 'storageClassName',
+                'volumeAttributesClassName', 'volumeMode']
+            - name: volumeSources
+              expression: >-
+                (object.kind == 'PersistentVolume' && has(object.spec)) ?
+                object.spec.filter(field, !(field in variables.nonSourceFields)) : []
+          expressions:
+            # SR-1. Exactly one volume source. Zero sources (an absent or empty
+            # spec, a truncated object) and two sources (a decoy local source
+            # beside a real remote one) both deny.
+            - expression: "object.kind != 'PersistentVolume' || size(variables.volumeSources) == 1"
+              message: A PersistentVolume must declare exactly one volume source; an absent, empty, or multi-source spec is denied.
+            # SR-2. The source must be one this cluster can keep inside itself.
+            # nfs, iscsi, cephfs, glusterfs, fc, rbd, portworxVolume, flexVolume,
+            # azureFile, azureDisk, awsElasticBlockStore, gcePersistentDisk,
+            # vsphereVolume, cinder, hostPath, and every future source fail here
+            # because they are not in the admitted set.
+            - expression: "object.kind != 'PersistentVolume' || variables.volumeSources.all(field, field in ['local', 'csi'])"
+              message: A PersistentVolume may use only the local or csi volume source; every network, cloud, host, and unrecognized source is denied.
+            # SR-3. A csi source publishes storage through whatever the driver
+            # reaches. Only an enumerated driver may do so.
+            - expression: >-
+                object.kind != 'PersistentVolume' || !('csi' in variables.volumeSources) ||
+                (has(object.spec.csi.driver) && object.spec.csi.driver in variables.enumeratedCsiDrivers)
+              message: A csi PersistentVolume must name a CSI driver on the enumerated local-provisioner allowlist.
+            # SR-4. A local source must sit under the enumerated root. A path
+            # elsewhere on the node — /var/lib/etcd, a mounted share, an operator
+            # home — is a different means than the one the owner enumerated.
+            - expression: >-
+                object.kind != 'PersistentVolume' || !('local' in variables.volumeSources) ||
+                (has(object.spec.local.path) && type(object.spec.local.path) == string &&
+                variables.enumeratedLocalRoots.exists(root,
+                object.spec.local.path == root || object.spec.local.path.startsWith(root + '/')))
+              message: A local PersistentVolume path must be the enumerated local root or a path beneath it.
+            # SR-5. SR-4 is prefix matching, and a prefix match accepts
+            # '<root>/../../var/lib/etcd'. Any parent traversal is denied outright.
+            - expression: >-
+                object.kind != 'PersistentVolume' || !('local' in variables.volumeSources) ||
+                (has(object.spec.local.path) && type(object.spec.local.path) == string &&
+                !object.spec.local.path.contains('..'))
+              message: A local PersistentVolume path must not contain a parent traversal segment.
+            # SR-6. A local volume without required node affinity is satisfiable
+            # by any node, which turns one node's directory into an unbounded set
+            # of directories across the cluster.
+            - expression: >-
+                object.kind != 'PersistentVolume' || !('local' in variables.volumeSources) ||
+                (has(object.spec.nodeAffinity) && has(object.spec.nodeAffinity.required))
+              message: A local PersistentVolume must pin itself to its node with required nodeAffinity.
+            # SR-7. The class name is part of the enumerated means; a volume that
+            # claims an unenumerated class is an unenumerated means.
+            - expression: >-
+                object.kind != 'PersistentVolume' || (has(object.spec) &&
+                has(object.spec.storageClassName) &&
+                object.spec.storageClassName in variables.enumeratedStorageClasses)
+              message: A PersistentVolume must declare an enumerated storageClassName.
+            # SR-8. The provisioner is the means. Anything outside the enumerated
+            # set — a cloud CSI provisioner, an NFS provisioner, a bare empty
+            # value — is denied.
+            - expression: >-
+                object.kind != 'StorageClass' || (has(object.provisioner) &&
+                object.provisioner in variables.enumeratedProvisioners)
+              message: A StorageClass must use an enumerated local provisioner.
+            # SR-9. The class inventory is enumerated too, so a second class
+            # cannot appear beside the reviewed one.
+            - expression: >-
+                object.kind != 'StorageClass' || (has(object.metadata) &&
+                has(object.metadata.name) && object.metadata.name in variables.enumeratedStorageClasses)
+              message: A StorageClass must be one of the enumerated class identities.
+            # SR-10. parameters and mountOptions are where a server, export,
+            # share, endpoint, or bucket would be named. A statically provisioned
+            # local class needs neither, so both must be absent or empty.
+            - expression: >-
+                object.kind != 'StorageClass' ||
+                ((!has(object.parameters) || size(object.parameters) == 0) &&
+                (!has(object.mountOptions) || size(object.mountOptions) == 0))
+              message: A StorageClass must declare no parameters and no mountOptions; that is where a remote endpoint would be named.
+            # SR-11. A claim with no class binds through the cluster default
+            # class — an invisible means chosen by whatever was installed last.
+            - expression: >-
+                object.kind != 'PersistentVolumeClaim' || (has(object.spec) &&
+                has(object.spec.storageClassName) &&
+                object.spec.storageClassName in variables.enumeratedStorageClasses)
+              message: A PersistentVolumeClaim must name an enumerated storageClassName; an absent class silently uses the cluster default.
+            # SR-12. dataSource/dataSourceRef import bytes from a snapshot or a
+            # cross-namespace source, which is a data flow the enumeration does
+            # not describe.
+            - expression: >-
+                object.kind != 'PersistentVolumeClaim' || (has(object.spec) &&
+                !has(object.spec.dataSource) && !has(object.spec.dataSourceRef))
+              message: A PersistentVolumeClaim must not populate itself from a dataSource or dataSourceRef.
+            # SR-13. Installing a CSI driver installs a new means wholesale.
+            - expression: >-
+                object.kind != 'CSIDriver' || (has(object.metadata) &&
+                has(object.metadata.name) && object.metadata.name in variables.enumeratedCsiDrivers)
+              message: A CSIDriver may be installed only for a driver on the enumerated local-provisioner allowlist.
+            # SR-14. VolumeAttributesClass carries a driverName plus a free-form
+            # parameter map; it is the newest object that can point storage at a
+            # backend, so it is bound to the same driver enumeration.
+            - expression: >-
+                object.kind != 'VolumeAttributesClass' || (has(object.driverName) &&
+                object.driverName in variables.enumeratedCsiDrivers)
+              message: A VolumeAttributesClass must name a CSI driver on the enumerated local-provisioner allowlist.
     - name: disallow-stateful-claim-templates
       match:
         any:

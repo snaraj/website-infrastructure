@@ -1,0 +1,46 @@
+# The complete admissible storage shape under the enumerated-local-means model:
+# the one enumerated StorageClass, a statically provisioned local PersistentVolume
+# rooted in the one enumerated local root and pinned to its node, and a claim that
+# names the same enumerated class. Nothing here can be reached from outside the
+# cluster: no network source, no CSI driver, no provisioner that could place bytes
+# somewhere the owner did not enumerate.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-pie-ssd
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-pie-ssd-media
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  volumeMode: Filesystem
+  local:
+    path: /mnt/local-pie-ssd/media
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-pie-ssd-media-claim
+  namespace: naranjo-online
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: local-pie-ssd
+  volumeName: local-pie-ssd-media
+  resources:
+    requests:
+      storage: 1Gi

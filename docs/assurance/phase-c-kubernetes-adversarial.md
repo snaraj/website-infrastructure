@@ -33,6 +33,27 @@ the inert scaffold (admission not enforced yet is itself asserted).
 Residual → G: webhook failure-policy behavior, audit-log emission, PSA
 runtime decisions need a live control plane (fixed read-only canaries).
 
+## 2a. Storage external reachability — proof level: policy + structural
+
+Positive: `fixtures/allow/storage-enumerated-local.yaml` (the enumerated
+class, a node-pinned local PersistentVolume under the enumerated root, and
+a claim naming the same class) passes both engines.
+Negative: nineteen single-object deny fixtures, one per rule — network and
+block sources, cloud and unknown CSI drivers, hostPath, a path outside the
+root, a traversal that survives prefix matching, an unpinned local volume,
+zero and two sources, an unenumerated class on both the volume and the
+class object, remote parameters, a classless claim, an imported claim, a
+CSIDriver, a VolumeAttributesClass, and two structurally unusable objects.
+Structural: `tests/security/test_storage_exposure_policy_contract.py`
+derives the covered kinds from the rule's own CEL expressions and pins the
+match block to them, because `kyverno test` reports an unmatched resource
+as `Pass / Excluded` — a narrowed match block leaves every behavioural row
+green while the gate covers nothing. The same battery pins the five
+enumerations byte-identical across Kyverno and Conftest.
+Residual → G: a manifest cannot prove what a node path is bound to
+(bind mount, network client mount, symlink); that is mount-time evidence,
+per the [storage-admission runbook](../runbooks/storage-admission.md).
+
 ## 3. Workload confinement — proof level: policy
 
 Positive: `fixtures/allow/hardened.yaml` + `lidersea-hardened.yaml` pass

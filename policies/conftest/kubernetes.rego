@@ -21,13 +21,49 @@ gateway_kinds := {
   "ReferenceGrant",
 }
 
-undiscovered_storage_kinds := {
+# The CI mirror of policies/kyverno/disallow-undiscovered-storage.yaml rule
+# `restrict-storage-to-enumerated-local-means`. Storage objects are admitted;
+# storage reachable from outside the cluster by a means the owner has not
+# enumerated is not. These five sets ARE the enumeration and must stay
+# byte-identical to the Kyverno CEL variables of the same meaning;
+# tests/security/test_storage_exposure_policy_contract.py fails if they drift,
+# and fails if either engine stops covering a storage kind the other covers.
+storage_kinds := {
   "PersistentVolume",
   "PersistentVolumeClaim",
   "StorageClass",
   "CSIDriver",
+  "VolumeAttributesClass",
 }
 
+enumerated_storage_classes := {"local-pie-ssd"}
+
+enumerated_storage_provisioners := {"kubernetes.io/no-provisioner"}
+
+# Empty by design: no CSI driver is an enumerated means today.
+enumerated_csi_drivers := set()
+
+enumerated_local_volume_roots := {"/mnt/local-pie-ssd"}
+
+admitted_persistent_volume_sources := {"local", "csi"}
+
+# Every PersistentVolumeSpec field that is not a volume source. Sources are
+# derived by subtraction, so an unrecognized source is a source.
+persistent_volume_non_source_fields := {
+  "accessModes",
+  "capacity",
+  "claimRef",
+  "mountOptions",
+  "nodeAffinity",
+  "persistentVolumeReclaimPolicy",
+  "storageClassName",
+  "volumeAttributesClassName",
+  "volumeMode",
+}
+
+# Pod-level storage stays under the older, stricter gate: admitting the storage
+# OBJECTS did not admit mounting them into workloads, which remains bounded by
+# the exact tenant volume allowlist below. This list is deliberately unchanged.
 undiscovered_pod_volume_sources := {
   "persistentVolumeClaim",
   "ephemeral",
@@ -824,9 +860,156 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s/%s must use canonical releaseName", [input.metadata.namespace, input.metadata.name])
 }
 
+# A storage object may be structurally unusable — no metadata, a truncated
+# document, a spec that is not a mapping. Reading a name out of it must never be
+# the thing that makes a deny rule undefined, because an undefined deny rule is
+# an allow.
+storage_object_name := name if {
+  name := object.get(object.get(input, "metadata", {}), "name", "")
+  is_string(name)
+  name != ""
+} else := "<unnamed>"
+
+storage_object_spec := spec if {
+  spec := object.get(input, "spec", {})
+  is_object(spec)
+} else := {}
+
+persistent_volume_sources := {field |
+  some field, _ in storage_object_spec
+  not field in persistent_volume_non_source_fields
+}
+
+# SR-0. A spec that is present but is not a mapping cannot be reasoned about, so
+# it is denied rather than skipped.
 deny contains msg if {
-  input.kind in undiscovered_storage_kinds
-  msg := sprintf("%s %s is forbidden until storage discovery and restore evidence are approved", [input.kind, input.metadata.name])
+  input.kind in {"PersistentVolume", "PersistentVolumeClaim"}
+  not is_object(object.get(input, "spec", {}))
+  msg := sprintf("%s %s has no usable spec mapping and cannot be evaluated", [input.kind, storage_object_name])
+}
+
+# SR-1. Exactly one volume source; zero (absent/empty/truncated spec) and two
+# (a local decoy beside a remote source) both deny.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  count(persistent_volume_sources) != 1
+  msg := sprintf("PersistentVolume %s must declare exactly one volume source, found %d", [storage_object_name, count(persistent_volume_sources)])
+}
+
+# SR-2. Derived by subtraction, so nfs, iscsi, cephfs, glusterfs, fc, rbd,
+# portworxVolume, flexVolume, azureFile, azureDisk, awsElasticBlockStore,
+# gcePersistentDisk, vsphereVolume, cinder, hostPath and every future source are
+# denied without maintaining a blocklist.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  some source in persistent_volume_sources
+  not source in admitted_persistent_volume_sources
+  msg := sprintf("PersistentVolume %s uses volume source %s, which is not an enumerated local means", [storage_object_name, source])
+}
+
+# SR-3. A csi source reaches wherever its driver reaches.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  "csi" in persistent_volume_sources
+  not object.get(object.get(storage_object_spec, "csi", {}), "driver", "") in enumerated_csi_drivers
+  msg := sprintf("PersistentVolume %s names a CSI driver outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+# SR-4. A local path outside the enumerated root is a different means.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  path := object.get(object.get(storage_object_spec, "local", {}), "path", "")
+  not local_path_under_enumerated_root(path)
+  msg := sprintf("PersistentVolume %s uses local path outside the enumerated local root", [storage_object_name])
+}
+
+# SR-5. Prefix matching alone accepts "<root>/../../var/lib/etcd".
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  path := object.get(object.get(storage_object_spec, "local", {}), "path", "")
+  contains(path, "..")
+  msg := sprintf("PersistentVolume %s uses a local path containing a parent traversal segment", [storage_object_name])
+}
+
+# SR-6. Without required node affinity one node's directory becomes any node's.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  not is_object(object.get(object.get(storage_object_spec, "nodeAffinity", {}), "required", null))
+  msg := sprintf("PersistentVolume %s must pin itself to its node with required nodeAffinity", [storage_object_name])
+}
+
+# SR-7. The class name is part of the enumerated means.
+deny contains msg if {
+  input.kind == "PersistentVolume"
+  not object.get(storage_object_spec, "storageClassName", "") in enumerated_storage_classes
+  msg := sprintf("PersistentVolume %s must declare an enumerated storageClassName", [storage_object_name])
+}
+
+# SR-8. The provisioner IS the means.
+deny contains msg if {
+  input.kind == "StorageClass"
+  not object.get(input, "provisioner", "") in enumerated_storage_provisioners
+  msg := sprintf("StorageClass %s must use an enumerated local provisioner", [storage_object_name])
+}
+
+# SR-9. A second class must not appear beside the reviewed one.
+deny contains msg if {
+  input.kind == "StorageClass"
+  not storage_object_name in enumerated_storage_classes
+  msg := sprintf("StorageClass %s is not an enumerated class identity", [storage_object_name])
+}
+
+# SR-10. parameters/mountOptions is where a server, export, share, endpoint, or
+# bucket would be named; a static local class needs neither.
+deny contains msg if {
+  input.kind == "StorageClass"
+  count(object.get(input, "parameters", {})) + count(object.get(input, "mountOptions", [])) > 0
+  msg := sprintf("StorageClass %s must declare no parameters and no mountOptions", [storage_object_name])
+}
+
+# SR-11. An absent class silently binds through the cluster default class.
+deny contains msg if {
+  input.kind == "PersistentVolumeClaim"
+  not object.get(storage_object_spec, "storageClassName", "") in enumerated_storage_classes
+  msg := sprintf("PersistentVolumeClaim %s must name an enumerated storageClassName", [storage_object_name])
+}
+
+# SR-12. dataSource/dataSourceRef import bytes the enumeration never described.
+deny contains msg if {
+  input.kind == "PersistentVolumeClaim"
+  some field in {"dataSource", "dataSourceRef"}
+  object.get(storage_object_spec, field, null) != null
+  msg := sprintf("PersistentVolumeClaim %s must not populate itself from %s", [storage_object_name, field])
+}
+
+# SR-13. Installing a CSI driver installs a new means wholesale.
+deny contains msg if {
+  input.kind == "CSIDriver"
+  not storage_object_name in enumerated_csi_drivers
+  msg := sprintf("CSIDriver %s is outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+# SR-14. VolumeAttributesClass is the newest object that can point storage at a
+# backend, so it is bound to the same driver enumeration.
+deny contains msg if {
+  input.kind == "VolumeAttributesClass"
+  not object.get(input, "driverName", "") in enumerated_csi_drivers
+  msg := sprintf("VolumeAttributesClass %s is outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+local_path_under_enumerated_root(path) if {
+  is_string(path)
+  some root in enumerated_local_volume_roots
+  path == root
+}
+
+local_path_under_enumerated_root(path) if {
+  is_string(path)
+  some root in enumerated_local_volume_roots
+  startswith(path, sprintf("%s/", [root]))
 }
 
 deny contains msg if {

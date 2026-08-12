@@ -1,0 +1,10 @@
+# SR-13. Installing a CSI driver installs a whole new means at once, before any
+# volume exists. The enumerated driver allowlist is empty today, so every
+# CSIDriver object is denied — by enumeration now, not by kind.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: ebs.csi.aws.com
+spec:
+  attachRequired: true
+  podInfoOnMount: false

@@ -1,0 +1,16 @@
+# SR-3, fail-closed direction. The driver name is one this repository has never
+# seen. An allow-by-default policy would admit it; the enumeration denies it
+# precisely because nobody enumerated it.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-unknown-csi
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  csi:
+    driver: not-a-reviewed-driver.invalid
+    volumeHandle: handle-invalid

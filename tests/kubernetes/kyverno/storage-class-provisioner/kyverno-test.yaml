@@ -1,0 +1,17 @@
+# SR-8 in isolation. Proving that the provisioner alone denies requires a
+# StorageClass whose NAME is the enumerated one, so this fixture cannot share a
+# resource set with the allow fixture's class of the same name.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: storage-class-provisioner-enumeration
+policies:
+  - ../../../../policies/kyverno/disallow-undiscovered-storage.yaml
+resources:
+  - ../../fixtures/deny/storage-unenumerated-provisioner-class.yaml
+results:
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [local-pie-ssd]
+    kind: StorageClass
+    result: fail

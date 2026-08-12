@@ -1,0 +1,21 @@
+# SR-4. A local source is admitted only under the enumerated root. This one
+# points at the control-plane state directory, which would hand etcd's bytes to
+# any pod that could bind the claim.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-local-outside-root
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /var/lib/etcd
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists

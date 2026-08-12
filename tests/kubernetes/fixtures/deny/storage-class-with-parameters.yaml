@@ -1,0 +1,14 @@
+# SR-10. The identity and provisioner are both enumerated, and the class still
+# names a remote server and share in its parameters. Parameters and mountOptions
+# are exactly where an external endpoint hides, and a statically provisioned
+# local class has no use for either.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-pie-ssd
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+parameters:
+  server: storage.invalid
+  share: /export/media

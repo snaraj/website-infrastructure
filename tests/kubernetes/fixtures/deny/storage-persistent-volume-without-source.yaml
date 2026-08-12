@@ -1,0 +1,13 @@
+# SR-1 in isolation. Zero sources: the spec parses, every other enumerated
+# constraint is satisfied, and the object still cannot be reasoned about as a
+# means. It is denied rather than skipped.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-sourceless
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
