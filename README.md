@@ -169,7 +169,10 @@ evidence passes. It's a reference platform, not a one-command installer.
 | kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
 | CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
 | Cluster initialization | Not run |
-| Flux bootstrap | Not run |
+| Flux controller install | Reproducible IaC: reviewed render + guarded installer (`scripts/install-flux-controllers.sh`) + [runbook](docs/runbooks/flux-install.md); the cluster apply is a separate operator-run step |
+| `flux-system` egress policy | Fail-closed set committed; the API-server allow keeps an unresolved sentinel address until an operator substitutes it locally |
+| Flux reconciliation (suspend flip) | Not run; every source and release stays `suspend: true` pending a separate reviewed change |
+| Flux bootstrap (SOPS + sync) | Not run |
 | SOPS key ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |
