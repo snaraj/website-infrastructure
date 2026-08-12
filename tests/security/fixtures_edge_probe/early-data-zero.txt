@@ -1,0 +1,114 @@
+Connecting to 192.0.2.1
+depth=2 C=US, O=Google Trust Services LLC, CN=GTS Root R4
+verify return:1
+depth=1 C=US, O=Google Trust Services, CN=WE1
+verify return:1
+depth=0 CN=naranjo.online
+verify return:1
+CONNECTED(00000006)
+---
+Certificate chain
+ 0 s:CN=naranjo.online
+   i:C=US, O=Google Trust Services, CN=WE1
+   a:PKEY: EC, (prime256v1); sigalg: ecdsa-with-SHA256
+   v:NotBefore: Aug  6 20:42:30 2026 GMT; NotAfter: Nov  4 21:31:06 2026 GMT
+ 1 s:C=US, O=Google Trust Services, CN=WE1
+   i:C=US, O=Google Trust Services LLC, CN=GTS Root R4
+   a:PKEY: EC, (prime256v1); sigalg: ecdsa-with-SHA384
+   v:NotBefore: Dec 13 09:00:00 2023 GMT; NotAfter: Feb 20 14:00:00 2029 GMT
+ 2 s:C=US, O=Google Trust Services LLC, CN=GTS Root R4
+   i:C=BE, O=GlobalSign nv-sa, OU=Root CA, CN=GlobalSign Root CA
+   a:PKEY: EC, (secp384r1); sigalg: sha256WithRSAEncryption
+   v:NotBefore: Nov 15 03:43:21 2023 GMT; NotAfter: Jan 28 00:00:42 2028 GMT
+---
+Server certificate
+[certificate PEM elided]
+subject=CN=naranjo.online
+issuer=C=US, O=Google Trust Services, CN=WE1
+---
+No client certificate CA names sent
+Peer signing digest: SHA256
+Peer signature type: ecdsa_secp256r1_sha256
+Negotiated TLS1.3 group: X25519MLKEM768
+---
+SSL handshake has read 3880 bytes and written 1552 bytes
+Verification: OK
+---
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+Protocol: TLSv1.3
+Server public key is 256 bit
+This TLS version forbids renegotiation.
+Compression: NONE
+Expansion: NONE
+No ALPN negotiated
+Early data was not sent
+Verify return code: 0 (ok)
+---
+HTTP/1.1 200 OK
+Date: [value elided]
+Content-Type: text/html; charset=utf-8
+Connection: close
+Accept-Ranges: bytes
+Cache-Control: no-cache
+content-security-policy: default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
+cross-origin-resource-policy: same-origin
+Report-To: [value elided]
+permissions-policy: camera=(), geolocation=(), microphone=()
+referrer-policy: no-referrer
+strict-transport-security: max-age=31536000
+vary: Cookie
+x-content-type-options: nosniff
+x-frame-options: DENY
+Nel: [value elided]
+cf-cache-status: DYNAMIC
+Server-Timing: [value elided]
+Server-Timing: [value elided]
+Server: cloudflare
+CF-RAY: [value elided]
+alt-svc: h3=":443"; ma=86400
+
+---
+Post-Handshake New Session Ticket arrived:
+SSL-Session:
+    Protocol  : TLSv1.3
+    Cipher    : TLS_AES_256_GCM_SHA384
+    Session-ID: [value elided]
+    Session-ID-ctx: [value elided]
+    Resumption PSK: [value elided]
+    PSK identity: None
+    PSK identity hint: None
+    SRP username: None
+    TLS session ticket lifetime hint: 64800 (seconds)
+    TLS session ticket:
+    [ticket bytes elided]
+
+    Start Time: 1786520413
+    Timeout   : 7200 (sec)
+    Verify return code: 0 (ok)
+    Extended master secret: no
+    Max Early Data: 0
+---
+read R BLOCK
+---
+Post-Handshake New Session Ticket arrived:
+SSL-Session:
+    Protocol  : TLSv1.3
+    Cipher    : TLS_AES_256_GCM_SHA384
+    Session-ID: [value elided]
+    Session-ID-ctx: [value elided]
+    Resumption PSK: [value elided]
+    PSK identity: None
+    PSK identity hint: None
+    SRP username: None
+    TLS session ticket lifetime hint: 64800 (seconds)
+    TLS session ticket:
+    [ticket bytes elided]
+
+    Start Time: 1786520413
+    Timeout   : 7200 (sec)
+    Verify return code: 0 (ok)
+    Extended master secret: no
+    Max Early Data: 0
+---
+read R BLOCK
+closed
