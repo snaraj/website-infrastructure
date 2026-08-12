@@ -12,9 +12,8 @@ CLOUDFLARE_PHASES = (
     "admin-policies",
     "admin-route",
     "admin-tunnel",
-    "public-dns-lidersea",
-    "public-dns-naranjo",
-    "public-edge",
+    "site-lidersea-com",
+    "site-naranjo-online",
 )
 
 

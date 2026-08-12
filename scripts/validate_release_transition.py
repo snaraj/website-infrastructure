@@ -65,35 +65,57 @@ CLOUDFLARE_PHASE_CONTRACTS = {
             "main.tf", "outputs.tf", "variables.tf", "versions.tf",
         }),
     },
-    "public-edge": {
-        "guard": "approve_public_edge_phase",
+    "site-naranjo-online": {
+        "guard": "approve_site_naranjo_online_phase",
         "resources": frozenset({
-            ("cloudflare_zero_trust_tunnel_cloudflared", "pi_websites"),
-            ("cloudflare_zero_trust_tunnel_cloudflared_config", "pi_websites"),
+            ("cloudflare_zero_trust_tunnel_cloudflared", "naranjo_online"),
+            ("cloudflare_zero_trust_tunnel_cloudflared_config", "naranjo_online"),
+            ("cloudflare_dns_record", "naranjo_online_apex"),
+            ("cloudflare_zone_setting", "naranjo_online_always_use_https"),
+            ("cloudflare_zone_setting", "naranjo_online_min_tls_version"),
+            ("cloudflare_zone_setting", "naranjo_online_tls_1_3"),
+            ("cloudflare_zone_setting", "naranjo_online_zero_rtt"),
+            ("cloudflare_zone_setting", "naranjo_online_http3"),
+            ("cloudflare_zone_setting", "naranjo_online_ssl"),
         }),
         "source_files": frozenset({
-            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+            "main.tf", "variables.tf", "versions.tf",
         }),
     },
-    "public-dns-naranjo": {
-        "guard": "enable_public_dns_naranjo_activation",
+    "site-lidersea-com": {
+        "guard": "approve_site_lidersea_com_phase",
         "resources": frozenset({
-            ("cloudflare_dns_record", "naranjo_online"),
+            ("cloudflare_zero_trust_tunnel_cloudflared", "lidersea_com"),
+            ("cloudflare_zero_trust_tunnel_cloudflared_config", "lidersea_com"),
+            ("cloudflare_dns_record", "lidersea_com_apex"),
+            ("cloudflare_zone_setting", "lidersea_com_always_use_https"),
+            ("cloudflare_zone_setting", "lidersea_com_min_tls_version"),
+            ("cloudflare_zone_setting", "lidersea_com_tls_1_3"),
+            ("cloudflare_zone_setting", "lidersea_com_zero_rtt"),
+            ("cloudflare_zone_setting", "lidersea_com_http3"),
+            ("cloudflare_zone_setting", "lidersea_com_ssl"),
         }),
         "source_files": frozenset({
-            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
-        }),
-    },
-    "public-dns-lidersea": {
-        "guard": "enable_public_dns_lidersea_activation",
-        "resources": frozenset({
-            ("cloudflare_dns_record", "lidersea_com"),
-        }),
-        "source_files": frozenset({
-            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+            "main.tf", "variables.tf", "versions.tf",
         }),
     },
 }
+# One public Tunnel per website, never a shared one and never a third. Each
+# site root owns exactly one Tunnel whose name is that site's identity tuple,
+# and the other site's identity token must not appear anywhere inside it.
+CLOUDFLARE_SITE_PHASES = {
+    "site-naranjo-online": {
+        "tunnel_name": "naranjo-online",
+        "foreign_marker": "lidersea",
+    },
+    "site-lidersea-com": {
+        "tunnel_name": "lidersea-com",
+        "foreign_marker": "naranjo",
+    },
+}
+CLOUDFLARE_PUBLIC_TUNNEL_COUNT = 2
+CLOUDFLARE_ADMIN_TUNNEL_COUNT = 1
+CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE = "cloudflare_zero_trust_tunnel_cloudflared"
 CLOUDFLARE_TERRAFORM_SOURCE_FILES = frozenset(
     CLOUDFLARE_PHASES_ROOT / phase / source
     for phase, contract in CLOUDFLARE_PHASE_CONTRACTS.items()
@@ -828,6 +850,10 @@ def _require_cloudflare_phase_contract(root: Path) -> None:
             )
         all_resource_identities.extend(phase_resources)
 
+        site = CLOUDFLARE_SITE_PHASES.get(phase)
+        if site is not None:
+            _require_site_root_isolation(phase_root, contract, site)
+
         versions = STATE._read_canonical_text(phase_root / "versions.tf")
         version_fragments = (
             'required_version = "= {}"'.format(CLOUDFLARE_TOFU_VERSION),
@@ -891,6 +917,49 @@ def _require_cloudflare_phase_contract(root: Path) -> None:
         raise STATE.CanonicalYamlError(
             "Cloudflare resource identity inventory is outside the closed contract"
         )
+
+    tunnels = [
+        identity for identity in all_resource_identities
+        if identity[0] == CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE
+    ]
+    public_tunnels = [
+        identity for identity in tunnels
+        if identity[1] != "pi_admin"
+    ]
+    if (
+        len(tunnels)
+        != CLOUDFLARE_ADMIN_TUNNEL_COUNT + CLOUDFLARE_PUBLIC_TUNNEL_COUNT
+        or len(public_tunnels) != CLOUDFLARE_PUBLIC_TUNNEL_COUNT
+        or len(frozenset(public_tunnels)) != CLOUDFLARE_PUBLIC_TUNNEL_COUNT
+        or len(CLOUDFLARE_SITE_PHASES) != CLOUDFLARE_PUBLIC_TUNNEL_COUNT
+    ):
+        raise STATE.CanonicalYamlError(
+            "Cloudflare public Tunnel inventory is not exactly one per website"
+        )
+
+
+def _require_site_root_isolation(phase_root: Path, contract, site) -> None:
+    """Prove one site root owns one Tunnel and never reaches the other site."""
+
+    tunnel_names = [
+        name for kind, name in contract["resources"]
+        if kind == CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE
+    ]
+    if len(tunnel_names) != 1:
+        raise STATE.CanonicalYamlError(
+            "a website root must declare exactly one public Tunnel"
+        )
+    declaration = '  name       = "{}"\n'.format(site["tunnel_name"])
+    main_source = STATE._read_canonical_text(phase_root / "main.tf")
+    if main_source.count(declaration) != 1:
+        raise STATE.CanonicalYamlError(
+            "website Tunnel name is outside its exact site identity tuple"
+        )
+    for name in sorted(set(contract["source_files"]) | {"terraform.tfvars.example"}):
+        if site["foreign_marker"] in STATE._read_canonical_text(phase_root / name):
+            raise STATE.CanonicalYamlError(
+                "a website root must never reference the other website"
+            )
 
 
 def cloudflare_phase_contract_errors(root: Path = ROOT) -> list[str]:

@@ -432,6 +432,75 @@ class ReleaseTransitionTests(unittest.TestCase):
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
+    def test_a_variable_file_inside_a_phase_root_is_rejected(self):
+        """The runbooks must never send an operator to a location that fails.
+
+        Reviewer finding F3: the docs told the owner to place the protected
+        variable file beside the root, which the closed file inventory rejects
+        — breaking the `make check` the same runbook requires. The docs now say
+        "outside the repository, passed with -var-file"; this pins the
+        behaviour that makes that the only workable instruction.
+        """
+
+        path = (
+            self.root
+            / "infrastructure/cloudflare/phases/site-naranjo-online"
+            / "private.auto.tfvars"
+        )
+        path.write_text("cloudflare_account_id = \"placeholder\"\n", encoding="utf-8")
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
+    def test_website_root_must_not_reference_the_other_website(self):
+        """One website root reaching the other is the shared-Tunnel regression.
+
+        The superseded design put both sites behind one Tunnel; the whole
+        point of the two-root shape is that neither root can name the other
+        site's zone, Tunnel, namespace, hostname, or variables.
+        """
+
+        self.replace_once(
+            "infrastructure/cloudflare/phases/site-naranjo-online/main.tf",
+            "# One site, one root, one state, one token.",
+            "# One site, one root, one state, one token. See lidersea.",
+        )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
+    def test_website_tunnel_name_must_match_its_site_identity(self):
+        """Safety invariant 14: domain, namespace, and Tunnel are one tuple."""
+
+        self.replace_once(
+            "infrastructure/cloudflare/phases/site-naranjo-online/main.tf",
+            '  name       = "naranjo-online"\n',
+            '  name       = "shared-websites"\n',
+        )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
+    def test_website_root_may_not_gain_a_second_public_tunnel(self):
+        path = (
+            self.root
+            / "infrastructure/cloudflare/phases/site-naranjo-online/main.tf"
+        )
+        with path.open("a", encoding="utf-8", newline="\n") as output:
+            output.write(
+                '\nresource "cloudflare_zero_trust_tunnel_cloudflared" "spare" {\n'
+                "  account_id = var.cloudflare_account_id\n"
+                '  name       = "spare"\n'
+                '  config_src = "cloudflare"\n'
+                "  lifecycle {\n"
+                "    prevent_destroy = true\n"
+                "    precondition {\n"
+                "      condition     = var.approve_site_naranjo_online_phase\n"
+                '      error_message = "synthetic"\n'
+                "    }\n"
+                "  }\n"
+                "}\n"
+            )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
     def test_cloudflare_resource_identity_inventory_is_closed(self):
         path = self.root / "infrastructure/cloudflare/phases/admin-tunnel/main.tf"
         with path.open("a", encoding="utf-8", newline="\n") as output:
@@ -533,3 +602,56 @@ class ReleaseTransitionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloudflareWebsiteTunnelInventoryTests(unittest.TestCase):
+    """Prove the exactly-two-public-Tunnels invariant is not decorative."""
+
+    def test_exactly_one_public_tunnel_per_website_root(self):
+        """The committed contract table must already satisfy the invariant."""
+
+        tunnels = [
+            identity for identity in TRANSITION.CLOUDFLARE_RESOURCE_IDENTITIES
+            if identity[0] == TRANSITION.CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE
+        ]
+        self.assertEqual(len(tunnels), 3)
+        self.assertEqual(
+            sorted(name for _kind, name in tunnels),
+            ["lidersea_com", "naranjo_online", "pi_admin"],
+        )
+
+    def test_a_third_website_phase_breaks_the_public_tunnel_count(self):
+        """Adding a third site must fail here rather than quietly ship."""
+
+        original = TRANSITION.CLOUDFLARE_SITE_PHASES
+        patched = dict(original)
+        patched["site-third-example"] = {
+            "tunnel_name": "third-example",
+            "foreign_marker": "third",
+        }
+        setattr(TRANSITION, "CLOUDFLARE_SITE_PHASES", patched)
+        try:
+            with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+                TRANSITION._require_cloudflare_phase_contract(REPO_ROOT)
+        finally:
+            setattr(TRANSITION, "CLOUDFLARE_SITE_PHASES", original)
+
+    def test_a_root_declaring_two_tunnels_is_rejected(self):
+        """The per-root guard, probed directly with a synthetic contract."""
+
+        contract = {
+            "resources": frozenset({
+                (TRANSITION.CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE, "naranjo_online"),
+                (TRANSITION.CLOUDFLARE_TUNNEL_CONNECTOR_RESOURCE_TYPE, "second"),
+            }),
+            "source_files": frozenset({"main.tf", "variables.tf", "versions.tf"}),
+        }
+        phase_root = (
+            REPO_ROOT / TRANSITION.CLOUDFLARE_PHASES_ROOT / "site-naranjo-online"
+        )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION._require_site_root_isolation(
+                phase_root,
+                contract,
+                TRANSITION.CLOUDFLARE_SITE_PHASES["site-naranjo-online"],
+            )

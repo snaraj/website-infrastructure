@@ -13,9 +13,38 @@ APPROVAL_VARIABLE = {
     "admin-policies": "approve_admin_policies_phase",
     "admin-route": "approve_admin_route_phase",
     "admin-api": "enable_kubernetes_api_access",
-    "public-edge": "approve_public_edge_phase",
-    "public-dns-naranjo": "enable_public_dns_naranjo_activation",
-    "public-dns-lidersea": "enable_public_dns_lidersea_activation",
+    "site-naranjo-online": "approve_site_naranjo_online_phase",
+    "site-lidersea-com": "approve_site_lidersea_com_phase",
+}
+
+# Per-site identity for the two adoption roots. ``foreign_*`` values are the
+# other site's identity: every mutation built from them proves the policy
+# refuses to let one site's root reach the other site's objects.
+SITE_CONTEXT = {
+    "site-naranjo-online": {
+        "slug": "naranjo_online",
+        "hostname": "naranjo.online",
+        "zone_variable": "cloudflare_naranjo_online_zone_id",
+        "audit_variable": "verified_naranjo_online_adoption_audit_sha256",
+        "foreign_slug": "lidersea_com",
+        "foreign_hostname": "lidersea.com",
+        "foreign_origin": (
+            "http://lidersea-com.lidersea-com.svc.cluster.local:8080"
+        ),
+        "foreign_variable": "var.cloudflare_lidersea_com_zone_id",
+    },
+    "site-lidersea-com": {
+        "slug": "lidersea_com",
+        "hostname": "lidersea.com",
+        "zone_variable": "cloudflare_lidersea_com_zone_id",
+        "audit_variable": "verified_lidersea_com_adoption_audit_sha256",
+        "foreign_slug": "naranjo_online",
+        "foreign_hostname": "naranjo.online",
+        "foreign_origin": (
+            "http://naranjo-online.naranjo-online.svc.cluster.local:8080"
+        ),
+        "foreign_variable": "var.cloudflare_naranjo_online_zone_id",
+    },
 }
 
 
@@ -41,6 +70,48 @@ def mutate(plan, name):
 
     def config(address):
         return exactly_one(configured, address)
+
+    def site():
+        """Return this phase's site identity, or fail closed if it has none.
+
+        Only the two website roots carry a site identity. Asking an
+        administrative phase for one is a broken call site: it must raise, so
+        the driver reports a failed mutation rather than silently emitting an
+        unmutated plan that the policy would then correctly accept — a
+        surviving mutant dressed up as a pass.
+        """
+
+        identity = SITE_CONTEXT.get(phase)
+        if identity is None:
+            raise ValueError("phase {} is not a website root".format(phase))
+        return identity
+
+    def dns_address():
+        return "cloudflare_dns_record.{}_apex".format(site()["slug"])
+
+    def tunnel_address():
+        return "cloudflare_zero_trust_tunnel_cloudflared.{}".format(site()["slug"])
+
+    def ingress():
+        return after(
+            "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
+                site()["slug"]
+            )
+        )["config"]["ingress"]
+
+    def zone_setting(key):
+        return "cloudflare_zone_setting.{}_{}".format(site()["slug"], key)
+
+    def foreign_tunnel_identifier():
+        """Return an identifier this root does not own.
+
+        Derived from the plan's own identifier rather than written down: the
+        repository privacy gate allows exactly one UUID literal in tracked
+        text, and a forged target must never become the second one.
+        """
+
+        own = after(tunnel_address())["id"]
+        return own[:-1] + ("1" if own[-1] != "1" else "2")
 
     if name == "false-approval":
         variables[APPROVAL_VARIABLE[phase]]["value"] = False
@@ -133,7 +204,7 @@ def mutate(plan, name):
     elif name == "wrong-route-tunnel-variable":
         config("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin")[
             "expressions"
-        ]["tunnel_id"] = {"references": ["var.pi_websites_tunnel_id"]}
+        ]["tunnel_id"] = {"references": ["var.cloudflare_account_id"]}
     elif name == "missing-policies-contract":
         variables["verified_admin_policies_contract_sha256"]["value"] = ""
     elif name == "zero-policies-contract":
@@ -189,44 +260,27 @@ def mutate(plan, name):
         after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")[
             "precedence"
         ] += 1
-    elif name == "swapped-public-ingress":
-        ingress = after(
-            "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites"
-        )["config"]["ingress"]
-        ingress[0], ingress[1] = ingress[1], ingress[0]
-    elif name == "wrong-lidersea-origin":
-        after("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites")[
-            "config"
-        ]["ingress"][1]["service"] = "http://unreviewed.invalid:8080"
     elif name == "nonterminal-catchall":
-        ingress = after(
-            "cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites"
-        )["config"]["ingress"]
-        ingress[1], ingress[2] = ingress[2], ingress[1]
-    elif name == "duplicate-ingress-hostname":
-        after("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites")[
-            "config"
-        ]["ingress"][1]["hostname"] = "naranjo.online"
+        rules = ingress()
+        rules[0], rules[1] = rules[1], rules[0]
+    elif name == "wrong-site-origin":
+        ingress()[0]["service"] = "http://unreviewed.invalid:8080"
     elif name == "extra-public-tunnel":
-        extra_change = copy.deepcopy(
-            exactly_one(changes, "cloudflare_zero_trust_tunnel_cloudflared.pi_websites")
-        )
+        extra_change = copy.deepcopy(exactly_one(changes, tunnel_address()))
         extra_change["address"] = "cloudflare_zero_trust_tunnel_cloudflared.unreviewed"
         extra_change["change"]["after"]["name"] = "unreviewed"
         changes.append(extra_change)
-        extra_config = copy.deepcopy(
-            exactly_one(
-                configured, "cloudflare_zero_trust_tunnel_cloudflared.pi_websites"
-            )
-        )
+        extra_config = copy.deepcopy(exactly_one(configured, tunnel_address()))
         extra_config["address"] = (
             "cloudflare_zero_trust_tunnel_cloudflared.unreviewed"
         )
         configured.append(extra_config)
     elif name == "public-warp-routing":
-        after("cloudflare_zero_trust_tunnel_cloudflared_config.pi_websites")[
-            "config"
-        ]["warp_routing"] = {"enabled": True}
+        after(
+            "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
+                site()["slug"]
+            )
+        )["config"]["warp_routing"] = {"enabled": True}
     elif name == "external-data-source":
         changes.append(
             {
@@ -278,50 +332,143 @@ def mutate(plan, name):
                 "expressions": {},
             }
         )
-    elif name == "dns-too-early":
+    elif name == "wrong-public-hostname":
+        after(dns_address())["name"] = "other.invalid"
+    elif name == "wrong-zone-variable":
+        config(dns_address())["expressions"]["zone_id"] = {
+            "references": ["var.cloudflare_account_id"]
+        }
+    elif name == "unproxied-dns":
+        after(dns_address())["proxied"] = False
+    elif name == "a-record":
+        after(dns_address())["type"] = "A"
+    elif name == "aaaa-record":
+        after(dns_address())["type"] = "AAAA"
+    elif name == "wildcard-dns-name":
+        after(dns_address())["name"] = "*." + site()["hostname"]
+    elif name == "account-as-zone-target":
+        after(dns_address())["zone_id"] = variables[
+            "cloudflare_account_id"
+        ]["value"]
+    elif name == "fabricated-create":
+        target = changes[0]["change"]
+        target["actions"] = ["create"]
+        target["before"] = None
+    elif name == "recreate-adopted-tunnel":
+        target = exactly_one(changes, tunnel_address())["change"]
+        target["actions"] = ["update"]
+    elif name == "renamed-tunnel":
+        after(tunnel_address())["name"] = "pi-websites"
+    elif name == "cross-site-hostname":
+        ingress()[0]["hostname"] = site()["foreign_hostname"]
+    elif name == "cross-site-origin":
+        ingress()[0]["service"] = site()["foreign_origin"]
+    elif name == "cross-site-tunnel-reference":
+        foreign = "cloudflare_zero_trust_tunnel_cloudflared.{}".format(
+            site()["foreign_slug"]
+        )
+        config(dns_address())["expressions"]["content"] = {
+            "references": [foreign + ".id", foreign]
+        }
+    elif name == "wildcard-hostname":
+        ingress()[0]["hostname"] = "*." + site()["hostname"]
+    elif name == "extra-ingress-rule":
+        ingress().insert(1, {"hostname": "ssh." + site()["hostname"], "service": "ssh://127.0.0.1:22"})
+    elif name == "private-route-in-site-root":
         changes.append(
             {
-                "address": "cloudflare_dns_record.too_early",
+                "address": "cloudflare_zero_trust_tunnel_cloudflared_route.smuggled",
                 "mode": "managed",
-                "type": "cloudflare_dns_record",
-                "change": {"actions": ["create"], "after": {}, "after_unknown": {}},
+                "type": "cloudflare_zero_trust_tunnel_cloudflared_route",
+                "change": {
+                    "actions": ["no-op"],
+                    "before": {"network": "192.0.2.10/32"},
+                    "after": {"network": "192.0.2.10/32"},
+                    "after_unknown": {},
+                },
             }
         )
         configured.append(
             {
-                "address": "cloudflare_dns_record.too_early",
+                "address": "cloudflare_zero_trust_tunnel_cloudflared_route.smuggled",
                 "mode": "managed",
-                "type": "cloudflare_dns_record",
+                "type": "cloudflare_zero_trust_tunnel_cloudflared_route",
                 "expressions": {},
             }
         )
-    elif name == "wrong-public-hostname":
-        address = {
-            "public-dns-naranjo": "cloudflare_dns_record.naranjo_online",
-            "public-dns-lidersea": "cloudflare_dns_record.lidersea_com",
-        }[phase]
-        after(address)["name"] = "other.invalid"
-    elif name == "wrong-zone-variable":
-        address = changes[0]["address"]
-        config(address)["expressions"]["zone_id"] = {
-            "references": ["var.cloudflare_account_id"]
+    elif name == "always-use-https-off":
+        after(zone_setting("always_use_https"))["value"] = "off"
+    elif name == "min-tls-downgrade":
+        after(zone_setting("min_tls_version"))["value"] = "1.0"
+    elif name == "tls13-off":
+        after(zone_setting("tls_1_3"))["value"] = "off"
+    elif name == "zero-rtt-on":
+        after(zone_setting("zero_rtt"))["value"] = "on"
+    elif name == "ssl-strict":
+        after(zone_setting("ssl"))["value"] = "strict"
+    elif name == "ssl-flexible":
+        after(zone_setting("ssl"))["value"] = "flexible"
+    elif name == "rebound-zone-setting":
+        after(zone_setting("min_tls_version"))["setting_id"] = "security_level"
+    elif name == "missing-zone-setting":
+        address = zone_setting("always_use_https")
+        changes.remove(exactly_one(changes, address))
+        configured.remove(exactly_one(configured, address))
+    elif name == "extra-zone-setting":
+        address = "cloudflare_zone_setting.{}_security_level".format(
+            site()["slug"]
+        )
+        extra_change = copy.deepcopy(exactly_one(changes, zone_setting("ssl")))
+        extra_change["address"] = address
+        extra_change["change"]["after"]["setting_id"] = "security_level"
+        changes.append(extra_change)
+        extra_config = copy.deepcopy(exactly_one(configured, zone_setting("ssl")))
+        extra_config["address"] = address
+        configured.append(extra_config)
+    elif name == "create-with-prior-object":
+        # F1 isolation: a create action that KEEPS its prior object. The
+        # before-null denial cannot see it and the adopted-identity rule does
+        # not apply to a zone setting, so only the adoption-action rule stands
+        # between this plan and a duplicated live object.
+        exactly_one(changes, zone_setting("ssl"))["change"]["actions"] = ["create"]
+    elif name == "apex-foreign-tunnel-uuid":
+        # F2 isolation: the configuration still references this root's own
+        # Tunnel; only the planned VALUE is foreign. A reference-only binding
+        # accepts this forged plan.
+        after(dns_address())["content"] = (
+            foreign_tunnel_identifier() + ".cfargotunnel.com"
+        )
+    elif name == "config-foreign-tunnel-uuid":
+        after(
+            "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
+                site()["slug"]
+            )
+        )["tunnel_id"] = foreign_tunnel_identifier()
+    elif name == "http3-off":
+        after(zone_setting("http3"))["value"] = "off"
+    elif name == "cross-site-plan-value":
+        # F7 isolation for the planned-value rule: an unpinned provider field
+        # carrying the other site's name. Nothing in the exact contract reads
+        # it, so this input is otherwise valid.
+        after(tunnel_address())["comment"] = "shared with {} until cutover".format(
+            site()["foreign_hostname"]
+        )
+    elif name == "cross-site-ingress-value":
+        # F7 isolation for the ingress rule: an ingress block attached to a
+        # resource whose exact contract does not pin extra keys.
+        after(tunnel_address())["config"] = {
+            "ingress": [{"service": site()["foreign_origin"]}]
         }
-    elif name == "wrong-cname-tunnel-variable":
-        config(changes[0]["address"])["expressions"]["content"] = {
-            "references": ["var.pi_admin_tunnel_id"]
+    elif name == "cross-site-config-reference":
+        # F7 isolation for the reference rule: a field whose references no
+        # exact-reference assertion inspects.
+        config(tunnel_address())["expressions"]["name"] = {
+            "references": [site()["foreign_variable"]]
         }
-    elif name == "unproxied-dns":
-        after(changes[0]["address"])["proxied"] = False
-    elif name == "a-record":
-        after(changes[0]["address"])["type"] = "A"
-    elif name == "account-as-zone-target":
-        after(changes[0]["address"])["zone_id"] = variables[
-            "cloudflare_account_id"
-        ]["value"]
-    elif name == "missing-edge-contract":
-        variables["verified_public_edge_contract_sha256"]["value"] = ""
-    elif name == "zero-edge-contract":
-        variables["verified_public_edge_contract_sha256"]["value"] = "0" * 64
+    elif name == "missing-adoption-audit":
+        variables[site()["audit_variable"]]["value"] = ""
+    elif name == "zero-adoption-audit":
+        variables[site()["audit_variable"]]["value"] = "0" * 64
     else:
         raise ValueError("unknown mutation {} for {}".format(name, phase))
 

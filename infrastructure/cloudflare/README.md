@@ -1,9 +1,15 @@
 # Cloudflare OpenTofu — staged, disabled, and unapplied
 
-This directory defines seven independent OpenTofu roots. It is a design and
+This directory defines six independent OpenTofu roots. It is a design and
 verification artifact only: nothing here authorizes an authenticated plan,
 import, apply, DNS change, or change to the Pi firewall, VPN, or SSH service.
 OpenTofu is pinned to `1.12.5` and the Cloudflare provider to `5.22.0`.
+
+Four administrative roots are create-only onboarding. The two website roots are
+different in kind: their Tunnels, apex records, and zones already exist and
+already serve traffic, so those roots ADOPT the live objects by import. Git is
+reconciled to the live topology, never the reverse, and never by deleting or
+recreating a live object.
 
 ## Phase graph
 
@@ -15,9 +21,8 @@ Each root owns one narrow resource graph and one independently protected state:
 | `phases/admin-policies` | Final Pi block and TCP 22 identity/device allow only | Exact admin-tunnel and strong-posture audit contracts |
 | `phases/admin-route` | One RFC1918 Pi `/32` route through `pi-admin` | Exact admin-policies audit contract |
 | `phases/admin-api` | One identity/device allow for TCP 6443 | Later, separate approval after route verification |
-| `phases/public-edge` | `pi-websites` Tunnel and exact two-origin configuration | Public edge staging only; no DNS |
-| `phases/public-dns-naranjo` | One proxied `naranjo.online` apex CNAME | Exact public-edge audit contract; first DNS activation |
-| `phases/public-dns-lidersea` | One proxied `lidersea.com` apex CNAME | Exact public-edge audit contract; final activation |
+| `phases/site-naranjo-online` | `naranjo-online` Tunnel, its single-origin configuration, the proxied `naranjo.online` apex CNAME, and that zone's six security settings | Adoption of the live naranjo.online objects; first website root |
+| `phases/site-lidersea-com` | `lidersea-com` Tunnel, its single-origin configuration, the proxied `lidersea.com` apex CNAME, and that zone's six security settings | Adoption of the live lidersea.com objects; final activation |
 
 The security dependencies are:
 
@@ -27,11 +32,9 @@ admin-tunnel -> verified tunnel + posture contracts -> admin-policies
              -> verified route + independent recovery + two working SSH sessions
              -> optional admin-api
 
-exact healthy admin tunnel + posture + complete policy + route contracts
-             -> public-edge-preflight -> public-edge
-             -> verified edge contract -> public-dns-naranjo
-                                      audit + receipt revalidation
-                                      -> public-dns-lidersea (last)
+per-site read-only adoption audit -> site-naranjo-online (import, then plan)
+             -> zone audit + receipt revalidation
+             -> site-lidersea-com (import, then plan; last)
 ```
 
 `admin-tunnel` deliberately contains no Gateway policy or private route.
@@ -71,33 +74,51 @@ WARP enrollment, Tor, `sshd`, host keys, or the operating system.
 The audit closes each relevant inventory instead of proving only one matching
 object. Administrative staging permits only `pi-admin`, zero Gateway policies
 before `admin-policies`, then exactly the SSH allow plus unconditional final
-block, and zero routes before `admin-route`, then exactly one Pi `/32`. Public
-staging permits only `pi-admin` plus `pi-websites`. Initial plan gates also
+block, and zero routes before `admin-route`, then exactly one Pi `/32`. The
+website adoption audit permits exactly three Tunnels — `pi-admin`,
+`naranjo-online`, and `lidersea-com` — and no fourth. Initial plan gates also
 require the preflight Tunnel/Gateway-policy/route counts appropriate to the next
 root. Any additional Tunnel, Gateway policy, or private route is a `NO-GO`; it
 must be removed through a separate reviewed operation or explicitly
 incorporated into a future closed architecture before deployment continues.
 
-For public staging, the audit must also reproduce the healthy `pi-admin`
+For website adoption, the audit must also reproduce the healthy `pi-admin`
 Tunnel, exact posture, complete Gateway-policy, and exact private-route
 contracts. The API policy may be absent with exactly two total Gateway rules or
-exact with exactly three; every other state is a conflict. `public-edge` uses
-the dedicated `public-edge-preflight` audit state, where only `pi-admin` exists,
-the admin route is exact, and both public apex records remain absent.
+exact with exactly three; every other state is a conflict.
 
-`public-edge` owns exactly these ordered ingress rules:
+Each website root owns exactly these ordered ingress rules on its own Tunnel:
 
-1. `naranjo.online` to
-   `http://naranjo-online.naranjo-online.svc.cluster.local:8080`;
-2. `lidersea.com` to
-   `http://lidersea-com.lidersea-com.svc.cluster.local:8080`;
-3. an unqualified terminal `http_status:404` catch-all.
+1. that site's apex to that site's ClusterIP service DNS name on TCP 8080;
+2. an unqualified terminal `http_status:404` catch-all.
 
-Each public DNS root owns exactly one proxied `ttl = 1` CNAME in one named
-zone, targeting the single audited `pi-websites` Tunnel. The roots, state, and
-tokens remain separate. Run and audit them serially; `public-dns-lidersea` is
-the literal last activation. `pi-admin` never receives public ingress or DNS,
-and `pi-websites` never owns a private route.
+There is no shared public Tunnel and no wildcard hostname. Each root also owns
+exactly one proxied `ttl = 1` apex CNAME in its own zone, whose content is
+derived from that root's own Tunnel resource attribute, so no Tunnel UUID ever
+enters Git or a variable file.
+
+Each website root additionally owns exactly six free zone-level settings that
+carry the zone security target state:
+
+| Setting | Committed value | Why |
+| --- | --- | --- |
+| `always_use_https` | `on` | Plain HTTP currently serves the live site; HSTS received over cleartext is ignored by browsers, so the edge redirect is the control that closes the first-visit gap |
+| `min_tls_version` | `1.2` | TLS 1.0 and 1.1 are currently accepted, and the legacy handshakes are signed `ecdsa_sha1` |
+| `tls_1_3` | `on` | Already on; committed so it cannot silently regress |
+| `0rtt` | `off` | Already off; early data is replayable and the handshake saving does not justify it |
+| `http3` | `on` | Already advertised on every response; pinned so it cannot regress unnoticed |
+| `ssl` | `full` | The connector-to-origin leg is plain HTTP by accepted decision, so a strict variant would break the site rather than harden it. A strict value is a policy denial, not a judgement call |
+
+`Strict-Transport-Security` is deliberately absent from this table: the
+application owns that header and Cloudflare-managed HSTS stays off so two
+writers can never publish contradictory policies.
+
+The roots, state, and tokens remain separate. Run and audit them serially;
+`site-lidersea-com` is the literal last activation. `pi-admin` never receives
+public ingress or DNS, and neither website Tunnel owns a private route. One
+website root never references the other site's zone, Tunnel, namespace,
+hostname, or variables — the plan policy and the phase-contract validator both
+reject a cross-site reference.
 
 ## Destruction-safe phase acknowledgements
 
@@ -107,10 +128,21 @@ false therefore makes planning fail; it does not turn the phase into a
 destroy-all plan. Every managed Cloudflare resource has `prevent_destroy`, and
 the phase plan gate must reject every delete or replacement, unexpected
 address, cross-phase resource, unknown security-critical value, or
-resource-count mismatch. Initial onboarding is create-only: each accepted
-change has exact action `["create"]` and no prior object. Import,
-reconciliation, update, replacement, and rollback require a separate future
-gate and are intentionally outside this one.
+resource-count mismatch.
+
+The two plan shapes are separate contracts and are never collapsed:
+
+- **Administrative onboarding is create-only.** Each accepted change has exact
+  action `["create"]` and no prior object.
+- **Website adoption is adopt-only.** Every change must carry a prior object,
+  no change may be a create, a delete, or a replacement, and the adopted Tunnel
+  and apex record must plan as `["no-op"]`. Only the ingress configuration and
+  the six zone settings may plan as `["update"]`, and only toward the exact
+  committed value. A create in a website plan means the import did not happen
+  and would duplicate a live object; a delete or replacement means an outage.
+
+Rollback of an authenticated apply still requires a separate future gate and is
+intentionally outside this one.
 
 The plan policy also requires exactly one empty `cloudflare` provider
 configuration, environment-only provider authentication, no module call, no
@@ -163,17 +195,26 @@ Compensating controls are mandatory:
 
 ## State, plan, and secret custody
 
-Use seven different state paths on a protected encrypted volume:
+Use six different state paths on a protected encrypted volume:
 
 ```text
 <protected>/cloudflare/admin-tunnel/terraform.tfstate
 <protected>/cloudflare/admin-policies/terraform.tfstate
 <protected>/cloudflare/admin-route/terraform.tfstate
 <protected>/cloudflare/admin-api/terraform.tfstate
-<protected>/cloudflare/public-edge/terraform.tfstate
-<protected>/cloudflare/public-dns-naranjo/terraform.tfstate
-<protected>/cloudflare/public-dns-lidersea/terraform.tfstate
+<protected>/cloudflare/site-naranjo-online/terraform.tfstate
+<protected>/cloudflare/site-lidersea-com/terraform.tfstate
 ```
+
+Every value that is a private identifier — the account ID, each zone ID, and
+the fresh adoption-audit hash — is supplied from a variable file on the same
+protected volume, outside the repository, passed with `-var-file`. A variable
+file inside a phase root is rejected by the closed file inventory, so the
+protected path is the only working location as well as the only safe one. The
+tracked `terraform.tfvars.example` in each root carries obvious placeholders,
+is never the file you fill in, and never holds a real identifier. `.gitignore`
+additionally covers `*.tfstate*`, `terraform.tfvars`, `*.auto.tfvars`, and
+`.terraform/` as defence in depth.
 
 Pass the phase-specific path with local-backend configuration when initializing
 only that root. Use the phase's dedicated protected
@@ -196,7 +237,7 @@ and must never feed a Terraform variable, provider data source, plan, state,
 log, or repository plaintext. The required child-only launcher is not yet
 implemented, so this rule currently blocks live plan/apply.
 
-The seven JIT write tokens have these maximum Cloudflare-enforced boundaries:
+The six JIT write tokens have these maximum Cloudflare-enforced boundaries:
 
 | Root | Cloudflare-enforced reach | Exact protected-plan intent |
 | --- | --- | --- |
@@ -204,9 +245,8 @@ The seven JIT write tokens have these maximum Cloudflare-enforced boundaries:
 | `admin-policies` | Required Gateway-policy write across the selected account | Final Pi block and TCP 22 allow only |
 | `admin-route` | Required private-network route write across the selected account | One Pi `/32` through `pi-admin` only |
 | `admin-api` | Required Gateway-policy write across the selected account | TCP 6443 allow only |
-| `public-edge` | Connector/Tunnel config write across the selected account | `pi-websites` Tunnel and exact config only |
-| `public-dns-naranjo` | DNS Write across the `naranjo.online` zone | One audited apex CNAME only |
-| `public-dns-lidersea` | DNS Write across the `lidersea.com` zone | One audited apex CNAME only |
+| `site-naranjo-online` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `naranjo.online` zone | One adopted Tunnel, its config, one adopted apex CNAME, and six zone settings |
+| `site-lidersea-com` | Connector/Tunnel config write across the selected account, plus DNS Write and Zone Settings Write across the `lidersea.com` zone | One adopted Tunnel, its config, one adopted apex CNAME, and six zone settings |
 
 Grant only matching read permission if the current provider requires it. The
 read-only audit token is separate from all write tokens. Its Zone Read and DNS
@@ -215,8 +255,9 @@ exact-two-zone assertion is meaningful. It may also have the narrow Billing,
 Tunnel, Networks, Zero Trust, Access policy, and audit-log reads needed by
 `scripts/cloudflare-audit.sh`. It must not have write access.
 
-`pi-admin` and `pi-websites` runtime tokens are separate from each other and
-from every API token. Retrieve them out of band without a provider data source
+The `pi-admin`, `naranjo-online`, and `lidersea-com` Tunnel runtime tokens are
+separate from each other and from every API token, and are rotated one Tunnel
+at a time. Retrieve them out of band without a provider data source
 or management-token substitution.
 
 Never grant Billing Write, Seats Write, Registrar, plan/subscription write,
@@ -261,7 +302,7 @@ reviewed-blob launcher is an explicit deployment blocker for both scripts.
    zones. Require exactly two active Free zones, a verified Free Zero Trust
    entitlement, no trial, and no nonzero or unknown price. Record only redacted
    labelled audit hashes.
-2. Validate all seven roots without credentials and review their pinned
+2. Validate all six roots without credentials and review their pinned
    provider locks. Resolve values only in ignored, protected phase-specific
    variable files.
 3. If an exact managed object already exists, import it only into its owning
@@ -285,16 +326,14 @@ reviewed-blob launcher is an explicit deployment blocker for both scripts.
    and API-input contracts, and repeated recovery/session evidence. Its token is
    distinct from the earlier policy token despite using the same account
    permission class.
-8. Gate, approve, and stage `public-edge` without DNS. Revoke and
-   rejection-verify the write token, then use the read-only token to audit the
-   account's complete Tunnel/config set, exact ordered origins, terminal 404,
-   and health. Emit the public-edge contract and retain the receipt.
-9. Use two different zone-scoped JIT tokens and two saved plans. Activate
-   `public-dns-naranjo`, revoke and rejection-verify its write token, and then
-   re-audit the complete Naranjo DNS zone with the read-only token before
-   minting the Lidersea token. Then activate `public-dns-lidersea` last, revoke
-   and rejection-verify its write token, re-audit the complete Lidersea zone
-   with the read-only token, and retain both receipts.
+8. Adopt `site-naranjo-online` with its own JIT token: import each object with
+   `imports/README.md`, confirm the refresh-only plan is non-destructive, apply
+   only the reviewed saved plan, then revoke and rejection-verify the write
+   token and re-audit that Tunnel and that complete DNS zone with the read-only
+   token.
+9. Only then mint the second, different JIT token and repeat for
+   `site-lidersea-com` — the literal final activation. Retain both receipts.
+   The two roots never share a token, a state file, or a plan.
 
 Any mismatch, ambiguity, unknown value, missing evidence, overbroad token
 selector, absent IP/TTL restriction, credential spill, unexpected account/zone
@@ -308,8 +347,9 @@ the exact phase name, saved plan, completed redacted audit, protected workspace
 root, pre-state receipt, exact current-phase state path, initialized protected
 backend-metadata file, and reviewed manual pre-apply attestation. It accepts at
 most one phase-specific ninth argument. `admin-route` and `admin-api` require
-the protected recovery/session JSON described below. `public-dns-lidersea`
-requires the fixed-schema protected Naranjo transaction directory. Every other
+the protected recovery/session JSON described below. The final website
+activation requires the fixed-schema protected predecessor transaction
+directory. Every other
 phase rejects a ninth argument. The plan, audit, receipts, backend/state,
 manual attestation, validation evidence, caller-selected `TMPDIR`, and
 every temporary JSON file must resolve inside that one non-symlink protected
@@ -468,6 +508,16 @@ future media feature or paid tier requires a new reviewed architecture and an
 explicit cost decision.
 
 ## Current caveats
+
+The authenticated apply ceremony in `scripts/cloudflare-plan-gate.sh`,
+`scripts/cloudflare-audit.sh`, and the two evidence validators still speaks the
+superseded shared-Tunnel phase names and its create-only onboarding contract.
+It therefore cannot authorize a website adoption, and after this reconciliation
+it names roots that no longer exist, so it fails closed rather than passing
+something stale. Reconciling that ceremony to the two website roots is tracked
+separately; until it lands, website plans and applies are owner-run with an
+owner-held just-in-time token against the runbook, and no gate output may be
+described as apply authorization.
 
 Deployment is still blocked. The write-token permissions reach broader
 Cloudflare resource classes than these plans, while the current audit does not

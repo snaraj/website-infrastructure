@@ -40,7 +40,7 @@ assert_mutation_denied() {
   printf 'PASS rejected mutation %s/%s\n' "${phase}" "${name}"
 }
 
-for phase in admin-tunnel admin-policies admin-route admin-api public-edge public-dns-naranjo public-dns-lidersea; do
+for phase in admin-tunnel admin-policies admin-route admin-api site-naranjo-online site-lidersea-com; do
   assert_mutation_denied "${phase}" false-approval
   assert_mutation_denied "${phase}" delete-resource
   assert_mutation_denied "${phase}" cloudflare-data-source
@@ -49,11 +49,16 @@ for phase in admin-tunnel admin-policies admin-route admin-api public-edge publi
   assert_mutation_denied "${phase}" module-call
   assert_mutation_denied "${phase}" provider-override
   assert_mutation_denied "${phase}" missing-provider-config
-  assert_mutation_denied "${phase}" stale-update
   assert_mutation_denied "${phase}" unexpected-mode
   assert_mutation_denied "${phase}" extra-resource
   assert_mutation_denied "${phase}" extra-configured-field
   assert_mutation_denied "${phase}" unknown-critical
+done
+
+# Administrative onboarding stays create-only: a plan carrying a prior object
+# is a stale or already-applied plan and must never re-run.
+for phase in admin-tunnel admin-policies admin-route admin-api; do
+  assert_mutation_denied "${phase}" stale-update
 done
 
 assert_mutation_denied admin-tunnel wrong-account-variable
@@ -102,24 +107,49 @@ assert_mutation_denied admin-api no-session-enforcement
 assert_mutation_denied admin-api extra-session-setting
 assert_mutation_denied admin-api wrong-account-variable
 
-assert_mutation_denied public-edge swapped-public-ingress
-assert_mutation_denied public-edge wrong-lidersea-origin
-assert_mutation_denied public-edge nonterminal-catchall
-assert_mutation_denied public-edge duplicate-ingress-hostname
-assert_mutation_denied public-edge extra-public-tunnel
-assert_mutation_denied public-edge public-warp-routing
-assert_mutation_denied public-edge dns-too-early
-assert_mutation_denied public-edge wrong-account-variable
-
-for phase in public-dns-naranjo public-dns-lidersea; do
+# The two site roots adopt live objects. Every mutation below is a way the
+# adoption could damage a running site, reach the other site, widen the public
+# surface, or walk the zone security target state backwards.
+for phase in site-naranjo-online site-lidersea-com; do
+  assert_mutation_denied "${phase}" fabricated-create
+  assert_mutation_denied "${phase}" create-with-prior-object
+  assert_mutation_denied "${phase}" apex-foreign-tunnel-uuid
+  assert_mutation_denied "${phase}" config-foreign-tunnel-uuid
+  assert_mutation_denied "${phase}" cross-site-plan-value
+  assert_mutation_denied "${phase}" cross-site-ingress-value
+  assert_mutation_denied "${phase}" cross-site-config-reference
+  assert_mutation_denied "${phase}" recreate-adopted-tunnel
+  assert_mutation_denied "${phase}" renamed-tunnel
+  assert_mutation_denied "${phase}" extra-public-tunnel
+  assert_mutation_denied "${phase}" wrong-account-variable
+  assert_mutation_denied "${phase}" cross-site-hostname
+  assert_mutation_denied "${phase}" cross-site-origin
+  assert_mutation_denied "${phase}" cross-site-tunnel-reference
+  assert_mutation_denied "${phase}" wildcard-hostname
+  assert_mutation_denied "${phase}" wildcard-dns-name
+  assert_mutation_denied "${phase}" extra-ingress-rule
+  assert_mutation_denied "${phase}" nonterminal-catchall
+  assert_mutation_denied "${phase}" wrong-site-origin
+  assert_mutation_denied "${phase}" public-warp-routing
+  assert_mutation_denied "${phase}" private-route-in-site-root
   assert_mutation_denied "${phase}" wrong-public-hostname
   assert_mutation_denied "${phase}" wrong-zone-variable
-  assert_mutation_denied "${phase}" wrong-cname-tunnel-variable
+  assert_mutation_denied "${phase}" account-as-zone-target
   assert_mutation_denied "${phase}" unproxied-dns
   assert_mutation_denied "${phase}" a-record
-  assert_mutation_denied "${phase}" account-as-zone-target
-  assert_mutation_denied "${phase}" missing-edge-contract
-  assert_mutation_denied "${phase}" zero-edge-contract
+  assert_mutation_denied "${phase}" aaaa-record
+  assert_mutation_denied "${phase}" always-use-https-off
+  assert_mutation_denied "${phase}" min-tls-downgrade
+  assert_mutation_denied "${phase}" tls13-off
+  assert_mutation_denied "${phase}" zero-rtt-on
+  assert_mutation_denied "${phase}" http3-off
+  assert_mutation_denied "${phase}" ssl-strict
+  assert_mutation_denied "${phase}" ssl-flexible
+  assert_mutation_denied "${phase}" rebound-zone-setting
+  assert_mutation_denied "${phase}" missing-zone-setting
+  assert_mutation_denied "${phase}" extra-zone-setting
+  assert_mutation_denied "${phase}" missing-adoption-audit
+  assert_mutation_denied "${phase}" zero-adoption-audit
 done
 
 printf 'All isolated Cloudflare phase policy fixtures passed.\n'
