@@ -1,0 +1,9 @@
+# The exact denial each document in admission-install-network-bypasses.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+NetworkPolicy kyverno/default-deny must isolate every Pod for ingress and egress
+NetworkPolicy kyverno/kyverno-admission-webhook widens its exact reviewed admission flow
+NetworkPolicy kyverno/kyverno-debug-shell is outside the exact admission webhook, DNS, API-server, and signature-verification allowlist
+NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact reviewed admission flow
+NetworkPolicy kyverno/kyverno-public-https widens its exact reviewed admission flow
