@@ -1198,6 +1198,34 @@ def _rbac_rule_blocks(document):
     return blocks
 
 
+def _rbac_rule_list(block, field):
+    """Return one RBAC rule field's members, in either YAML sequence style.
+
+    The reviewed manifests write short lists inline (``verbs: [get, list]``) and
+    long ones as indented sequences, and the generated export writes everything
+    as indented sequences. A check that understood only one of the two would be
+    decorative on half the files it runs over.
+    """
+
+    inline = re.search(
+        r"(?m)^\s*{}:\s*\[([^\]]*)\]\s*$".format(re.escape(field)), block
+    )
+    if inline is not None:
+        return [item.strip().strip("'\"") for item in inline.group(1).split(",") if item.strip()]
+    nested = re.search(
+        r"(?ms)^(?P<indent>\s*){}:\s*$\n(?P<body>(?:(?P=indent)\s*-\s.*\n?)*)".format(
+            re.escape(field)
+        ),
+        block,
+    )
+    if nested is None:
+        return []
+    return [
+        item.strip().strip("'\"")
+        for item in re.findall(r"(?m)^\s*-\s+(\S+)\s*$", nested.group("body"))
+    ]
+
+
 def flux_rbac_contract_errors(root):
     """Require the narrowed Flux controller authorization (AUDIT S12).
 
@@ -1293,9 +1321,8 @@ def flux_rbac_contract_errors(root):
                 )
             # A controller that can write Secrets in flux-system can rewrite
             # the SOPS key it decrypts with.
-            if namespace == "flux-system" and re.search(r"(?m)^\s*-\s*secrets\s*$", block):
-                verbs = re.search(r"(?m)^\s*verbs:\s*\[([^\]]*)\]", block)
-                granted = [item.strip() for item in verbs.group(1).split(",")] if verbs else []
+            if namespace == "flux-system" and "secrets" in _rbac_rule_list(block, "resources"):
+                granted = _rbac_rule_list(block, "verbs")
                 for verb in RBAC_WRITE_VERBS:
                     if verb in granted:
                         errors.append(

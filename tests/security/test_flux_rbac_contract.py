@@ -21,14 +21,15 @@ What is modelled rather than observed is stated in the module docstring of
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
+from .support import load_script
 from .testsupport import rbac_model as model
 from .testsupport.rbac_model import Authorizer, Subject, YamlSubsetError
 
@@ -519,6 +520,140 @@ class FluxRbacCompositionTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(saved)
         return contract
+
+
+class FluxRbacStructuralValidatorTests(unittest.TestCase):
+    """The fast gate's own checks, each shown to fail on the thing it bans.
+
+    A structural check written against one YAML sequence style is decorative on
+    files written in the other, and this repository uses both: inline lists in
+    the reviewed manifests, indented sequences in the generated export. Every
+    mutation below is applied in the style the real file uses.
+    """
+
+    REQUIRED_PATHS = (
+        "kubernetes/flux-system/access.yaml",
+        "kubernetes/flux-system/controllers/kustomization.yaml",
+        "kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml",
+        "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+        "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.validator = load_script("validate_repository.py", module_name="rbac_validator")
+
+    def build_tree(self):
+        directory = tempfile.mkdtemp(prefix="flux-rbac-contract.")
+        self.addCleanup(shutil.rmtree, directory, True)
+        # The validator refuses to read through a reparse point, and the
+        # platform temporary root is a symlink on macOS, so the fixture root is
+        # resolved before anything is written under it.
+        root = Path(directory).resolve()
+        for relative in self.REQUIRED_PATHS:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+        return root
+
+    def test_the_reviewed_tree_produces_no_finding(self):
+        self.assertEqual(self.validator.flux_rbac_contract_errors(self.build_tree()), [])
+
+    def mutate(self, relative, old, new):
+        root = self.build_tree()
+        path = root / relative
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return self.validator.flux_rbac_contract_errors(root)
+
+    def test_a_wildcard_is_refused_in_both_yaml_styles(self):
+        for replacement in ("    resources: ['*']\n", "    resources:\n      - '*'\n"):
+            with self.subTest(style=replacement.strip()):
+                errors = self.mutate(
+                    "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+                    "    resources: [kustomizations]\n",
+                    replacement,
+                )
+                self.assertTrue(any("wildcard RBAC rule" in error for error in errors), errors)
+
+    def test_a_writable_flux_system_secret_grant_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/access.yaml",
+            "    resources: [secrets]\n    verbs: [get, list, watch]",
+            "    resources: [secrets]\n    verbs: [get, list, watch, update]",
+        )
+        self.assertTrue(any("must be read-only" in error for error in errors), errors)
+
+    def test_an_unrestricted_impersonate_grant_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/access.yaml",
+            "    verbs: [impersonate]\n    resourceNames: [helm-reconciler]\n",
+            "    verbs: [impersonate]\n",
+        )
+        self.assertTrue(
+            any("unrestricted impersonate grant" in error for error in errors), errors
+        )
+
+    def test_token_creation_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+            "    resources: [kustomizations]\n",
+            "    resources:\n      - serviceaccounts/token\n",
+        )
+        self.assertTrue(
+            any("serviceaccounts/token" in error for error in errors), errors
+        )
+
+    def test_a_re_broadened_subject_list_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
+            "  - kind: ServiceAccount\n    name: source-controller\n",
+            "  - kind: ServiceAccount\n    name: image-automation-controller\n"
+            "    namespace: flux-system\n  - kind: ServiceAccount\n    name: source-controller\n",
+        )
+        self.assertTrue(
+            any("exactly the installed controllers" in error for error in errors), errors
+        )
+
+    def test_repointing_the_deletion_patch_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml",
+            "$patch: delete\n",
+            "",
+        )
+        self.assertTrue(
+            any("delete the binding, not repoint it" in error for error in errors), errors
+        )
+
+    def test_an_unwired_patch_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/kustomization.yaml",
+            "    path: patches/crd-controller-role.yaml\n",
+            "",
+        )
+        self.assertTrue(
+            any("does not apply patches/crd-controller-role.yaml" in error for error in errors),
+            errors,
+        )
+
+    def test_a_missing_controller_identity_role_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/access.yaml",
+            "  name: flux-controller-decryption\n  namespace: flux-system\nrules:",
+            "  name: flux-controller-renamed\n  namespace: flux-system\nrules:",
+        )
+        self.assertTrue(
+            any("flux-system/flux-controller-decryption" in error for error in errors), errors
+        )
+
+    def test_a_hand_written_cluster_admin_binding_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/access.yaml",
+            "  name: flux-controller-runtime\n  namespace: flux-system\nrules:",
+            "  name: cluster-admin\n  namespace: flux-system\nrules:",
+        )
+        self.assertTrue(any("cluster-admin binding" in error for error in errors), errors)
 
 
 class YamlSubsetReaderTests(unittest.TestCase):
