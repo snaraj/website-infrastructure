@@ -107,10 +107,14 @@ class LegacyArchivePolicyTests(unittest.TestCase):
         )
 
     def test_architecture_denies_archive_to_platform_consumers(self):
-        """The archive stays outside Kubernetes, Flux, CI, and both connectors."""
+        """The archive stays outside Kubernetes, Flux, CI, and every connector."""
 
         self.assertIn('Kubernetes -. "denied" .-> LegacyArchive', self.overview)
-        self.assertIn('PublicTunnel -. "denied" .-> LegacyArchive', self.overview)
+        # ADR 0015 split the public edge into two per-site Tunnels; each one
+        # must carry its own explicit archive denial so neither inherits an
+        # implicit allowance from the retired shared connector.
+        self.assertIn('NaranjoTunnel -. "denied" .-> LegacyArchive', self.overview)
+        self.assertIn('LiderseaTunnel -. "denied" .-> LegacyArchive', self.overview)
         for fragment in (
             "denied to Flux, Pods, both Tunnel connectors, CI, and provider tooling",
             "cluster rebuild or ordinary rollback may not activate it",

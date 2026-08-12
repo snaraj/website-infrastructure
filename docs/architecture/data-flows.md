@@ -2,15 +2,21 @@
 
 ## Public request
 
-1. A visitor resolves a proxied tunnel CNAME; no home A/AAAA record exists.
-2. Cloudflare terminates public TLS under the existing Free zone.
-3. The outbound `pi-websites` connector receives the request.
-4. The first exact hostname rule maps `naranjo.online` to
-   `naranjo-online.naranjo-online.svc.cluster.local:8080`.
-5. The second exact hostname rule maps `lidersea.com` to
-   `lidersea-com.lidersea-com.svc.cluster.local:8080`.
-6. NetworkPolicy permits only those namespace/Pod/port pairs. Unknown hostnames
-   reach the final `http_status:404`; neither site receives workload egress.
+1. A visitor resolves the site's proxied apex CNAME, which targets that
+   site's own Tunnel; no home A/AAAA record exists.
+2. Cloudflare terminates public TLS under the existing Free zone. The
+   application owns HSTS (exactly `max-age=31536000`); Cloudflare-managed
+   HSTS stays off (ADR 0015).
+3. The site's own outbound connector (`naranjo-online` or `lidersea-com`
+   Tunnel, per ADR 0015) receives the request in `cloudflare-public`.
+4. The Tunnel's single exact hostname rule maps the apex to its own service —
+   `naranjo.online` to `naranjo-online.naranjo-online.svc.cluster.local:8080`,
+   or `lidersea.com` to `lidersea-com.lidersea-com.svc.cluster.local:8080`.
+   This connector-to-origin leg is plain HTTP inside the default-deny policy
+   boundary by accepted decision; internal TLS/mTLS is a future option.
+5. NetworkPolicy permits only that namespace/Pod/port pair. Unknown hostnames
+   reach the Tunnel's terminal `http_status:404`; neither site receives
+   workload egress, and neither Tunnel can reach the other site's service.
 
 ## Heavy-media publication and request — disabled
 

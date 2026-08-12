@@ -110,11 +110,14 @@ This repository must be operable cold by any major frontier model: AGENTS.md
 is the canonical, vendor-agnostic agent contract, and no requirement may live
 only in a vendor-specific file or an agent's private memory. The delivery
 lane is the verification and documentation surface — `tests/**`, `scripts/**`,
-`.github/workflows/**`, `Makefile`, `README.md`, and `docs/**`. The platform
-lane — `bootstrap/pi/**`, `versions.env`, the ADRs, and the capacity
-documents — is owned separately: delivery-lane changes never edit
-platform-lane files, and platform decisions (the safety invariants above,
-including PLAT-DEC-001) are referenced from here, never restated or reworded.
+`.github/workflows/**`, `Makefile`, `README.md`, and `docs/**` — plus, per
+the owner's lane re-cut of 2026-08-12, the Cloudflare/edge surface:
+`infrastructure/cloudflare/**` and the Cloudflare ADRs (0006–0008, 0015,
+and successors). The platform lane — `bootstrap/pi/**`, `versions.env`, the
+remaining ADRs, and the capacity documents — is owned separately:
+delivery-lane changes never edit platform-lane files, and platform
+decisions (the safety invariants above, including PLAT-DEC-001) are
+referenced from here, never restated or reworded.
 
 Delivery-lane requirements, explicit and numbered:
 
@@ -435,9 +438,11 @@ is the consolidated command view:
   (`make release-check` rejects every deployment sentinel); release and
   versioning ceremony arrives with the release-state policy, per
   ADR 0014.
-- **Lane discipline in docs.** ADRs and the capacity documents are
-  platform-lane: cite them by number, never edit, restate, or reword
-  them from the delivery lane. Runbooks and assurance documents are
+- **Lane discipline in docs.** The platform ADRs and the capacity documents
+  are platform-lane: cite them by number, never edit, restate, or reword
+  them from the delivery lane. The Cloudflare ADRs (0006–0008, 0015, and
+  successors) are delivery-lane per the owner's 2026-08-12 lane re-cut.
+  Runbooks and assurance documents are
   delivery-lane and follow the same evidence standard as PR bodies —
   their cross-references are pinned by tests.
 - **Attribution.** No third-party creative assets exist here. Any that
