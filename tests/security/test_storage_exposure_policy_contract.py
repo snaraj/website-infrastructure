@@ -1010,10 +1010,19 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
             "the fixture runner no longer proves its own attribution check",
         )
         self.assertIn(
-            "attribution_failures != 1",
+            "self_test_rc != 2",
             runner,
             "the fixture runner's self-test no longer requires the attribution check to be "
             "what refused the probe",
+        )
+        # Return code 1 means the probe was not rejected AT ALL, which is a
+        # weakened rule rather than a broken attribution check. The two are
+        # separately reported so a red never has to be diagnosed by guesswork.
+        self.assertIn(
+            "self_test_rc == 1",
+            runner,
+            "the fixture runner's self-test no longer distinguishes a weakened rule from "
+            "a broken attribution check",
         )
         # The self-test probe must be one of the fixtures pinned above, so the
         # probe cannot be pointed at a file that stops existing.

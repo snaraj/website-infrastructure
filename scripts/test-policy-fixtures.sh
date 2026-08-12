@@ -23,10 +23,14 @@ command -v conftest >/dev/null 2>&1 || { printf 'conftest is required\n' >&2; ex
 # Set ONLY by the self-test below, so the attribution grep can be exercised
 # against a message no rule emits without editing a committed fixture.
 expected_message_override=''
-attribution_failures=0
 
 # Reject one deny fixture, and — when it declares one — require the denial to
-# carry the message its own rule emits.
+# carry the message its own rule emits. The two failure modes return DIFFERENT
+# codes on purpose: the self-test has to tell "the attribution check stopped
+# checking" from "the rule this probe pins was weakened", and both are red.
+#   0  rejected, by the rule it claims
+#   1  not rejected at all
+#   2  rejected, but by some other rule
 expect_rejection() {
   local fixture="$1" output expected_message
   if output="$(conftest test --policy "${policy}" "${fixture}" 2>&1)"; then
@@ -44,8 +48,7 @@ expect_rejection() {
     printf '%s\n' "${output}" >&2
     printf 'deny fixture was rejected by some OTHER rule, not the one it claims: %s (expected message: %s)\n' \
       "${fixture}" "${expected_message}" >&2
-    attribution_failures=$((attribution_failures + 1))
-    return 1
+    return 2
   fi
   return 0
 }
@@ -59,17 +62,18 @@ expect_rejection() {
 self_test_probe="${repo_root}/tests/kubernetes/fixtures/deny/pod-volume-undiscovered-source.yaml"
 [[ -s "${self_test_probe}" ]] || { printf 'fixture-runner self-test probe is missing\n' >&2; exit 1; }
 expected_message_override='no rule in this repository ever emits this sentence'
-if expect_rejection "${self_test_probe}" >/dev/null 2>&1; then
+self_test_rc=0
+expect_rejection "${self_test_probe}" >/dev/null 2>&1 || self_test_rc=$?
+expected_message_override=''
+if (( self_test_rc == 1 )); then
+  printf 'FIXTURE RUNNER SELF-TEST FAILED: the probe %s is no longer rejected at all — the rule it pins has been weakened\n' \
+    "$(basename -- "${self_test_probe}")" >&2
+  exit 1
+fi
+if (( self_test_rc != 2 )); then
   printf 'FIXTURE RUNNER SELF-TEST FAILED: a wrong expected message was accepted — the attribution check is not checking\n' >&2
   exit 1
 fi
-expected_message_override=''
-if (( attribution_failures != 1 )); then
-  printf 'FIXTURE RUNNER SELF-TEST FAILED: a wrong expected message produced %d attribution failures, not 1\n' \
-    "${attribution_failures}" >&2
-  exit 1
-fi
-attribution_failures=0
 
 # Allow fixtures detect over-broad rules; deny fixtures prove unsafe resources
 # still stop the build instead of being accepted as ordinary test output.
@@ -77,6 +81,6 @@ for fixture in "${repo_root}"/tests/kubernetes/fixtures/allow/*.yaml; do
   conftest test --policy "${policy}" "${fixture}"
 done
 for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
-  expect_rejection "${fixture}" || exit 1
+  expect_rejection "${fixture}"
   printf 'PASS rejected %s\n' "${fixture}"
 done
