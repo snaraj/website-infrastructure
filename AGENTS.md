@@ -193,7 +193,9 @@ results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
 "no finding — checked X, Y, Z" statements so silence is never ambiguous;
 confirmation the scratch workspace was removed; the reviewing agent's
 signature in the form `- <Agent> (adversarial reviewer)`, matching its
-agent label. A REQUEST-CHANGES verdict returns the work to the same
+agent label. Posting the verdict also removes the `requires-review`
+label, whichever way the verdict went — the item is no longer waiting on
+review attention. A REQUEST-CHANGES verdict returns the work to the same
 branch owner — fixes land on the same branch and receive a delta
 re-review of the changed scope. A PR flips from draft to ready only
 after an APPROVE verdict (or after findings are fixed and re-verified),
@@ -211,10 +213,24 @@ authority: the owner alone merges.
 - **Labels.** One taxonomy, identical names/colors/meanings across all
   three repositories: `production-readiness`, `conventions`, `security`,
   `tests`, `ci`, `docs`, `release`, `fix`, `provider-neutrality`,
-  `delivery-lane`, `features`. New labels are added to all three at once.
-  This repository additionally retains two repo-local legacy labels from
-  the separation era (`platform`, `extraction`); the shared taxonomy
-  governs new work.
+  `delivery-lane`, `features`, `requires-review`. New labels are added to
+  all three at once. This repository additionally retains two repo-local
+  legacy labels from the separation era (`platform`, `extraction`); the
+  shared taxonomy governs new work.
+- **`requires-review` — the review-readiness signal.** The author lane
+  applies `requires-review` the moment a PR or issue is
+  complete-from-author — every commit pushed, body and evidence final —
+  so review attention is productive. Its ABSENCE on an open
+  agent-authored PR or issue means the item is still in flight:
+  reviewers and other lanes must not spend review effort on it. The
+  reviewer removes it when posting the verdict; on REQUEST-CHANGES the
+  author re-applies it once the fix commits are pushed. On an issue it
+  carries the same meaning — complete enough to act on or decide — and
+  whoever then acts on it or records the decision removes the label;
+  opening a PR that claims the issue counts as acting. It is
+  a coordination signal only: never a substitute for draft/ready state,
+  for the APPROVE verdict that flips a PR ready, or for owner merge
+  authority.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
@@ -257,7 +273,9 @@ The complete delivery loop, each step gated by the sections around it:
    them.
 2. **Claim the work.** File (or take) the issue; state intent and
    constraints. Label it — including both agent labels — assign the
-   owner, set a milestone.
+   owner, set a milestone. Apply `requires-review` once the issue is
+   complete-from-author — the problem stated, the acceptance criteria
+   final; until it carries that label, the issue is still being drafted.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
    a branch that is not yours is a branch you never push to.
@@ -270,7 +288,10 @@ The complete delivery loop, each step gated by the sections around it:
    signature.
 6. **Push and open a DRAFT PR**: `Closes #N`, the same labels, owner as
    assignee, a milestone, body signed. Every number in the body must be
-   reproducible — the adversarial review will reproduce it.
+   reproducible — the adversarial review will reproduce it. Apply
+   `requires-review` once the PR is complete-from-author — every commit
+   pushed, the body final; until it carries that label, nobody reviews
+   it.
 7. **Adversarial review** per the protocol above; findings are fixed on
    the same branch by the same writer and delta re-reviewed before the
    flip to ready.
