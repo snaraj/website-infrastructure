@@ -178,7 +178,7 @@ SITE_RELEASE_CONTRACTS = (
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "0e6c9c7f1dac58f9a5be61108c4dca106fff07ebd9b02cbebd7dec5508b689b5"
+    "4ad6b3fcfc80b1cfa12418215f5747d05aced7e5846467930fc7206750692ea6"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -1126,6 +1126,194 @@ def flux_components_errors(root):
     return errors
 
 
+# The three ServiceAccounts the reviewed component set actually creates. The
+# generated export binds seven, four of which name accounts that do not exist;
+# a dangling subject grants nothing today and everything the day its controller
+# is installed, so the subject list is pinned to what exists.
+FLUX_CONTROLLER_ACCOUNTS = ("source-controller", "kustomize-controller", "helm-controller")
+
+# The narrowing patches, each paired with the object it rewrites. The mapping is
+# the contract: a patch file that exists but is not wired into the install root
+# leaves the generated export untouched while the repository reads as hardened,
+# which is the same failure as having no patch at all.
+FLUX_RBAC_PATCHES = {
+    "cluster-reconciler.yaml": ("ClusterRoleBinding", "cluster-reconciler-flux-system"),
+    "crd-controller-role.yaml": ("ClusterRole", "crd-controller-flux-system"),
+    "crd-controller-binding.yaml": ("ClusterRoleBinding", "crd-controller-flux-system"),
+}
+
+# Authorization this repository writes itself, as opposed to the generated
+# export. Wildcards are refused here because every rule in these files is
+# derived from an enumerated desired state; a wildcard would mean the derivation
+# was abandoned.
+FLUX_AUTHORED_RBAC_FILES = (
+    "kubernetes/flux-system/access.yaml",
+    "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+)
+
+# Controller-identity Roles that carry the authority the deleted cluster-admin
+# binding used to supply. Absence of any one of them is a reconciliation that
+# cannot start, so they are required by name rather than inferred.
+FLUX_CONTROLLER_ROLE_NAMESPACES = {
+    "flux-controller-runtime": ("flux-system",),
+    "flux-controller-decryption": ("flux-system",),
+    "flux-controller-impersonation": (
+        "flux-system", "cloudflare-public", "naranjo-online", "lidersea-com",
+    ),
+}
+
+RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
+
+
+def _yaml_documents(text):
+    """Split a multi-document manifest the way the other checks here do."""
+
+    return re.split(r"(?m)^---\s*$", text)
+
+
+def _rbac_rule_blocks(document):
+    """Return the text of each `rules:` entry in one RBAC document.
+
+    The RBAC files this repository authors use one canonical shape — a
+    top-level ``rules:`` sequence whose entries are two-space-indented ``- ``
+    items — so the rules can be sliced textually without a YAML parser, which
+    the fast gate deliberately cannot depend on.
+    """
+
+    match = re.search(r"(?ms)^rules:\s*$\n(?P<body>(?:[ \t].*\n?|\n)*)", document)
+    if match is None:
+        return []
+    body = match.group("body")
+    blocks = []
+    current = []
+    for line in body.splitlines():
+        if re.match(r"^\s*-\s", line) and re.match(r"^\s{0,4}-\s", line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def flux_rbac_contract_errors(root):
+    """Require the narrowed Flux controller authorization (AUDIT S12).
+
+    The generated export binds ``cluster-admin`` to the kustomize- and
+    helm-controller accounts and shares a wildcard ClusterRole across seven
+    named subjects. This function pins the three properties that replace it:
+    the narrowing patches exist AND are applied by the install root, the
+    authorization this repository authors contains no wildcard and no
+    cluster-admin reference, and the controller-identity Roles that carry the
+    replacement authority are present with the shape that keeps them narrow.
+    """
+
+    errors = []
+    controllers = root / "kubernetes/flux-system/controllers"
+    index_path = controllers / "kustomization.yaml"
+    index_text = read(index_path) if index_path.is_file() else ""
+    if not index_text:
+        errors.append("Flux controller install root is missing")
+
+    for name, (kind, target) in sorted(FLUX_RBAC_PATCHES.items()):
+        patch_path = controllers / "patches" / name
+        if not patch_path.is_file():
+            errors.append("Flux RBAC narrowing patch is missing: " + name)
+            continue
+        patch_text = read(patch_path)
+        if not re.search(r"(?m)^kind:\s*{}\s*$".format(kind), patch_text):
+            errors.append("Flux RBAC patch {} must target kind {}".format(name, kind))
+        if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(target)), patch_text):
+            errors.append("Flux RBAC patch {} must name {}".format(name, target))
+        if "patches/" + name not in index_text:
+            errors.append("Flux controller install root does not apply patches/" + name)
+
+    # The cluster-admin binding is deleted rather than repointed: `roleRef` is
+    # immutable, so a repoint would be unappliable on the live cluster that
+    # already carries the broad binding.
+    deletion = controllers / "patches/cluster-reconciler.yaml"
+    if deletion.is_file() and not re.search(r"(?m)^\$patch:\s*delete\s*$", read(deletion)):
+        errors.append("cluster-admin binding patch must delete the binding, not repoint it")
+
+    # The subject list, pinned exactly. A regenerated export reintroduces four
+    # subjects for controllers this install does not run.
+    binding_patch = controllers / "patches/crd-controller-binding.yaml"
+    if binding_patch.is_file():
+        subjects = re.findall(
+            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", read(binding_patch)
+        )
+        if tuple(sorted(subjects)) != tuple(sorted(FLUX_CONTROLLER_ACCOUNTS)):
+            errors.append(
+                "crd-controller subjects must be exactly the installed controllers: "
+                + ", ".join(sorted(FLUX_CONTROLLER_ACCOUNTS))
+            )
+
+    for relative in FLUX_AUTHORED_RBAC_FILES:
+        path = root / relative
+        if not path.is_file():
+            errors.append("authored Flux RBAC file is missing: " + relative)
+            continue
+        text = read(path)
+        if re.search(r"(?m)^\s*(?:-\s+)?['\"]?\*['\"]?\s*$", text) or re.search(
+            r"(?m)^\s*(?:apiGroups|resources|verbs):\s*\[[^\]]*\*", text
+        ):
+            errors.append("wildcard RBAC rule in " + relative)
+        # Prose may name the role it removes; a manifest field may not name it
+        # at all.
+        if re.search(r"(?m)^\s*name:\s*cluster-admin\s*$", text):
+            errors.append("cluster-admin binding in " + relative)
+        if re.search(r"(?m)^\s*-\s*serviceaccounts/token\s*$", text):
+            errors.append("serviceaccounts/token creation must not be granted: " + relative)
+
+    access_path = root / "kubernetes/flux-system/access.yaml"
+    if not access_path.is_file():
+        return errors
+    documents = _yaml_documents(read(access_path))
+    seen_roles = set()
+    for document in documents:
+        if not re.search(r"(?m)^kind:\s*Role\s*$", document):
+            continue
+        name_match = re.search(r"(?m)^\s*name:\s*(\S+)\s*$", document)
+        namespace_match = re.search(r"(?m)^\s*namespace:\s*(\S+)\s*$", document)
+        if name_match is None or namespace_match is None:
+            continue
+        name, namespace = name_match.group(1), namespace_match.group(1)
+        seen_roles.add((name, namespace))
+        for block in _rbac_rule_blocks(document):
+            # Impersonation without `resourceNames` is impersonation of every
+            # account in the namespace, which re-opens the escalation path the
+            # deleted binding used to hold open.
+            if "impersonate" in block and "resourceNames" not in block:
+                errors.append(
+                    "unrestricted impersonate grant in access.yaml Role {}/{}".format(
+                        namespace, name
+                    )
+                )
+            # A controller that can write Secrets in flux-system can rewrite
+            # the SOPS key it decrypts with.
+            if namespace == "flux-system" and re.search(r"(?m)^\s*-\s*secrets\s*$", block):
+                verbs = re.search(r"(?m)^\s*verbs:\s*\[([^\]]*)\]", block)
+                granted = [item.strip() for item in verbs.group(1).split(",")] if verbs else []
+                for verb in RBAC_WRITE_VERBS:
+                    if verb in granted:
+                        errors.append(
+                            "flux-system Secret grant must be read-only: {}/{} grants {}".format(
+                                namespace, name, verb
+                            )
+                        )
+    for name, namespaces in sorted(FLUX_CONTROLLER_ROLE_NAMESPACES.items()):
+        for namespace in namespaces:
+            if (name, namespace) not in seen_roles:
+                errors.append(
+                    "controller-identity Role missing from access.yaml: {}/{}".format(
+                        namespace, name
+                    )
+                )
+    return errors
+
+
 def check_kubernetes(root):
     errors = []
     forbidden = {
@@ -1146,6 +1334,11 @@ def check_kubernetes(root):
         for label, pattern in forbidden.items():
             if pattern.search(text):
                 errors.append("{} in {}".format(label, rel))
+        # The generated Flux export is excluded from this file set, so this is a
+        # ban on every hand-written manifest: nothing this repository authors
+        # may bind the built-in cluster-admin role to anything.
+        if re.search(r"(?m)^\s*name:\s*cluster-admin\s*$", text):
+            errors.append("cluster-admin binding in " + rel)
         for match in re.finditer(r"(?m)^[ \t]*image:[ \t]*([^\s#]+)", text):
             image = match.group(1).strip("'\"")
             if not DIGEST_IMAGE.match(image):
@@ -1216,6 +1409,7 @@ def check_kubernetes(root):
             for policy_name in policy_names:
                 if policy_name not in text:
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
+        errors.extend(flux_rbac_contract_errors(root))
     errors.extend(signature_policy_source_errors(root))
     return errors
 

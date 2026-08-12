@@ -1,0 +1,26 @@
+# The generated export lists seven subject ServiceAccounts while the reviewed
+# three-controller component set creates only three. The other four —
+# notification-controller, image-reflector-controller,
+# image-automation-controller, and source-watcher — name accounts that do not
+# exist, so today they grant nothing; the moment any of those controllers were
+# added the binding would activate silently, with no review of what it granted.
+#
+# Pinning the subject list to the accounts the install actually creates makes
+# adding a controller a deliberate, reviewed edit of this file. The subject set
+# is additionally pinned by scripts/validate_repository.py, by the Conftest rule
+# over the rendered output, and by the live-state model in
+# bootstrap/flux/bootstrap.sh, so a silent re-broadening fails three ways.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system

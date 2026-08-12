@@ -1,0 +1,104 @@
+# Positive control for the narrowed Flux controller authorization (AUDIT S12).
+# These are the shapes the rendered desired state actually produces: an
+# enumerated shared ClusterRole, a binding naming only the three installed
+# controllers, name-restricted impersonation Roles, and a read-only Secret grant
+# in flux-system. If a rule added to policies/conftest/kubernetes.rego is broader
+# than the property it is meant to enforce, it fails here rather than silently
+# rejecting the real manifests at render time.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, ocirepositories]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [""]
+    resources: [namespaces, serviceaccounts, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - nonResourceURLs: [/livez/ping]
+    verbs: [head]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [root-reconciler, platform-prerequisites-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-impersonation
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-impersonation
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: naranjo-online
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [helm-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-decryption
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+# The wildcard aggregation roles the generated export ships are permitted to
+# exist precisely because nothing binds them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flux-view-flux-system
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io, kustomize.toolkit.fluxcd.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
