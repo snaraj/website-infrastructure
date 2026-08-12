@@ -575,12 +575,22 @@ class SignaturePolicyContractTests(unittest.TestCase):
             renderer.index("validate_signature_policy.py\" policy"),
             renderer.index("kustomize build \"${REPO_ROOT}/policies/kyverno\""),
         )
+        signature_rego = REPO_ROOT.joinpath(
+            "policies", "conftest", "signature-policy.rego"
+        ).read_text(encoding="utf-8")
         self.assertIn(
-            "input == expected_signature_policy(name, contract, action)",
-            REPO_ROOT.joinpath(
-                "policies", "conftest", "signature-policy.rego"
-            ).read_text(encoding="utf-8"),
+            "input == expected_signature_policy(name, contract, action, failure_policy)",
+            signature_rego,
         )
+        # The webhook failure policy is a parameter of the closed contract, not
+        # an escape from it: object equality still pins every other byte, and
+        # the parameter's domain is exactly two values. `Ignore` exists for the
+        # report-only install stage, where a fail-closed webhook would refuse
+        # Pod creation in the site namespaces whenever Kyverno was unreachable.
+        self.assertIn(
+            'signature_policy_failure_policies := {"Fail", "Ignore"}', signature_rego
+        )
+        self.assertIn("failure_policy in signature_policy_failure_policies", signature_rego)
 
     def test_fast_kubernetes_gate_rejects_a_weakened_audit_policy(self):
         with tempfile.TemporaryDirectory() as directory:
