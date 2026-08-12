@@ -380,8 +380,11 @@ class FluxRbacCompositionTests(unittest.TestCase):
         # renderer. This test proves that shortcut is faithful: the RBAC the
         # model composes must equal the RBAC the pinned Kustomize actually
         # builds, object for object and rule for rule.
+        kustomize = shutil.which("kustomize")
+        if kustomize is None:
+            self.skipTest("kustomize is not installed")
         rendered = subprocess.run(
-            [shutil.which("kustomize"), "build", str(ROOT / "kubernetes/flux-system/controllers")],
+            [kustomize, "build", str(ROOT / "kubernetes/flux-system/controllers")],
             check=True,
             capture_output=True,
             text=True,
@@ -488,7 +491,8 @@ class FluxRbacCompositionTests(unittest.TestCase):
     def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")
         inventory = re.search(r"(?ms)^  expected_inventory='(?P<body>.*?)'$", text)
-        self.assertIsNotNone(inventory)
+        if inventory is None:
+            self.fail("bootstrap.sh no longer declares a reviewed manifest inventory")
         listed = {line.split(" ", 1)[1] for line in inventory.group("body").splitlines()}
         for relative in model.FLUX_RBAC_PATCH_FILES:
             with self.subTest(patch=relative):

@@ -89,16 +89,14 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, watch]
----
-# The wildcard aggregation roles the generated export ships are permitted to
-# exist precisely because nothing binds them.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: flux-view-flux-system
-  labels:
-    rbac.authorization.k8s.io/aggregate-to-view: "true"
-rules:
-  - apiGroups: [source.toolkit.fluxcd.io, kustomize.toolkit.fluxcd.io]
-    resources: ["*"]
-    verbs: [get, list, watch]
+#
+# The two wildcard aggregation ClusterRoles the generated export ships
+# (flux-edit-flux-system, flux-view-flux-system) are deliberately NOT reproduced
+# here. They must remain acceptable, and the exemption that keeps them
+# acceptable is exercised on the real thing: the rendered flux-system artifact
+# contains both, and `scripts/render-manifests.sh` runs this same Conftest policy
+# over it. Copying a wildcard role into this directory would add a scanner
+# allowlist entry for a fixture — an allowlist expansion buying coverage the
+# render already provides. The binding half of the property, which is the half
+# that actually matters, is the `flux-operator-view` document in the paired deny
+# fixture, plus `test_the_wildcard_aggregation_roles_are_bound_to_no_one`.

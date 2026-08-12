@@ -65,7 +65,16 @@ class YamlSubsetError(ValueError):
     """Raised when a manifest uses a construct this reader will not guess at."""
 
 
-_INDENT = re.compile(r"^(\s*)(.*)$")
+def _indent_of(line):
+    """Columns of leading spaces, computed rather than matched.
+
+    A regex here would return an Optional the caller has to unwrap, and this
+    reader must never fail by dereferencing None: an input it cannot parse has
+    to raise ``YamlSubsetError`` with the offending line, because a crash inside
+    the sufficiency proof would read as "no permission gap found".
+    """
+
+    return len(line) - len(line.lstrip(" "))
 
 
 def _strip_comment(line):
@@ -137,6 +146,12 @@ class _Reader:
         self.position = 0
 
     def peek(self):
+        """The next significant line as ``(indent, text)``, or ``None`` at end.
+
+        One optional return, unwrapped once per call site, instead of a pair of
+        Optionals that every caller has to remember to check twice.
+        """
+
         while self.position < len(self.lines):
             raw = self.lines[self.position]
             if "\t" in raw:
@@ -145,13 +160,15 @@ class _Reader:
             if not stripped.strip():
                 self.position += 1
                 continue
-            indent = len(_INDENT.match(stripped).group(1))
-            return indent, stripped.strip()
-        return None, None
+            return _indent_of(stripped), stripped.strip()
+        return None
 
     def parse_block(self, indent):
-        current, text = self.peek()
-        if current is None or current < indent:
+        entry = self.peek()
+        if entry is None:
+            return None
+        current, text = entry
+        if current < indent:
             return None
         if text.startswith("- "):
             return self._parse_sequence(current)
@@ -160,8 +177,11 @@ class _Reader:
     def _parse_sequence(self, indent):
         items = []
         while True:
-            current, text = self.peek()
-            if current is None or current < indent or not text.startswith("- "):
+            entry = self.peek()
+            if entry is None:
+                break
+            current, text = entry
+            if current < indent or not text.startswith("- "):
                 break
             if current > indent:
                 raise YamlSubsetError("inconsistent sequence indentation: " + text)
@@ -187,9 +207,10 @@ class _Reader:
             return {key: self._block_scalar()}
         if remainder:
             return {key: _value(remainder)}
-        current, text = self.peek()
-        if current is None:
+        entry = self.peek()
+        if entry is None:
             return {key: {}}
+        current, text = entry
         # A sequence under a mapping key may be indented to the key's own column
         # — the style the generated Flux export uses — or deeper, the style the
         # reviewed manifests use. Both are ordinary YAML and both appear here.
@@ -201,24 +222,29 @@ class _Reader:
 
     def _block_scalar(self):
         collected = []
-        indent = None
+        indent = 0
+        started = False
         while self.position < len(self.lines):
             raw = self.lines[self.position].rstrip("\n")
             if raw.strip():
-                current = len(_INDENT.match(raw).group(1))
-                if indent is None:
+                current = _indent_of(raw)
+                if not started:
                     indent = current
+                    started = True
                 elif current < indent:
                     break
-            collected.append(raw[indent:] if indent and len(raw) >= indent else raw.strip())
+            collected.append(raw[indent:] if len(raw) >= indent else raw.strip())
             self.position += 1
         return "\n".join(collected).rstrip("\n") + "\n"
 
     def _parse_mapping(self, indent, existing=None):
         mapping = existing if existing is not None else {}
         while True:
-            current, text = self.peek()
-            if current is None or current < indent:
+            entry = self.peek()
+            if entry is None:
+                break
+            current, text = entry
+            if current < indent:
                 break
             if current > indent:
                 raise YamlSubsetError("inconsistent mapping indentation: " + text)
@@ -546,6 +572,10 @@ def _kustomization_paths(root, relative):
     base = root / relative
     index = base / "kustomization.yaml"
     documents = load_documents(index)
+    if not documents:
+        # An empty or unreadable Kustomize root would silently contribute zero
+        # objects, which is indistinguishable from "everything is authorized".
+        raise AssertionError("no Kustomize root parsed at " + str(index))
     resources = documents[0].get("resources") or []
     files = []
     for entry in resources:
