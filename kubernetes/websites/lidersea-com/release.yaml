@@ -29,7 +29,7 @@ spec:
       retries: 0
       strategy: rollback
   values:
-    deploymentReady: false
+    deploymentReady: true
     image:
       repository: ghcr.io/snaraj/lidersea-com
-      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      digest: sha256:4714041a4ab9acf0a514c6f5b690684f74f78bb6d59effbcfd0db2d97f4ce479
