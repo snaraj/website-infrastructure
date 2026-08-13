@@ -244,7 +244,13 @@ experiment, and removes the worktree afterward.
 3. Probe for vacuity: a guard that cannot fail is no guard. For each new
    or changed assertion, demonstrate at least one input that turns it
    red (the kill matrix usually supplies it); an assertion no input can
-   fail is decorative, and decorative checks are findings.
+   fail is decorative, and decorative checks are findings. Work through
+   `skills/gh-pr-flow/references/evidence-doctrine.md` rather than
+   re-deriving it: it catalogues the distinct, reproducible mechanisms
+   by which a fully green run proves nothing — coverage that a policy
+   suite cannot see, fixtures and gates that disable themselves, and the
+   ways a fix written to close a finding is itself vacuous — each with
+   its general correction.
 4. Probe for flakes: the full suite at least three times, plus the race
    detector where the language has one. Any nondeterminism is a finding
    naming the test.
@@ -267,11 +273,16 @@ confirmation the scratch workspace was removed; the reviewing agent's
 signature in the form `- <Agent> (adversarial reviewer)`, matching its
 agent label. Posting the verdict also removes the `requires-review`
 label, whichever way the verdict went — the item is no longer waiting on
-review attention. A REQUEST-CHANGES verdict returns the work to the same
-branch owner — fixes land on the same branch and receive a delta
-re-review of the changed scope. A PR flips from draft to ready only
-after an APPROVE verdict (or after findings are fixed and re-verified),
-and the evidence comment remains on the PR as the permanent record.
+review attention. That removal is NOT a readiness signal: the draft flag
+is the only readiness signal, so label-off while still draft is the
+normal mid-cycle state. A REQUEST-CHANGES verdict returns the work to
+the same branch owner — fixes land on the same branch and receive a
+delta re-review of the changed scope. The COORDINATOR performs the flip
+from draft to ready — never the branch author, never the reviewer — and
+only once the verdict is APPROVE (or its findings are fixed and
+re-verified), no owner or peer comment is outstanding, and every check
+is green at the exact head; the owner then merges. The evidence comment
+remains on the PR as the permanent record.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
