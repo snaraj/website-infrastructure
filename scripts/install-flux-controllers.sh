@@ -707,15 +707,15 @@ for fragment in \
   '    app: source-controller' \
   '    app.kubernetes.io/part-of: flux' \
   '  serviceAccountName: source-controller' \
-  '          value: kubernetes.default.svc' \
-  '        - --raw=/api'; do
+  'value: kubernetes.default.svc' \
+  '- --raw=/api'; do
   [[ "$(grep -cF -- "$fragment" "$canary_rendered" || true)" -eq 1 ]] || \
     die "API canary render does not carry the reviewed boundary exactly once: ${fragment}"
 done
 canary_image="$(pin_value FLUX_API_CANARY_IMAGE)"
 [[ "$canary_image" =~ ^registry\.k8s\.io/kubectl:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || \
   die 'FLUX_API_CANARY_IMAGE must be one tagged, digest-pinned official kubectl image'
-[[ "$(grep -cF -- "      image: ${canary_image}" "$canary_rendered" || true)" -eq 1 ]] || \
+[[ "$(grep -cF -- "image: ${canary_image}" "$canary_rendered" || true)" -eq 1 ]] || \
   die 'API canary image does not exactly match the versions.env identity'
 canary_digest="$(digest_of "$canary_rendered")"
 if [[ -n "$EXPECT_CANARY_SHA256" && "$canary_digest" != "$EXPECT_CANARY_SHA256" ]]; then

@@ -47,6 +47,7 @@ from .support import hermetic_git_environment, load_script, required_tool
 BASH = shutil.which("bash")
 BASH_REQUIRED = "bash is required to exercise the installer gate"
 GIT = shutil.which("git")
+KUSTOMIZE = shutil.which("kustomize")
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLERS = ROOT / "kubernetes" / "flux-system" / "controllers"
@@ -309,6 +310,61 @@ class ApiCanaryManifestTests(unittest.TestCase):
         self.assertIn("CANARY_TARGET='kubernetes/flux-system/canary'", read(INSTALLER))
         root = read(ROOT / "kubernetes" / "flux-system" / "kustomization.yaml")
         self.assertNotRegex(root, r"(?m)^\s*-\s*canary\s*$")
+
+    @unittest.skipUnless(
+        BASH and GIT and KUSTOMIZE, "bash, git, and kustomize are required"
+    )
+    def test_real_pinned_kustomize_render_passes_the_installer_boundary(self):
+        """Exercise the production serializer, not the behavioural YAML stub."""
+
+        with tempfile.TemporaryDirectory(prefix="flux-real-render.") as directory:
+            repo = Path(directory) / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            shutil.copy2(INSTALLER, repo / "scripts" / INSTALLER.name)
+            shutil.copy2(VERSIONS, repo / VERSIONS.name)
+            for target in ("controllers", "egress", "canary"):
+                shutil.copytree(
+                    ROOT / "kubernetes" / "flux-system" / target,
+                    repo / "kubernetes" / "flux-system" / target,
+                )
+
+            environment = hermetic_git_environment(
+                identity=("Flux Real Render", "flux-real-render@example.invalid")
+            )
+            environment["PATH"] = os.pathsep.join(
+                [
+                    str(Path(required_tool(KUSTOMIZE, "kustomize is required")).parent),
+                    environment.get("PATH", ""),
+                ]
+            )
+            for command in (
+                ["init", "-q", "-b", "main"],
+                ["add", "-A"],
+                ["commit", "-q", "-m", "real render fixture"],
+            ):
+                subprocess.run(
+                    [required_tool(GIT, "git is required"), *command],
+                    cwd=str(repo),
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                )
+
+            completed = subprocess.run(
+                [
+                    required_tool(BASH, BASH_REQUIRED),
+                    str(repo / "scripts" / INSTALLER.name),
+                    "--render",
+                ],
+                cwd=str(repo),
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            output = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertIn("API canary sha256", output)
+            self.assertIn("RENDER only; no cluster was contacted", output)
 
 
 class EgressAllowlistTests(unittest.TestCase):
