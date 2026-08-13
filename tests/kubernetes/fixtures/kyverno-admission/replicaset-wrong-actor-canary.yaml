@@ -18,6 +18,14 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: naranjo-online-wrong-actor-deny}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: canary
           image: ghcr.io/snaraj/naranjo-online:v1.0.0@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
