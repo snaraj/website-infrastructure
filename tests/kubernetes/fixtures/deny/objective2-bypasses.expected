@@ -3,11 +3,21 @@
 # disappears is a weakened rule, a message that appears is an unreviewed
 # denial. File-level rejection alone hides both.
 #
-# The `cloudflared-to-naranjo-online` row below covers the EDGE-DRIFT-001
-# document #87 appended to this fixture: the canonical site-ingress policy with
-# a name-only peer, which was the accepted shape before the double-pin and must
-# now be denied. Deriving this list on the branch alone would have left it out,
-# and the runner correctly reported it as an unreviewed denial on the merge.
+# Two rows here came from bases that landed after this branch was cut, and both
+# were surfaced by this runner rather than missed by it.
+#
+# #87 appended the EDGE-DRIFT-001 document — the canonical site-ingress policy
+# with a name-only peer, the accepted shape before the double-pin — which is the
+# `cloudflared-to-naranjo-online` row.
+#
+# #96 replaced the blanket pre-discovery PVC refusal with the owner's
+# enumeration, so `PersistentVolumeClaim invented-media is forbidden until
+# storage discovery and restore evidence are approved` is GONE and two denials
+# take its place: the claim now fails on naming no enumerated class, and the
+# `azureFile` volume in the same file is now refused as an undiscovered source.
+# Read and accepted: the object is still refused, by a narrower and better-named
+# rule, and the second denial is a rule that started covering something it did
+# not cover before.
 ConfigMap lidersea-com/encoded-media-in-data contains a recognized encoded media/archive header
 ConfigMap lidersea-com/media-in-etcd key album.flac looks like a media payload
 ConfigMap lidersea-com/media-in-etcd must not store binary data in etcd
@@ -19,7 +29,7 @@ NetworkPolicy lidersea-com/endport-widening widens the exact cloudflare-public T
 NetworkPolicy naranjo-online/cloudflared-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
 NetworkPolicy lidersea-com/widened-ingress must not grant site egress
 NetworkPolicy lidersea-com/widened-ingress widens the exact cloudflare-public TCP 8080 ingress contract
-PersistentVolumeClaim invented-media is forbidden until storage discovery and restore evidence are approved
+PersistentVolumeClaim invented-media must name an enumerated storageClassName
 Pod lidersea-bypass must not tolerate node DiskPressure
 Pod lidersea-bypass must not use hostNetwork
 Pod wildcard-disk-pressure must not use a wildcard toleration that includes node DiskPressure
@@ -38,3 +48,4 @@ volume media is outside the exact ephemeral/credential volume allowlist for name
 volume media uses undiscovered storage source persistentVolumeClaim
 volume stolen-token is outside the exact ephemeral/credential volume allowlist for namespace lidersea-com
 volume tmp is outside the exact ephemeral/credential volume allowlist for namespace lidersea-com
+volume tmp uses undiscovered storage source azureFile

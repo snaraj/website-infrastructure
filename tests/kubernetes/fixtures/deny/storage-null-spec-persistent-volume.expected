@@ -1,0 +1,7 @@
+# The exact denial each document in storage-null-spec-persistent-volume.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+PersistentVolume storage-null-spec has no usable spec mapping and cannot be evaluated
+PersistentVolume storage-null-spec must declare an enumerated storageClassName
+PersistentVolume storage-null-spec must declare exactly one volume source, found 0

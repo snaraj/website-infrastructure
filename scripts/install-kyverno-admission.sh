@@ -645,8 +645,17 @@ require_report_only_evidence() {
     [[ -n "$action" ]] || die "stage report-only did not install ClusterPolicy ${name}"
     [[ "$action" == 'Audit' ]] || \
       die "ClusterPolicy ${name} is already ${action}; the cluster is not in the report-only stage"
-    rule_actions="$(KUBECTL get clusterpolicy "$name" \
-      -o 'jsonpath={range .spec.rules[*]}{.validate.failureAction}{"\n"}{end}' 2>/dev/null || true)"
+    # The third instance of the same class, and the one that mattered most: an
+    # EMPTY answer here is legitimate (verifyImages rules carry no validate
+    # block), so emptiness cannot be the refusal the way it is for the
+    # spec-level read four lines above — which means a discarded status leaves
+    # a timed-out or denied read indistinguishable from "every rule reports
+    # Audit", and the gate would announce "evidence accepted" and promote to
+    # fail-closed admission on a cluster it never actually read.
+    if ! rule_actions="$(KUBECTL get clusterpolicy "$name" \
+      -o 'jsonpath={range .spec.rules[*]}{.validate.failureAction}{"\n"}{end}' 2>&1)"; then
+      die "cannot read ClusterPolicy ${name}'s authoritative rule actions (${rule_actions}); stage 1 is NOT proven to be what is running and enforcement must not be promoted on an unread cluster"
+    fi
     while IFS= read -r rule_action; do
       # verifyImages rules carry no validate block at all, so an empty value is
       # the expected shape for them rather than a missing answer.

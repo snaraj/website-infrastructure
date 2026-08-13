@@ -23,8 +23,10 @@ reproduced findings block the promotion:
 | **#100** | The engine configuration filters `[ReplicaSet,*,*]` and `[ReplicaSet/?*,*,*]`, so `require-release-readiness`'s exact-Deployment-owner rule is **inert at admission**. Unfiltering it widens the enforcing webhook's blast radius on a one-node cluster and is an owner decision. | CONFIRMED against `enforce/config.yaml` |
 | **#102** | The promotion has **no admission canary** on either side of the flip, and its evidence is not bound to the exact installation. | CONFIRMED as a gap |
 
-**#87** (connector identity) and **#96** (the storage-gate pivot) must also land
-first. #101 tracks two further defects on the same execution path.
+**#87** (connector identity) and **#96** (the storage-gate pivot) were also
+preconditions; both have since landed on `main` and are merged into this
+branch, so they no longer block. The three findings in the table above do.
+#101 tracks two further defects on the same execution path.
 
 This is not only written down. `render.lock` records
 `stage.enforce.authorized=no`, and

@@ -41,32 +41,35 @@ render.tool.version=v5.8.1
 #         ownership boundary is inert at admission
 #   #102  the promotion has no canary and its evidence is not bound to the
 #         exact installation
-# And two must land first: #87 (connector identity) and #96 (the storage pivot).
+# Two further preconditions have since been SATISFIED and are recorded rather
+# than dropped: #87 (connector identity) and #96 (the storage pivot) have both
+# landed on main, and this branch has merged them.
 #
 # Flipping this to `yes` is a reviewed change with peer/platform validation
 # recorded on the pull request that does it — never an edit made during a
 # ceremony.
 stage.enforce.authorized=no
-stage.enforce.blocked-by=#99, #100, #102 (and #87, #96 must land first)
+stage.enforce.blocked-by=#99, #100, #102 (#87, #96 landed and are merged into this branch)
 
 # THE BASE THESE DIGESTS DESCRIBE.
 #
 # Both roots compose `policies/kyverno/` through `../../admission`, so the
 # rendered bytes depend on the committed policy set — and therefore on the base
 # this branch lands on, not on this branch alone. #87 added a fourth rule to
-# require-release-readiness after this branch was cut, which changes both
-# renders. The digests below are derived from the MERGE of this branch into
-# `origin/main` at 2026-08-12 (`a83e197`, i.e. after #87 and #90), which is the
-# tree pull-request CI builds and the tree that lands. Re-derive them in the
-# same pull request as anything that changes a committed policy.
-render.base=a83e19786d615bcb494a1bd4af72b4429ec6afa4
+# require-release-readiness and #96 rewrote the storage policy's rule bodies,
+# both after this branch was cut, and each changes the rendered bytes. This
+# branch has since MERGED `origin/main`, so the digests below describe this
+# branch's own working tree, which is also the tree that lands. Re-derive them
+# in the same pull request as anything that changes a committed policy, and
+# keep the base recorded here so a reader can tell which tree they describe.
+render.base=93960bc8611078fb97a23f08f824a97d299884b6
 
 # STAGE 1 — kubernetes/platform/admission-install/report-only
-report-only.sha256=cf9198eb09df11b2ccb2b87cf603a4614d3bac1855790683737cecad77c52899
+report-only.sha256=0746ddbb1ecadeb9dda1740333fc0583a99a52acf45511e5ec758866d9b345d2
 report-only.objects=22
 
 # STAGE 2 — kubernetes/platform/admission-install/enforce
-enforce.sha256=39b3e9fa4c52febfa7df896e55b9dd4f3e10726daebb3baec8e3dff485d56fcd
+enforce.sha256=f5d6536f197af2c75b6706d5a1a58e967de3d4f868673302ef81b4e54a736167
 enforce.objects=22
 
 # The inventory, by scope. Both stages carry the identical object set — stage 1

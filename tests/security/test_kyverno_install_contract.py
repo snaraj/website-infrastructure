@@ -309,6 +309,59 @@ NEVER_JOURNALED_KINDS = (
     "MutatingWebhookConfiguration",
 )
 
+# The install phase table, and the scope of every kind in it.
+#
+# These two lists are a PARTITION, and the partition is the thing that has to be
+# pinned. The installer derives "is this journal entry cluster-scoped?" from
+# `CLUSTER_SCOPED_KINDS` and "could this install have journaled it?" from the
+# phase table. Adding a genuinely cluster-scoped kind to a phase WITHOUT adding
+# it to the cluster-scoped list makes the installer treat it as namespaced: the
+# journal accepts it with `namespace: kyverno`, the rollback issues
+# `kubectl -n kyverno delete <Kind> <name>`, kubectl ignores `--namespace` for a
+# root-scoped object, and the delete goes out cluster-wide — P0-1 reopened for
+# that one kind, while the run prints "at the scope its kind declares".
+#
+# Nothing in the installer can catch that: both halves would be internally
+# consistent. Only a reviewed partition can, and the phase table is exactly what
+# the component-export promotion will edit, so this is a live trap rather than a
+# hypothetical.
+REVIEWED_PHASE_KINDS = {
+    "namespace": ("Namespace",),
+    "bounds": ("ResourceQuota", "LimitRange"),
+    "network": ("NetworkPolicy",),
+    "controller": (
+        "CustomResourceDefinition",
+        "ConfigMap",
+        "ServiceAccount",
+        "ClusterRole",
+        "ClusterRoleBinding",
+        "Role",
+        "RoleBinding",
+        "Service",
+        "Deployment",
+        "PodDisruptionBudget",
+        "PriorityClass",
+    ),
+    "policies": ("ClusterPolicy", "Policy"),
+}
+# Every kind above that Kubernetes scopes INSIDE a namespace. The complement of
+# REVIEWED_CLUSTER_SCOPED_KINDS over the phase table, stated rather than derived
+# so that adding a kind to the phase table fails until someone declares which
+# side of the partition it is on.
+REVIEWED_NAMESPACED_KINDS = (
+    "ResourceQuota",
+    "LimitRange",
+    "NetworkPolicy",
+    "ConfigMap",
+    "ServiceAccount",
+    "Role",
+    "RoleBinding",
+    "Service",
+    "Deployment",
+    "PodDisruptionBudget",
+    "Policy",
+)
+
 
 class ParseGuardTests(unittest.TestCase):
     """The parse helpers report a coverage gap; they never crash into one.
@@ -1020,6 +1073,59 @@ class RenderLockTests(unittest.TestCase):
             "all derive scope from the same kind list",
         )
 
+    def test_every_phase_kind_declares_which_side_of_the_scope_split_it_is_on(self):
+        """The partition between the phase table and the cluster-scoped list.
+
+        Both halves can be internally consistent and still wrong together: a
+        cluster-scoped kind added to a phase but not to `CLUSTER_SCOPED_KINDS`
+        is journaled as namespaced, accepted with `namespace: kyverno`, and then
+        deleted CLUSTER-WIDE, because kubectl ignores `--namespace` for a
+        root-scoped object. Nothing inside the installer can detect that, so the
+        partition is pinned here — and the phase table is precisely what the
+        component-export promotion will edit.
+        """
+
+        installer = read(INSTALLER)
+        block = capture(
+            r"(?s)declare -A PHASE_KINDS=\(\n(.*?)\n\)", installer, "the phase table"
+        )
+        declared = {
+            phase: tuple(kinds.split("|"))
+            for phase, kinds in re.findall(r"\[(\w+)\]='([^']+)'", block)
+        }
+        self.assertEqual(
+            declared,
+            REVIEWED_PHASE_KINDS,
+            "the installer's phase table and the reviewed one have diverged",
+        )
+        cluster_scoped = set(REVIEWED_CLUSTER_SCOPED_KINDS)
+        namespaced = set(REVIEWED_NAMESPACED_KINDS)
+        self.assertEqual(
+            cluster_scoped & namespaced,
+            set(),
+            "a kind cannot be both cluster-scoped and namespaced",
+        )
+        for phase, kinds in REVIEWED_PHASE_KINDS.items():
+            for kind in kinds:
+                with self.subTest(phase=phase, kind=kind):
+                    self.assertEqual(
+                        (kind in cluster_scoped) ^ (kind in namespaced),
+                        True,
+                        "every kind an install phase applies must be declared "
+                        "cluster-scoped or namespaced exactly once; an "
+                        "undeclared kind is journaled at the wrong scope and "
+                        "deleted cluster-wide on rollback",
+                    )
+        # The reverse direction, so the namespaced list cannot grow entries that
+        # no phase applies and quietly widen what a journal may name.
+        self.assertEqual(
+            namespaced,
+            {kind for kinds in REVIEWED_PHASE_KINDS.values() for kind in kinds}
+            - cluster_scoped,
+            "the reviewed namespaced kinds are exactly the phase kinds that are "
+            "not cluster-scoped",
+        )
+
     def test_the_inventory_names_are_the_cluster_scoped_objects(self):
         names = lock_value("inventory.cluster-scoped.names").split(",")
         self.assertEqual(len(names), int(lock_value("inventory.cluster-scoped")))
@@ -1364,7 +1470,7 @@ case "$args" in
     echo 'Error from server (NotFound)' >&2; exit 1 ;;
   *"get deployment -l app.kubernetes.io/part-of=kyverno"*)
     case "$scenario" in
-      enforce-ready|enforce-no-reports|enforce-already|enforce-rule-enforcing|enforce-foreign-reports)
+      enforce-ready|enforce-no-reports|enforce-already|enforce-rule-enforcing|enforce-foreign-reports|enforce-rule-unreadable)
         printf 'kyverno-admission-controller=1\n'; exit 0 ;;
       enforce-unhealthy) printf 'kyverno-admission-controller=\n'; exit 0 ;;
     esac
@@ -1374,13 +1480,18 @@ case "$args" in
   # which is the whole shape a gate reading only the spec level cannot see.
   *"get clusterpolicy "*validationFailureAction*)
     case "$scenario" in
-      enforce-ready|enforce-no-reports|enforce-rule-enforcing|enforce-foreign-reports)
+      enforce-ready|enforce-no-reports|enforce-rule-enforcing|enforce-foreign-reports|enforce-rule-unreadable)
         printf 'Audit\n'; exit 0 ;;
       enforce-already) printf 'Enforce\n'; exit 0 ;;
     esac
     exit 0 ;;
   *"get clusterpolicy "*"rules[*]"*)
     case "$scenario" in
+      # An EMPTY answer is legitimate here (verifyImages rules carry no validate
+      # block), so emptiness cannot be the refusal — which is exactly why the
+      # read's own status has to be.
+      enforce-rule-unreadable)
+        echo 'Error from server (Forbidden): clusterpolicies.kyverno.io is forbidden' >&2; exit 1 ;;
       enforce-rule-enforcing) printf 'Audit\nEnforce\n'; exit 0 ;;
       enforce-ready|enforce-no-reports|enforce-foreign-reports) printf 'Audit\n\n'; exit 0 ;;
     esac
@@ -2684,6 +2795,26 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn(
             "authoritative validate.failureAction is Enforce", completed.stderr
         )
+
+    def test_enforce_is_refused_when_the_rule_level_action_cannot_be_READ(self):
+        """The third `2>/dev/null || true`, on the promotion gate's own
+        authoritative read.
+
+        The spec-level read four lines above is fail-closed because an empty
+        answer is impossible there. Here an empty answer is LEGITIMATE — a
+        verifyImages rule carries no validate block — so a discarded status made
+        a denied or timed-out read indistinguishable from "every rule reports
+        Audit", and the gate would print `evidence accepted` and promote the
+        cluster-wide webhook to fail-closed on a cluster it never read.
+        """
+
+        completed = self._run(
+            "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-rule-unreadable"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("cannot read ClusterPolicy", completed.stderr)
+        self.assertIn("NOT proven to be what is running", completed.stderr)
+        self.assertNotIn("evidence accepted", completed.stdout)
 
     def test_enforce_is_refused_when_no_report_names_a_reviewed_policy(self):
         # A stale report from something else entirely is not evidence that this

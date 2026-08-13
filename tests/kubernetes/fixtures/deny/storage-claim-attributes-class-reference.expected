@@ -1,0 +1,5 @@
+# The exact denial each document in storage-claim-attributes-class-reference.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+PersistentVolumeClaim storage-attributes-reference-claim references a VolumeAttributesClass outside the enumerated allowlist
