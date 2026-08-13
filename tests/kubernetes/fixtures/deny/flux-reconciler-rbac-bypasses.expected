@@ -1,0 +1,16 @@
+# The exact denial each document in flux-reconciler-rbac-bypasses.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+ClusterRole crd-controller-flux-system must not grant a wildcard resources
+ClusterRole crd-controller-flux-system must not grant a wildcard verbs
+ClusterRole flux-cluster-impersonator must not grant impersonate at cluster scope
+ClusterRole flux-token-minter must not grant ServiceAccount token creation
+ClusterRoleBinding cluster-reconciler-flux-system must not bind cluster-admin
+ClusterRoleBinding flux-operator-view must not bind a wildcard aggregation role
+Role flux-controller-impersonation must restrict impersonate to named accounts
+Role flux-system/flux-controller-decryption must not write Secrets
+Role flux-system/flux-controller-runtime must not grant a wildcard verbs
+RoleBinding quiet-escalation must not bind cluster-admin
+crd-controller-flux-system must bind exactly the three installed controllers
+the cluster-admin reconciler binding must be deleted, not rendered
