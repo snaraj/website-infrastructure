@@ -108,8 +108,12 @@ FORBIDDEN_IDENTITY_SHAPES = {
         r"(?<![A-Za-z0-9_.-])/(?:Users|home)/[A-Za-z0-9._-]+"
     ),
     "home-relative workstation path": re.compile(r"~/[A-Za-z0-9._-]+"),
-    # Bare, not just the "PR #12" spelling. The negative lookahead keeps hex
-    # colour literals out of it.
+    # Bare, not just the "PR #12" spelling. The lookahead clears hex colour
+    # literals that contain a letter. Known residual: an ALL-DIGIT colour
+    # ("#012345") is indistinguishable from an item reference and still
+    # matches — name the colour or write a form containing a letter. Do not
+    # bound the digit count to escape it: real item numbers reach six digits,
+    # and that trade sheds detections to buy prose convenience.
     "repository item reference": re.compile(r"#[0-9]+(?![0-9a-fA-F])"),
 }
 
@@ -213,15 +217,24 @@ class SkillStructureTests(unittest.TestCase):
                 *(v for v in FORBIDDEN_IDENTITY if v not in licensed),
                 *SKILL_LOCAL_FORBIDDEN_IDENTITY.get(skill.name, ()),
             )
+            # These two loops never use assertNotIn or assertNotRegex. Those
+            # helpers build their own message from the operands: assertNotIn
+            # prints the value AND the whole corpus twice, and assertNotRegex
+            # prints the MATCHED TEXT — which, for the host-alias shape, is
+            # the alias this file exists to avoid naming. A failing run's
+            # output is a public artefact on a public repository, so the
+            # diagnosis is kept and the evidence is not reproduced.
             for position, value in enumerate(forbidden):
-                # Indexed, not named, for the same reason as the exemptions
-                # above: this list holds the values a public artefact must
-                # never carry, and a failure label is a public artefact.
                 with self.subTest(skill=skill.name, forbidden=position):
-                    self.assertNotIn(value.lower(), combined.lower())
+                    if value.lower() in combined.lower():
+                        self.fail(
+                            f"forbidden identity #{position} appears in "
+                            f"{skill.name}"
+                        )
             for label, shape in FORBIDDEN_IDENTITY_SHAPES.items():
                 with self.subTest(skill=skill.name, shape=label):
-                    self.assertNotRegex(combined, shape)
+                    if shape.search(combined):
+                        self.fail(f"shape {label!r} matched in {skill.name}")
 
     def test_identity_shapes_do_not_match_ordinary_prose(self):
         """The false-positive boundary of every shape, pinned.
