@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub PR Flow"
+  short_description: "Run auditable GitHub pull-request workflows"
+  default_prompt: "Use $gh-pr-flow to author or independently review a pull request with exact-head evidence."

@@ -85,6 +85,28 @@ MAX_ASSET_BYTES = 1024 * 1024
 MAX_ASSET_TREE_BYTES = 2 * 1024 * 1024
 TEXT_AREAS = frozenset({"references", "scripts", "agents"})
 KNOWN_AREAS = TEXT_AREAS | {"assets"}
+AUXILIARY_SKILL_DOCUMENTS = frozenset(
+    {
+        "readme.md",
+        "installation_guide.md",
+        "quick_reference.md",
+        "changelog.md",
+    }
+)
+EXPECTED_INTERFACES = {
+    "build-website-infrastructure": (
+        "Build Website Infrastructure",
+        "Build secure sites and cost-controlled infrastructure",
+        "Use $build-website-infrastructure to build or evolve this website "
+        "platform from its repository-defined contracts.",
+    ),
+    "gh-pr-flow": (
+        "GitHub PR Flow",
+        "Run auditable GitHub pull-request workflows",
+        "Use $gh-pr-flow to author or independently review a pull request "
+        "with exact-head evidence.",
+    ),
+}
 # Shapes, not literals. The repository privacy validator is NOT a second net
 # here: it covers emails, addresses, UUIDs, 32-hex and Windows paths only, so
 # commits, short commits, POSIX and home-relative workstation paths, and
@@ -216,8 +238,13 @@ def skill_layout_findings(skill):
             findings.append("script exceeds size ceiling")
         if area == "agents" and len(data) > MAX_AGENT_FILE_BYTES:
             findings.append("agent metadata exceeds size ceiling")
-        if area == "references" and path.suffix.casefold() != ".md":
-            findings.append("reference is not Markdown")
+        if path.name.casefold() in AUXILIARY_SKILL_DOCUMENTS:
+            findings.append("auxiliary skill document is forbidden")
+        if area == "references":
+            if path.suffix.casefold() != ".md":
+                findings.append("reference is not Markdown")
+            if len(relative.parts) != 2:
+                findings.append("reference is not one level below SKILL.md")
         try:
             data.decode("utf-8", "strict")
         except UnicodeDecodeError:
@@ -352,13 +379,88 @@ def frontmatter_findings(text, expected_name):
     return tuple(findings)
 
 
+def interface_findings(skill):
+    """Validate the deterministic minimal ``agents/openai.yaml`` interface."""
+    interface = skill / "agents" / "openai.yaml"
+    if not interface.is_file() or interface.is_symlink():
+        return ("missing regular agents/openai.yaml",)
+    match = re.fullmatch(
+        r'interface:\n'
+        r'  display_name: "([^"\n]+)"\n'
+        r'  short_description: "([^"\n]+)"\n'
+        r'  default_prompt: "([^"\n]+)"\n?',
+        interface.read_text(encoding="utf-8"),
+    )
+    if match is None:
+        return ("invalid agents/openai.yaml interface grammar",)
+    actual = match.groups()
+    expected = EXPECTED_INTERFACES.get(skill.name)
+    if expected is None or actual != expected:
+        return ("agents/openai.yaml does not match the governed skill",)
+    if not 25 <= len(actual[1]) <= 64:
+        return ("agent short description is outside its size contract",)
+    if f"${skill.name}" not in actual[2]:
+        return ("agent default prompt does not invoke its skill",)
+    return ()
+
+
+def _fence_opening(line):
+    """Return a strict CommonMark-style fence identity, if one opens here."""
+    opening = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
+    if opening is None or (
+        opening.group(1)[0] == "`" and "`" in opening.group(2)
+    ):
+        return None
+    return opening.group(1)[0], len(opening.group(1))
+
+
+def _blockquote_content(line):
+    """Return nested blockquote content, or None for ordinary prose."""
+    remainder = line
+    found = False
+    while True:
+        marker = re.match(r"^[ ]{0,3}>[ \t]?", remainder)
+        if marker is None:
+            return remainder if found else None
+        found = True
+        remainder = remainder[marker.end():]
+
+
+def _container_fence_opening(line):
+    """Detect a fence opened inside a blockquote or list container.
+
+    The link-evidence grammar intentionally does not interpret container
+    continuation. Once such a fence opens, the remainder is unavailable as
+    evidence. That conservative subset cannot turn container code into a link.
+    """
+
+    def content_opens_fence(content):
+        if _fence_opening(content) is not None:
+            return True
+        nested_quote = _blockquote_content(content)
+        return (
+            nested_quote is not None
+            and _fence_opening(nested_quote) is not None
+        )
+
+    quoted = _blockquote_content(line)
+    if quoted is not None and content_opens_fence(quoted):
+        return True
+    list_item = re.match(
+        r"^[ ]{0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+(.*)$", line
+    )
+    return list_item is not None and content_opens_fence(list_item.group(1))
+
+
 def _markdown_without_code_or_comments(markdown):
     """Remove fenced, indented and inline code plus HTML comments.
 
     This is deliberately a strict link-evidence projection, not a Markdown
     renderer: a link used to prove that a resource is discoverable must appear
-    in ordinary prose. Four-space/tab-indented blocks and code spans are inert
-    even when they contain syntactically convincing link text.
+    in ordinary prose. Four-space/tab-indented blocks, blockquotes, code spans,
+    and fenced code are inert even when they contain convincing link text.
+    Container-fence continuation is deliberately outside the accepted grammar:
+    after one opens, nothing later in the document counts as link evidence.
     """
     # An unclosed comment hides everything through EOF in GitHub Markdown; it
     # must not expose inert link-shaped text to this evidence projection.
@@ -366,7 +468,11 @@ def _markdown_without_code_or_comments(markdown):
     visible_lines = []
     fence_character = None
     fence_length = 0
+    opaque_container_fence = False
     for line in markdown.splitlines():
+        if opaque_container_fence:
+            visible_lines.append("")
+            continue
         if fence_character is not None:
             closing_fence = re.match(
                 r"^[ ]{0,3}"
@@ -380,13 +486,21 @@ def _markdown_without_code_or_comments(markdown):
             visible_lines.append("")
             continue
 
-        opening_fence = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
-        if opening_fence is not None and not (
-            opening_fence.group(1)[0] == "`"
-            and "`" in opening_fence.group(2)
-        ):
-            fence_character = opening_fence.group(1)[0]
-            fence_length = len(opening_fence.group(1))
+        quoted = _blockquote_content(line)
+        if quoted is not None:
+            if _container_fence_opening(line):
+                opaque_container_fence = True
+            visible_lines.append("")
+            continue
+
+        if _container_fence_opening(line):
+            opaque_container_fence = True
+            visible_lines.append("")
+            continue
+
+        opening_fence = _fence_opening(line)
+        if opening_fence is not None:
+            fence_character, fence_length = opening_fence
             visible_lines.append("")
             continue
 
@@ -436,6 +550,20 @@ def _is_backslash_escaped(text, position):
     return backslashes % 2 == 1
 
 
+def _inside_unclosed_label(text, position):
+    """Whether a candidate starts inside an earlier unmatched label."""
+    depth = 0
+    line_start = text.rfind("\n", 0, position) + 1
+    for index in range(line_start, position):
+        if _is_backslash_escaped(text, index):
+            continue
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]" and depth:
+            depth -= 1
+    return depth > 0
+
+
 def _normalized_link_target(value):
     value = value.strip()
     if value.startswith("<") and value.endswith(">"):
@@ -444,38 +572,65 @@ def _normalized_link_target(value):
 
 
 def markdown_link_targets(markdown):
-    """Return actual inline and full/collapsed reference-style link targets."""
+    """Return links accepted by the strict, visible-prose evidence grammar."""
     visible = _markdown_without_code_or_comments(markdown)
     targets = set()
+    # Escapes belong to a label rather than terminating it.  This makes odd
+    # backslash parity consume a would-be closing bracket; an even pair is
+    # consumed together and leaves the following bracket free to close.
+    label_fragment = r"(?:\\.|[^\[\]\\\n])*"
     inline = re.compile(
-        r"(?<!!)\[[^\]\n]*\]\(\s*"
+        r"(?<!!)\[(" + label_fragment + r")\]\(\s*"
         r"(<[^>\n]+>|(?:\\.|[^\s()\n])+)"
         r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^\)\n]*\)))?"
         r"\s*\)"
     )
     for match in inline.finditer(visible):
-        if not _is_backslash_escaped(visible, match.start()):
-            targets.add(_normalized_link_target(match.group(1)))
+        if (
+            not _is_backslash_escaped(visible, match.start())
+            and not _inside_unclosed_label(visible, match.start())
+            and match.group(1).strip()
+        ):
+            targets.add(_normalized_link_target(match.group(2)))
 
     definitions = {}
     definition = re.compile(
-        r"(?m)^[ ]{0,3}\[([^\]\n]+)\]:[ \t]*(<[^>\n]+>|\S+)"
+        r"(?m)^[ ]{0,3}\[("
+        + label_fragment
+        + r")\]:[ \t]*(<[^>\n]+>|\S+)"
     )
     for match in definition.finditer(visible):
-        label = " ".join(match.group(1).split()).casefold()
-        definitions[label] = _normalized_link_target(match.group(2))
+        if not match.group(1).strip():
+            continue
+        normalized_definition = " ".join(match.group(1).split()).casefold()
+        definitions[normalized_definition] = _normalized_link_target(
+            match.group(2)
+        )
     uses_visible = definition.sub("", visible)
-    reference_use = re.compile(r"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]")
+    label_pattern = r"(?:\\.|[^\[\]\\\n])*"
+    reference_use = re.compile(
+        r"(?<!!)\[(" + label_pattern + r")\]\[(" + label_pattern + r")\]"
+    )
     for match in reference_use.finditer(uses_visible):
-        if _is_backslash_escaped(uses_visible, match.start()):
+        if _is_backslash_escaped(
+            uses_visible, match.start()
+        ) or _inside_unclosed_label(uses_visible, match.start()):
             continue
         label = match.group(2) or match.group(1)
+        if not label.strip():
+            continue
         normalized_label = " ".join(label.split()).casefold()
         if normalized_label in definitions:
             targets.add(definitions[normalized_label])
-    shortcut_use = re.compile(r"(?<!!)\[([^\]\n]+)\](?![\[(])")
+    shortcut_use = re.compile(
+        r"(?<!!)\[(" + label_pattern + r")\](?![\[(])"
+    )
     for match in shortcut_use.finditer(uses_visible):
-        if _is_backslash_escaped(uses_visible, match.start()):
+        if (
+            _is_backslash_escaped(uses_visible, match.start())
+            or _inside_unclosed_label(uses_visible, match.start())
+            or not match.group(1).strip()
+        ):
             continue
         normalized_label = " ".join(match.group(1).split()).casefold()
         if normalized_label in definitions:
@@ -586,15 +741,15 @@ class SkillStructureTests(unittest.TestCase):
             with self.subTest(invalid=label):
                 self.assertTrue(frontmatter_findings(text, expected_name))
 
-    def test_references_and_interface_exist(self):
+    def test_references_and_interfaces_exist(self):
         for name in (
             "project-contract.md", "github-actions.md", "external-gates.md",
             "media-storage.md",
         ):
             self.assertTrue((SKILL / "references" / name).is_file())
-        interface = (SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
-        self.assertIn('display_name: "Build Website Infrastructure"', interface)
-        self.assertIn("$build-website-infrastructure", interface)
+        for skill in governed_skills():
+            with self.subTest(interface=skill.name):
+                self.assertEqual(interface_findings(skill), ())
 
     def test_skill_contains_methods_not_this_repository_identity(self):
         for skill in governed_skills():
@@ -674,6 +829,23 @@ class SkillStructureTests(unittest.TestCase):
             (skill / "scripts" / "check.py").write_bytes(b"\xff")
             self.assertIn(
                 "text resource is not UTF-8", skill_layout_findings(skill)
+            )
+
+            # References are one level below SKILL.md and auxiliary process
+            # documents never become skill resources merely by being linked.
+            nested_reference = skill / "references" / "nested" / "guide.md"
+            nested_reference.parent.mkdir(parents=True, exist_ok=True)
+            nested_reference.write_text("# Nested\n", encoding="utf-8")
+            self.assertIn(
+                "reference is not one level below SKILL.md",
+                skill_layout_findings(skill),
+            )
+            nested_reference.unlink()
+            auxiliary = skill / "references" / "README.md"
+            auxiliary.write_text("# Extra process document\n", encoding="utf-8")
+            self.assertIn(
+                "auxiliary skill document is forbidden",
+                skill_layout_findings(skill),
             )
 
     def test_skill_layout_rejects_live_and_broken_resource_symlinks(self):
@@ -782,6 +954,9 @@ class SkillStructureTests(unittest.TestCase):
         target = "references/guide.md"
         for markdown in (
             "[Guide](references/guide.md)",
+            r"[Guide\\](references/guide.md)",
+            "- Read [Guide](references/guide.md)",
+            "~~~text\ninert\n~~~\n[Guide](references/guide.md)",
             "[Guide][portable]\n\n[portable]: references/guide.md",
             "[Guide][]\n\n[Guide]: <references/guide.md#details>",
             "[Guide]\n\n[Guide]: references/guide.md?view=portable",
@@ -798,6 +973,13 @@ class SkillStructureTests(unittest.TestCase):
             "\t[Guide](references/guide.md)",
             "   \t[Guide](references/guide.md)",
             "\\[Guide](references/guide.md)",
+            "[Guide\\](references/guide.md)",
+            "[Guide\\][portable]\n\n[portable]: references/guide.md",
+            "[portable]\n\n[portable\\]: references/guide.md",
+            "> [Guide](references/guide.md)",
+            "> ~~~text\n> [Guide](references/guide.md)\n> ~~~",
+            "> ```text\n> [Guide](references/guide.md)",
+            "- ~~~text\n  [Guide](references/guide.md)\n  ~~~",
             "<!-- [Guide](references/guide.md) -->",
             "<!-- unclosed\n[Guide](references/guide.md)",
             "![Guide](references/guide.md)",
@@ -816,6 +998,34 @@ class SkillStructureTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, doctrine)
+
+    def test_pr_flow_pins_ephemeral_recreation_transaction(self):
+        """Pin the method; the skill itself never supplies live authority."""
+        main = collapsed(PR_FLOW / "SKILL.md")
+        for fragment in (
+            "ephemerality as an explicit repository-owned classification",
+            "never as a property inferred from a Kubernetes kind",
+            "this method does not grant live authority",
+            "exact pre-inventory and pre-state",
+            "explicit allowlist of API group, kind, namespace, and name",
+            "immutable hashes of desired-state manifests, images, configuration",
+            "metadata-only Secret references and key names, never Secret data",
+            "tokens, Secrets, SOPS or age material, private keys, etcd and "
+            "control-plane PKI",
+            "StatefulSets, PVs, PVCs, databases, and operators",
+            "backup and restore evidence",
+            "availability, expected downtime, readiness, and recovery-time "
+            "objective",
+            "Run one serialized live lane",
+            "never use namespace-wide, wildcard, label-selector, or `all` "
+            "deletion",
+            "residue and orphan check is empty",
+            "public HTTPS status, DNS answers, certificate identity",
+            "canonical-body contract",
+            "this doctrine alone is never live acceptance evidence",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, main)
 
     def test_skill_explicitly_discovers_portable_variants(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")

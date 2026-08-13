@@ -241,6 +241,48 @@ then rationalising is not a test. If the change cannot be deployed yet,
 say so and name the precondition; never present a render as a live
 result.
 
+### Destructive recreation of declared ephemeral workloads
+
+Treat ephemerality as an explicit repository-owned classification, never as a
+property inferred from a Kubernetes kind, controller, namespace, or current
+lack of data. Design a declared-ephemeral workload so its complete desired
+state can recreate it from immutable inputs; this method does not grant live
+authority, classify an object, or override a repository's protected sets.
+
+Before opening a destructive acceptance lane:
+
+1. Obtain task-specific live authority and freeze the transaction packet.
+   Record the exact pre-inventory and pre-state; an explicit allowlist of API
+   group, kind, namespace, and name for every target; current live identities;
+   and immutable hashes of desired-state manifests, images, configuration, and
+   deployable artifacts. Treat an unlisted object as protected.
+2. Prove dependencies without reading protected values. Inspect metadata-only
+   Secret references and key names, never Secret data. Hard-exclude tokens,
+   Secrets, SOPS or age material, private keys, etcd and control-plane PKI,
+   DNS and Tunnel/provider identities, routes and recovery custody, and Git
+   refs or history.
+3. Classify persistence separately. For StatefulSets, PVs, PVCs, databases,
+   and operators, bind retention/reclaim behavior, backup and restore evidence,
+   operator-owned dependants, and the exact data-loss boundary. Exclude durable
+   state from deletion unless a separately authorized destructive drill proves
+   those semantics and names the accepted loss.
+4. Predict availability, expected downtime, readiness, and recovery-time
+   objective before execution. Define a bounded rollback or clean redeploy and
+   the stop conditions that trigger it.
+
+Run one serialized live lane. Delete only the frozen exact object allowlist;
+never use namespace-wide, wildcard, label-selector, or `all` deletion. Measure
+observed unavailability and readiness, then reconcile from the frozen desired
+state and hashes. Abort on identity drift, an unexpected dependant, missing
+input, secret-data access, or any out-of-allowlist effect.
+
+Accept the drill only when every target returns to its predicted desired state,
+the residue and orphan check is empty, durability checks pass, and measured
+availability/RTO meets the prediction. For public connectors or sites, also
+revalidate public HTTPS status, DNS answers, certificate identity, and the
+canonical-body contract. Record every difference and close the lane; a render,
+written plan, or this doctrine alone is never live acceptance evidence.
+
 ## 13. Publication: a PR comment is public
 
 On a public repository, a PR comment is publication. When a review finds
