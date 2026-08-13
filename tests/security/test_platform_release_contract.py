@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import copy
 import importlib.util
 import io
@@ -11,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -530,8 +532,65 @@ class GitTransitionTests(unittest.TestCase):
 
     def initialize(self, root: Path) -> str:
         self.git(root, "init", "-q")
+        # Writing Git commands may otherwise launch detached automatic
+        # maintenance. A TemporaryDirectory can then enumerate .git while that
+        # background process creates a lock or object, making Linux rmtree fail
+        # with ENOTEMPTY. Disable both the modern maintenance path and legacy
+        # auto-gc in this disposable repository; keeping both detach fallbacks
+        # false also makes any unexpected maintenance synchronous with the Git
+        # subprocess whose completion the fixture already waits for.
+        for key, value in (
+            ("maintenance.auto", "false"),
+            ("maintenance.autoDetach", "false"),
+            ("gc.auto", "0"),
+            ("gc.autoDetach", "false"),
+        ):
+            self.git(root, "config", "--local", key, value)
         self.git(root, "branch", "-m", "main")
         return self.commit(root, None, "initial")
+
+    def assert_fixture_git_is_quiescent(self, root: Path) -> None:
+        expected = {
+            "maintenance.auto": "false",
+            "maintenance.autoDetach": "false",
+            "gc.auto": "0",
+            "gc.autoDetach": "false",
+        }
+        actual = {
+            key: self.git(root, "config", "--local", "--get", key)
+            for key in expected
+        }
+        self.assertEqual(actual, expected)
+
+    def test_repeated_concurrent_git_fixtures_finish_before_safe_cleanup(self):
+        def lifecycle(round_index: int, worker_index: int, barrier: threading.Barrier):
+            with tempfile.TemporaryDirectory(prefix="platform-release-git-") as temporary:
+                root = Path(temporary)
+                initial = self.initialize(root)
+                self.assert_fixture_git_is_quiescent(root)
+                barrier.wait(timeout=30)
+                head = self.commit(
+                    root,
+                    "0.1.0",
+                    f"concurrent release {round_index}-{worker_index}",
+                )
+                intent = MODULE.validate_transition(
+                    root, initial, head, first_parent=True
+                )
+                self.assertEqual(intent, MODULE.Intent(head, MODULE.Version(0, 1, 0)))
+                return temporary
+
+        cleaned: list[str] = []
+        for round_index in range(2):
+            barrier = threading.Barrier(4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [
+                    executor.submit(lifecycle, round_index, worker_index, barrier)
+                    for worker_index in range(4)
+                ]
+                cleaned.extend(future.result(timeout=60) for future in futures)
+        for temporary in cleaned:
+            self.assertFalse(Path(temporary).exists())
 
     def test_initial_rapid_and_out_of_order_patch_releases_are_unique(self):
         with tempfile.TemporaryDirectory() as temporary:
