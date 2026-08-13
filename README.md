@@ -4,6 +4,7 @@
 [![CodeQL](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml)
 [![Scheduled security](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml)
 [![Coverage](docs/badges/coverage.svg)](docs/badges/coverage.json)
+[![Platform release](https://img.shields.io/github/v/release/snaraj/website-infrastructure?sort=semver)](https://github.com/snaraj/website-infrastructure/releases)
 
 Everything needed to run two real websites from one Raspberry Pi 5 at home —
 upstream Kubernetes bootstrapped with kubeadm, GitOps with Flux, and
@@ -14,6 +15,12 @@ Imagine the ergonomics of a managed platform, except the hardware is yours,
 every byte of configuration is reviewable in this repository, and nothing —
 literally nothing — is allowed to cost money or leak where the box lives.
 That's this repo.
+
+Every protected-main merge also publishes one immutable patch release of this
+repository's platform source (`vX.Y.Z`). That source release is an audit and
+recovery identity only: it never deploys, promotes, or mutates Kubernetes,
+Flux, Cloudflare, DNS, Tunnel state, secrets, or protected custody. Site image
+and chart releases remain owned by the two application repositories.
 
 ```mermaid
 flowchart LR

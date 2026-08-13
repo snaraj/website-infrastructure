@@ -8,7 +8,9 @@ A new agent operates from this repository alone; nothing is relayed by
 the owner. In order:
 
 1. Read this file end to end — the safety invariants and the lane split
-   before anything else; CLAUDE.md only imports it.
+   before anything else; CLAUDE.md only imports it. Then read
+   `skills/gh-pr-flow/SKILL.md` and all of its linked references before any
+   GitHub issue/branch/PR/review action.
 2. `git fetch origin` and work from `origin/main`. Never trust a local
    `main`, a stale worktree, or another agent's summary of remote state —
    verify remote facts directly (`gh pr view`, `git ls-remote`).
@@ -97,6 +99,13 @@ the owner. In order:
   `scripts/ci/requirements-coverage.txt`.
 - Do not install tools, authenticate, plan, apply, deploy, commit, push, or
   mutate the Pi/router/GitHub/Cloudflare without explicit authorization.
+- A claim that a Kubernetes workload is ephemeral is load-bearing only after
+  `skills/gh-pr-flow/references/destructive-workloads.md` is satisfied and
+  `scripts/validate_destructive_test_ledger.py` accepts the exact evidence.
+  Stateful/PV/PVC/database/operator resources remain supported but never
+  inherit deletion permission. Protected tokens, Secrets, SOPS/age material,
+  private keys, etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and
+  Git history are excluded from destructive tests.
 - Use official upstream documentation to revalidate versions, schemas,
   entitlements, and billing immediately before any external change.
 
@@ -194,16 +203,17 @@ Delivery-lane requirements, explicit and numbered:
    and the GitHub-hosted runner only, and no third-party service ever
    receives repository content, tokens, or measurements — the coverage gate
    is self-hosted for exactly this reason.
-2. Owner-only merges, and no force-push: history published to origin is
-   immutable; corrections land as new commits on a branch behind a reviewed
-   pull request.
+2. Owner-only merges and immutable history: Samuel alone merges. An agent must
+   NEVER merge, auto-merge, squash, rebase into, or push `main`; must never
+   force-push, delete refs, or create tags; and must stop and question even a
+   later request to do so. Corrections are additive commits or a fresh branch.
 3. Commit-metadata privacy: the GitHub noreply address appears in both the
    author and the committer fields of every outgoing commit; the
    immutable-history gate (`scripts/validate_publication_history.py`)
    enforces this closure over the whole outgoing range.
-4. No co-author trailers: agent work is signed in the open, per lane —
-   delivery-lane commit bodies end with "- Fable5", and Codex-lane pull
-   request titles end with " - Codex 5.6 Sol Ultra".
+4. No co-author trailers: agent work is signed in the open with the acting
+   identity. This authoring lane signs commit and PR bodies `- 5.6 Sol` and
+   carries the matching `5.6-sol` label.
 5. Fail-closed, never weaken: a delivery-lane change strengthens or
    documents a check, never relaxes one, and every deliberate exception is
    an explicit, load-bearing justification that the suite re-verifies (the
@@ -216,6 +226,11 @@ Delivery-lane requirements, explicit and numbered:
    and bounded by the platform lane (safety invariant 4 and its ADRs);
    shared code and checks keep capability names generic so the binding
    could change without rewriting this lane.
+8. Every protected-main merge has a platform release consequence. Every PR,
+   including docs and Dependabot, advances `VERSION` and a dated changelog by
+   exactly one patch from its current base. Successful main CI publishes an
+   immutable annotated plain `vX.Y.Z` tag and GitHub Release at that exact SHA.
+   This source release never deploys or promotes platform or site workloads.
 
 ## Adversarial review protocol
 
@@ -231,6 +246,15 @@ than the author — a fresh session of the same vendor qualifies; a
 different lane is better. The reviewer works in a disposable worktree at
 the PR head, stays read-only toward the author's workspace, reverts every
 experiment, and removes the worktree afterward.
+
+**Exact-head receipt.** Agents share the owner's GitHub principal, so identity
+is textual workflow evidence. A normal PR comment contains exactly one
+`HEAD: <40-lowercase-hex>` line, exactly one `VERDICT: APPROVE` or
+`VERDICT: REQUEST-CHANGES`, and ends `- <Agent> (adversarial reviewer)`.
+Any head change invalidates it and requires a fresh independent review. Validate
+the shape with `scripts/validate_review_receipt.py`; context independence still
+requires coordinator verification. If the owner merged first, record a
+post-merge audit rather than retroactive approval.
 
 **The review must:**
 
@@ -258,8 +282,8 @@ experiment, and removes the worktree afterward.
    simulated evidence of both directions in the PR and treat the first
    post-merge run as part of the change under review.
 
-**Verdict format** — posted as a PR comment, so every vendor and the
-owner see the identical record: APPROVE or REQUEST-CHANGES; numbered
+**Verdict format** — posted as a normal PR comment, so every vendor and the
+owner see the identical record: exact head, APPROVE or REQUEST-CHANGES; numbered
 findings with severity and file:line; the mutation kill matrix; flake
 results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
 "no finding — checked X, Y, Z" statements so silence is never ambiguous;
@@ -279,7 +303,8 @@ authority: the owner alone merges.
 ## GitHub conventions
 
 - **Issues first.** Substantive work is tracked as a labeled issue before or
-  alongside its PR; PRs declare `Closes #N` so merges close the record.
+  alongside its PR; a standalone exact `Closes #N` targets a same-repository
+  issue so only the owner merge closes it.
   Feature intake lands as a `features`-labeled issue with the architectural
   constraints stated, even when implementation waits.
 - **Labels.** One taxonomy, identical names/colors/meanings across all
@@ -331,6 +356,16 @@ authority: the owner alone merges.
   and never rewritten.
 - **Commits.** Detailed bodies to the review protocol's evidence standard —
   problem, mechanism, enumerated changes, evidence — signed per lane.
+- **Dependabot.** Dependency PRs obey the same issue/milestone/assignee,
+  next-patch/changelog, exact-head review, CI/coverage, and base freshness
+  controls. Tool or runner outages are reported as infrastructure failures;
+  they never waive a real product failure.
+- **Merge readiness.** Keep Draft until the exact head has a fresh independent
+  APPROVE receipt, all exact-head checks succeed, protected base is current,
+  all discussions/findings are resolved, metadata/scope/order remain exact,
+  and the platform patch-release consequence is proven. Only the coordinator
+  flips Ready and re-verifies; author and reviewer never do. Nobody but Samuel
+  merges.
 
 ## Working a change end to end
 
@@ -350,7 +385,9 @@ The complete delivery loop, each step gated by the sections around it:
    final; until it carries that label, the issue is still being drafted.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
-   a branch that is not yours is a branch you never push to.
+   a branch that is not yours is a branch you never push to. Reserve the next
+   patch from that exact base. If main moves first, use a fresh branch and
+   replacement Draft PR with a new patch; never rewrite the published branch.
 4. **Build the change** inside the invariants, the Change workflow, and
    the delivery-lane requirements above. Docs-only diffs still run the
    gates.
@@ -395,13 +432,10 @@ Read it from published history and pin it per command:
       GIT_COMMITTER_EMAIL="$identity_email" \
       git commit ...
 
-- EVERY history-writing command runs under the same pinned environment —
-  `commit`, `commit --amend`, `rebase`, `cherry-pick`. A rebase rewrites
-  the COMMITTER of every replayed commit, and the privacy gate checks
-  the committer field (`scripts/validate_publication_history.py`
-  enforces the closure over the whole outgoing range, in the pre-push
-  hook and again in PR CI), so an unpinned rebase silently reintroduces
-  the machine identity into otherwise-clean commits.
+- Every authorized commit runs under the pinned environment. Agents never
+  amend, rebase, cherry-pick onto published history, force, or delete; use
+  additive commits or a fresh branch. The publication-history validator checks
+  both author and committer over the complete outgoing range.
 - No `Co-Authored-By` trailers, ever. Signatures per lane (delivery-lane
   requirement 4), matching the agent label.
 - Treat the Git index as public (safety invariant 12): no hostname, IP
@@ -416,26 +450,13 @@ promptly, reply IN-THREAD per comment describing the resolution, then
 notify the owner the PR is ready to re-check; never mark a PR ready
 with unaddressed owner comments.
 
-## Stacked pull requests
+## Dependent pull requests
 
-Stacking is sanctioned for dependent work; these rules exist because a
-squash-merge repository punishes careless stacks:
-
-- The stacked PR's base is THE BRANCH IT STACKS ON, so its diff shows
-  only the increment.
-- A stacked PR STAYS DRAFT UNTIL ITS BASE MERGES. Squashing a stacked
-  PR before its base would duplicate the base's entire content into
-  `main`.
-- When the base merges: `git fetch --prune`; rebase the stacked branch
-  onto `main` under the pinned identity environment (the committer
-  rewrite above); re-run the gates on the rebased head; then
-  `git push --force-with-lease` to YOUR OWN single-writer branch — the
-  sole force-push an agent ever performs in this repository. GitHub
-  retargets the PR to `main` automatically; verify the retarget and the
-  residual diff yourself.
-- One writer per branch, always, and remote truth is checked directly —
-  `gh pr view`, `git ls-remote` — never assumed from another agent's
-  report.
+Keep dependent work Draft and publish a merge order. After a predecessor lands,
+fetch current main, create a fresh branch, port only the residual diff without
+rewriting history, allocate the new exact patch, open a replacement Draft PR,
+and obtain a fresh exact-head review. Every PR that eventually targets main
+must independently carry its release consequence.
 
 ## Quality gates — exact commands and patterns
 
@@ -524,10 +545,10 @@ is the consolidated command view:
   never claims otherwise. Badge honesty is enforced: the coverage badge
   is regenerated byte-exact by the gate and cannot claim what CI did
   not measure.
-- **No CHANGELOG yet.** Releases are deliberately suspended
-  (`make release-check` rejects every deployment sentinel); release and
-  versioning ceremony arrives with the release-state policy, per
-  ADR 0014.
+- **Platform source changelog.** `VERSION` and `CHANGELOG.md` name immutable
+  repository source releases. They are deliberately separate from
+  `make release-check`, which still rejects deployment sentinels; publishing a
+  source release never claims the platform is deployed or promoted.
 - **Lane discipline in docs.** The platform ADRs and the capacity documents
   are platform-lane: cite them by number, never edit, restate, or reword
   them from the delivery lane. The Cloudflare ADRs (0006–0008, 0015, and

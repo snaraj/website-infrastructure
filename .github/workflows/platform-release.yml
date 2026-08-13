@@ -1,0 +1,131 @@
+name: Platform release
+
+# One independent exact-SHA release path follows each successful main-CI run.
+# Publication names repository source only. It never deploys or promotes.
+on:
+  workflow_run:
+    workflows: [Pull request]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind event, source, and exact patch
+        id: release
+        env:
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/platform_release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          base_sha="$(git rev-parse HEAD^1)"
+          intent="$(python3 -I -B scripts/ci/platform_release_contract.py transition \
+            --repository . --base "${base_sha}" --head "${COMPLETED_SHA}" --first-parent)"
+          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+          version="$(jq -er '.version' <<<"${intent}")"
+          tag="$(jq -er '.tag' <<<"${intent}")"
+          test "${source_sha}" = "${COMPLETED_SHA}"
+          test "${tag}" = "v${version}"
+          printf 'source_sha=%s\nversion=%s\ntag=%s\n' \
+            "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Create or verify exact annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/ref.json"
+          tag_json="${RUNNER_TEMP}/tag.json"
+          verify_tag() {
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > "${ref_json}"
+            jq -e --arg tag "${TAG}" '.ref == ("refs/tags/" + $tag) and .object.type == "tag"' "${ref_json}" >/dev/null
+            object="$(jq -er '.object.sha' "${ref_json}")"
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object}" > "${tag_json}"
+            jq -e --arg tag "${TAG}" --arg sha "${SOURCE_SHA}" \
+              '.tag == $tag and .object.type == "commit" and .object.sha == $sha' "${tag_json}" >/dev/null
+          }
+          if ! verify_tag 2>/dev/null; then
+            object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+              -f tag="${TAG}" -f message="Platform release ${TAG} from ${SOURCE_SHA}" \
+              -f object="${SOURCE_SHA}" -f type=commit --jq '.sha')"
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${object}" >/dev/null; then
+              verify_tag
+            fi
+          fi
+          verify_tag
+      - name: Create or verify exact GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          existing="${RUNNER_TEMP}/release.json"
+          {
+            printf '## Platform %s\n\n' "${TAG}"
+            printf 'Immutable repository source: `%s`\n\n' "${SOURCE_SHA}"
+            printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
+            printf 'See `CHANGELOG.md` at this tag for the human-readable change record.\n'
+          } > "${notes}"
+          verify_release() {
+            test "$(git rev-list -n 1 "${TAG}")" = "${SOURCE_SHA}"
+            gh release view "${TAG}" --json tagName,name,body,isDraft,isPrerelease > "${existing}"
+            jq -e --arg tag "${TAG}" \
+              '.tagName == $tag and .name == ("Platform " + $tag) and (.isDraft | not) and (.isPrerelease | not)' \
+              "${existing}" >/dev/null
+            python3 -I -B - "${existing}" "${notes}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          actual = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["body"].rstrip("\r\n")
+          expected = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip("\r\n")
+          if actual != expected:
+              raise SystemExit("existing release body conflicts with exact source state")
+          PY
+          }
+          release_present=false
+          release_exact=false
+          if verify_release 2>/dev/null; then
+            release_present=true
+            release_exact=true
+          elif gh release view "${TAG}" >/dev/null 2>&1; then
+            release_present=true
+          fi
+          set +e
+          state="$(python3 -I -B scripts/ci/platform_release_contract.py publication-state \
+            --tag-present true --tag-exact true \
+            --release-present "${release_present}" --release-exact "${release_exact}")"
+          classifier_status=$?
+          set -e
+          printf 'platform publication state: %s\n' "${state}"
+          if [ "${state}" = complete ]; then
+            exit 0
+          fi
+          if [ "${classifier_status}" -ne 0 ] || [ "${state}" != resume-release ]; then
+            printf 'existing release %s conflicts with exact source state\n' "${TAG}" >&2
+            exit 1
+          fi
+          gh release create "${TAG}" --verify-tag \
+            --title "Platform ${TAG}" --notes-file "${notes}"
+          verify_release
