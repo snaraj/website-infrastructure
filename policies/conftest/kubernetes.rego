@@ -503,9 +503,24 @@ public_connector_workload if {
 #
 # This binds that surface by the SAME derivation as the volume rule — the
 # Secret name must equal the connector's own app.kubernetes.io/instance plus
-# `-token`, and that instance is itself rooted in the Deployment name by
-# connector_identity_rooted_in_name — so neither engine can be satisfied by a
-# self-consistent relabelling.
+# `-token` — and the instance a DEPLOYMENT may claim is itself rooted in that
+# Deployment's name by connector_identity_rooted_in_name.
+#
+# DECLARED LIMIT, stated because the honest scope is narrower than "no
+# self-consistent relabelling anywhere". That rooting is scoped to
+# `input.kind == "Deployment"`, since a bare Pod has no name to root in — its
+# name is generated — and no selector or template to compare against. So a
+# BARE Pod that moves its instance label and its secretKeyRef together stays
+# internally consistent and is admitted. Three things bound what that buys an
+# attacker, and none of them is this rule: the label that selects the token is
+# the SAME label both site NetworkPolicies select on, so such a Pod is a
+# duplicate of the site it claims rather than a bridge to the other one; the
+# closed connector inventory below still refuses an identity outside the
+# reviewed two; and creating a bare Pod in this namespace is not a right any
+# reviewed principal holds. Closing it properly means requiring a controller
+# ownerReference on Pods here, which would rewrite every connector fixture in
+# the repository and is an admission-semantics addition in its own right —
+# tracked, not smuggled into this change.
 #
 # `envFrom` is refused outright rather than pattern-matched: a `secretRef`
 # there injects EVERY key of the named Secret with no key selector to bind, so

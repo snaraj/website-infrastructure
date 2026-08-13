@@ -52,7 +52,35 @@ STORAGE_RULE = "disallow-persistent-storage-resources"
 # a time, deliberately not by wildcard, so a rule added or removed here silently
 # ships an ENFORCING rule during the fail-open audit stage. Changing this number
 # is legitimate only together with that patch.
-EXPECTED_RULE_COUNT = 7
+#
+# STATED AS AN ORDERED SEQUENCE, not a bare count, because a count is not an
+# identity and neither is a position. Twice in one day a change added a rule to
+# a policy this overlay addresses by index, every later rule shifted down, and
+# the merge was textually clean and semantically broken — the overlay went on
+# downgrading rules it was not written for while the displaced one kept
+# ``Enforce`` into the fail-open stage. A count catches an insertion only by
+# accident of arithmetic; the sequence below names what sits at each index, so
+# the index the overlay must move is legible in the failure message.
+#
+# DECLARED STAGE-1 DECISION, 2026-08-12: ``allow-only-own-instance-token-env``
+# is added at index 4 and the three rules after it shift down one. The stage-1
+# report-only overlay needs one more ``test``/``replace`` pair, and the three
+# existing pairs for the displaced rules need their indices moved; that overlay
+# lives in the admission-install tree, which is not in this branch's base, so
+# the change is declared here and carried on the pull request rather than made
+# silently. Adding an admission rule is an admission-semantics decision that
+# stage 1 must review, which is exactly why the overlay is not a wildcard.
+EXPECTED_RULE_SEQUENCE = (
+    "disallow-persistent-storage-resources",
+    "disallow-stateful-claim-templates",
+    "allow-only-site-scratch-volumes",
+    "allow-only-tunnel-token-volume",
+    "allow-only-own-instance-token-env",
+    "disallow-legacy-service-account-token-secrets",
+    "disallow-disk-pressure-toleration",
+    "disallow-wildcard-toleration",
+)
+EXPECTED_RULE_COUNT = len(EXPECTED_RULE_SEQUENCE)
 
 # The complete storage rule set, stated ONCE here in the test rather than read
 # out of either policy. Every other check below compares the two engines against
@@ -427,6 +455,22 @@ class StorageRuleCoverage(unittest.TestCase):
         rules = re.findall(r"(?m)^    - name: (\S+)$", self.policy)
         self.assertEqual(len(rules), EXPECTED_RULE_COUNT)
         self.assertIn(STORAGE_RULE, rules)
+
+    def test_rule_order_stays_bound_to_the_staged_install_patch(self) -> None:
+        """The overlay addresses rules by POSITION, so order is contract.
+
+        An insertion that keeps the count right by also deleting a rule, or a
+        reorder that keeps every rule present, both leave the arity check above
+        green while every ``test``/``replace`` pair in the report-only overlay
+        starts addressing a different rule than it was written for.
+        """
+
+        self.assertEqual(
+            tuple(re.findall(r"(?m)^    - name: (\S+)$", self.policy)),
+            EXPECTED_RULE_SEQUENCE,
+            "the storage policy's rule ORDER changed; every index the stage-1 "
+            "report-only overlay names has to move with it",
+        )
 
     def test_policy_stays_fail_closed_at_the_webhook(self) -> None:
         """Enforcement mode, failure policy, and the admission switch itself.

@@ -7,11 +7,18 @@
 #
 # ENGINE ASYMMETRY, stated rather than papered over: Kyverno's CEL `.all()`
 # iterates a map's KEYS and reports this shape as a pass, so it is asserted in
-# Conftest only. That is the safe way round. This shape cannot reach admission
-# at all — the API server refuses to decode a map where `[]EnvVar` is required
-# — so the engine that CAN see it is the static gate on the rendered desired
-# state, which is exactly where it is refused. The sibling string-shaped `env`
-# errors in CEL and IS refused by both.
+# Conftest only. That is the safe way round, and the reason is VERIFIED against
+# the cluster rather than asserted — a server dry-run of exactly this shape in
+# an application namespace is refused before admission is ever consulted:
+#
+#   Error from server (BadRequest): Pod in version "v1" cannot be handled as a
+#   Pod: json: cannot unmarshal object into Go struct field
+#   Container.spec.containers.env of type []v1.EnvVar
+#
+# while the byte-identical Pod with a LIST-shaped env decodes and reaches
+# admission. So the only engine that can ever see this shape is the static gate
+# on the rendered desired state, which is exactly where it is refused. The
+# sibling string-shaped `env` errors in CEL and IS refused by both engines.
 #
 # ONE document per file, deliberately: the fixture runner asserts only that a
 # FILE is rejected, so pairing arms in one file would keep the file "rejected"

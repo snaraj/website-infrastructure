@@ -396,18 +396,54 @@ for name in sorted(required_policies):
         raise SystemExit(f"live ClusterPolicy spec differs from exact desired state: {name}")
 
 
+# The tenant NetworkPolicy inventory this gate expects to find, reconciled to a
+# read-only capture of the cluster on 2026-08-12. It was previously a list of
+# what the committed manifests declare, which is not the same thing: this gate
+# compares LIVE objects against desired-state evidence, so an inventory that
+# names objects the cluster does not have fails for the wrong reason and hides
+# the ones it does have. The cloudflare-public default-deny is named
+# `default-deny-all` live; the committed prerequisites manifest calls it
+# `default-deny`, and that manifest has never been applied.
 expected_network_policies = {
-    ("cloudflare-public", "default-deny"),
+    ("cloudflare-public", "default-deny-all"),
     ("cloudflare-public", "cloudflared-dns"),
     ("cloudflare-public", "cloudflared-edge"),
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
-    ("naranjo-online", "default-deny"),
     ("naranjo-online", "ingress-to-naranjo-online"),
-    ("lidersea-com", "default-deny"),
     ("lidersea-com", "ingress-to-lidersea-com"),
 }
-tenant_namespaces = {identity[0] for identity in expected_network_policies}
+
+# EVERY tenant namespace is REQUIRED to carry a namespace-wide default-deny: a
+# policy whose podSelector is `{}`, isolating every Pod for both directions. A
+# default is only a default if it selects every Pod — a podSelector-SCOPED deny
+# leaves any pod that does not match it completely unrestricted.
+namespaces_requiring_namespace_wide_default_deny = {
+    "cloudflare-public",
+    "naranjo-online",
+    "lidersea-com",
+}
+
+# AUDIT NP7 — DECLARED LIVE DIVERGENCE, recorded rather than normalised away.
+# Captured read-only 2026-08-12: cloudflare-public satisfies the requirement
+# above; NEITHER site namespace does. naranjo-online carries one policy, with
+# `policyTypes: [Ingress]` only, so its pods have unrestricted egress and any
+# other pod scheduled into that namespace has unrestricted everything.
+# lidersea-com denies its own pods' egress but its policy is podSelector-scoped,
+# so the same holds for any other pod there.
+#
+# Closing it is a traffic-policy change to workloads that have been serving for
+# a day and needs an owner decision plus an observation pass of what those
+# namespaces actually egress to, so it is NOT done here. It is declared so the
+# gap lives in the repository instead of only in a capture — and the check below
+# fails the moment the declaration goes STALE, so closing the gap forces the
+# declaration to be removed rather than leaving a permanent exemption behind.
+namespaces_without_a_namespace_wide_default_deny = {
+    "naranjo-online",
+    "lidersea-com",
+}
+
+tenant_namespaces = set(namespaces_requiring_namespace_wide_default_deny)
 tenant_network_policies = [
     policy
     for policy in load_items("networkpolicies.json")
@@ -422,6 +458,26 @@ if (
     or set(live_network_policies) != expected_network_policies
 ):
     raise SystemExit("live tenant NetworkPolicy inventory differs from exact desired state")
+for namespace in sorted(namespaces_requiring_namespace_wide_default_deny):
+    namespace_wide = [
+        name
+        for (found_namespace, name), policy in live_network_policies.items()
+        if found_namespace == namespace
+        and policy.get("spec", {}).get("podSelector") == {}
+        and set(policy.get("spec", {}).get("policyTypes") or ()) == {"Ingress", "Egress"}
+    ]
+    if namespace in namespaces_without_a_namespace_wide_default_deny:
+        if namespace_wide:
+            raise SystemExit(
+                "declared default-deny divergence is stale: "
+                f"{namespace} now carries a namespace-wide default-deny; "
+                "remove it from the declaration"
+            )
+        continue
+    if not namespace_wide:
+        raise SystemExit(
+            f"tenant namespace has no namespace-wide default-deny: {namespace}"
+        )
 for namespace, name in sorted(expected_network_policies):
     desired_path = root / f"desired-networkpolicy-{namespace}-{name}.json"
     desired = json.loads(desired_path.read_text(encoding="utf-8"))
