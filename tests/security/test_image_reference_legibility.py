@@ -24,6 +24,7 @@ the differential harness, not matching constants.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -46,32 +47,47 @@ DIGEST = "sha256:" + "11" * 32
 CANONICAL = "container {name} must use the canonical image repository for namespace naranjo-online"
 APPROVED = "container {name} image must use an approved registry and full digest"
 
+# Kyverno's counterpart rules, named individually. Asserting the POLICY was
+# rejected is not enough: two rules cover overlapping ground here, so
+# neutering either one on its own leaves the fixture still rejected by the
+# other and a policy-level assertion sees nothing. This was a real survivor in
+# this change's own mutation matrix — opening `require-canonical-naranjo-image`
+# to accept any tag left the suite green because `require-approved-digest`
+# still caught the same Pod. Rule-level expectations are what closed it.
+DIGEST_RULE = "require-approved-digest"
+CANONICAL_RULE = "require-canonical-naranjo-image"
+
 ROWS = (
-    ("allow/tagged-release-reference.yaml", "tagged", ()),
+    ("allow/tagged-release-reference.yaml", "tagged", (), frozenset()),
     (
         "deny/image-floating-tag.yaml",
         "image-floating-tag",
         (CANONICAL,),
+        frozenset({DIGEST_RULE, CANONICAL_RULE}),
     ),
     (
         "deny/image-tag-without-digest.yaml",
         "image-tag-without-digest",
         (CANONICAL, APPROVED),
+        frozenset({DIGEST_RULE, CANONICAL_RULE}),
     ),
     (
         "deny/image-unprefixed-release-tag.yaml",
         "image-unprefixed-release-tag",
         (CANONICAL,),
+        frozenset({DIGEST_RULE, CANONICAL_RULE}),
     ),
     (
         "deny/image-tag-smuggling-a-registry.yaml",
         "image-tag-smuggling-a-registry",
         (CANONICAL, APPROVED),
+        frozenset({DIGEST_RULE, CANONICAL_RULE}),
     ),
     (
         "deny/image-sibling-site-repository-tagged.yaml",
         "image-sibling-site-repository-tagged",
         (CANONICAL,),
+        frozenset({CANONICAL_RULE}),
     ),
 )
 
@@ -102,8 +118,11 @@ def conftest_denials(path):
     }
 
 
-def kyverno_rejects(path):
-    """Return True when require-approved-images refuses the fixture."""
+FAILING_RULE = re.compile(r"^\d+ - (\S+) ")
+
+
+def kyverno_failing_rules(path):
+    """Return the exact set of require-approved-images rules that refused."""
 
     completed = subprocess.run(
         [KYVERNO, "apply", str(KYVERNO_POLICY), "--resource", str(path)],
@@ -112,13 +131,27 @@ def kyverno_rejects(path):
         check=False,
         cwd=str(REPO_ROOT),
     )
+    summary = None
+    rules = set()
     for line in completed.stdout.splitlines():
-        if line.startswith("pass:") and "fail:" in line:
-            failures = line.split("fail:", 1)[1].split(",", 1)[0].strip()
-            return int(failures) > 0
-    raise AssertionError(
-        "kyverno apply produced no summary line for {}".format(path.name)
-    )
+        matched = FAILING_RULE.match(line.strip())
+        if matched:
+            rules.add(matched.group(1))
+        elif line.startswith("pass:") and "fail:" in line:
+            summary = int(line.split("fail:", 1)[1].split(",", 1)[0].strip())
+    if summary is None:
+        raise AssertionError(
+            "kyverno apply produced no summary line for {}".format(path.name)
+        )
+    # The parsed rule names and the engine's own count must agree, or this
+    # harness is reading output it does not understand and every row below is
+    # measuring nothing.
+    if len(rules) != summary:
+        raise AssertionError(
+            "kyverno reported {} failures but {} rule names were parsed for "
+            "{}".format(summary, len(rules), path.name)
+        )
+    return rules
 
 
 @unittest.skipUnless(CONFTEST, "conftest is required")
@@ -131,7 +164,7 @@ class ImageReferenceGrammarTests(unittest.TestCase):
         weakened image rule would stay invisible behind some other denial.
         """
 
-        for relative, container, expected in ROWS:
+        for relative, container, expected, _rules in ROWS:
             path = FIXTURES / relative
             with self.subTest(fixture=relative):
                 self.assertTrue(path.is_file(), "missing fixture: " + relative)
@@ -176,13 +209,23 @@ class ImageReferenceGrammarTests(unittest.TestCase):
         each shape to both and fail on any disagreement.
         """
 
-        for relative, _container, expected in ROWS:
+        for relative, _container, expected, rules in ROWS:
             path = FIXTURES / relative
-            with self.subTest(fixture=relative):
+            failing = kyverno_failing_rules(path)
+            with self.subTest(fixture=relative, axis="verdict"):
                 self.assertEqual(
-                    kyverno_rejects(path),
+                    bool(failing),
                     bool(expected),
                     "conftest and kyverno disagree about {}".format(relative),
+                )
+            # Which RULE refused is part of the contract. Two rules overlap on
+            # most of these shapes, so a policy-level verdict cannot tell a
+            # working pair from one working rule carrying a neutered one.
+            with self.subTest(fixture=relative, axis="rules"):
+                self.assertEqual(
+                    failing,
+                    set(rules),
+                    "the wrong kyverno rules refused {}".format(relative),
                 )
 
 
