@@ -704,9 +704,19 @@ class SiteReleasePolicyTests(unittest.TestCase):
                     path = Path(directory) / "release.yaml"
                     path.write_text(document, encoding="utf-8")
                     with self.subTest(field=field, shape=label):
-                        self.assertIn(
-                            "HelmRelease naranjo-online " + expected,
+                        # EXACTLY the type denial, not merely "a denial fired".
+                        # Without the `is_string` precondition on the pattern
+                        # arms the same object also trips the canonical-shape
+                        # rule, because `regex.match` ERRORS on a non-string
+                        # and an errored builtin under `not` fires. That is a
+                        # superset — safe, but it means the refusal is riding
+                        # on builtin-error semantics again, which is the exact
+                        # fragility that produced this bug. Asserting the exact
+                        # set keeps the two rules' responsibilities separate
+                        # and makes the precondition load bearing.
+                        self.assertEqual(
                             release_policy_denials(path),
+                            {"HelmRelease naranjo-online " + expected},
                         )
 
     def test_a_well_formed_release_produces_no_leaf_type_denial(self):
