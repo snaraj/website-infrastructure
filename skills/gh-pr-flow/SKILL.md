@@ -11,14 +11,23 @@ A repository-agnostic PR flow. Enforceable rules live in
 around them. It never acquires, prints, or stores credentials, and it is
 not a substitute for server-side rulesets.
 
-## 0. Identity preconditions (hard stops)
+## 0. Identity and credential preconditions (hard stops)
 
-- `gh auth status` must show the dedicated non-admin machine identity.
-  The repository owner's identity in an agent context is a hard stop.
+- Read the target repository's authority file before interpreting identity.
+  `gh auth status` observes the already-configured principal; it neither
+  supplies permission nor chooses which account ought to exist. A repository
+  may deliberately authorize its owner account or may provision a dedicated
+  least-privilege machine principal. This portable flow does not override that
+  choice.
+- Continue only when the configured principal and the requested operation are
+  both authorized for the current task. An unexpected or unauthorized identity
+  is a hard stop. Never acquire, extract, exchange, print, change, or repurpose
+  credentials to satisfy this flow; a dedicated principal is a requirement only
+  where the repository owner has already provisioned and required one.
 - Commit author/committer emails and every trailer email must satisfy the
-  publication-history metadata rule (`.invalid` or GitHub noreply forms
-  only) — see the repository's validators; a real-domain address anywhere
-  in metadata will fail the pre-push gate.
+  target repository's publication-history metadata rule. Derive the accepted
+  identity from that repository's authority and validators rather than assuming
+  one portable email form.
 
 ## 1. Start clean, from current main
 
@@ -65,10 +74,13 @@ this flow.
 Open exactly one PR for the branch with: purpose, baseline commit, scope
 and changed files, threats/failure modes addressed, tests with exact
 results, explicit exclusions, rollback path, residual risks, and the
-review caveat — author and any reviewing agent are distinct dedicated
-non-admin principals, and agent review is machine technical review, not an
-independent human. The owner alone merges to `main`; import PRs merge via
-merge commit, everything else squashes per repository convention.
+review caveat — branch author and reviewer are distinct contexts, with the
+reviewer independently reproducing evidence at the exact head in a disposable
+worktree. A distinct GitHub principal is stronger when the owner has already
+provisioned one, but it is not fabricated as a prerequisite. Agent review is
+machine technical review, not an independent human. The owner alone merges to
+`main`; import PRs merge via merge commit, everything else follows the target
+repository's merge convention.
 
 ## 5. Evidence to record per cycle
 
@@ -96,20 +108,25 @@ a matrix result is never carried forward across a fix.
 
 ## 7. Roles and authority
 
-Four roles, and they never collapse into one agent:
+Four roles have explicit compatibility rules; the flow does not assume four
+different account credentials:
 
-- **Author** — the single writer on the branch. Never posts its own
-  verdict, never lifts its own gate, never flips its own PR. A fixer
-  posting the reviewer's verdict reads as self-approval even when the
-  review was genuinely independent.
-- **Independent reviewer** — a different agent or context, working in a
-  disposable worktree at the PR head, read-only toward the author's
-  workspace, reverting every experiment. It posts the verdict.
-- **Coordinator** — flips draft to ready, and only once the review has
-  cleared AND every check is green at the exact head, with no peer or
-  owner comment outstanding. Flipping is an assertion about the work,
-  never "let the owner take a look".
-- **Owner** — merges. Alone.
+- **Author** — the single writer on the branch. The branch author and
+  independent reviewer are never the same context. The author never posts its
+  own verdict and never lifts its own review gate.
+- **Independent reviewer** — a different context, working in a disposable
+  worktree at the exact PR head, read-only toward the author's workspace and
+  reverting every experiment. It independently derives the evidence and posts
+  the verdict.
+- **Coordinator** — performs the readiness flip when this separate role is
+  present, and only once review has cleared AND every check is green at the
+  exact head, with no peer or owner comment outstanding. If no separate
+  coordinator exists, the owner may perform that coordination action.
+- **Owner** — alone holds merge authority. Acting as the coordinator fallback
+  neither transfers that authority nor makes author and reviewer compatible.
+
+Neither the author nor the reviewer performs the readiness flip. Flipping is
+an assertion that review is complete, never "let the owner take a look".
 
 A green check, a peer approval, and a ready state are EVIDENCE, never
 authority. Draft means "not ready for the owner's eyes"; ready means the
@@ -179,6 +196,12 @@ the summary. And a "false positive" can still be pointing at a real hole:
 drive the code it flags with the inputs it implies before dismissing it.
 
 Two aggregate states, two different meanings, and neither is a formality:
+
+The aggregate pull-request alerts check is distinct from each per-language
+analysis check: the aggregate reports alert comparison, while an analysis job
+can fail on configuration, extraction, build, or upload before it produces
+alert evidence. Name which layer failed or passed rather than calling both
+simply "CodeQL".
 
 - **A RED aggregate means REAL ALERTS.** There is no "aggregation race".
   That diagnosis has been advanced, relayed unchecked, and then disproved

@@ -119,9 +119,17 @@ delivery-lane changes never edit platform-lane files, and platform
 decisions (the safety invariants above, including PLAT-DEC-001) are
 referenced from here, never restated or reworded.
 
-**Lane-surface rulings (owner, 2026-08-12).** Load-bearing surfaces the two
-lists above never named, each assigned once so the question stops being
-re-adjudicated per pull request:
+**Lane-surface rulings (owner, 2026-08-12; later rulings identify their
+source).** Load-bearing surfaces the two lists above never named, each assigned
+once so the question stops being re-adjudicated per pull request:
+
+- `skills/**` — SHARED AGENT GOVERNANCE (peer/platform ruling, 2026-08-13),
+  not the exclusive property of either implementation lane. Either lane may
+  author there under one-writer-per-branch, but review comes from a different
+  context and, where a skill touches a lane-specific security boundary, from
+  the other lane. A skill never supersedes AGENTS.md and never grants
+  credential, live-mutation, or merge authority; any change that expands
+  permission requires an owner ruling.
 
 - `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
   docs. `bootstrap.sh` embeds the inventory and desired-state assertions
@@ -228,9 +236,13 @@ Neither gets a different protocol.)
 
 **Reviewer independence.** The reviewer is a different agent or context
 than the author — a fresh session of the same vendor qualifies; a
-different lane is better. The reviewer works in a disposable worktree at
-the PR head, stays read-only toward the author's workspace, reverts every
-experiment, and removes the worktree afterward.
+different lane is better. Both contexts use this repository's already
+configured, task-authorized owner account: the GitHub principal is transport,
+not the independence boundary. Never acquire, extract, exchange, or change
+credentials to manufacture reviewer separation, and never print or repurpose
+them. The reviewer works in a disposable worktree at the PR head, stays
+read-only toward the author's workspace, reverts every experiment, and removes
+the worktree afterward.
 
 **The review must:**
 
@@ -277,14 +289,16 @@ review attention. That removal is NOT a readiness signal: the draft flag
 is the only readiness signal, so label-off while still draft is the
 normal mid-cycle state. A REQUEST-CHANGES verdict returns the work to
 the same branch owner — fixes land on the same branch and receive a
-delta re-review of the changed scope. The COORDINATOR — whoever is
-directing the work, distinct from both the branch author and the
-reviewer; the owner where no such role exists — performs the flip
-from draft to ready, never the branch author and never the reviewer, and
-only once the verdict is APPROVE (or its findings are fixed and
-re-verified), no owner or peer comment is outstanding, and every check
-is green at the exact head; the owner then merges. The evidence comment
-remains on the PR as the permanent record.
+delta re-review of the changed scope. Role compatibility is fixed: the
+branch author and independent reviewer are never the same context, and
+neither the author nor the reviewer performs the readiness flip. The
+COORDINATOR — whoever is directing the work — performs that flip when
+present; if no separate coordinator exists, the owner may perform that
+coordination action. The flip happens only once the verdict is APPROVE
+(or its findings are fixed and re-verified), no owner or peer comment is
+outstanding, and every check is green at the exact head. A coordination
+action never confers merge authority; the owner alone merges. The evidence
+comment remains on the PR as the permanent record.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
@@ -314,8 +328,8 @@ authority: the owner alone merges.
   whoever then acts on it or records the decision removes the label;
   opening a PR that claims the issue counts as acting. It is
   a coordination signal only: never a substitute for draft/ready state,
-  for the APPROVE verdict and coordinator flip that make a PR ready, or
-  for owner merge authority.
+  for the APPROVE verdict and the flip by the coordinator (or owner
+  fallback) that make a PR ready, or for owner merge authority.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
