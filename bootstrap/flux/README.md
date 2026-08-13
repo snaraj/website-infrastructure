@@ -10,10 +10,12 @@ Losing either session afterward is recoverable; claiming the proof before it
 happened is not.
 
 **The controllers-only install is the one exception, and it is not performed
-from this directory.** Installing the three controllers reads no protected
-file, creates no Secret, needs no age identity, and applies no Flux custom
-resource, so none of the custody machinery below is load-bearing for it. It was
-therefore separated into its own reviewed entry point,
+from this directory.** Installing the three controllers creates no Secret,
+needs no age identity, and applies no Flux custom resource. Its live modes are
+not credential-free: they use the protected flattened kubeconfig and its client
+credential through a pinned kubectl. Kustomize and kubectl are copied into a
+private work directory and their exact executable bytes are SHA-256-bound
+before either copy is invoked. The install was separated into its own reviewed entry point,
 `scripts/install-flux-controllers.sh`, whose guardrails are executable rather
 than documentary: a constant install target that cannot be pointed at the
 unsuspended bootstrap root, refusal of any render containing a Flux custom
@@ -28,9 +30,10 @@ than no assertion.
 `bootstrap.sh --apply-controllers` remains blocked and is **not** the sanctioned
 path: it is the protected-custody variant, and it is code-blocked by the same
 missing launcher as everything else here. The two are not alternatives — the
-sanctioned installer performs an inert, credential-free apply, while this
-script's controller mode exists for the future protected ceremony that also
-verifies live state against reviewed expectations.
+sanctioned installer performs an inert authenticated install with the explicit
+protected kubeconfig/context/server tuple, while this script's controller mode
+exists for the future protected ceremony that also verifies live state against
+reviewed expectations.
 
 The code-enforced blocker for everything else stands: no trusted stage-zero
 reviewed-blob launcher exists yet. `bootstrap.sh --apply-controllers`,

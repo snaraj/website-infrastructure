@@ -1309,7 +1309,9 @@ FLUX_INSTALLER_REFUSALS = (
     "the egress bytes this would apply are not the reviewed ones",
     "the API endpoint-set substitution changed bytes outside",
     "the in-Pod Kubernetes Service/API canary did not succeed",
+    "does not match versions.env KUSTOMIZE_LINUX_AMD64_SHA256",
     "matches no versions.env kubectl digest pin",
+    "does not exactly match the complete live kubernetes.default EndpointSlice set",
     "the install inputs carry uncommitted modifications",
     "is not owned by this install",
     "ROLLBACK INCOMPLETE",
@@ -1323,6 +1325,7 @@ FLUX_INSTALLER_REFUSALS = (
 )
 FLUX_INSTALLER_PIN_KEYS = (
     "KUSTOMIZE_VERSION",
+    "KUSTOMIZE_LINUX_AMD64_SHA256",
     "KUBERNETES_VERSION",
     "KUBECTL_LINUX_AMD64_SHA256",
     "KUBECTL_ARM64_SHA256",

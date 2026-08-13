@@ -4,8 +4,9 @@
 # Why this exists as its own entry point: bootstrap/flux/bootstrap.sh owns the
 # secret-bearing and sync-applying ceremonies and stays code-blocked until the
 # reviewed-blob launcher exists. The controllers-only install needs none of
-# that machinery — no age identity, no Secret, no Flux custom resource, no
-# credential of any kind — and it was authorized as a separate,
+# that machinery — no age identity, no Secret, and no Flux custom resource —
+# but every live mode necessarily reads the protected client credential in its
+# explicit kubeconfig. It was authorized as a separate,
 # inert-by-construction step. Encoding that step here, with its guardrails
 # executable and reviewable, is strictly better than performing it as an ad-hoc
 # command outside the repository.
@@ -15,11 +16,11 @@
 #
 #   ORDERING. The reviewed controller bundle carries `allow-egress` patched to
 #   podSelector {} + policyTypes [Ingress, Egress] with no rules, which on a
-#   NetworkPolicy-enforcing CNI is a namespace-wide deny-all. Applying that
+#   NetworkPolicy-enforcing CNI is a namespace-wide deny-all. Creating that
 #   together with the three controller Deployments isolates the controllers at
 #   the instant they are created: no DNS, no API server, no leader election, no
-#   cache sync, so they can never become ready and the install deadlocks. The apply
-#   is therefore ORDERED — the namespace, CRDs, RBAC and Services first, then
+#   cache sync, so they can never become ready and the install deadlocks. The
+#   creation transaction is therefore ORDERED — the namespace, CRDs, RBAC and Services first, then
 #   the startup egress allows (default-deny, DNS, the intra-namespace artifact
 #   fetch, and the API server bound to the very endpoint this run targets), and
 #   an ephemeral, digest-pinned Pod using source-controller's labels and Service
@@ -30,27 +31,29 @@
 #   --open-public-egress is that separate step.
 #
 #   BINDING. Nothing here runs against "whatever is on PATH" or "whatever the
-#   ambient kubeconfig points at". kustomize and kubectl are checked against the
-#   versions.env pins (kubectl by version AND by binary sha256, so a hostile
-#   earlier-on-PATH shim cannot impersonate it); the render must come from a Git
+#   ambient kubeconfig points at". kustomize and kubectl are copied into the
+#   private work directory and checked against the versions.env executable
+#   SHA-256 pins BEFORE either copy is invoked; the render must come from a Git
 #   checkout at an ASSERTED commit with no uncommitted modification to any
-#   install input; BOTH rendered artifacts -- the controller bundle and the
-#   controller, egress and canary renders must hash to the sha256s the reviewer
-#   signed off; and
+#   install input; all three rendered artifacts -- controller, egress, and
+#   canary -- must hash to the sha256s the reviewer signed off; and
 #   every single API operation carries an explicit --kubeconfig/--context/
 #   --server whose context is proven to resolve to exactly that server first.
 #   Binding only the controller render was not enough: the egress bundle is the
-#   SECURITY half of what this script applies, and an unasserted digest over it
+#   SECURITY half of what this script creates, and an unasserted digest over it
 #   meant a commit could widen an allow while reproducing the reviewed
 #   controller digest exactly.
 #
-#   TRANSACTION. `kubectl apply -f` is not atomic: a failure part-way leaves an
-#   applied prefix, and 12 of this bundle's objects are non-namespaced (8 CRDs,
+#   TRANSACTION. A multi-object `kubectl create -f` is not atomic: a failure part-way leaves a
+#   created prefix, and 12 of this bundle's objects are non-namespaced (8 CRDs,
 #   3 ClusterRoles, 1 ClusterRoleBinding) which no `delete namespace` can
 #   remove. --apply therefore installs onto a FRESH cluster only. That is the
-#   scope in which the transaction is honest: every object it touches it
-#   created, so undoing it is a delete, and the ledger of what to delete is
-#   re-derived from the API server rather than trusted from kubectl's stdout.
+#   scope in which the transaction is honest. Every object is created with an
+#   unpredictable per-attempt annotation and create-only semantics, so a
+#   same-name race can never be overwritten or mistaken for this attempt. Undo
+#   captures the matching UID/resourceVersion and sends a DeleteOptions request
+#   carrying both preconditions; a response-loss lookup or delete can therefore
+#   never remove a concurrent replacement.
 #   An apply over an EXISTING install would instead rewrite objects as
 #   `configured` -- a mutation with no recorded prestate, which no ledger of
 #   creations can undo and which would make the rollback report "the cluster is
@@ -70,7 +73,7 @@
 #
 #   --render  render, verify, and print all three render sha256s; no cluster contact
 #   --plan    the same, plus the read-only pre-apply gate; no mutation
-#   --apply   the same checks, then the ordered, ledger-backed apply (fresh only)
+#   --apply   the same checks, then the ordered, attempt-bound create transaction (fresh only)
 #   --open-public-egress  the deferred public-HTTPS allow, once every controller
 #                         replica is current/updated/available/ready and the
 #                         namespace still reconciles nothing
@@ -84,7 +87,7 @@
 # See docs/runbooks/flux-install.md for the surrounding ceremony.
 set -euo pipefail
 # Every byte this script writes -- the render, the address-substituted egress
-# bundle, the apply ledger -- is operator-private, so the work directory and
+# bundle, the attempt ledger -- is operator-private, so the work directory and
 # everything in it is created unreadable to anyone else from the first syscall.
 umask 077
 
@@ -114,7 +117,7 @@ EXPECTED_OBJECTS=24
 # ResourceQuota, 3 ServiceAccounts, 1 Service, 3 Deployments, 3 NetworkPolicies).
 EXPECTED_CLUSTER_SCOPED=13
 EXPECTED_NAMESPACED=11
-# ... and it splits again by apply phase: the 3 controller Deployments are held
+# ... and it splits again by creation phase: the 3 controller Deployments are held
 # back until their egress allows and canary proof exist, so 21 objects go first.
 EXPECTED_WORKLOADS=3
 EXPECTED_PREREQUISITES=21
@@ -163,6 +166,7 @@ APISERVER_PORT=6443
 SUPPORTED_CNI_PROVIDER='calico'
 MAX_API_ENDPOINTS=16
 CANARY_NAME='flux-api-reachability-canary'
+ATTEMPT_ANNOTATION='platform.snaraj.dev/install-attempt-id'
 
 # Recognized dry-run report lines. kubectl prints "<kind>/<name> <verb>" per
 # object, optionally suffixed " (dry run)" (client) or " (server dry run)"
@@ -205,7 +209,7 @@ usage() {
     'Modes:' \
     '  --render  render + verify + print all three render sha256s; contacts no cluster' \
     '  --plan    the same, plus the read-only pre-apply gate; no mutation' \
-    '  --apply   the same checks, then the ordered, ledger-backed apply (fresh only)' \
+    '  --apply   the same checks, then the ordered, attempt-bound create transaction (fresh only)' \
     '  --open-public-egress  the deferred public-HTTPS allow, once every desired replica is ready' \
     '' \
     'Binding options -- ALL are required by --plan, --apply, and' \
@@ -381,6 +385,18 @@ digest_of() {
   fi
 }
 
+# Create the private directory before resolving a downloaded executable. The
+# selected binary is copied once, the copy is hashed, and only that copy is ever
+# invoked. Hashing one pathname and later executing the mutable source pathname
+# would leave a replacement race between the proof and the execution.
+work="$(mktemp -d "${TMPDIR:-/tmp}/flux-controllers.XXXXXX")"
+cleanup() {
+  local status=$?
+  rm -rf -- "$work"
+  exit "$status"
+}
+trap cleanup EXIT
+
 # versions.env is parsed as DATA, never sourced: sourcing a file to learn a
 # version string would execute whatever else it contained.
 pin_value() {
@@ -400,27 +416,36 @@ resolve_tool() {
   printf '%s' "$path"
 }
 
+stage_tool() {
+  local tool="$1"
+  local source="$2"
+  local directory="${work}/tools/${tool}"
+  local destination=''
+  mkdir -p -- "$directory"
+  destination="${directory}/$(basename -- "$source")"
+  cp -- "$source" "$destination"
+  chmod 0500 -- "$destination"
+  [[ -f "$destination" && ! -L "$destination" && -x "$destination" ]] || \
+    die "the private ${tool} copy is not an executable regular file"
+  printf '%s' "$destination"
+}
+
 [[ -f "$VERSIONS_FILE" ]] || die 'versions.env is missing; the tool pins cannot be read'
 
-KUSTOMIZE_BIN="$(resolve_tool kustomize)"
+KUSTOMIZE_BIN="$(stage_tool kustomize "$(resolve_tool kustomize)")"
+kustomize_digest_pin="$(pin_value KUSTOMIZE_LINUX_AMD64_SHA256)"
+[[ "$kustomize_digest_pin" =~ ^[0-9a-f]{64}$ ]] || \
+  die 'versions.env carries no valid KUSTOMIZE_LINUX_AMD64_SHA256 pin'
+kustomize_digest="$(digest_of "$KUSTOMIZE_BIN")"
+[[ "$kustomize_digest" == "$kustomize_digest_pin" ]] || \
+  die 'the kustomize executable sha256 does not match versions.env KUSTOMIZE_LINUX_AMD64_SHA256; refusing to execute unidentified bytes beside a protected kubeconfig'
 kustomize_pin="$(pin_value KUSTOMIZE_VERSION)"
 kustomize_reported="$("$KUSTOMIZE_BIN" version 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
 [[ "$kustomize_reported" == "$kustomize_pin" ]] || \
   die "the kustomize resolved from PATH reports '${kustomize_reported}'; versions.env pins ${kustomize_pin}"
-# versions.env pins kubectl by digest but carries no kustomize checksum, so the
-# strongest available kustomize binding is its self-reported version. That gap
-# is a declared platform-lane ask (versions.env is not editable from this lane);
-# until a KUSTOMIZE_*_SHA256 pin exists, the render digest below is what
-# actually binds kustomize's OUTPUT, which is the property the install needs.
 
 if [[ "$needs_cluster" == 'yes' ]]; then
-  KUBECTL_BIN="$(resolve_tool kubectl)"
-  kubectl_pin="$(pin_value KUBERNETES_VERSION)"
-  kubectl_reported="$("$KUBECTL_BIN" version --client -o yaml 2>/dev/null \
-    | grep -E '^[[:space:]]*gitVersion:' | head -n 1 | tr -d '[:space:]' || true)"
-  kubectl_reported="${kubectl_reported#gitVersion:}"
-  [[ "$kubectl_reported" == "$kubectl_pin" ]] || \
-    die "the kubectl resolved from PATH reports '${kubectl_reported}'; versions.env pins ${kubectl_pin}"
+  KUBECTL_BIN="$(stage_tool kubectl "$(resolve_tool kubectl)")"
   kubectl_digest="$(digest_of "$KUBECTL_BIN")"
   kubectl_digest_matched='no'
   for pin_key in KUBECTL_LINUX_AMD64_SHA256 KUBECTL_ARM64_SHA256; do
@@ -430,6 +455,12 @@ if [[ "$needs_cluster" == 'yes' ]]; then
   done
   [[ "$kubectl_digest_matched" == 'yes' ]] || \
     die 'the kubectl resolved from PATH matches no versions.env kubectl digest pin; refusing to run an unidentified binary against a cluster'
+  kubectl_pin="$(pin_value KUBERNETES_VERSION)"
+  kubectl_reported="$("$KUBECTL_BIN" version --client -o yaml 2>/dev/null \
+    | grep -E '^[[:space:]]*gitVersion:' | head -n 1 | tr -d '[:space:]' || true)"
+  kubectl_reported="${kubectl_reported#gitVersion:}"
+  [[ "$kubectl_reported" == "$kubectl_pin" ]] || \
+    die "the kubectl resolved from PATH reports '${kubectl_reported}'; versions.env pins ${kubectl_pin}"
 fi
 
 # --- Repository bytes --------------------------------------------------------
@@ -464,28 +495,20 @@ fi
 [[ -f "${REPO_ROOT}/${CANARY_TARGET}/kustomization.yaml" ]] || \
   die "missing API canary root: ${CANARY_TARGET}"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/flux-controllers.XXXXXX")"
-cleanup() {
-  local status=$?
-  rm -rf -- "$work"
-  exit "$status"
-}
-trap cleanup EXIT
-
 # An INTERRUPT is not a clean stop. A Ctrl-C, a terminal hangup, or a `kill`
-# during the apply leaves everything the completed phases created -- including
+# during the transaction leaves everything the completed phases created -- including
 # the Namespace and all 12 non-namespaced RBAC/CRD objects -- with
 # nothing to remove them and no list of what to remove by hand. That is exactly
 # the residue the ledger exists to prevent, so the signal runs the SAME rollback
 # path a failed phase runs. Two hazards it must survive: arriving before any
-# apply (the transaction is not open, so there is nothing to undo and saying so
+# mutation (the transaction is not open, so there is nothing to undo and saying so
 # is the whole job), and arriving twice (the second must not restart a rollback
 # that is already in flight).
 TRANSACTION_OPEN='no'
 TRANSACTION_COMMITTED='no'
 INTERRUPT_HANDLED='no'
 # A stable duplicate of the real stderr. Bash defers a trap until the running
-# foreground command finishes, and the applies run through the kube() SHELL
+# foreground command finishes, and the creates run through the kube() SHELL
 # FUNCTION with `>"$output" 2>&1` on the call -- so a handler that fires there
 # inherits that redirection and writes its rollback report into a file inside
 # $work, which the EXIT trap then deletes. The operator would see an interrupt,
@@ -502,13 +525,13 @@ on_signal() {
   # Disarm before doing anything slow, so a repeat signal cannot re-enter.
   trap - INT TERM HUP
   {
-    warn "interrupted by SIG${signal}; an in-flight apply may already have created objects"
+    warn "interrupted by SIG${signal}; an in-flight create may already have persisted objects"
     if [[ "$TRANSACTION_OPEN" == 'yes' ]]; then
       rollback || true
     elif [[ "$TRANSACTION_COMMITTED" == 'yes' ]]; then
       warn 'rollback: the mutation was already committed; no transaction remains open'
     else
-      warn 'rollback: the interrupt arrived before anything was applied; the cluster is unchanged'
+      warn 'rollback: the interrupt arrived before any mutation; the cluster is unchanged'
     fi
   } 2>&9
   exit 1
@@ -776,6 +799,128 @@ fi
 }
 [[ "$cni_identity" == 'calico-node|calico-node|calico-node' ]] || \
   die "the selected-CNI identity is '${cni_identity}', not the reviewed Calico daemonset/selector contract"
+
+# A Service canary proves one request traversed the dataplane; it cannot prove
+# that every /32 granted by the policy belongs to that Service. Bind the private
+# input to the complete authenticated EndpointSlice set before expanding the
+# policy. The snapshot includes slice UID/resourceVersion, address type, named
+# port, readiness, and every address, so a same-address replacement or a
+# concurrent endpoint-set change is visible as drift rather than silently
+# becoming a durable egress peer.
+expected_api_endpoints="${work}/expected-api-endpoints.txt"
+printf '%s\n' "${API_ENDPOINTS[@]}" >"$expected_api_endpoints"
+endpoint_probe_index=0
+capture_api_endpoint_snapshot() {
+  local destination="$1"
+  local raw="${destination}.raw"
+  local errors="${destination}.err"
+  local observed="${destination}.addresses"
+  local record='' first='' second='' third='' fourth='' extra=''
+  local canonical='' current_slice=''
+  local slice_count=0 port_count=0 endpoint_count=0 total_endpoints=0
+  local -a addresses=()
+
+  # `$ready` is a Go-template variable, not shell expansion.
+  # shellcheck disable=SC2016
+  if ! kube -n default get endpointslice \
+      -l kubernetes.io/service-name=kubernetes \
+      -o go-template='{{range .items}}SLICE|{{.metadata.name}}|{{.metadata.uid}}|{{.metadata.resourceVersion}}|{{.addressType}}{{"\n"}}{{range .ports}}PORT|{{.name}}|{{.protocol}}|{{.port}}{{"\n"}}{{end}}{{range .endpoints}}{{$ready := .conditions.ready}}{{range .addresses}}ENDPOINT|{{.}}|{{$ready}}{{"\n"}}{{end}}{{end}}{{end}}' \
+      >"$raw" 2>"$errors"; then
+    cat -- "$errors" >&2
+    warn 'could not read the authoritative kubernetes.default EndpointSlice set'
+    return 1
+  fi
+  if [[ -s "$errors" || ! -s "$raw" ]]; then
+    cat -- "$errors" >&2
+    warn 'the kubernetes.default EndpointSlice probe was empty or produced diagnostics'
+    return 1
+  fi
+
+  while IFS='|' read -r record first second third fourth extra; do
+    [[ -z "$extra" ]] || {
+      warn 'the kubernetes.default EndpointSlice probe returned a malformed record'
+      return 1
+    }
+    case "$record" in
+      SLICE)
+        if [[ -n "$current_slice" && ("$port_count" -ne 1 || "$endpoint_count" -eq 0) ]]; then
+          warn 'a kubernetes.default EndpointSlice did not carry exactly one reviewed port and at least one ready endpoint'
+          return 1
+        fi
+        [[ -n "$first" && "$first" =~ ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ \
+           && "$second" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
+           && "$third" =~ ^[1-9][0-9]*$ && "$fourth" == 'IPv4' ]] || {
+          warn 'the kubernetes.default EndpointSlice identity/addressType record is not canonical IPv4 state'
+          return 1
+        }
+        current_slice="$first"
+        port_count=0
+        endpoint_count=0
+        ((slice_count += 1))
+        ;;
+      PORT)
+        [[ -n "$current_slice" && "$first" == 'https' && "$second" == 'TCP' \
+           && "$third" == "$APISERVER_PORT" && -z "$fourth" ]] || {
+          warn 'a kubernetes.default EndpointSlice does not expose exactly the reviewed https/TCP/6443 backend port'
+          return 1
+        }
+        ((port_count += 1))
+        ;;
+      ENDPOINT)
+        [[ -n "$current_slice" && "$second" == 'true' && -z "$third" && -z "$fourth" ]] || {
+          warn 'a kubernetes.default EndpointSlice address is not explicitly ready'
+          return 1
+        }
+        canonical="$(normalize_ipv4 "$first")" || {
+          warn 'a kubernetes.default EndpointSlice returned a noncanonical/non-unicast IPv4 address'
+          return 1
+        }
+        [[ "$canonical" == "$first" ]] || {
+          warn 'a kubernetes.default EndpointSlice returned a noncanonical IPv4 spelling'
+          return 1
+        }
+        addresses+=("$canonical")
+        ((endpoint_count += 1))
+        ((total_endpoints += 1))
+        ;;
+      *)
+        warn 'the kubernetes.default EndpointSlice probe returned an unknown record type'
+        return 1
+        ;;
+    esac
+  done <"$raw"
+  [[ "$slice_count" -gt 0 && "$port_count" -eq 1 && "$endpoint_count" -gt 0 ]] || {
+    warn 'the kubernetes.default EndpointSlice set has no complete ready IPv4 backend slice'
+    return 1
+  }
+  printf '%s\n' "${addresses[@]}" | LC_ALL=C sort >"$observed"
+  [[ "$(LC_ALL=C sort -u "$observed" | grep -cE '.' || true)" -eq "$total_endpoints" ]] || {
+    warn 'the kubernetes.default EndpointSlice set contains a duplicate backend address'
+    return 1
+  }
+  cmp -s -- "$expected_api_endpoints" "$observed" || {
+    warn 'the supplied API endpoint set does not exactly match the complete live kubernetes.default EndpointSlice set'
+    return 1
+  }
+  LC_ALL=C sort -- "$raw" >"$destination"
+}
+
+endpoint_snapshot="${work}/api-endpoints.initial"
+capture_api_endpoint_snapshot "$endpoint_snapshot" || \
+  die 'the supplied API endpoint set is not authoritative live Kubernetes endpoint state'
+note "selected-CNI API backend set authenticated against ${#API_ENDPOINTS[@]} live EndpointSlice address(es)"
+
+endpoint_snapshot_unchanged() {
+  local label="$1"
+  local current=''
+  ((endpoint_probe_index += 1))
+  current="${work}/api-endpoints.${endpoint_probe_index}"
+  capture_api_endpoint_snapshot "$current" || return 1
+  cmp -s -- "$endpoint_snapshot" "$current" || {
+    warn "the authoritative Kubernetes endpoint set drifted during ${label}"
+    return 1
+  }
+}
 
 # --- The egress bundle, bound to the Calico post-DNAT API endpoint set -------
 #
@@ -1071,9 +1216,12 @@ else
   note "existing-cluster dry run clean (${clean} objects)"
 fi
 
+endpoint_snapshot_unchanged 'the read-only pre-mutation gate' || \
+  die 'the authoritative Kubernetes endpoint set changed while the install was being planned'
+
 if [[ "$MODE" == '--plan' ]]; then
   note 'PLAN only; no mutation attempted'
-  note "apply order would be: ${EXPECTED_PREREQUISITES} prerequisites, ${EXPECTED_STARTUP_POLICIES} startup egress allows, one create/prove/delete API canary, then ${EXPECTED_WORKLOADS} controller Deployments"
+  note "create order would be: ${EXPECTED_PREREQUISITES} prerequisites, ${EXPECTED_STARTUP_POLICIES} startup egress allows, one create/prove/conditional-delete API canary, then ${EXPECTED_WORKLOADS} controller Deployments"
   exit 0
 fi
 
@@ -1081,30 +1229,113 @@ fi
 
 LEDGER="${work}/created-by-this-attempt.txt"
 : >"$LEDGER"
-# The manifests already applied, in the order they were applied. The ledger is
-# rebuilt from these on demand rather than appended to as we go.
-APPLIED_MANIFESTS=()
+# Candidate manifests whose create requests were attempted, in request order.
+# The ledger is rebuilt from their live per-attempt identities on demand rather
+# than trusting kubectl output or same-name existence.
+ATTEMPTED_MANIFESTS=()
+FOREIGN_COLLISIONS="${work}/foreign-collisions.txt"
+UNCERTAIN_OBJECTS="${work}/uncertain-objects.txt"
+: >"$FOREIGN_COLLISIONS"
+: >"$UNCERTAIN_OBJECTS"
+
+attempt_random="${work}/attempt-random.bin"
+if ! dd if=/dev/urandom of="$attempt_random" bs=32 count=1 status=none; then
+  die 'could not obtain kernel randomness for the install-attempt identity'
+fi
+[[ "$(wc -c <"$attempt_random")" -eq 32 ]] || \
+  die 'the install-attempt entropy read was incomplete'
+ATTEMPT_ID="$(digest_of "$attempt_random")"
+rm -f -- "$attempt_random"
+[[ "$ATTEMPT_ID" =~ ^[0-9a-f]{64}$ ]] || \
+  die 'the install-attempt identity is not a canonical 256-bit value'
+
+# Add the unpredictable identity to top-level metadata only. The inverse pass
+# then removes it and must reproduce the reviewed manifest byte for byte: that
+# is what proves this runtime derivation added no second field while making
+# every create response independently attributable.
+annotate_manifest_for_attempt() {
+  local source="$1"
+  local destination="$2"
+  local attempt="$3"
+  local roundtrip="${destination}.roundtrip"
+  local expected=''
+  expected="$(count_objects "$source")"
+  awk -v key="$ATTEMPT_ANNOTATION" -v attempt="$attempt" '
+    function flush_metadata() {
+      if (!has_annotations) {
+        print "  annotations:"
+        print "    " key ": " attempt
+      }
+      printf "%s", metadata
+      metadata = ""
+      in_metadata = 0
+      has_annotations = 0
+    }
+    $0 == "metadata:" {
+      print
+      in_metadata = 1
+      documents++
+      next
+    }
+    in_metadata {
+      if ($0 !~ /^ /) {
+        flush_metadata()
+      } else {
+        if ($0 == "  annotations:") {
+          metadata = metadata $0 "\n" "    " key ": " attempt "\n"
+          has_annotations = 1
+          next
+        }
+        if (index($0, "    " key ":") == 1) { exit 41 }
+        metadata = metadata $0 "\n"
+        next
+      }
+    }
+    { print }
+    END {
+      if (in_metadata) { flush_metadata() }
+      if (documents == 0) { exit 42 }
+    }
+  ' "$source" >"$destination" || \
+    die 'the attempt annotation could not be added exactly once per object'
+  [[ "$(grep -cF -- "    ${ATTEMPT_ANNOTATION}: ${attempt}" "$destination" || true)" -eq "$expected" ]] || \
+    die 'the attempt annotation count does not equal the manifest object count'
+
+  awk -v key="$ATTEMPT_ANNOTATION" -v attempt="$attempt" '
+    function flush_annotations() {
+      if (body != "") {
+        print "  annotations:"
+        printf "%s", body
+      }
+      body = ""
+      in_annotations = 0
+    }
+    $0 == "  annotations:" {
+      in_annotations = 1
+      next
+    }
+    in_annotations {
+      if ($0 !~ /^    /) {
+        flush_annotations()
+      } else {
+        if ($0 == "    " key ": " attempt) { removed++; next }
+        body = body $0 "\n"
+        next
+      }
+    }
+    { print }
+    END {
+      if (in_annotations) { flush_annotations() }
+      if (removed == 0) { exit 43 }
+    }
+  ' "$destination" >"$roundtrip" || \
+    die 'the attempt annotation could not be removed from the derived manifest'
+  cmp -s -- "$source" "$roundtrip" || \
+    die 'the attempt-bound manifest changed bytes outside its provenance annotation'
+}
 
 entry_is_cluster_scoped() {
-  [[ "$1" =~ ^(namespace|customresourcedefinition\.apiextensions\.k8s\.io|clusterrole\.rbac\.authorization\.k8s\.io|clusterrolebinding\.rbac\.authorization\.k8s\.io)/ ]]
-}
-
-delete_entry() {
-  local entry="$1"
-  if entry_is_cluster_scoped "$entry"; then
-    kube delete "$entry" --ignore-not-found --wait >/dev/null 2>&1 || true
-  else
-    kube delete "$entry" -n "$INSTALL_NAMESPACE" --ignore-not-found --wait >/dev/null 2>&1 || true
-  fi
-}
-
-entry_exists() {
-  local entry="$1"
-  if entry_is_cluster_scoped "$entry"; then
-    kube get "$entry" -o name >/dev/null 2>&1
-  else
-    kube get "$entry" -n "$INSTALL_NAMESPACE" -o name >/dev/null 2>&1
-  fi
+  [[ "$1" =~ ^(namespace|customresourcedefinition\.apiextensions\.k8s\.io|clusterrole\.rbac\.authorization\.k8s\.io|clusterrolebinding\.rbac\.authorization\.k8s\.io)/[^/]+$ ]]
 }
 
 # The objects a manifest declares, as the `<resource>/<name>` identifiers kubectl
@@ -1135,66 +1366,212 @@ manifest_entries() {
   ' "$1"
 }
 
-# Rebuild the ledger of what THIS attempt created, from two independent sources.
-#
-# Deliberately not bookkeeping kept up to date as we go, and deliberately not
-# kubectl's stdout alone. Two ways stdout loses an object: a signal can arrive
-# between the API server creating it and kubectl printing its line, and a
-# transport failure can drop the line entirely. Either leaves a ledger that says
-# "created nothing" while the object exists, i.e. exactly the unremovable
-# cluster-scoped residue this mechanism exists to prevent. So an object enters
-# the ledger if kubectl reported it created OR if it is in the cluster now --
-# and because --apply is fresh-only, every object of this render was proven
-# absent before the first apply, which is what makes "it exists now" mean "this
-# attempt created it". Re-derived immediately before any rollback, so the record
-# is correct no matter where the failure or the interrupt landed.
+# One atomic metadata read supplies the attempt marker and the two server
+# preconditions used for rollback. Missing/foreign/malformed/error are distinct:
+# only an exact attempt match may ever enter the deletion ledger.
+CAPTURE_STATE=''
+CAPTURE_ATTEMPT=''
+CAPTURE_UID=''
+CAPTURE_RESOURCE_VERSION=''
+capture_entry_metadata() {
+  local entry="$1"
+  local key="${entry//[\/.]/_}"
+  local output="${work}/identity-${key}.txt"
+  local errors="${work}/identity-${key}.err"
+  local marker='' extra=''
+  CAPTURE_STATE='error'
+  CAPTURE_ATTEMPT=''
+  CAPTURE_UID=''
+  CAPTURE_RESOURCE_VERSION=''
+  : >"$output"
+  : >"$errors"
+  if entry_is_cluster_scoped "$entry"; then
+    if ! kube get "$entry" \
+        -o go-template='{{index .metadata.annotations "platform.snaraj.dev/install-attempt-id"}}{{"|"}}{{.metadata.uid}}{{"|"}}{{.metadata.resourceVersion}}{{"|END"}}' \
+        >"$output" 2>"$errors"; then
+      if grep -Eq '^Error from server \(NotFound\): .+ not found$' "$errors"; then
+        CAPTURE_STATE='absent'
+        return 0
+      fi
+      return 1
+    fi
+  else
+    if ! kube -n "$INSTALL_NAMESPACE" get "$entry" \
+        -o go-template='{{index .metadata.annotations "platform.snaraj.dev/install-attempt-id"}}{{"|"}}{{.metadata.uid}}{{"|"}}{{.metadata.resourceVersion}}{{"|END"}}' \
+        >"$output" 2>"$errors"; then
+      if grep -Eq '^Error from server \(NotFound\): .+ not found$' "$errors"; then
+        CAPTURE_STATE='absent'
+        return 0
+      fi
+      return 1
+    fi
+  fi
+  [[ ! -s "$errors" ]] || return 1
+  IFS='|' read -r CAPTURE_ATTEMPT CAPTURE_UID CAPTURE_RESOURCE_VERSION marker extra <"$output"
+  [[ -z "$extra" && "$marker" == 'END' \
+     && "$CAPTURE_UID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
+     && "$CAPTURE_RESOURCE_VERSION" =~ ^[1-9][0-9]*$ ]] || return 1
+  CAPTURE_STATE='present'
+  return 0
+}
+
+# Convert only the closed reviewed resource inventory to REST collection paths.
+# `kubectl delete --raw PATH -f DeleteOptions.json` is the kubectl interface that
+# can actually send UID/resourceVersion preconditions; ordinary `kubectl delete`
+# explicitly performs no resourceVersion check.
+entry_api_path() {
+  local entry="$1"
+  local name="${entry#*/}"
+  [[ "$name" != "$entry" && "$name" =~ ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]] || return 1
+  case "$entry" in
+    namespace/*) printf '/api/v1/namespaces/%s' "$name" ;;
+    customresourcedefinition.apiextensions.k8s.io/*) printf '/apis/apiextensions.k8s.io/v1/customresourcedefinitions/%s' "$name" ;;
+    clusterrole.rbac.authorization.k8s.io/*) printf '/apis/rbac.authorization.k8s.io/v1/clusterroles/%s' "$name" ;;
+    clusterrolebinding.rbac.authorization.k8s.io/*) printf '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/%s' "$name" ;;
+    networkpolicy.networking.k8s.io/*) printf '/apis/networking.k8s.io/v1/namespaces/%s/networkpolicies/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    deployment.apps/*) printf '/apis/apps/v1/namespaces/%s/deployments/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    resourcequota/*) printf '/api/v1/namespaces/%s/resourcequotas/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    serviceaccount/*) printf '/api/v1/namespaces/%s/serviceaccounts/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    service/*) printf '/api/v1/namespaces/%s/services/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    pod/*) printf '/api/v1/namespaces/%s/pods/%s' "$INSTALL_NAMESPACE" "$name" ;;
+    *) return 1 ;;
+  esac
+}
+
+conditional_delete_entry() {
+  local entry="$1"
+  local uid="$2"
+  local resource_version="$3"
+  local key="${entry//[\/.]/_}"
+  local options="${work}/delete-${key}.json"
+  local response="${work}/delete-${key}.response"
+  local api_path=''
+  api_path="$(entry_api_path "$entry")" || return 1
+  printf '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Background","preconditions":{"uid":"%s","resourceVersion":"%s"}}\n' \
+    "$uid" "$resource_version" >"$options"
+  kube delete --raw "$api_path" -f "$options" >"$response" 2>&1
+}
+
+# Rebuild the ledger from exact attempt identities. An AlreadyExists response or
+# a lost response after a concurrent actor won the name is not evidence of our
+# ownership; that live object is recorded as a collision and left untouched.
 harvest_ledger() {
   local manifest=''
-  local output=''
   local entry=''
   : >"$LEDGER"
-  for manifest in ${APPLIED_MANIFESTS[@]+"${APPLIED_MANIFESTS[@]}"}; do
-    output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
+  : >"$FOREIGN_COLLISIONS"
+  : >"$UNCERTAIN_OBJECTS"
+  for manifest in ${ATTEMPTED_MANIFESTS[@]+"${ATTEMPTED_MANIFESTS[@]}"}; do
     while IFS= read -r entry; do
       [[ -n "$entry" ]] || continue
-      # `grep -Fxq` matches the WHOLE line, so a dry run's "<entry> created
-      # (dry run)" can never satisfy it; only a real apply prints the bare form.
-      if [[ -f "$output" ]] && grep -Fxq -- "${entry} created" "$output"; then
-        printf '%s\n' "$entry" >>"$LEDGER"
-      elif entry_exists "$entry"; then
-        printf '%s\n' "$entry" >>"$LEDGER"
+      if ! capture_entry_metadata "$entry"; then
+        printf '%s\n' "$entry" >>"$UNCERTAIN_OBJECTS"
+      elif [[ "$CAPTURE_STATE" == 'present' && "$CAPTURE_ATTEMPT" == "$ATTEMPT_ID" ]]; then
+        printf '%s|%s|%s\n' "$entry" "$CAPTURE_UID" "$CAPTURE_RESOURCE_VERSION" >>"$LEDGER"
+      elif [[ "$CAPTURE_STATE" == 'present' ]]; then
+        printf '%s\n' "$entry" >>"$FOREIGN_COLLISIONS"
       fi
     done < <(manifest_entries "$manifest")
   done
 }
 
-# Roll back exactly what this attempt created, newest first, and then PROVE the
-# absence rather than trusting the delete's exit status. `kubectl delete
-# namespace flux-system` -- the runbook's old whole-install undo -- cannot touch
-# the 12 non-namespaced RBAC/CRD objects, so the ledger is the only thing that
-# makes the undo complete.
+UID_GONE_STATE=''
+attempt_uid_is_gone() {
+  local entry="$1"
+  local uid="$2"
+  UID_GONE_STATE='error'
+  if ! capture_entry_metadata "$entry"; then
+    return 1
+  fi
+  if [[ "$CAPTURE_STATE" == 'absent' ]]; then
+    UID_GONE_STATE='absent'
+    return 0
+  fi
+  if [[ "$CAPTURE_STATE" == 'present' && "$CAPTURE_UID" != "$uid" ]]; then
+    UID_GONE_STATE='replaced'
+    warn "rollback: ${entry} was concurrently replaced; the foreign UID remains untouched"
+    return 0
+  fi
+  UID_GONE_STATE='residue'
+  return 1
+}
+
+# Roll back exactly matching attempt objects newest-first. Identity is captured
+# immediately before each DELETE and supplied as UID+resourceVersion server
+# preconditions, so neither a concurrent update nor delete/recreate can be lost.
 rollback() {
-  local -a created=()
-  local entry=''
+  local -a created=() residue=() collisions=() uncertain=()
+  local record='' entry='' uid='' resource_version=''
   local index=0
-  local -a residue=()
+  local namespace_record='' preserve_namespace='no'
   harvest_ledger
   mapfile -t created <"$LEDGER"
+  mapfile -t collisions <"$FOREIGN_COLLISIONS"
+  mapfile -t uncertain <"$UNCERTAIN_OBJECTS"
+  if ((${#collisions[@]} > 0)); then
+    warn "rollback: ${#collisions[@]} concurrent/foreign same-name object(s) were identified and left untouched: ${collisions[*]}"
+    for entry in "${collisions[@]}"; do
+      if ! entry_is_cluster_scoped "$entry"; then
+        preserve_namespace='yes'
+      fi
+    done
+  fi
+  for entry in "${uncertain[@]}"; do
+    if ! entry_is_cluster_scoped "$entry"; then
+      preserve_namespace='yes'
+    fi
+  done
   if ((${#created[@]} == 0)); then
-    warn 'rollback: this attempt created nothing; the cluster is unchanged'
+    if ((${#uncertain[@]} > 0)); then
+      warn "ROLLBACK INCOMPLETE: could not classify ${#uncertain[@]} candidate object(s) by attempt identity: ${uncertain[*]}"
+      return 1
+    fi
+    if ((${#collisions[@]} > 0)); then
+      warn 'rollback: this attempt created nothing; foreign collisions remain untouched'
+    else
+      warn 'rollback: this attempt created nothing; the cluster is unchanged'
+    fi
     return 0
   fi
   warn "rollback: removing the ${#created[@]} object(s) this attempt created, newest first"
   for ((index = ${#created[@]} - 1; index >= 0; index--)); do
-    delete_entry "${created[index]}"
+    record="${created[index]}"
+    IFS='|' read -r entry uid resource_version <<<"$record"
+    if [[ "$entry" == "namespace/${INSTALL_NAMESPACE}" ]]; then
+      namespace_record="$record"
+      continue
+    fi
+    conditional_delete_entry "$entry" "$uid" "$resource_version" || \
+      warn "rollback: the preconditioned delete response for ${entry} was unsuccessful or lost"
   done
-  for entry in "${created[@]}"; do
-    if entry_exists "$entry"; then
+  for record in "${created[@]}"; do
+    IFS='|' read -r entry uid resource_version <<<"$record"
+    [[ "$entry" != "namespace/${INSTALL_NAMESPACE}" ]] || continue
+    if ! attempt_uid_is_gone "$entry" "$uid"; then
       residue+=("$entry")
+      if ! entry_is_cluster_scoped "$entry"; then
+        preserve_namespace='yes'
+      fi
+    elif [[ "$UID_GONE_STATE" == 'replaced' ]] && ! entry_is_cluster_scoped "$entry"; then
+      preserve_namespace='yes'
     fi
   done
+  if [[ -n "$namespace_record" ]]; then
+    IFS='|' read -r entry uid resource_version <<<"$namespace_record"
+    if [[ "$preserve_namespace" == 'yes' ]]; then
+      residue+=("$entry")
+      warn 'rollback: preserving the attempt-created Namespace because deleting it would cascade a concurrent/uncertain foreign namespaced object'
+    else
+      conditional_delete_entry "$entry" "$uid" "$resource_version" || \
+        warn "rollback: the preconditioned delete response for ${entry} was unsuccessful or lost"
+      attempt_uid_is_gone "$entry" "$uid" || residue+=("$entry")
+    fi
+  fi
+  if ((${#uncertain[@]} > 0)); then
+    residue+=("${uncertain[@]}")
+  fi
   if ((${#residue[@]} > 0)); then
-    warn "ROLLBACK INCOMPLETE: ${#residue[@]} object(s) still exist and need manual removal: ${residue[*]}"
+    warn "ROLLBACK INCOMPLETE: ${#residue[@]} attempt object(s) remain or could not be classified; manual protected review required: ${residue[*]}"
     return 1
   fi
   warn "rollback complete: all ${#created[@]} object(s) this attempt created are absent, cluster-scoped objects included"
@@ -1207,32 +1584,33 @@ transaction_failed() {
   exit 1
 }
 
-apply_phase() {
+create_phase() {
   local label="$1"
   local manifest="$2"
   local expected="$3"
-  # Named from the manifest, whose basename carries the phase index, so
-  # harvest_ledger can pair a phase's output with the manifest it applied.
   local output=''
-  output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
-  local rc=0
-  local reported=''
-  local total=''
-  note "phase ${label}: applying ${expected} object(s)"
-  # Recorded BEFORE the call, not after: an interrupt delivered during the apply
+  output="${work}/create-$(basename -- "$manifest" .yaml).txt"
+  local rc=0 reported=0 total='' entry=''
+  note "phase ${label}: creating ${expected} attempt-bound object(s)"
+  # Recorded BEFORE the call, not after: an interrupt delivered during create
   # must still find this manifest in the list, or its objects are invisible to
   # the rollback.
-  APPLIED_MANIFESTS+=("$manifest")
-  kube apply -f "$manifest" >"$output" 2>&1 || rc=$?
+  ATTEMPTED_MANIFESTS+=("$manifest")
+  kube create --save-config -f "$manifest" >"$output" 2>&1 || rc=$?
   if ((rc != 0)); then
     cat -- "$output" >&2
-    transaction_failed "phase ${label} apply failed (kubectl exit ${rc}); a partial apply may have created objects"
+    transaction_failed "phase ${label} create failed (kubectl exit ${rc}); a partial create or a foreign collision may exist"
   fi
-  reported="$(grep -cE "$INVENTORY_MUTATION_LINE" "$output" || true)"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    if grep -Fxq -- "${entry} created" "$output"; then
+      ((reported += 1))
+    fi
+  done < <(manifest_entries "$manifest")
   total="$(grep -cE '.' "$output" || true)"
   if [[ "$reported" -ne "$expected" || "$total" -ne "$expected" ]]; then
     cat -- "$output" >&2
-    transaction_failed "phase ${label} reported ${reported} reviewed object(s) across ${total} line(s); expected exactly ${expected}"
+    transaction_failed "phase ${label} reported ${reported} exact creations across ${total} line(s); expected exactly ${expected}"
   fi
 }
 
@@ -1245,10 +1623,10 @@ create_exact_object() {
   local expected_entry="$3"
   local failure_prefix="${4:-${label} create failed}"
   local output=''
-  output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
+  output="${work}/create-$(basename -- "$manifest" .yaml).txt"
   local rc=0
-  APPLIED_MANIFESTS+=("$manifest")
-  kube create -f "$manifest" >"$output" 2>&1 || rc=$?
+  ATTEMPTED_MANIFESTS+=("$manifest")
+  kube create --save-config -f "$manifest" >"$output" 2>&1 || rc=$?
   if ((rc != 0)); then
     cat -- "$output" >&2
     transaction_failed "${failure_prefix} (kubectl exit ${rc}); the response may have been lost after persistence"
@@ -1264,13 +1642,12 @@ prove_api_path_then_remove_canary() {
   local canary_entry="pod/${CANARY_NAME}"
   local wait_output="${work}/canary-wait.txt"
   local phase_error="${work}/canary-phase.err"
-  local delete_output="${work}/canary-delete.txt"
-  local delete_rc=0
+  local canary_uid='' canary_resource_version=''
   local phase=''
   local after=''
 
   note 'phase api-canary: proving DNS, TLS, Service routing, ServiceAccount authentication and API discovery'
-  create_exact_object 'API canary' "$canary_rendered" "$canary_entry" \
+  create_exact_object 'API canary' "$canary_attempt" "$canary_entry" \
     'the in-Pod Kubernetes Service/API canary did not succeed; API canary create failed'
   if ! kube -n "$INSTALL_NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
       "$canary_entry" --timeout=60s >"$wait_output" 2>&1; then
@@ -1287,15 +1664,19 @@ prove_api_path_then_remove_canary() {
     transaction_failed "the API canary terminal phase is '${phase}', not Succeeded"
   }
 
-  kube -n "$INSTALL_NAMESPACE" delete "$canary_entry" --wait=true \
-    >"$delete_output" 2>&1 || delete_rc=$?
+  if ! capture_entry_metadata "$canary_entry" \
+      || [[ "$CAPTURE_STATE" != 'present' || "$CAPTURE_ATTEMPT" != "$ATTEMPT_ID" ]]; then
+    transaction_failed 'the API canary terminal object is not bound to this install attempt; it will not be deleted by name'
+  fi
+  canary_uid="$CAPTURE_UID"
+  canary_resource_version="$CAPTURE_RESOURCE_VERSION"
+  conditional_delete_entry "$canary_entry" "$canary_uid" "$canary_resource_version" || \
+    warn 'API canary conditional-delete response was unsuccessful or lost; proving the exact UID is gone'
+  attempt_uid_is_gone "$canary_entry" "$canary_uid" || \
+    transaction_failed 'the API canary UID could not be proven gone after its preconditioned delete'
   after="$(probe_labels pod "$CANARY_NAME" namespaced)"
   if [[ "$after" != 'ABSENT' ]]; then
-    cat -- "$delete_output" >&2
-    transaction_failed 'the API canary could not be proven absent; controller creation remains blocked'
-  fi
-  if ((delete_rc != 0)); then
-    warn 'API canary delete response was lost, but the independent absence probe proved cleanup'
+    transaction_failed 'the API canary name is no longer absent; a concurrent foreign replacement remains untouched and controller creation is blocked'
   fi
   note 'phase api-canary: authenticated in-cluster API path proved; ephemeral Pod is absent'
 }
@@ -1330,8 +1711,24 @@ deployment_is_fully_ready() {
      && "$current" -eq "$desired" && "$updated" -eq "$desired" \
      && "$available" -eq "$desired" && "$ready" -eq "$desired" \
      && "$unavailable" -eq 0 ]] || \
-    die "Deployment ${deployment} is not fully current (${status}); public egress stays shut until every positive desired replica is observed, current, updated, available and ready with none unavailable"
+     die "Deployment ${deployment} is not fully current (${status}); public egress stays shut until every positive desired replica is observed, current, updated, available and ready with none unavailable"
 }
+
+attempt_manifests="${work}/attempt"
+mkdir -p -- "$attempt_manifests"
+prerequisites_attempt="${attempt_manifests}/phase-1-prerequisites.yaml"
+startup_egress_attempt="${attempt_manifests}/phase-2-startup-egress.yaml"
+canary_attempt="${attempt_manifests}/api-canary.yaml"
+workloads_attempt="${attempt_manifests}/phase-3-workloads.yaml"
+public_egress_attempt="${attempt_manifests}/phase-4-public-egress.yaml"
+if [[ "$MODE" == '--apply' ]]; then
+  annotate_manifest_for_attempt "$prerequisites" "$prerequisites_attempt" "$ATTEMPT_ID"
+  annotate_manifest_for_attempt "$startup_egress" "$startup_egress_attempt" "$ATTEMPT_ID"
+  annotate_manifest_for_attempt "$canary_rendered" "$canary_attempt" "$ATTEMPT_ID"
+  annotate_manifest_for_attempt "$workloads" "$workloads_attempt" "$ATTEMPT_ID"
+else
+  annotate_manifest_for_attempt "$public_egress" "$public_egress_attempt" "$ATTEMPT_ID"
+fi
 
 if [[ "$MODE" == '--open-public-egress' ]]; then
   [[ "$cluster_state" == 'existing' ]] || \
@@ -1372,13 +1769,28 @@ if [[ "$MODE" == '--open-public-egress' ]]; then
       die "the cluster carries ${live_custom_resources} ${crd_name} object(s); the controllers are reconciling, not idle, and public egress stays shut"
   done
 
-  # Compare the live startup closure with the exact private endpoint-set render.
+  # Compare the live startup closure with the exact private endpoint-set render
+  # and the one attempt identity that created it. A fresh attempt is used only
+  # for the new public policy; it must not make the installed startup policies
+  # appear drifted merely because their provenance marker is intentionally old.
+  startup_install_attempt=''
   for policy in "${STARTUP_EGRESS_POLICIES[@]}"; do
-    kube -n "$INSTALL_NAMESPACE" get networkpolicy "$policy" -o name >/dev/null 2>&1 || \
+    startup_entry="networkpolicy.networking.k8s.io/${policy}"
+    if ! capture_entry_metadata "$startup_entry" || [[ "$CAPTURE_STATE" != 'present' ]]; then
       die "the startup egress policy ${policy} is not in the cluster; the namespace closure is not in the state this step extends"
+    fi
+    [[ "$CAPTURE_ATTEMPT" =~ ^[0-9a-f]{64}$ ]] || \
+      die "the startup egress policy ${policy} carries no canonical install-attempt provenance"
+    if [[ -z "$startup_install_attempt" ]]; then
+      startup_install_attempt="$CAPTURE_ATTEMPT"
+    elif [[ "$startup_install_attempt" != "$CAPTURE_ATTEMPT" ]]; then
+      die 'the startup egress policies were not created by one atomic install attempt'
+    fi
   done
+  startup_expected="${work}/startup-egress-live-attempt.yaml"
+  annotate_manifest_for_attempt "$startup_egress" "$startup_expected" "$startup_install_attempt"
   startup_shape="${work}/startup-shape.txt"
-  if ! kube apply -f "$startup_egress" --dry-run=server >"$startup_shape" 2>&1; then
+  if ! kube apply -f "$startup_expected" --dry-run=server >"$startup_shape" 2>&1; then
     cat -- "$startup_shape" >&2
     die 'could not compare the live startup egress policies with the reviewed render'
   fi
@@ -1393,11 +1805,13 @@ if [[ "$MODE" == '--open-public-egress' ]]; then
   [[ "$public_prestate" == 'ABSENT' ]] || \
     die "NetworkPolicy ${PUBLIC_EGRESS_POLICY} already exists; this absent-only transaction never adopts, reconciles, or deletes pre-existing state"
 
+  endpoint_snapshot_unchanged 'the public-policy prestate gate' || \
+    die 'the authoritative Kubernetes endpoint set drifted before the public-policy mutation'
   TRANSACTION_OPEN='yes'
-  create_exact_object 'public-HTTPS NetworkPolicy' "$public_egress" \
+  create_exact_object 'public-HTTPS NetworkPolicy' "$public_egress_attempt" \
     "networkpolicy.networking.k8s.io/${PUBLIC_EGRESS_POLICY}"
   public_poststate="${work}/public-poststate.txt"
-  if ! kube apply -f "$public_egress" --dry-run=server >"$public_poststate" 2>&1; then
+  if ! kube apply -f "$public_egress_attempt" --dry-run=server >"$public_poststate" 2>&1; then
     cat -- "$public_poststate" >&2
     transaction_failed 'the public-HTTPS policy was created but its exact poststate could not be proven'
   fi
@@ -1406,6 +1820,8 @@ if [[ "$MODE" == '--open-public-egress' ]]; then
     cat -- "$public_poststate" >&2
     transaction_failed 'the public-HTTPS policy poststate differs from the exact reviewed object'
   }
+  endpoint_snapshot_unchanged 'the public-policy poststate gate' || \
+    transaction_failed 'the authoritative Kubernetes endpoint set drifted across the public-policy mutation'
   TRANSACTION_COMMITTED='yes'
   TRANSACTION_OPEN='no'
   note 'public HTTPS allowed; the absent-only transaction committed the exact reviewed policy'
@@ -1419,20 +1835,28 @@ TRANSACTION_OPEN='yes'
 
 # 1 — the namespace, its deny-all, the CRDs, the RBAC, the quota, the accounts,
 #     and the Service. No Pod exists yet, so nothing is isolated yet either.
-apply_phase prerequisites "$prerequisites" "$EXPECTED_PREREQUISITES"
+create_phase prerequisites "$prerequisites_attempt" "$EXPECTED_PREREQUISITES"
 # 2 — the startup allows, bound to this run's API server. From here the
 #     namespace denies by default and permits exactly DNS, the intra-namespace
 #     artifact fetch, and the API server.
-apply_phase startup-egress "$startup_egress" "$EXPECTED_STARTUP_POLICIES"
+endpoint_snapshot_unchanged 'startup-policy creation' || \
+  transaction_failed 'the authoritative Kubernetes endpoint set drifted before startup-policy creation'
+create_phase startup-egress "$startup_egress_attempt" "$EXPECTED_STARTUP_POLICIES"
+endpoint_snapshot_unchanged 'startup-policy poststate' || \
+  transaction_failed 'the authoritative Kubernetes endpoint set drifted across startup-policy creation'
 # 2b — prove the selected-CNI Service/API path from the controller boundary,
 #      then remove and absence-prove the canary before any controller exists.
 prove_api_path_then_remove_canary
+endpoint_snapshot_unchanged 'the API canary boundary' || \
+  transaction_failed 'the authoritative Kubernetes endpoint set drifted across the API canary proof'
 # 3 — only now the controllers, which come up into a namespace where the flows
 #     they need to elect a leader and sync a cache already exist.
-apply_phase workloads "$workloads" "$EXPECTED_WORKLOADS"
+create_phase workloads "$workloads_attempt" "$EXPECTED_WORKLOADS"
+endpoint_snapshot_unchanged 'controller creation' || \
+  transaction_failed 'the authoritative Kubernetes endpoint set drifted across controller creation'
 TRANSACTION_COMMITTED='yes'
 TRANSACTION_OPEN='no'
 
-note 'applied; Flux is installed and inert'
+note 'created; Flux is installed and inert'
 note 'the controllers start with DNS, the intra-namespace artifact fetch, and the API server allowed; public HTTPS is still denied'
 note 'verify every positive desired controller replica is current/updated/available/ready with none unavailable and no Flux custom resource, then run --open-public-egress (docs/runbooks/flux-install.md)'

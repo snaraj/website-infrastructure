@@ -1,10 +1,11 @@
 # Flux controller install — reviewed Git contract, live validation pending
 
-Current repository status is `NO-GO` for reconciliation. This runbook defines a
-credential-free, inert installation and a bounded live-validation package; it
-does not authorize an operator to use either one. The protected coordinator
-must record separate authorization, exact reviewed inputs, prestate, commands,
-results, and poststate before a live run.
+Current repository status is `NO-GO` for reconciliation. This runbook defines
+an inert, authenticated installation and a bounded live-validation package; it
+does not authorize an operator to use either one. Every live mode reads the
+protected flattened kubeconfig and uses its client credential through kubectl.
+The protected coordinator must record separate authorization, exact reviewed
+inputs, prestate, commands, results, and poststate before a live run.
 
 The install surface is
 [`kubernetes/flux-system/controllers`](../../kubernetes/flux-system/controllers).
@@ -77,9 +78,15 @@ failure stops the run.
 Calico evaluates this workload egress after Service translation. The Pod calls
 the Kubernetes Service on TCP 443, while the NetworkPolicy must name every
 actual API backend as an explicit `/32` on TCP 6443. Those private backends are
-provided with one or more repeated `--api-endpoint` options. They are never
-inferred from the operator-facing `--server`, because a local proxy, VIP, DNS
-name, or future HA endpoint set can make the two surfaces different.
+provided with one or more repeated `--api-endpoint` options. Before mutation,
+the sorted supplied set must equal the complete authenticated, explicitly-ready
+IPv4 address set from every `kubernetes.default` EndpointSlice, with exactly the
+reviewed `https`/TCP/6443 port. The bound snapshot includes each slice name,
+UID, resourceVersion, address type, port, readiness, and address, and is checked
+again across every mutation boundary. A missing, extra, duplicate, stale,
+malformed, unready, or concurrently changed member fails closed. The endpoints
+are never inferred from the operator-facing `--server`, because a local proxy,
+VIP, DNS name, or future HA endpoint set can make the two surfaces different.
 
 The committed policy keeps `192.0.2.0/32` as a non-routable sentinel. In a
 mode-0700 temporary directory the installer replaces the one reviewed sentinel
@@ -89,10 +96,12 @@ with the reviewed render. No other byte may change, and the private endpoint
 set is neither written to Git nor printed as evidence.
 
 A CNI other than Calico, an unproved Calico identity, IPv6, a subnet, a
-duplicate, loopback, multicast, noncanonical IPv4 text, or an endpoint set that
-does not make the in-Pod canary succeed is a stop condition. Supporting another
-CNI requires its own reviewed destination and canary contract; changing the
-flag is not sufficient.
+duplicate, loopback, multicast, noncanonical IPv4 text, an endpoint set that is
+not the complete authenticated live EndpointSlice set, or a set that does not
+make the in-Pod canary succeed is a stop condition. EndpointSlice membership
+proves every allowed `/32`; the canary separately proves one authenticated
+Service/dataplane path. Supporting another CNI requires its own reviewed
+destination and canary contract; changing the flag is not sufficient.
 
 ## Preconditions and absolute boundary
 
@@ -128,9 +137,15 @@ Ingress, Gateway, host port, or host network. Stop rather than expand the scope.
   `--expect-canary-sha256`: controller, policy-template, and executable-canary
   bytes must all reproduce review evidence;
 - `--expect-commit`: binds the installer and every guard, not just its output;
-- the `versions.env` Kustomize version, Kubernetes client version, platform
-  kubectl binary SHA-256, and exact tagged-and-digested
+- the `versions.env` Kustomize version and Linux AMD64 executable SHA-256,
+  Kubernetes client version, platform kubectl binary SHA-256, and exact tagged-and-digested
   `FLUX_API_CANARY_IMAGE`.
+
+The installer first resolves each executable, copies it into its mode-0700 work
+directory, removes write permission, hashes that private copy, and only then
+invokes the copy. A matching self-reported version is not provenance. The
+current Kustomize executable pin deliberately admits only the reviewed official
+Linux AMD64 v5.8.1 bytes for a live ceremony.
 
 An OCI identity such as `image:vX.Y.Z@sha256:...` is both readable and
 immutable; the digest remains part of the identity. Release tags remain exactly
@@ -177,9 +192,11 @@ from the execution checkout merely because they are reproducible.
 ```
 
 The plan renders and validates all three surfaces, proves the selected Calico
-identity, expands and round-trips the private endpoint set, performs
-**client-side strict validation**, and runs read-only existence, ownership, and
-server-dry-run checks. It does not create the canary or any other object.
+identity, authenticates the supplied private endpoint set against the complete
+live `kubernetes.default` EndpointSlice set, expands and round-trips it,
+performs **client-side strict validation**, and runs read-only existence,
+ownership, and server-dry-run checks. It does not create the canary or any other
+object.
 
 On a fresh cluster, server dry-run cannot persist the dry-run Namespace before
 validating its children
@@ -201,17 +218,25 @@ prestate after an in-place rewrite.
 ./scripts/install-flux-controllers.sh --apply "${COMMON_ARGS[@]}"
 ```
 
-Run only when the plan proves the complete fresh state. The installer applies
-phase 1, phase 2, creates the exact canary absent-only, waits up to 60 seconds
-for `Succeeded`, reads that terminal phase independently, deletes the Pod, and
-proves it absent before creating any controller Deployment. A create response
-can be lost after the API server persists the Pod; the prestate proof and live
-rediscovery ledger still identify it as this attempt's object and remove it.
+Run only when the plan proves the complete fresh state. The installer gives
+every object an unpredictable 256-bit per-attempt annotation and uses
+`kubectl create --save-config`, never a reconciling mutation. It creates phase
+1, phase 2, creates the exact canary absent-only, waits up to 60 seconds for
+`Succeeded`, reads that terminal phase independently, conditionally deletes the
+Pod, and proves its exact UID gone and its name absent before creating any
+controller Deployment. A concurrent same-name object can produce
+`AlreadyExists` or a lost response, but cannot be adopted, rewritten, or
+attributed to this attempt.
 
-Every mutation enters the ledger before the request. On failure or `INT`,
-`TERM`, or `HUP`, the installer re-derives creations from kubectl output and
-live existence, deletes them newest-first, and proves every recorded object
-absent. It reports `ROLLBACK INCOMPLETE` and exact residue rather than claiming
+Every attempted manifest enters the transaction before its request. On failure
+or `INT`, `TERM`, or `HUP`, the installer rebuilds its ledger from live objects
+whose attempt annotation exactly matches. It deletes those objects newest-first
+with both UID and resourceVersion in Kubernetes `DeleteOptions` preconditions,
+then proves each captured UID gone. A foreign collision or concurrent
+replacement is reported and left untouched; an uncertain namespaced collision
+also prevents cascading Namespace deletion. A lost successful DELETE response
+is accepted only after the captured UID is independently proved gone. The
+installer reports `ROLLBACK INCOMPLETE` and exact residue rather than claiming
 success when cleanup cannot be proved. A signal before mutation leaves the
 cluster unchanged; a second signal cannot re-enter rollback.
 
@@ -255,17 +280,21 @@ This mode refuses unless:
 
 - all three Deployments satisfy the scalable current-generation N/N invariant;
 - every Flux CRD query succeeds cleanly and returns zero objects;
-- all four startup NetworkPolicies exist and server dry-run reports each exact
-  private endpoint-bound object `unchanged`; and
+- all four startup NetworkPolicies carry one canonical install-attempt identity
+  and server dry-run reports each exact private endpoint-bound object
+  `unchanged`;
 - `flux-controllers-public-https` is absent.
 
-The public policy is an **absent-only transaction**. It uses `create`, never a
+The public policy is an **absent-only transaction**. It receives a fresh,
+unpredictable attempt annotation and uses `create --save-config`, never a
 reconciling `apply`; it never adopts, rewrites, or deletes pre-existing state.
-The manifest enters the response-loss-safe ledger before creation. After a
-successful response, server dry-run must report the exact reviewed object
+The manifest enters the response-loss-safe transaction before creation. After a
+successful response, server dry-run must report the exact attempt-bound object
 `unchanged`. A lost response, signal, diagnostic, unexpected line, or poststate
-drift rolls back only the object proven absent before this attempt, then proves
-absence. Only exact poststate commits the transaction.
+drift invokes rollback, but deletion is permitted only for the matching attempt
+annotation and captured UID/resourceVersion. A concurrent foreign winner is
+reported and left untouched. Only exact poststate and an unchanged authoritative
+EndpointSlice snapshot commit the transaction.
 
 The rule permits public destinations on TCP 443 while excluding private,
 loopback, link-local, carrier-grade-NAT, multicast, and reserved ranges. Its
