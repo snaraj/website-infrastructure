@@ -20,8 +20,9 @@ FORBIDDEN_IDENTITY = (
     "lidersea",
     "snaraj",
     "samuel",
-    # Hosts and host aliases.
-    "pie5",
+    # Host and service names. Aliases of the edge host are matched as a SHAPE
+    # below rather than listed here: a denylist that spells out the value it
+    # protects publishes it to everyone who reads the denylist.
     "pi-admin",
     "pi-websites",
     # This repository, and the agent labels that only exist in these
@@ -72,6 +73,10 @@ FORBIDDEN_IDENTITY_SHAPES = {
     "short commit": re.compile(
         r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,39}\b"
     ),
+    # A single-board-host alias: the family name followed by a unit number,
+    # in any of its spellings. A shape, so this file never has to name the
+    # host it is protecting.
+    "host alias": re.compile(r"(?i)\bpi[a-z]*[-_ ]?[0-9]+\b"),
     "windows workstation path": re.compile(r"(?i)[A-Z]:[\\/](?:Users|dev)[\\/]"),
     # No trailing slash required: the leaf is usually the operator's name,
     # which is exactly the part that must not ship.
