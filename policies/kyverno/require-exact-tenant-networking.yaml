@@ -4,7 +4,7 @@ metadata:
   name: require-exact-tenant-networking
   annotations:
     policies.kyverno.io/category: Networking
-    policies.kyverno.io/description: Admit only the exact cloudflared-to-site TCP 8080 cross-namespace flow and no site egress.
+    policies.kyverno.io/description: Admit only the exact ingress-to-site TCP 8080 cross-namespace flow and no site egress.
 spec:
   admission: true
   background: true
@@ -45,7 +45,7 @@ spec:
                 (object.metadata.name == 'default-deny' && object.spec.podSelector.size() == 0 &&
                 (!has(object.spec.ingress) || object.spec.ingress.size() == 0) &&
                 (!has(object.spec.egress) || object.spec.egress.size() == 0)) ||
-                (object.metadata.name == 'cloudflared-to-' + object.metadata.namespace &&
+                (object.metadata.name == 'ingress-to-' + object.metadata.namespace &&
                 has(object.spec.podSelector.matchLabels) &&
                 object.spec.podSelector.matchLabels.size() == 2 &&
                 object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == object.metadata.namespace &&
@@ -58,8 +58,9 @@ spec:
                 object.spec.ingress[0].from[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == 'cloudflare-public' &&
                 has(object.spec.ingress[0].from[0].podSelector) &&
                 has(object.spec.ingress[0].from[0].podSelector.matchLabels) &&
-                object.spec.ingress[0].from[0].podSelector.matchLabels.size() == 1 &&
+                object.spec.ingress[0].from[0].podSelector.matchLabels.size() == 2 &&
                 object.spec.ingress[0].from[0].podSelector.matchLabels['app.kubernetes.io/name'] == 'cloudflare-public' &&
+                object.spec.ingress[0].from[0].podSelector.matchLabels['app.kubernetes.io/instance'] == object.metadata.namespace + '-tunnel' &&
                 has(object.spec.ingress[0].ports) && object.spec.ingress[0].ports.size() == 1 &&
                 object.spec.ingress[0].ports[0].port == 8080 &&
                 (!has(object.spec.ingress[0].ports[0].protocol) || object.spec.ingress[0].ports[0].protocol == 'TCP') &&
@@ -79,9 +80,6 @@ spec:
             - expression: >-
                 object.metadata.name == 'default-deny' ||
                 (has(object.spec.podSelector.matchLabels) &&
-                object.spec.podSelector.matchLabels.size() == 2 &&
-                object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == 'cloudflare-public' &&
-                object.spec.podSelector.matchLabels['app.kubernetes.io/instance'] == 'cloudflare-public' &&
                 has(object.spec.policyTypes) && object.spec.policyTypes.size() == 1 &&
                 object.spec.policyTypes[0] == 'Egress' &&
                 (!has(object.spec.ingress) || object.spec.ingress.size() == 0) &&
@@ -89,6 +87,8 @@ spec:
                 has(object.spec.egress[0].to) && object.spec.egress[0].to.size() == 1 &&
                 has(object.spec.egress[0].ports) &&
                 ((object.metadata.name == 'cloudflared-dns' &&
+                object.spec.podSelector.matchLabels.size() == 1 &&
+                object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == 'cloudflare-public' &&
                 has(object.spec.egress[0].to[0].namespaceSelector.matchLabels) &&
                 object.spec.egress[0].to[0].namespaceSelector.matchLabels.size() == 1 &&
                 object.spec.egress[0].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == 'kube-system' &&
@@ -100,6 +100,8 @@ spec:
                 object.spec.egress[0].ports.exists(port, port.port == 53 && port.protocol == 'TCP') &&
                 object.spec.egress[0].ports.exists(port, port.port == 53 && port.protocol == 'UDP')) ||
                 (object.metadata.name == 'cloudflared-edge' &&
+                object.spec.podSelector.matchLabels.size() == 1 &&
+                object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == 'cloudflare-public' &&
                 has(object.spec.egress[0].to[0].ipBlock) &&
                 object.spec.egress[0].to[0].ipBlock.cidr == '0.0.0.0/0' &&
                 has(object.spec.egress[0].to[0].ipBlock.except) &&
@@ -110,6 +112,9 @@ spec:
                 object.spec.egress[0].ports.exists(port, port.port == 7844 && port.protocol == 'TCP') &&
                 object.spec.egress[0].ports.exists(port, port.port == 7844 && port.protocol == 'UDP')) ||
                 (object.metadata.name in ['cloudflared-naranjo-online', 'cloudflared-lidersea-com'] &&
+                object.spec.podSelector.matchLabels.size() == 2 &&
+                object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == 'cloudflare-public' &&
+                object.spec.podSelector.matchLabels['app.kubernetes.io/instance'] == object.metadata.name.replace('cloudflared-', '') + '-tunnel' &&
                 has(object.spec.egress[0].to[0].namespaceSelector.matchLabels) &&
                 object.spec.egress[0].to[0].namespaceSelector.matchLabels.size() == 1 &&
                 object.spec.egress[0].to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == object.metadata.name.replace('cloudflared-', '') &&

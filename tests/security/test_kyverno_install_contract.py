@@ -68,6 +68,7 @@ CORE_POLICIES = (
     "require-approved-images",
     "require-exact-tenant-networking",
     "require-release-readiness",
+    "require-replicaset-admission-identity",
     "require-restricted-workloads",
     "require-zero-site-capacity",
 )
@@ -76,6 +77,12 @@ SIGNATURE_POLICIES = ("require-signed-lidersea-com", "require-signed-naranjo-onl
 
 def read(path):
     return path.read_text(encoding="utf-8")
+
+
+def write_exact(path, text):
+    """Write fixture bytes with LF endings on every test host."""
+
+    path.write_bytes(text.encode("utf-8"))
 
 
 def capture(pattern, text, description):
@@ -152,6 +159,7 @@ def render(stage):
         [required_tool(KUSTOMIZE, "kustomize is required"), "build", str(INSTALL_ROOT / stage)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     )
     return completed.stdout
@@ -204,9 +212,9 @@ NEEDS_KUSTOMIZE = "kustomize is not installed"
 # the enforcing value disappears from the difference list instead of failing it.
 # The counts are what make a disappearance loud.
 STAGE_DIFFERENCE_COUNTS = {
-    "failureAction": 31,
-    "failurePolicy": 10,
-    "validationFailureAction": 8,
+    "failureAction": 33,
+    "failurePolicy": 11,
+    "validationFailureAction": 11,
 }
 
 # The reviewed rule inventory: every rule name each committed policy declares,
@@ -241,6 +249,7 @@ REVIEWED_RULE_NAMES = {
         "disallow-stateful-claim-templates",
         "allow-only-site-scratch-volumes",
         "allow-only-tunnel-token-volume",
+        "allow-only-own-instance-token-env",
         "disallow-legacy-service-account-token-secrets",
         "disallow-disk-pressure-toleration",
         "disallow-wildcard-toleration",
@@ -261,6 +270,9 @@ REVIEWED_RULE_NAMES = {
         "require-replicaset-owned-by-exact-deployment",
         "require-site-deployment-readiness",
         "require-tunnel-token-revision",
+    ),
+    "require-replicaset-admission-identity": (
+        "require-replicaset-controller-and-live-owner-uid",
     ),
     "require-restricted-workloads": (
         "require-restricted-tenant-namespace",
@@ -329,8 +341,8 @@ REVIEWED_PHASE_KINDS = {
     "namespace": ("Namespace",),
     "bounds": ("ResourceQuota", "LimitRange"),
     "network": ("NetworkPolicy",),
-    "controller": (
-        "CustomResourceDefinition",
+    "crds": ("CustomResourceDefinition",),
+    "controller-prerequisites": (
         "ConfigMap",
         "ServiceAccount",
         "ClusterRole",
@@ -338,10 +350,10 @@ REVIEWED_PHASE_KINDS = {
         "Role",
         "RoleBinding",
         "Service",
-        "Deployment",
         "PodDisruptionBudget",
         "PriorityClass",
     ),
+    "controller": ("Deployment",),
     "policies": ("ClusterPolicy", "Policy"),
 }
 # Every kind above that Kubernetes scopes INSIDE a namespace. The complement of
@@ -598,6 +610,12 @@ class StagedRolloutTests(unittest.TestCase):
         for name in SIGNATURE_POLICIES:
             policy = read(POLICIES / (name + ".yaml"))
             with self.subTest(policy=name):
+                self.assertIn(
+                    "  validationFailureAction: Enforce",
+                    policy.splitlines(),
+                    "stage 2 must reject an unsigned or wrong-identity image; "
+                    "the report-only overlay performs the only Audit downgrade",
+                )
                 self.assertNotIn("failureAction:", policy)
                 self.assertFalse(
                     (REPORT_ONLY / "patches" / ("audit-" + name + ".yaml")).exists()
@@ -743,6 +761,10 @@ class EngineConfigurationTests(unittest.TestCase):
         # short reference would let a name pass a check written for a digest.
         self.assertIn('enableDefaultRegistryMutation: "false"', self.text)
 
+    def test_replicasets_reach_the_admission_identity_rule(self):
+        self.assertNotIn("[ReplicaSet,*,*]", self.text)
+        self.assertNotIn("[ReplicaSet/?*,*,*]", self.text)
+
 
 class NamespaceTwinTests(unittest.TestCase):
     """The operator-applied namespace and the one Flux will adopt are one
@@ -786,7 +808,16 @@ class OrderingContractTests(unittest.TestCase):
             r"(?m)^PHASE_NAMES=\((.*)\)$", self.installer, "the installer's phase order"
         ).split()
         self.assertEqual(
-            ordered, ["namespace", "bounds", "network", "controller", "policies"]
+            ordered,
+            [
+                "namespace",
+                "bounds",
+                "network",
+                "crds",
+                "controller-prerequisites",
+                "controller",
+                "policies",
+            ],
         )
 
     def test_there_is_no_webhook_phase(self):
@@ -840,9 +871,10 @@ class OrderingContractTests(unittest.TestCase):
         destinations = re.findall(
             r"(?m)^\s+cidr:\s+(\S+)\s*$", read(ENFORCE / "network-policies.yaml")
         )
-        self.assertEqual(destinations.count("192.0.2.0/32"), 2)
-        self.assertIn("SENTINEL_OCCURRENCES=2", self.installer)
-        self.assertIn("SENTINEL_CIDR='192.0.2.0/32'", self.installer)
+        self.assertEqual(destinations.count("192.0.2.10/32"), 1)
+        self.assertEqual(destinations.count("192.0.2.20/32"), 1)
+        self.assertIn("WEBHOOK_SOURCE_SENTINEL_CIDR='192.0.2.10/32'", self.installer)
+        self.assertIn("RUNTIME_API_SENTINEL_CIDR='192.0.2.20/32'", self.installer)
 
 
 class AdmissionNetworkShapeTests(unittest.TestCase):
@@ -918,18 +950,16 @@ class AdmissionNetworkShapeTests(unittest.TestCase):
 
     def test_the_webhook_ingress_is_one_host_on_one_port(self):
         document = self._document("kyverno-admission-webhook")
-        self.assertEqual(self._values(document, "cidr"), ["192.0.2.0/32"])
+        self.assertEqual(self._values(document, "cidr"), ["192.0.2.10/32"])
         self.assertNotIn("except:", document)
         self.assertEqual(self._values(document, "port"), ["9443"])
         self.assertEqual(self._values(document, "protocol"), ["TCP"])
 
-    def test_the_api_server_egress_is_one_host_on_one_port(self):
-        # "While we are here, let it also reach the kubelet" is how 10250 gets
-        # granted; a second port here would be exactly that change.
+    def test_the_runtime_api_egress_is_a_separate_fail_closed_shape(self):
         document = self._document("kyverno-kube-apiserver")
-        self.assertEqual(self._values(document, "cidr"), ["192.0.2.0/32"])
+        self.assertEqual(self._values(document, "cidr"), ["192.0.2.20/32"])
         self.assertNotIn("except:", document)
-        self.assertEqual(self._values(document, "port"), ["6443"])
+        self.assertEqual(self._values(document, "port"), ["65535"])
         self.assertEqual(self._values(document, "protocol"), ["TCP"])
 
     def test_the_public_https_egress_excludes_every_reviewed_range(self):
@@ -1017,9 +1047,9 @@ class ResourceBoundsTests(unittest.TestCase):
         self.assertIn("requests.cpu: 400m", self.bounds)
         self.assertIn("requests.memory: 768Mi", self.bounds)
 
-    def test_one_replica_on_a_one_node_cluster(self):
-        self.assertRegex(self.patch, r"(?m)^  path: /spec/replicas$")
-        self.assertRegex(self.patch, r"(?m)^  value: 1$")
+    def test_replica_count_is_not_forced_by_the_runtime_patch(self):
+        self.assertNotIn("path: /spec/replicas", self.patch)
+        self.assertIn("capacity/availability decision", self.patch)
 
     def test_admission_outranks_the_workloads_it_protects(self):
         # An evicted admission controller with an enforcing webhook registered
@@ -1091,7 +1121,7 @@ class RenderLockTests(unittest.TestCase):
         )
         declared = {
             phase: tuple(kinds.split("|"))
-            for phase, kinds in re.findall(r"\[(\w+)\]='([^']+)'", block)
+            for phase, kinds in re.findall(r"\[([a-z0-9-]+)\]='([^']+)'", block)
         }
         self.assertEqual(
             declared,
@@ -1234,9 +1264,15 @@ class RealRepositoryTests(unittest.TestCase):
 
         self.assertEqual(lock_value("stage.enforce.authorized"), "no")
         blockers = lock_value("stage.enforce.blocked-by")
-        for issue in ("#99", "#100", "#102", "#87", "#96"):
+        for issue in ("#100", "#101", "#102", "runtime-network-canary"):
             with self.subTest(issue=issue):
                 self.assertIn(issue, blockers)
+
+    def test_stage_one_is_recorded_as_not_authorized(self):
+        self.assertEqual(lock_value("stage.report-only.authorized"), "no")
+        blockers = lock_value("stage.report-only.blocked-by")
+        self.assertIn("#101", blockers)
+        self.assertIn("runtime-network-canary", blockers)
 
     def test_the_runbook_states_that_stage_two_is_not_authorized(self):
         """Pinned as STRUCTURE, not as a substring.
@@ -1264,7 +1300,7 @@ class RealRepositoryTests(unittest.TestCase):
             runbook.index("--stage enforce"),
             "the refusal must precede the first promotion instruction",
         )
-        for issue in ("#99", "#100", "#102", "#87", "#96"):
+        for issue in ("#100", "#101", "#102", "runtime-network-canary"):
             with self.subTest(issue=issue):
                 self.assertIn(issue, runbook)
 
@@ -1291,9 +1327,30 @@ class RealRepositoryTests(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("stage enforce is NOT AUTHORIZED", completed.stderr)
-        for issue in ("#99", "#100", "#102"):
+        for issue in ("#100", "#101", "#102", "runtime-network-canary"):
             with self.subTest(issue=issue):
                 self.assertIn(issue, completed.stderr)
+
+    @unittest.skipUnless(BASH, BASH_REQUIRED)
+    def test_applying_stage_one_in_the_real_repository_is_refused_before_tools(self):
+        completed = subprocess.run(
+            [
+                required_tool(BASH, BASH_REQUIRED),
+                str(INSTALLER),
+                "--stage",
+                "report-only",
+                "--apply",
+                "--journal",
+                os.path.join(os.environ.get("TMPDIR", "/tmp"), "never-written-stage1.journal"),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("stage report-only is NOT AUTHORIZED", completed.stderr)
+        self.assertIn("#101", completed.stderr)
+        self.assertIn("runtime-network-canary", completed.stderr)
 
     def test_the_staged_controller_digest_is_still_the_all_zero_sentinel(self):
         controllers = read(ADMISSION / "kyverno" / "controllers.yaml")
@@ -1303,14 +1360,12 @@ class RealRepositoryTests(unittest.TestCase):
     def test_planning_the_real_repository_fails_closed(self):
         """Every apply path in THIS repository refuses, and names why.
 
-        Which guard refuses depends on the machine. Where kubectl is the pinned
-        version — the reviewed operator workstation — the tool binding passes
-        and the refusal is the missing platform-lane pins, after the render has
-        already been proven against the lock. Where it is not, the tool binding
-        refuses first, which is the same fail-closed property one guard earlier.
-        Asserting only the first message would make this test a fact about the
-        runner image rather than about the installer, which is exactly how it
-        first went red in CI.
+        Which guard refuses depends on the machine. The version-pinned Windows
+        renderer used for local render comparison cannot satisfy the separately
+        pinned Linux executable hash, while Linux CI may reach the kubectl
+        version guard or the intentionally missing controller pins. Every one
+        is a valid earlier fail-closed boundary; the assertion names them rather
+        than pretending a version match implies immutable tool identity.
         """
 
         for stage in ("report-only", "enforce"):
@@ -1334,9 +1389,11 @@ class RealRepositoryTests(unittest.TestCase):
                 else:
                     self.assertRegex(
                         completed.stderr,
-                        r"kubectl is \S+; versions\.env pins " + re.escape(
-                            pinned_version("KUBERNETES_VERSION")
-                        ),
+                        r"(?:kustomize executable sha256 [0-9a-f]{64} does not "
+                        r"match versions\.env KUSTOMIZE_LINUX_AMD64_SHA256|"
+                        r"kubectl is \S+; versions\.env pins "
+                        + re.escape(pinned_version("KUBERNETES_VERSION"))
+                        + r")",
                     )
 
 
@@ -1378,7 +1435,7 @@ class RunbookTests(unittest.TestCase):
         command = section.index("./scripts/install-kyverno-admission.sh")
         preamble = section[:command]
         self.assertIn("NOT AUTHORIZED", preamble)
-        for issue in ("#99", "#100", "#102"):
+        for issue in ("#100", "#101", "#102", "runtime-network-canary"):
             with self.subTest(issue=issue):
                 self.assertIn(issue, preamble)
 
@@ -1388,14 +1445,18 @@ class RunbookTests(unittest.TestCase):
 
 # --- behavioural harness -----------------------------------------------------
 
-# A synthetic render whose SHAPE is what the installer classifies: 14 documents,
-# 3 of them cluster-scoped, two carrying the sentinel destination, one pinned
+# A synthetic render whose SHAPE is what the installer classifies: 15 documents,
+# 4 of them cluster-scoped, two carrying distinct network sentinels, one pinned
 # image, and the engine exclusions the guards look for. Field meaning is
 # irrelevant here — kubectl is stubbed — but every property a guard reads must
 # be genuinely present, or an acceptance test would pass by dying early.
 PINNED_IMAGE = (
     "reg.kyverno.io/kyverno/kyverno:v1.18.2@sha256:"
     "1111111111111111111111111111111111111111111111111111111111111111"
+)
+PINNED_CANARY_IMAGE = (
+    "registry.k8s.io/e2e-test-images/agnhost:2.56@sha256:"
+    "2222222222222222222222222222222222222222222222222222222222222222"
 )
 SYNTHETIC_DOCUMENTS = [
     "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: kyverno\n",
@@ -1405,14 +1466,17 @@ SYNTHETIC_DOCUMENTS = [
     "  name: default-deny\n  namespace: kyverno\n",
     "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
     "  name: kyverno-admission-webhook\n  namespace: kyverno\nspec:\n"
-    "  ingress:\n  - from:\n    - ipBlock:\n        cidr: 192.0.2.0/32\n",
+    "  ingress:\n    - from:\n        - ipBlock:\n            cidr: 192.0.2.10/32\n",
     "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
     "  name: kyverno-dns\n  namespace: kyverno\n",
     "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
     "  name: kyverno-kube-apiserver\n  namespace: kyverno\nspec:\n"
-    "  egress:\n  - to:\n    - ipBlock:\n        cidr: 192.0.2.0/32\n",
+    "  egress:\n    - to:\n        - ipBlock:\n            cidr: 192.0.2.20/32\n"
+    "      ports:\n        - port: 65535\n",
     "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
     "  name: kyverno-public-https\n  namespace: kyverno\n",
+    "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n"
+    "  name: clusterpolicies.kyverno.io\n",
     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: kyverno\n  namespace: kyverno\ndata:\n"
     "  excludeGroups: system:nodes\n"
     "  resourceFilters: >-\n    [*/*,kube-system,*] [*/*,flux-system,*] [*/*,kyverno,*]\n"
@@ -1438,7 +1502,10 @@ SYNTHETIC_RENDER = "---\n".join(SYNTHETIC_DOCUMENTS)
 SYNTHETIC_ENFORCE_RENDER = SYNTHETIC_RENDER.replace(
     "failurePolicy: Ignore", "failurePolicy: Fail"
 ).replace("failureAction: Audit", "failureAction: Enforce")
-SYNTHETIC_CLUSTER_SCOPED = "Namespace/kyverno,ClusterPolicy/alpha,ClusterPolicy/beta"
+SYNTHETIC_CLUSTER_SCOPED = (
+    "Namespace/kyverno,CustomResourceDefinition/clusterpolicies.kyverno.io,"
+    "ClusterPolicy/alpha,ClusterPolicy/beta"
+)
 
 # The stubbed kubectl. It reproduces the report shapes the guards classify and
 # appends every invocation to KYVERNO_STUB_LOG so ordering can be asserted.
@@ -1453,10 +1520,32 @@ case "$args" in
     printf '%s\n' "${KYVERNO_STUB_KUBECONFIG_SERVER:-https://198.51.100.7:6443}"; exit 0 ;;
 esac
 case "$args" in
+  *"get service kubernetes"*) printf '192.0.2.30|443\n'; exit 0 ;;
+  *"get endpoints kubernetes"*addresses*) printf '203.0.113.20\n203.0.113.21\n'; exit 0 ;;
+  *"get endpoints kubernetes"*ports*) printf '6443\n'; exit 0 ;;
+  *"get nodes -l node-role.kubernetes.io/control-plane"*) printf '203.0.113.10\n203.0.113.11\n'; exit 0 ;;
+  *"get namespace kyverno"*install-render-sha256*) printf '%s\n' "${KYVERNO_STUB_LIVE_BINDING}"; exit 0 ;;
+  *"get pod kyverno-network-canary"*)
+    echo 'Error from server (NotFound): pods "kyverno-network-canary" not found' >&2; exit 1 ;;
+  *"create -f"*network-canary.yaml*)
+    target="${args##*create -f }"
+    sed 's/^/CANARY /' "$target" >>"${KYVERNO_STUB_LOG:-/dev/null}"
+    printf 'pod/kyverno-network-canary created\n'; exit 0 ;;
+  *"annotate namespace kyverno"*) printf 'namespace/kyverno annotated\n'; exit 0 ;;
   *"--dry-run=client"*)
     if [[ "$scenario" == client-invalid ]]; then
       echo 'error: strict decoding error: unknown field "spec.bogus"' >&2; exit 1; fi
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf 'object/%s created (dry run)\n' "$i"; done
+    target=''; previous=''
+    for argument in "$@"; do
+      [[ "$previous" != '-f' ]] || target="$argument"
+      previous="$argument"
+    done
+    if grep -q '^kind: ClusterPolicy$' "$target" 2>/dev/null &&
+       [[ ! -f "${KYVERNO_STUB_CRD_READY}" ]]; then
+      echo 'no matches for kind "ClusterPolicy" in version "kyverno.io/v1"; ensure CRDs are installed first' >&2
+      exit 1
+    fi
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do printf 'object/%s created (dry run)\n' "$i"; done
     exit 0 ;;
   *"get namespace kyverno"*)
     if [[ "$scenario" == namespace-present ]]; then printf 'namespace/kyverno\n'; exit 0; fi
@@ -1468,11 +1557,14 @@ case "$args" in
     if [[ "$scenario" == probe-unreadable ]]; then
       echo 'Error from server (Forbidden): clusterpolicies.kyverno.io is forbidden' >&2; exit 1; fi
     echo 'Error from server (NotFound)' >&2; exit 1 ;;
+  *"get CustomResourceDefinition "*)
+    echo 'Error from server (NotFound)' >&2; exit 1 ;;
   *"get deployment -l app.kubernetes.io/part-of=kyverno"*)
     case "$scenario" in
       enforce-ready|enforce-no-reports|enforce-already|enforce-rule-enforcing|enforce-foreign-reports|enforce-rule-unreadable)
-        printf 'kyverno-admission-controller=1\n'; exit 0 ;;
-      enforce-unhealthy) printf 'kyverno-admission-controller=\n'; exit 0 ;;
+        printf 'kyverno-admission-controller|1|1|1|1|1\n'; exit 0 ;;
+      enforce-unhealthy) printf 'kyverno-admission-controller|1|1|2|2|1\n'; exit 0 ;;
+      enforce-stale) printf 'kyverno-admission-controller|2|1|1|1|1\n'; exit 0 ;;
     esac
     exit 0 ;;
   # The DEPRECATED spec-level action, and the rule-level one Kyverno actually
@@ -1500,11 +1592,19 @@ case "$args" in
   # to the reviewed policy set instead of counted.
   *"get policyreports"*)
     case "$scenario" in
-      enforce-ready|enforce-rule-enforcing|enforce-already) printf 'alpha\nbeta\n' ;;
-      enforce-foreign-reports) printf 'some-unrelated-policy\n' ;;
+      enforce-ready|enforce-rule-enforcing|enforce-already) printf 'alpha|%s\nbeta|%s\n' "$(date -u +%s)" "$(date -u +%s)" ;;
+      enforce-foreign-reports) printf 'some-unrelated-policy|%s\n' "$(date -u +%s)" ;;
     esac
     exit 0 ;;
-  *"wait "*) exit 0 ;;
+  *"wait "*)
+    if [[ "$scenario" == network-canary-fail && "$args" == *"pod/kyverno-network-canary"* ]]; then
+      echo 'timed out waiting for canary' >&2
+      exit 1
+    fi
+    if [[ "$args" == *"--for=condition=Established crd/clusterpolicies.kyverno.io"* ]]; then
+      : >"${KYVERNO_STUB_CRD_READY}"
+    fi
+    exit 0 ;;
   *"apply -f"*)
     target=''; previous=''
     for argument in "$@"; do
@@ -1513,6 +1613,7 @@ case "$args" in
     done
     if [[ -f "$target" ]]; then
       grep -h 'cidr:' "$target" 2>/dev/null | sed 's/^/CIDR /' >>"${KYVERNO_STUB_LOG:-/dev/null}" || true
+      grep -h 'port:' "$target" 2>/dev/null | sed 's/^/PORT /' >>"${KYVERNO_STUB_LOG:-/dev/null}" || true
       # What was APPLIED, not what was announced: the recorded action fields are
       # how a test can tell a demotion that shipped the fail-open bytes from one
       # that shipped the enforcing bytes and printed the fail-open message.
@@ -1527,7 +1628,19 @@ case "$args" in
     if [[ -n "${KYVERNO_STUB_SIGNAL_PHASE:-}" && "$args" == *"phase-${KYVERNO_STUB_SIGNAL_PHASE}.yaml"* ]]; then
       kill -TERM "$PPID" 2>/dev/null || true; fi
     printf 'applied\n'; exit 0 ;;
+  *"delete validatingwebhookconfiguration kyverno-policy-validating-webhook-cfg"*)
+    if [[ "$scenario" == webhook-delete-failure ]]; then
+      echo 'Error from server (Forbidden): simulated exact-name delete failure' >&2
+      exit 1
+    fi
+    printf 'deleted\n'; exit 0 ;;
   *"delete "*) printf 'deleted\n'; exit 0 ;;
+  *"get validatingwebhookconfiguration kyverno-"*|*"get mutatingwebhookconfiguration kyverno-"*)
+    if [[ "$scenario" == webhook-read-forbidden ]]; then
+      echo 'Error from server (Forbidden): webhookconfiguration is forbidden' >&2; exit 1; fi
+    if [[ "$scenario" == residue && "$args" == *"kyverno-resource-validating-webhook-cfg"* ]]; then
+      printf 'validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg\n'; exit 0; fi
+    echo 'Error from server (NotFound)' >&2; exit 1 ;;
   *"get validatingwebhookconfiguration"*|*"get mutatingwebhookconfiguration"*)
     # The deletes above SUCCEED in this scenario and only the READ fails, which
     # is the sharp form of the defect: the sweep did everything it was asked to
@@ -1569,11 +1682,11 @@ class InstallerGuardTests(unittest.TestCase):
         (cls.repo / "kubernetes" / "platform" / "admission-install").mkdir(parents=True)
 
         cls.render = cls.base / "render.yaml"
-        cls.render.write_text(SYNTHETIC_RENDER, encoding="utf-8")
+        write_exact(cls.render, SYNTHETIC_RENDER)
         cls.enforce_render = cls.base / "render-enforce.yaml"
-        cls.enforce_render.write_text(SYNTHETIC_ENFORCE_RENDER, encoding="utf-8")
-        digest = hashlib.sha256(SYNTHETIC_RENDER.encode("utf-8")).hexdigest()
-        enforce_digest = hashlib.sha256(SYNTHETIC_ENFORCE_RENDER.encode("utf-8")).hexdigest()
+        write_exact(cls.enforce_render, SYNTHETIC_ENFORCE_RENDER)
+        digest = hashlib.sha256(cls.render.read_bytes()).hexdigest()
+        enforce_digest = hashlib.sha256(cls.enforce_render.read_bytes()).hexdigest()
         objects = len(re.findall(r"(?m)^kind:", SYNTHETIC_RENDER))
         (cls.repo / "kubernetes" / "platform" / "admission-install" / "render.lock").write_text(
             "\n".join(
@@ -1584,7 +1697,7 @@ class InstallerGuardTests(unittest.TestCase):
                     "report-only.objects=" + str(objects),
                     "enforce.sha256=" + enforce_digest,
                     "enforce.objects=" + str(objects),
-                    "inventory.cluster-scoped=3",
+                    "inventory.cluster-scoped=4",
                     "inventory.namespaced=11",
                     "inventory.cluster-scoped.names=" + SYNTHETIC_CLUSTER_SCOPED,
                     # The synthetic repository is where the promotion gate is
@@ -1592,6 +1705,10 @@ class InstallerGuardTests(unittest.TestCase):
                     # and RealRepositoryTests pins that refusal.
                     "stage.enforce.authorized=yes",
                     "stage.enforce.blocked-by=nothing (synthetic fixture)",
+                    "stage.enforce.minimum-observation-seconds=0",
+                    "stage.report-only.authorized=yes",
+                    "stage.report-only.blocked-by=nothing (synthetic fixture)",
+                    "runtime.controllers.names=kyverno-admission-controller",
                     "runtime.webhooks.label=webhook.kyverno.io/managed-by=kyverno",
                     # TWO names per kind, deliberately: with one, a sweep that
                     # only ever removed the first entry would look complete.
@@ -1614,6 +1731,7 @@ class InstallerGuardTests(unittest.TestCase):
                     "KYVERNO_ADMISSION_CONTROLLER_IMAGE=" + PINNED_IMAGE,
                     "KYVERNO_REPORTS_CONTROLLER_IMAGE=" + PINNED_IMAGE,
                     "KYVERNO_KYVERNOPRE_IMAGE=" + PINNED_IMAGE,
+                    "KYVERNO_NETWORK_CANARY_IMAGE=" + PINNED_CANARY_IMAGE,
                     "",
                 ]
             ),
@@ -1637,9 +1755,72 @@ class InstallerGuardTests(unittest.TestCase):
         kubectl = cls.bin / "kubectl"
         kubectl.write_text(_KUBECTL_STUB, encoding="utf-8")
         kubectl.chmod(0o755)
+        cls.bash_env = cls.base / "bash-env"
+        write_exact(
+            cls.bash_env,
+            "stat() { printf '%s\\n' \"${KYVERNO_STUB_NETWORK_MODE:-600}\"; }\n",
+        )
+
+        with (cls.repo / "versions.env").open("a", encoding="utf-8") as versions:
+            versions.write(
+                "KUSTOMIZE_LINUX_AMD64_SHA256={}\n".format(
+                    hashlib.sha256(kustomize.read_bytes()).hexdigest()
+                )
+            )
+            versions.write(
+                "KUBECTL_LINUX_AMD64_SHA256={}\n".format(
+                    hashlib.sha256(kubectl.read_bytes()).hexdigest()
+                )
+            )
 
         cls.kubeconfig = cls.base / "kubeconfig"
         cls.kubeconfig.write_text("# stubbed; kubectl config view is stubbed too\n", encoding="utf-8")
+        cls.network_contract = cls.base / "runtime-network.contract"
+        write_exact(
+            cls.network_contract,
+            "\n".join(
+                [
+                    "SCHEMA=website-infrastructure-kyverno-network-v1",
+                    "CNI_IDENTITY=synthetic-cni",
+                    "KUBE_PROXY_MODE=iptables",
+                    "POLICY_DATAPLANE=service-vip",
+                    "KUBERNETES_SERVICE_CIDR=192.0.2.30/32",
+                    "KUBERNETES_SERVICE_PORT=443",
+                    "KUBERNETES_ENDPOINT_CIDRS=203.0.113.20/32,203.0.113.21/32",
+                    "KUBERNETES_ENDPOINT_PORT=6443",
+                    "WEBHOOK_SOURCE_CIDRS=203.0.113.10/32,203.0.113.11/32",
+                    "DNS_NAME=kubernetes.default.svc",
+                    "",
+                ]
+            ),
+        )
+        cls.network_contract.chmod(0o600)
+        cls.stage1_journal = cls.base / "stage1-evidence.journal"
+        target_digest = hashlib.sha256(
+            b"https://198.51.100.7:6443"
+        ).hexdigest()
+        network_digest = hashlib.sha256(cls.network_contract.read_bytes()).hexdigest()
+        entries = []
+        cluster_scoped = {"Namespace", "CustomResourceDefinition", "ClusterPolicy"}
+        for document in SYNTHETIC_DOCUMENTS:
+            kind = capture(
+                r"(?m)^kind: (\S+)$", document, "the synthetic object kind"
+            )
+            name = capture(
+                r"(?m)^  name: (\S+)$", document, "the synthetic object name"
+            )
+            namespace = "" if kind in cluster_scoped else "kyverno"
+            entries.append("{}|{}|{}".format(kind, namespace, name))
+        write_exact(
+            cls.stage1_journal,
+            "@transaction-v3|report-only|{}|{}|{}|{}\n{}\n".format(
+                digest,
+                target_digest,
+                network_digest,
+                "a" * 64,
+                "\n".join(entries),
+            ),
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -1655,7 +1836,23 @@ class InstallerGuardTests(unittest.TestCase):
         environment["KUBECONFIG"] = str(self.kubeconfig)
         environment["KYVERNO_INSTALL_CONTEXT"] = "reviewed-context"
         environment["KYVERNO_INSTALL_SERVER"] = "https://198.51.100.7:6443"
+        environment["KYVERNO_RUNTIME_NETWORK_CONTRACT"] = str(self.network_contract)
+        environment["KYVERNO_REPORT_ONLY_JOURNAL"] = str(self.stage1_journal)
+        environment["KYVERNO_STUB_LIVE_BINDING"] = "{}|{}|{}".format(
+            hashlib.sha256(self.render.read_bytes()).hexdigest(),
+            hashlib.sha256(self.network_contract.read_bytes()).hexdigest(),
+            hashlib.sha256(self.stage1_journal.read_bytes()).hexdigest(),
+        ) + "|{}|1700000000".format("a" * 64)
+        # Git for Windows reports every ordinary NTFS fixture as 0644 even
+        # after chmod. BASH_ENV shadows only the synthetic process's `stat`;
+        # Linux CI exercises the production command, while mutations can still
+        # drive the 0600 refusal through KYVERNO_STUB_NETWORK_MODE.
+        environment["BASH_ENV"] = str(self.bash_env)
+        environment["KYVERNO_STUB_NETWORK_MODE"] = "600"
         environment["KYVERNO_STUB_LOG"] = str(self.base / "invocations.log")
+        crd_ready = self.base / "crd-ready"
+        crd_ready.unlink(missing_ok=True)
+        environment["KYVERNO_STUB_CRD_READY"] = str(crd_ready)
         for key, value in overrides.items():
             if value is None:
                 environment.pop(key, None)
@@ -1672,6 +1869,39 @@ class InstallerGuardTests(unittest.TestCase):
 
     def _invocations(self):
         return (self.base / "invocations.log").read_text(encoding="utf-8").splitlines()
+
+    def _write_bound_journal(
+        self,
+        path,
+        entries,
+        stage="report-only",
+        render_digest=None,
+        target_digest=None,
+        network_digest=None,
+    ):
+        """Write the v2 provenance header before intentionally mutated entries."""
+
+        render = self.render if stage == "report-only" else self.enforce_render
+        header = "@transaction-v3|{}|{}|{}|{}|{}\n".format(
+            stage,
+            render_digest or hashlib.sha256(render.read_bytes()).hexdigest(),
+            target_digest
+            or hashlib.sha256(b"https://198.51.100.7:6443").hexdigest(),
+            network_digest
+            or hashlib.sha256(self.network_contract.read_bytes()).hexdigest(),
+            "b" * 64,
+        )
+        write_exact(path, header + entries)
+        return path
+
+    @contextlib.contextmanager
+    def _network_case(self, text):
+        original = self.network_contract.read_bytes()
+        write_exact(self.network_contract, text)
+        try:
+            yield
+        finally:
+            self.network_contract.write_bytes(original)
 
     def _deletes(self):
         return [line for line in self._invocations() if " delete " in line]
@@ -1700,12 +1930,12 @@ class InstallerGuardTests(unittest.TestCase):
         """
 
         path = self.base / "render-case.yaml"
-        path.write_text(text, encoding="utf-8")
+        write_exact(path, text)
         lock = self.repo / "kubernetes" / "platform" / "admission-install" / "render.lock"
         original = lock.read_text(encoding="utf-8")
         overrides = dict(lock_overrides)
         overrides.setdefault(
-            stage + ".sha256", hashlib.sha256(text.encode("utf-8")).hexdigest()
+            stage + ".sha256", hashlib.sha256(path.read_bytes()).hexdigest()
         )
         overrides.setdefault(
             stage + ".objects", str(len(re.findall(r"(?m)^kind:", text)))
@@ -1784,9 +2014,30 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("resolves inside the checkout", completed.stderr)
 
+    def test_version_spoofing_external_binaries_are_refused_by_bytes(self):
+        """Correct self-reported versions cannot substitute executable identity."""
+
+        for tool in ("kustomize", "kubectl"):
+            with self.subTest(tool=tool):
+                spoof = self.base / ("spoof-" + tool)
+                spoof.mkdir(exist_ok=True)
+                for candidate in ("kustomize", "kubectl"):
+                    shutil.copy(self.bin / candidate, spoof / candidate)
+                    (spoof / candidate).chmod(0o755)
+                with (spoof / tool).open("ab") as executable:
+                    executable.write(b"\n# version string unchanged; bytes are hostile\n")
+                completed = self._run(
+                    "--stage", "report-only", "--plan", bin_dir=spoof
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "{} executable sha256".format(tool), completed.stderr
+                )
+                self.assertIn("does not match versions.env", completed.stderr)
+
     def test_a_render_that_does_not_match_the_lock_is_refused(self):
         tampered = self.base / "tampered.yaml"
-        tampered.write_text(SYNTHETIC_RENDER + "\n# one extra byte\n", encoding="utf-8")
+        write_exact(tampered, SYNTHETIC_RENDER + "\n# one extra byte\n")
         completed = self._run(
             "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=str(tampered)
         )
@@ -1796,7 +2047,7 @@ class InstallerGuardTests(unittest.TestCase):
     def test_an_unpinned_image_in_the_render_is_refused(self):
         substituted = self.base / "unpinned.yaml"
         text = SYNTHETIC_RENDER.replace(PINNED_IMAGE, "docker.io/library/kyverno:latest")
-        substituted.write_text(text, encoding="utf-8")
+        write_exact(substituted, text)
         lock = self.repo / "kubernetes" / "platform" / "admission-install" / "render.lock"
         original = lock.read_text(encoding="utf-8")
         lock.write_text(
@@ -1832,23 +2083,30 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("targets a different server", completed.stderr)
 
-    def test_a_server_that_is_not_an_address_is_refused(self):
-        # The reviewed server is also the NetworkPolicy destination; a name
-        # cannot be turned into one, and guessing would be the deadlock.
+    def test_an_operator_hostname_is_not_reused_as_a_pod_network_peer(self):
+        # The operator kubeconfig URL is identity only. Pods use the reviewed
+        # kubernetes.default Service or endpoint path from the private contract.
+        journal = self.base / "hostname-target.journal"
         completed = self._run(
             "--stage",
             "report-only",
-            "--plan",
+            "--apply",
+            "--journal",
+            str(journal),
             KYVERNO_STUB_KUBECONFIG_SERVER="https://control-plane.invalid:6443",
             KYVERNO_INSTALL_SERVER="https://control-plane.invalid:6443",
         )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("must name an IPv4 address", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        destinations = [
+            line.split()[-1] for line in self._invocations() if line.startswith("CIDR ")
+        ]
+        self.assertIn("192.0.2.30/32", destinations)
+        self.assertTrue(all("control-plane.invalid" not in peer for peer in destinations))
+        journal.unlink()
 
-    def test_the_sentinel_destination_is_replaced_by_the_bound_server(self):
-        """The committed bytes grant nothing; the applied bytes name the server
-        the binding guard already proved. Applying the sentinel would close the
-        namespace against an address that matches nothing — the deadlock."""
+    def test_the_network_sentinels_are_replaced_by_the_private_contract(self):
+        """The committed bytes grant nothing; selected-CNI and HA peers come
+        from a private contract cross-checked against the target cluster."""
 
         journal = self.base / "substitution.journal"
         completed = self._run(
@@ -1858,14 +2116,18 @@ class InstallerGuardTests(unittest.TestCase):
         destinations = [
             line.split()[-1] for line in self._invocations() if line.startswith("CIDR ")
         ]
-        self.assertIn("198.51.100.7/32", destinations)
-        self.assertNotIn("192.0.2.0/32", destinations)
+        self.assertIn("203.0.113.10/32", destinations)
+        self.assertIn("203.0.113.11/32", destinations)
+        self.assertIn("192.0.2.30/32", destinations)
+        self.assertNotIn("198.51.100.7/32", destinations)
+        self.assertNotIn("192.0.2.10/32", destinations)
+        self.assertNotIn("192.0.2.20/32", destinations)
         journal.unlink()
 
     def test_a_render_with_the_wrong_sentinel_count_is_refused(self):
-        text = SYNTHETIC_RENDER.replace("cidr: 192.0.2.0/32", "cidr: 203.0.113.99/32", 1)
+        text = SYNTHETIC_RENDER.replace("cidr: 192.0.2.20/32", "cidr: 203.0.113.99/32", 1)
         altered = self.base / "no-sentinel.yaml"
-        altered.write_text(text, encoding="utf-8")
+        write_exact(altered, text)
         lock = self.repo / "kubernetes" / "platform" / "admission-install" / "render.lock"
         original = lock.read_text(encoding="utf-8")
         lock.write_text(
@@ -1882,7 +2144,7 @@ class InstallerGuardTests(unittest.TestCase):
         finally:
             lock.write_text(original, encoding="utf-8")
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("sentinel destinations", completed.stderr)
+        self.assertIn("network sentinel 192.0.2.20/32; expected one", completed.stderr)
 
     # --- transactionality ---------------------------------------------------
 
@@ -1919,27 +2181,124 @@ class InstallerGuardTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         applied = [
-            capture(r"phase-(\w+)\.yaml", line, "the applied phase file")
+            capture(r"phase-([a-z-]+)\.yaml", line, "the applied phase file")
             for line in self._invocations()
-            if re.search(r"apply -f \S*phase-\w+\.yaml", line)
+            if re.search(r"apply -f \S*phase-[a-z-]+\.yaml", line)
+            and "--dry-run=client" not in line
         ]
-        self.assertEqual(applied, ["namespace", "bounds", "network", "controller", "policies"])
+        self.assertEqual(
+            applied,
+            [
+                "namespace",
+                "bounds",
+                "network",
+                "crds",
+                "controller-prerequisites",
+                "controller",
+                "policies",
+            ],
+        )
         # The health wait sits between the controller and the policies, which is
         # the whole ordering claim: nothing that triggers webhook registration
         # runs before the backend is Available.
         log = self._invocations()
+        crd_wait = first_index(log, "--for=condition=Established", "the CRD wait")
         wait = first_index(log, "--for=condition=Available", "the controller health wait")
+        crds = first_index(log, "phase-crds.yaml", "the CRD phase")
+        prerequisites = first_index(
+            log,
+            "phase-controller-prerequisites.yaml",
+            "the controller prerequisites phase",
+        )
         controller = first_index(log, "phase-controller.yaml", "the controller phase")
-        policies = first_index(log, "phase-policies.yaml", "the policies phase")
+        policies = next(
+            (
+                index
+                for index, line in enumerate(log)
+                if "phase-policies.yaml" in line and "--dry-run=client" not in line
+            ),
+            None,
+        )
+        self.assertIsNotNone(policies, "the policies apply phase vanished")
+        self.assertLess(crds, crd_wait)
+        self.assertLess(crd_wait, prerequisites)
+        self.assertLess(prerequisites, controller)
         self.assertLess(controller, wait)
         self.assertLess(wait, policies)
+        policy_validation = first_index(
+            log,
+            "phase-policies.yaml --dry-run=client",
+            "strict policy validation after CRD discovery",
+        )
+        self.assertLess(crd_wait, policy_validation)
+        self.assertLess(policy_validation, policies)
+        journal.unlink()
+
+    def test_precontroller_canary_uses_exact_identity_and_precedes_deployment(self):
+        journal = self.base / "canary-order.journal"
+        completed = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(journal)
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        log = self._invocations()
+        prerequisites = first_index(
+            log, "phase-controller-prerequisites.yaml", "controller prerequisites"
+        )
+        create = first_index(log, "create -f", "the pre-controller canary create")
+        wait = first_index(
+            log, "pod/kyverno-network-canary --timeout=60s", "the canary success wait"
+        )
+        delete = first_index(
+            log, "delete pod kyverno-network-canary --wait=true", "canary cleanup"
+        )
+        controller = first_index(log, "phase-controller.yaml", "controller apply")
+        self.assertLess(prerequisites, create)
+        self.assertLess(create, wait)
+        self.assertLess(wait, delete)
+        self.assertLess(delete, controller)
+        manifest = "\n".join(line for line in log if line.startswith("CANARY "))
+        for exact in (
+            "CANARY   name: kyverno-network-canary",
+            "CANARY     app.kubernetes.io/name: kyverno",
+            "CANARY     app.kubernetes.io/component: admission-controller",
+            "CANARY     app.kubernetes.io/part-of: kyverno",
+            "CANARY   automountServiceAccountToken: false",
+            "CANARY   serviceAccountName: kyverno-admission-controller",
+            "CANARY       command: [/agnhost, connect, --timeout=10s, kubernetes.default.svc:443]",
+        ):
+            self.assertIn(exact, manifest)
+        self.assertIn(PINNED_CANARY_IMAGE, manifest)
+        journal.unlink()
+
+    def test_precontroller_canary_failure_rolls_back_and_cleans_the_pod(self):
+        journal = self.base / "canary-failure.journal"
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--apply",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SCENARIO="network-canary-fail",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("pre-controller network canary DNS/API path", completed.stderr)
+        self.assertTrue(
+            any(
+                "delete pod kyverno-network-canary" in line
+                for line in self._invocations()
+            )
+        )
+        self.assertTrue(
+            any("delete Namespace kyverno" in line for line in self._invocations())
+        )
         journal.unlink()
 
     def test_the_journal_records_every_object_with_its_scope(self):
         journal = self.base / "recorded.journal"
         self._run("--stage", "report-only", "--apply", "--journal", str(journal))
         entries = journal.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(entries), len(SYNTHETIC_DOCUMENTS))
+        self.assertEqual(len(entries), len(SYNTHETIC_DOCUMENTS) + 1)
+        self.assertTrue(entries[0].startswith("@transaction-v3|report-only|"))
         self.assertIn("Namespace||kyverno", entries)
         self.assertIn("ClusterPolicy||alpha", entries)
         self.assertIn("Deployment|kyverno|kyverno-admission-controller", entries)
@@ -1971,9 +2330,9 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_removes_the_journal_in_reverse_order(self):
         journal = self.base / "reverse.journal"
-        journal.write_text(
+        self._write_bound_journal(
+            journal,
             "Namespace||kyverno\nConfigMap|kyverno|kyverno\nClusterPolicy||alpha\n",
-            encoding="utf-8",
         )
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -1989,9 +2348,65 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn("delete Namespace kyverno", ordered[2])
         journal.unlink()
 
+    def test_rollback_refuses_an_enforce_journal_without_deleting(self):
+        journal = self.base / "enforce-is-not-delete.journal"
+        self._write_bound_journal(
+            journal, "ClusterPolicy||alpha\n", stage="enforce"
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must never be used as a delete program", completed.stderr)
+        self.assertIn("use --demote", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_bound_to_another_render(self):
+        journal = self.base / "foreign-render.journal"
+        self._write_bound_journal(
+            journal, "ClusterPolicy||alpha\n", render_digest="c" * 64
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("render digest does not match", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_bound_to_another_target(self):
+        journal = self.base / "foreign-target.journal"
+        self._write_bound_journal(
+            journal, "ClusterPolicy||alpha\n", target_digest="d" * 64
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("target digest does not match", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_bound_to_another_network_contract(self):
+        journal = self.base / "foreign-network.journal"
+        self._write_bound_journal(
+            journal, "ClusterPolicy||alpha\n", network_digest="e" * 64
+        )
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("runtime-network digest does not match", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_a_completed_rollback_journal_cannot_be_replayed(self):
+        journal = self.base / "replay.journal"
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
+        first = self._run("--rollback", "--journal", str(journal))
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        second = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("already rolled back; replay is refused", second.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
     def test_rollback_fails_closed_when_residue_remains(self):
         journal = self.base / "residue.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run(
             "--rollback", "--journal", str(journal), KYVERNO_STUB_SCENARIO="residue"
         )
@@ -2026,14 +2441,23 @@ class InstallerGuardTests(unittest.TestCase):
             "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-unhealthy"
         )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("no available replica", completed.stderr)
+        self.assertIn("not ready", completed.stderr)
+        self.assertIn("desired=2, updated=2, available=1", completed.stderr)
+
+    def test_enforce_is_refused_while_the_controller_generation_is_stale(self):
+        completed = self._run(
+            "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-stale"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("not current", completed.stderr)
+        self.assertIn("generation 2, observed 1", completed.stderr)
 
     def test_enforce_is_refused_without_report_evidence(self):
         completed = self._run(
             "--stage", "enforce", "--plan", KYVERNO_STUB_SCENARIO="enforce-no-reports"
         )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("produced no policy report", completed.stderr)
+        self.assertIn("produced no fresh timestamped report", completed.stderr)
 
     def test_enforce_is_accepted_once_report_only_is_proven(self):
         completed = self._run(
@@ -2210,7 +2634,7 @@ class InstallerGuardTests(unittest.TestCase):
             )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "render has 4 cluster-scoped objects; render.lock records 3",
+            "render has 5 cluster-scoped objects; render.lock records 4",
             completed.stderr,
         )
 
@@ -2227,7 +2651,7 @@ class InstallerGuardTests(unittest.TestCase):
                 "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
             )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("journaled 14 identities for 15 rendered objects", completed.stderr)
+        self.assertIn("journaled 15 identities for 16 rendered objects", completed.stderr)
 
     def test_an_inventory_name_absent_from_the_render_is_refused(self):
         # A ghost name in the reviewed inventory would otherwise shrink the
@@ -2253,13 +2677,13 @@ class InstallerGuardTests(unittest.TestCase):
         # The object-count comparison can only disagree with the digest on a
         # lock somebody hand-edited — which is precisely the case a reviewer
         # regenerating one field and not the other produces.
-        with self._render_case(SYNTHETIC_RENDER, **{"report-only.objects": "13"}) as rendered:
+        with self._render_case(SYNTHETIC_RENDER, **{"report-only.objects": "14"}) as rendered:
             completed = self._run(
                 "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
             )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "render has 14 objects; render.lock records 13", completed.stderr
+            "render has 15 objects; render.lock records 14", completed.stderr
         )
 
     def test_a_renderer_that_did_not_produce_the_lock_is_refused(self):
@@ -2287,11 +2711,10 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("still carries the all-zero sentinel digest", completed.stderr)
 
-    def test_a_bound_server_inside_the_sentinel_range_is_refused(self):
-        # The substitution's own failure mode, and the reason the survival check
-        # is not decorative: a server that IS the RFC 5737 sentinel makes the
-        # substitution a no-op and would close the namespace against an address
-        # that matches nothing.
+    def test_an_operator_target_in_test_net_does_not_collide_with_runtime_sentinels(self):
+        # Operator identity and Pod network paths are separate namespaces of
+        # data. Even a synthetic target equal to an old sentinel cannot alter
+        # the selected-CNI contract substitution.
         completed = self._run(
             "--stage",
             "report-only",
@@ -2299,33 +2722,83 @@ class InstallerGuardTests(unittest.TestCase):
             KYVERNO_STUB_KUBECONFIG_SERVER="https://192.0.2.0:6443",
             KYVERNO_INSTALL_SERVER="https://192.0.2.0:6443",
         )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def test_a_contract_service_vip_mismatch_is_refused(self):
+        original = self.network_contract.read_bytes()
+        write_exact(
+            self.network_contract,
+            original.decode("utf-8").replace(
+                "KUBERNETES_SERVICE_CIDR=192.0.2.30/32",
+                "KUBERNETES_SERVICE_CIDR=192.0.2.31/32",
+            ),
+        )
+        try:
+            completed = self._run("--stage", "report-only", "--plan")
+        finally:
+            self.network_contract.write_bytes(original)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "the fail-closed sentinel destination survived substitution",
+            "does not match the live kubernetes.default Service VIP/port",
             completed.stderr,
         )
 
-    def test_a_render_that_already_names_the_bound_server_is_refused(self):
-        # The post-substitution count fires when the render ALREADY carries the
-        # bound address somewhere nobody reviewed as an API-server flow.
-        text = SYNTHETIC_RENDER.replace(
-            "  name: kyverno-public-https\n  namespace: kyverno\n",
-            "  name: kyverno-public-https\n  namespace: kyverno\nspec:\n"
-            "  egress:\n  - to:\n    - ipBlock:\n        cidr: 198.51.100.7/32\n",
+    def test_runtime_contract_mode_is_enforced(self):
+        completed = self._run(
+            "--stage",
+            "report-only",
+            "--plan",
+            KYVERNO_STUB_NETWORK_MODE="644",
         )
-        with self._render_case(text) as rendered:
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("mode must be 0600", completed.stderr)
+
+    def test_runtime_contract_rejects_extra_keys(self):
+        text = self.network_contract.read_text(encoding="utf-8") + "SURPRISE=value\n"
+        with self._network_case(text):
+            completed = self._run("--stage", "report-only", "--plan")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("key inventory is not exact", completed.stderr)
+
+    def test_runtime_contract_rejects_an_incomplete_ha_source_set(self):
+        text = self.network_contract.read_text(encoding="utf-8").replace(
+            "WEBHOOK_SOURCE_CIDRS=203.0.113.10/32,203.0.113.11/32",
+            "WEBHOOK_SOURCE_CIDRS=203.0.113.10/32",
+        )
+        with self._network_case(text):
+            completed = self._run("--stage", "report-only", "--plan")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("every live control-plane InternalIP", completed.stderr)
+
+    def test_runtime_contract_rejects_an_incomplete_api_endpoint_set(self):
+        text = self.network_contract.read_text(encoding="utf-8").replace(
+            "KUBERNETES_ENDPOINT_CIDRS=203.0.113.20/32,203.0.113.21/32",
+            "KUBERNETES_ENDPOINT_CIDRS=203.0.113.20/32",
+        )
+        with self._network_case(text):
+            completed = self._run("--stage", "report-only", "--plan")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("complete live Kubernetes API endpoint set", completed.stderr)
+
+    def test_endpoint_dataplane_expands_every_endpoint_and_port_6443(self):
+        text = self.network_contract.read_text(encoding="utf-8").replace(
+            "POLICY_DATAPLANE=service-vip", "POLICY_DATAPLANE=endpoint"
+        )
+        journal = self.base / "endpoint-dataplane.journal"
+        with self._network_case(text):
             completed = self._run(
-                "--stage", "report-only", "--plan", KYVERNO_STUB_RENDER=rendered
+                "--stage", "report-only", "--apply", "--journal", str(journal)
             )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn(
-            "substituted render carries 3 API-server destinations; expected 2",
-            completed.stderr,
-        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        rendered = "\n".join(self._invocations())
+        self.assertIn("CIDR             cidr: 203.0.113.20/32", rendered)
+        self.assertIn("CIDR             cidr: 203.0.113.21/32", rendered)
+        self.assertIn("PORT         - port: 6443", rendered)
+        self.assertNotIn("192.0.2.20/32", rendered)
+        self.assertNotIn("port: 65535", rendered)
+        journal.unlink()
 
-    def test_a_server_whose_octets_are_out_of_range_is_refused(self):
-        # `[0-9]{1,3}` accepts 999.999.999.999 and would substitute it into the
-        # NetworkPolicies as a destination.
+    def test_operator_target_is_compared_exactly_even_when_opaque(self):
         completed = self._run(
             "--stage",
             "report-only",
@@ -2333,8 +2806,7 @@ class InstallerGuardTests(unittest.TestCase):
             KYVERNO_STUB_KUBECONFIG_SERVER="https://999.999.999.999:6443",
             KYVERNO_INSTALL_SERVER="https://999.999.999.999:6443",
         )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("must name an IPv4 address", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
 
     # --- the journal is untrusted input --------------------------------------
 
@@ -2344,8 +2816,8 @@ class InstallerGuardTests(unittest.TestCase):
         verbatim, `--rollback` is "delete whatever this file names"."""
 
         journal = self.base / "foreign.journal"
-        journal.write_text(
-            "Namespace||kube-system\nClusterRole||cluster-admin\n", encoding="utf-8"
+        self._write_bound_journal(
+            journal, "Namespace||kube-system\nClusterRole||cluster-admin\n"
         )
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
@@ -2359,9 +2831,9 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_refuses_a_journal_naming_another_namespace(self):
         journal = self.base / "foreign-namespaced.journal"
-        journal.write_text(
+        self._write_bound_journal(
+            journal,
             "ClusterPolicy||alpha\nConfigMap|kube-system|kube-root-ca.crt\n",
-            encoding="utf-8",
         )
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
@@ -2371,7 +2843,7 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_refuses_a_malformed_journal(self):
         journal = self.base / "malformed.journal"
-        journal.write_text("Namespace||kyverno|extra\n", encoding="utf-8")
+        self._write_bound_journal(journal, "Namespace||kyverno|extra\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("is not kind|namespace|name", completed.stderr)
@@ -2399,8 +2871,8 @@ class InstallerGuardTests(unittest.TestCase):
 
         for kind in REVIEWED_CLUSTER_SCOPED_KINDS:
             journal = self.base / "scoped.journal"
-            journal.write_text(
-                "{}|{}|{}\n".format(kind, "kyverno", "cluster-admin"), encoding="utf-8"
+            self._write_bound_journal(
+                journal, "{}|{}|{}\n".format(kind, "kyverno", "cluster-admin")
             )
             completed = self._run("--rollback", "--journal", str(journal))
             with self.subTest(kind=kind):
@@ -2424,7 +2896,7 @@ class InstallerGuardTests(unittest.TestCase):
         # without a namespace would otherwise take the cluster-scoped branch and
         # be measured against an inventory it can never be in.
         journal = self.base / "unscoped.journal"
-        journal.write_text("ConfigMap||kyverno\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ConfigMap||kyverno\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("with no namespace", completed.stderr)
@@ -2435,7 +2907,9 @@ class InstallerGuardTests(unittest.TestCase):
         # The journal writer classifies every document through the phase table,
         # so a kind absent from it is a kind no attempt of this installer wrote.
         journal = self.base / "unphased.journal"
-        journal.write_text("Pod|kyverno|kyverno-admission-controller\n", encoding="utf-8")
+        self._write_bound_journal(
+            journal, "Pod|kyverno|kyverno-admission-controller\n"
+        )
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("which no phase of this install applies", completed.stderr)
@@ -2446,7 +2920,7 @@ class InstallerGuardTests(unittest.TestCase):
         # Shipped with the journal work and unpinned: without it, arbitrary text
         # reaches `kubectl delete` as its type argument.
         journal = self.base / "kind-shape.journal"
-        journal.write_text("Config-Map|kyverno|kyverno\n", encoding="utf-8")
+        self._write_bound_journal(journal, "Config-Map|kyverno|kyverno\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("names no kind", completed.stderr)
@@ -2459,7 +2933,7 @@ class InstallerGuardTests(unittest.TestCase):
         what stops a FLAG being parsed as an object name."""
 
         journal = self.base / "name-shape.journal"
-        journal.write_text("ConfigMap|kyverno|--all\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ConfigMap|kyverno|--all\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("names no object", completed.stderr)
@@ -2476,7 +2950,7 @@ class InstallerGuardTests(unittest.TestCase):
         """
 
         journal = self.base / "empty.journal"
-        journal.write_text("\n\n", encoding="utf-8")
+        self._write_bound_journal(journal, "\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("journal records no object", completed.stderr)
@@ -2514,6 +2988,7 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn("journal path is inside the checkout", completed.stderr)
         self.assertFalse(journal.exists(), "the refusal must not create the file")
 
+    @unittest.skipIf(os.name == "nt", "Git Bash cannot express POSIX mode bits on NTFS")
     def test_the_journal_is_created_unreadable_to_others(self):
         # The record of what a privileged apply touched is also the delete
         # program the next --rollback runs. Created under umask 077 so it is not
@@ -2566,24 +3041,36 @@ class InstallerGuardTests(unittest.TestCase):
         Ctrl-C, a supervisor TERM, or a closed session between two phases left a
         half-installed cluster with no automatic undo."""
 
-        journal = self.base / "interrupted.journal"
-        completed = self._run(
-            "--stage",
-            "report-only",
-            "--apply",
-            "--journal",
-            str(journal),
-            KYVERNO_STUB_SIGNAL_PHASE="network",
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("received SIGTERM during the transaction", completed.stderr)
-        self.assertIn("interrupted attempt rolled back", completed.stderr)
-        deletes = self._deletes()
-        self.assertTrue(
-            any("delete Namespace kyverno" in line for line in deletes),
-            "an interrupted attempt must undo the namespace it created",
-        )
-        journal.unlink()
+        for phase in (
+            "namespace",
+            "bounds",
+            "network",
+            "crds",
+            "controller-prerequisites",
+            "controller",
+            "policies",
+        ):
+            with self.subTest(phase=phase):
+                journal = self.base / ("interrupted-" + phase + ".journal")
+                completed = self._run(
+                    "--stage",
+                    "report-only",
+                    "--apply",
+                    "--journal",
+                    str(journal),
+                    KYVERNO_STUB_SIGNAL_PHASE=phase,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "received SIGTERM during the transaction", completed.stderr
+                )
+                self.assertIn("interrupted attempt rolled back", completed.stderr)
+                deletes = self._deletes()
+                self.assertTrue(
+                    any("delete Namespace kyverno" in line for line in deletes),
+                    "an interrupted attempt must undo the namespace it created",
+                )
+                journal.unlink()
 
     def test_an_interrupted_apply_demands_recovery_when_residue_remains(self):
         # The half that matters more: an interrupt whose rollback cannot PROVE
@@ -2603,9 +3090,31 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn(str(journal), completed.stderr)
         journal.unlink()
 
+    def test_an_interrupted_promotion_demotes_and_never_deletes(self):
+        journal = self.base / "interrupted-promotion.journal"
+        completed = self._run(
+            "--stage",
+            "enforce",
+            "--apply",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SIGNAL_PHASE="network",
+            KYVERNO_STUB_SCENARIO="enforce-ready",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("interrupted promotion demoted to report-only", completed.stderr)
+        self.assertEqual(
+            self._deletes(),
+            [],
+            "an interrupted promotion must not uninstall the stage-1 objects",
+        )
+        self.assertIn("failurePolicy: Ignore", self._applied_actions())
+        self.assertIn("failureAction: Audit", self._applied_actions())
+        journal.unlink()
+
     def test_rollback_sweeps_every_reviewed_runtime_webhook_name(self):
         journal = self.base / "sweep.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run("--rollback", "--journal", str(journal))
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         deletes = self._deletes()
@@ -2647,7 +3156,7 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_fails_closed_when_a_kyverno_crd_remains(self):
         journal = self.base / "crd-residue.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run(
             "--rollback", "--journal", str(journal), KYVERNO_STUB_SCENARIO="residue-crd"
         )
@@ -2657,7 +3166,7 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_fails_closed_when_the_namespace_remains(self):
         journal = self.base / "namespace-residue.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run(
             "--rollback",
             "--journal",
@@ -2699,6 +3208,39 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("break-glass did NOT clear admission", completed.stderr)
 
+    def test_break_glass_reports_each_delete_failure_and_attempts_the_full_sweep(self):
+        completed = self._run(
+            "--break-glass", KYVERNO_STUB_SCENARIO="webhook-delete-failure"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("failed to delete reviewed", completed.stderr)
+        self.assertIn("admission is NOT proven clear", completed.stderr)
+        invocations = "\n".join(self._invocations())
+        for name in (
+            "kyverno-policy-validating-webhook-cfg",
+            "kyverno-resource-validating-webhook-cfg",
+            "kyverno-policy-mutating-webhook-cfg",
+            "kyverno-resource-mutating-webhook-cfg",
+        ):
+            self.assertIn("delete", invocations)
+            self.assertIn(name, invocations)
+
+    def test_rollback_delete_failure_leaves_controller_inventory_untouched(self):
+        journal = self.base / "webhook-delete-failure.journal"
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
+        completed = self._run(
+            "--rollback",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SCENARIO="webhook-delete-failure",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("controller objects were left in place", completed.stderr)
+        self.assertFalse(
+            any("delete ClusterPolicy alpha" in line for line in self._invocations())
+        )
+        journal.unlink()
+
     def test_break_glass_refuses_when_it_cannot_READ_the_webhook_configurations(self):
         """An unreadable cluster is not a clean cluster.
 
@@ -2729,7 +3271,7 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_refuses_when_it_cannot_READ_the_webhook_configurations(self):
         journal = self.base / "unreadable-webhooks.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run(
             "--rollback",
             "--journal",
@@ -2743,7 +3285,7 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_rollback_refuses_when_it_cannot_READ_the_custom_resource_definitions(self):
         journal = self.base / "unreadable-crds.journal"
-        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        self._write_bound_journal(journal, "ClusterPolicy||alpha\n")
         completed = self._run(
             "--rollback",
             "--journal",
@@ -2824,7 +3366,7 @@ class InstallerGuardTests(unittest.TestCase):
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "no policy report naming a reviewed policy", completed.stderr
+            "no fresh timestamped report naming a reviewed policy", completed.stderr
         )
 
 

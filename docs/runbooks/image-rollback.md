@@ -12,8 +12,14 @@ HelmRelease and parent Kustomization to be suspended, and leaves the worktree
 unchanged. Review the printed candidate directory and `evidence.env`, run
 `git apply --check` on `promotion.patch`, apply it explicitly, and rerun the
 repository and transition gates before opening a PR. The script never stages,
-commits, pushes, deploys, or overwrites a concurrent editor. The version is
-evidence and navigation; Kubernetes still receives only the digest. The
+commits, pushes, deploys, or overwrites a concurrent editor. The candidate
+advances the release tag and the digest TOGETHER, from the pair four separate
+`oras resolve` calls proved the registry binds, so the override can never state
+a version the transaction did not verify against the bytes beside it. The
+rendered workload therefore reads `repository:vMAJOR.MINOR.PATCH@sha256:<hex>`:
+Kubernetes still resolves only the digest, cosign and admission still address
+only the digest, and the tag is what an operator reads in `kubectl describe
+pod`. The
 transaction directory is mode-restricted on POSIX; Git Bash/NTFS inherits the
 operator's ACL. No plaintext credential is written, but a configured tunnel
 Secret is copied as repository-tracked SOPS ciphertext, so protect retained
@@ -46,8 +52,11 @@ then merge that reviewed digest-only PR, re-run the release and runtime checks,
 and resume in two more reviewed, observed changes: activate the parent first and prove the
 new digest remains suspended, then activate the HelmRelease. The parent-first
 resume commit must restore and retain the same signature/capacity envelope
-before Flux can reconcile the site path. Never put the tag in Helm values, move
-an old tag,
+before Flux can reconcile the site path. Never let a tag become the thing that
+RESOLVES — the digest stays mandatory in the values, in the rendered reference,
+and in every admission rule, and a values tag that is not one exact published
+release name is refused by `validate_release_state.py`, by the release policy,
+and by both admission engines. Never move an old tag,
 direct-push main, use `kubectl set image`, or use an unsigned emergency build.
 If the prior image is now vulnerable or compromised, roll forward to a repaired
 digest under a new version instead.

@@ -36,6 +36,215 @@ metadata:
   namespace: kyverno
 automountServiceAccountToken: false
 ---
+# Controller identity: what the three installed controllers may do AS
+# THEMSELVES. Every object a reconciliation applies is applied by one of the
+# impersonated reconciler accounts further down this file, never by a
+# controller account, so no application kind appears in this section.
+#
+# These Roles are the compensating authority for the two narrowing patches in
+# controllers/patches/: cluster-reconciler.yaml deletes the generated
+# cluster-admin binding, and crd-controller-role.yaml replaces the shared
+# ClusterRole's wildcards, cluster-wide Secret reads, and
+# `serviceaccounts/token` creation with an enumerated set. What the controllers
+# still need is namespaced, so it is granted here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-runtime
+  namespace: flux-system
+rules:
+  # Leader election is per-controller and always runs in the namespace the
+  # controller Pod lives in, so it is namespaced rather than cluster-scoped.
+  # Losing this grant crashes the Pod at startup — a loud failure, never a
+  # silent half-reconciliation.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # The only ConfigMaps a controller writes are its own, in its own namespace.
+  # Cluster-wide read stays in the shared ClusterRole for `substituteFrom` and
+  # Helm `valuesFrom`; the write half is confined here.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps/status]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-runtime
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-runtime
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+# The single Secret any controller reads under its own identity: the SOPS age
+# key the platform-services Kustomization decrypts with. Read verbs only — a
+# controller that could write Secrets could rewrite the key it decrypts with.
+# The grant is namespaced instead of name-restricted because `list` and `watch`
+# cannot be limited by `resourceNames`, and flux-system is designed to hold no
+# other Secret; the rendered-output policy and the live-state verifier both
+# refuse a write verb here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-decryption
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-decryption
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-decryption
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+# Impersonation is the mechanism that replaces cluster-admin. kustomize-controller
+# applies every object as the account named in the Kustomization's
+# `spec.serviceAccountName`, and every Kustomization in this repository lives in
+# flux-system, so this one namespaced Role — restricted by name to the six
+# reconciler accounts that exist — is the controller's entire ability to act on
+# a tenant namespace.
+#
+# `default` is deliberately absent. The controllers run with
+# `--default-service-account=default`, so a Kustomization that forgot to name an
+# account would fall back to an account this Role does not list: the
+# reconciliation stops at the impersonation step with an explicit RBAC denial
+# instead of applying anything. The flag and this Role are two independent
+# fail-closed layers over the same mistake.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames:
+      - root-reconciler
+      - platform-prerequisites-reconciler
+      - admission-reconciler
+      - platform-services-reconciler
+      - naranjo-online-reconciler
+      - lidersea-com-reconciler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-impersonation
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-impersonation
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+# helm-controller resolves `spec.serviceAccountName` in the HelmRelease's OWN
+# namespace, so its impersonation authority is one name-restricted Role per
+# tenant namespace. A namespace with no HelmRelease gets no Role, and a
+# namespace added later without one denies the release rather than running it
+# with borrowed authority.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: cloudflare-public
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [helm-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-impersonation
+  namespace: cloudflare-public
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-impersonation
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: naranjo-online
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [helm-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-impersonation
+  namespace: naranjo-online
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-impersonation
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: lidersea-com
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [helm-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-controller-impersonation
+  namespace: lidersea-com
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flux-controller-impersonation
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -274,8 +483,16 @@ metadata:
   name: flux-release-reconciler
   namespace: naranjo-online
 rules:
+  # This site's chart arrives as a signed OCI artifact, so the source object
+  # this reconciler applies is an OCIRepository. The grant said
+  # `gitrepositories` — the kind this namespace held before the move to
+  # published charts — which would have denied the very object
+  # kubernetes/websites/naranjo-online/source.yaml declares, at the moment the
+  # Kustomization was unsuspended. A GitRepository here has no legitimate
+  # identity at all (the Conftest tenant-source rule refuses one), so the old
+  # kind is removed rather than kept alongside.
   - apiGroups: [source.toolkit.fluxcd.io]
-    resources: [gitrepositories]
+    resources: [ocirepositories]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [helm.toolkit.fluxcd.io]
     resources: [helmreleases]
@@ -301,8 +518,12 @@ metadata:
   name: flux-release-reconciler
   namespace: lidersea-com
 rules:
+  # Same correction as the sibling site, derived independently from this
+  # namespace's own source object: kubernetes/websites/lidersea-com/source.yaml
+  # declares an OCIRepository, so `gitrepositories` was a grant for a kind this
+  # reconciler never applies and a denial for the one it does.
   - apiGroups: [source.toolkit.fluxcd.io]
-    resources: [gitrepositories]
+    resources: [ocirepositories]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [helm.toolkit.fluxcd.io]
     resources: [helmreleases]

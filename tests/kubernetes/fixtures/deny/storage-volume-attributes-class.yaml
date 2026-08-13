@@ -1,0 +1,12 @@
+# proves: SR-14
+# rego-message: is outside the enumerated local-provisioner allowlist
+# SR-14. The newest object that can retarget storage at a backend: a driver name
+# plus a free-form parameter map. It is bound to the same empty driver
+# enumeration as CSIDriver and csi volume sources.
+apiVersion: storage.k8s.io/v1beta1
+kind: VolumeAttributesClass
+metadata:
+  name: storage-remote-attributes
+driverName: ebs.csi.aws.com
+parameters:
+  iops: "3000"

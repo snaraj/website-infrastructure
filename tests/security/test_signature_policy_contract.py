@@ -262,7 +262,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                         MODULE.signature_policy_action(text, slug, workflow), action
                     )
 
-    def test_checked_in_policies_are_the_canonical_audit_variants(self):
+    def test_checked_in_policies_are_the_canonical_enforce_variants(self):
         for slug, workflow in MODULE.SIGNATURE_CONTRACTS.items():
             with self.subTest(slug=slug):
                 text = REPO_ROOT.joinpath(
@@ -272,7 +272,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                     MODULE.signature_policy_errors(text, slug, workflow), []
                 )
                 self.assertEqual(
-                    MODULE.signature_policy_action(text, slug, workflow), "Audit"
+                    MODULE.signature_policy_action(text, slug, workflow), "Enforce"
                 )
 
     def test_action_specific_validation_cannot_confuse_audit_with_enforce(self):
@@ -571,6 +571,10 @@ class SignaturePolicyContractTests(unittest.TestCase):
                     "validate_signature_policy.py\" " + command, renderer
                 )
         self.assertIn("validate_signature_policy.py\" policy", renderer)
+        policy_call = renderer[renderer.index("validate_signature_policy.py\" policy"):]
+        policy_call = policy_call[: policy_call.index("done")]
+        self.assertIn("--action Enforce", policy_call)
+        self.assertNotIn("--action Audit", policy_call)
         self.assertLess(
             renderer.index("validate_signature_policy.py\" policy"),
             renderer.index("kustomize build \"${REPO_ROOT}/policies/kyverno\""),

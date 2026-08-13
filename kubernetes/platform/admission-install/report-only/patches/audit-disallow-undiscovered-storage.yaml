@@ -44,19 +44,25 @@
   value: Audit
 - op: test
   path: /spec/rules/4/name
-  value: disallow-legacy-service-account-token-secrets
+  value: allow-only-own-instance-token-env
 - op: replace
   path: /spec/rules/4/validate/failureAction
   value: Audit
 - op: test
   path: /spec/rules/5/name
-  value: disallow-disk-pressure-toleration
+  value: disallow-legacy-service-account-token-secrets
 - op: replace
   path: /spec/rules/5/validate/failureAction
   value: Audit
 - op: test
   path: /spec/rules/6/name
-  value: disallow-wildcard-toleration
+  value: disallow-disk-pressure-toleration
 - op: replace
   path: /spec/rules/6/validate/failureAction
+  value: Audit
+- op: test
+  path: /spec/rules/7/name
+  value: disallow-wildcard-toleration
+- op: replace
+  path: /spec/rules/7/validate/failureAction
   value: Audit

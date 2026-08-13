@@ -105,3 +105,9 @@ patches:
       kind: ClusterPolicy
       name: require-release-readiness
     path: patches/audit-require-release-readiness.yaml
+  - target:
+      group: kyverno.io
+      version: v1
+      kind: ClusterPolicy
+      name: require-replicaset-admission-identity
+    path: patches/audit-require-replicaset-admission-identity.yaml

@@ -1,493 +1,418 @@
-# Kyverno admission install — Draft / unverified
+# Kyverno admission install — NO-GO / unverified
 
-Current status is `NO-GO`. Nothing in this runbook authorizes a live
-installation. It exists so that when installation *is* authorized, it is an
-apply of reviewed bytes from an exact reviewed commit rather than an ad-hoc
-command — and so that the review of those bytes, and of the ordering, can happen
-now, in a pull request, instead of at the terminal at the moment of highest
-consequence.
+This runbook describes a future, bounded validation ceremony. It does not
+authorize one. Kyverno is not installed, Flux remains suspended and inert, and
+no step here changes a site, tunnel, secret, Cloudflare configuration, route,
+host, or Flux suspension.
+
+## STAGE 1 IS **NOT AUTHORIZED**
+
+`render.lock` records `stage.report-only.authorized=no`. The installer reads
+that value before resolving a tool, binding a target, reading private network
+data, or creating a journal. Therefore `--stage report-only --apply` is
+unreachable while either blocker remains:
+
+| Blocker | Required closure |
+| --- | --- |
+| `#101` | Land and review the real Kyverno CRD/controller export, release and image pins, fresh-CRD ordering, and immutable tool identities. The committed all-zero controller sentinel is not installable. |
+| `runtime-network-canary` | Build and review the private selected-CNI contract, cross-check every live Service, endpoint, and control-plane source, then pass the exact pre-controller ServiceAccount/label canary. |
+
+The owner must authorize a later pull request which changes the lock. Editing
+the lock at a terminal is not authorization.
 
 ## STAGE 2 IS **NOT AUTHORIZED**
 
-Read this before anything else in this document.
+`render.lock` independently records `stage.enforce.authorized=no`. Stage 2
+inherits every stage-1 prerequisite and remains blocked on:
 
-The pull request that introduced this runbook landed the install **transaction**
-and **stage 1 only**. Stage 1 is `Audit` and `failurePolicy: Ignore` — fail-open,
-enforcing nothing, degrading at worst to the cluster's state today. **Promoting
-to stage 2 (`--stage enforce`) is not authorized by it**, and three independently
-reproduced findings block the promotion:
-
-| Blocker | What is wrong | Status |
-| --- | --- | --- |
-| **#99** | Both `require-signed-*` policies render `validationFailureAction: Audit` with **no rule-level `failureAction`** in the `enforce` root, so stage 2 **does not enforce image signatures** — an unsigned or wrong-identity image is reported and admitted while the installer announces admission is fail-closed. | CONFIRMED against the rendered `enforce` root |
-| **#100** | The engine configuration filters `[ReplicaSet,*,*]` and `[ReplicaSet/?*,*,*]`, so `require-release-readiness`'s exact-Deployment-owner rule is **inert at admission**. Unfiltering it widens the enforcing webhook's blast radius on a one-node cluster and is an owner decision. | CONFIRMED against `enforce/config.yaml` |
-| **#102** | The promotion has **no admission canary** on either side of the flip, and its evidence is not bound to the exact installation. | CONFIRMED as a gap |
-
-**#87** (connector identity) and **#96** (the storage-gate pivot) were also
-preconditions; both have since landed on `main` and are merged into this
-branch, so they no longer block. The three findings in the table above do.
-#101 tracks two further defects on the same execution path.
-
-This is not only written down. `render.lock` records
-`stage.enforce.authorized=no`, and
-[`scripts/install-kyverno-admission.sh`](../../scripts/install-kyverno-admission.sh)
-reads it **before it binds a single tool**:
-
-```
-$ ./scripts/install-kyverno-admission.sh --stage enforce --apply --journal /tmp/j
-install-kyverno-admission: stage enforce is NOT AUTHORIZED: promotion is blocked
-on #99, #100, #102 (and #87, #96 must land first); see
-docs/runbooks/kyverno-install.md. Authorization is a reviewed change to
-render.lock, never an edit made during a ceremony
-$ echo $?
-1
-```
-
-`--stage enforce --plan` still runs — it mutates nothing and is how the promotion
-gate is rehearsed and tested — and prints the same refusal as a warning.
-Authorizing stage 2 means a reviewed pull request that flips
-`stage.enforce.authorized`, with peer/platform validation recorded on it. It is
-never an edit made during a ceremony.
-
-## Why this is the most dangerous install in this repository
-
-Every other component here fails by not working. An admission controller fails
-by making the API server refuse writes.
-
-A `ValidatingWebhookConfiguration` with `failurePolicy: Fail` tells the API
-server to reject any request it cannot get an answer for. Registered against a
-backend that is not answering — wrong Service, unissued certificate, denied
-egress, unscheduled Pod — every matching write in the cluster becomes a 500,
-including the writes needed to fix it. This cluster is one node, with one
-operator, and no second control plane. That state is reached by a single
-successful `kubectl apply`, and it is the state this entire design exists to
-make unreachable.
-
-## What is true today
-
-Measured read-only on 2026-08-12 (a dated observation, not a constant —
-revalidate read-only before the ceremony):
-
-- Kyverno is **not installed**: zero `kyverno` CRDs, no `kyverno` namespace, and
-  **zero `ValidatingWebhookConfiguration` objects cluster-wide**.
-- Every `ClusterPolicy` under [`policies/kyverno/`](../../policies/kyverno) is
-  therefore an inert marker. Nothing validates what enters the app namespaces.
-- The Flux controllers are pinned and reviewable but hold no custom resource,
-  so nothing is reconciling either.
-- [`kubernetes/platform/admission/kyverno/controllers.yaml`](../../kubernetes/platform/admission/kyverno/controllers.yaml)
-  is a deliberate fail-closed sentinel: an all-zero image digest, an unreachable
-  Service, `failurePolicy: Fail`. It documents the shape and cannot be applied.
-
-## The hard gate
-
-**This install is a precondition for un-suspending any Flux object.**
-
-Flux reconciles with `prune: true`. The moment a `suspend` flips, whatever Flux
-applies is admitted by whatever admission control exists at that instant — and
-today that is none. The image-signature, restricted-workload, tenant-networking,
-storage, and release-readiness policies would be bypassed not because anything
-disabled them but because nothing was ever listening.
-
-So the order is: admission installed and enforcing, *then* a suspend flip is
-even discussable. That ordering is the peer platform lane's requirement and this
-runbook does not soften it.
-
-## What is missing before any apply is possible
-
-`versions.env` carries `KYVERNO_CLI_VERSION` — the CLI that runs the policy
-fixtures in CI — and **no controller pins at all**. The installer requires five,
-and refuses every apply path until they exist:
-
-| Pin | What it binds |
+| Blocker | Required closure |
 | --- | --- |
-| `KYVERNO_VERSION` | the controller release, expected to match the reviewed CLI version |
-| `KYVERNO_CHART_VERSION` | the chart the component export is rendered from |
-| `KYVERNO_ADMISSION_CONTROLLER_IMAGE` | `reg.kyverno.io/kyverno/kyverno` at a full digest |
-| `KYVERNO_REPORTS_CONTROLLER_IMAGE` | `reg.kyverno.io/kyverno/reports-controller` at a full digest |
-| `KYVERNO_KYVERNOPRE_IMAGE` | `reg.kyverno.io/kyverno/kyvernopre` at a full digest |
+| `#100` | In report-only mode, prove the actual ReplicaSet admission username and the exact live Deployment UID lookup for controller-created and spoofed ReplicaSets. |
+| `#101` | Complete the stage-1 component, CRD, tool, and runtime-network prerequisites. |
+| `#102` | Bind a full observation window, exact controller rollout state, fresh reviewed-policy reports, webhook inspection, positive and negative admission canaries, interrupt recovery, rollback, and residue evidence to one transaction. |
+| `runtime-network-canary` | Transitive from stage 1; the in-cluster API path and every webhook source must be proven before fail-closed admission is considered. |
 
-Those are platform-lane values. This lane requests them and does not invent
-them; `versions.env` is not edited from here. Until they land, and until the
-sentinel controller manifest is replaced by the reviewed component export
-described in
-[`render.lock`](../../kubernetes/platform/admission-install/render.lock), the
-installer stops at its pin guard. Reproduce that refusal at any time:
+Finding `#99` is repaired in the committed artifacts: both
+`require-signed-*` policies are `Enforce` in stage 2, and the generic
+report-only overlay is their only `Audit` downgrade. That repair does not
+authorize enforcement.
 
-```sh
-./scripts/install-kyverno-admission.sh --stage report-only --plan
-```
+An enforce apply is prohibited unless all blockers are closed, a fresh
+independent review covers the exact head, and the owner separately authorizes
+the transition. This document never supplies that authorization.
 
-It renders, proves the render matches the lock, and then refuses. That refusal
-is the intended state of this work.
+## Safety model
 
-## The two stages, and why they are not one
+Admission is unusually hazardous because a registered webhook with
+`failurePolicy: Fail` can refuse the writes needed to repair it. Stage 1 is
+therefore `Audit` plus `Ignore`; stage 2 is `Enforce` plus `Fail`. Both roots
+render the same objects and differ only in action fields.
 
-| | Stage 1 — `report-only` | Stage 2 — `enforce` |
-| --- | --- | --- |
-| webhook `failurePolicy` | `Ignore` | `Fail` |
-| policy action | `Audit` | `Enforce` |
-| a broken install means | no admission control — today's state | **no writes** |
-| everything else | identical | identical |
+The install path never applies a webhook configuration. Kyverno registers its
+own webhooks only after its CRD, prerequisites, controller network, and
+controller readiness gates pass. `kube-system`, `flux-system`, and `kyverno`
+remain excluded from interception so admission cannot lock out the control
+plane, its reconciler, or itself. `system:nodes` remains filtered too.
 
-[`kubernetes/platform/admission-install/report-only`](../../kubernetes/platform/admission-install/report-only)
-is an overlay of
-[`.../enforce`](../../kubernetes/platform/admission-install/enforce), so the two
-stages cannot describe different controllers, bounds, or network — the suite
-asserts their renders differ only in `failureAction`, `validationFailureAction`,
-and `failurePolicy`. Promotion changes those fields and nothing else.
+Replica count is a capacity and availability choice, never a security
+invariant. A dated one-node plan may choose one replica; a future HA plan uses
+multiple replicas and failure domains. Promotion instead proves the exact
+controller inventory, positive desired replicas, current observed generation,
+and `updated == available == desired`, with separately reviewed quota, surge,
+and disruption capacity.
 
-Stage 2 cannot be reached from an empty cluster. `--stage enforce` refuses
-unless the live cluster proves stage 1 ran: every Kyverno Deployment Available,
-every reviewed `ClusterPolicy` present **and reporting `Audit`**, and at least
-one `PolicyReport` or `ClusterPolicyReport` object in existence. A promotion
-without report evidence would be enforcement promoted on unmeasured blast
-radius.
+The storage policy is not a deny-by-kind boundary. `PersistentVolume`,
+`PersistentVolumeClaim`, `StorageClass`, `StatefulSet`, database, CSI, and
+operator designs remain extensible when a reviewed change explicitly binds
+driver and storage provenance, topology, capacity, exposure, RBAC, network,
+backup/restore, and threat controls. Unknown sources remain fail closed.
 
-## Blast radius of stage 2, stated before it is taken
+Git and release tags are exactly `vX.Y.Z`. An OCI reference such as
+`image:vX.Y.Z@sha256:<digest>` is valid and must retain its digest.
 
-Once `failurePolicy: Fail` is registered, these become hard failures rather than
-findings. Read this list as "what stops working if Kyverno stops answering":
+## Transaction and ordering
 
-- **Cluster-wide, in every namespace except `kube-system`, `flux-system`, and
-  `kyverno`:** no non-`ClusterIP` Service, no `Ingress`, no Gateway API object,
-  and no storage object outside the enumerated allowlist — `PersistentVolume`,
-  `PersistentVolumeClaim`, `StorageClass`, `CSIDriver`,
-  `VolumeAttributesClass`, and `StatefulSet` claim templates are all matched.
-  `disallow-public-services` and the non-namespaced rules of
-  `disallow-undiscovered-storage` reach every namespace.
-- **The storage stance is an allowlist, not a kind denial.** The owner's ruling
-  of 2026-08-12 permits StorageClasses, PersistentVolumes, and
-  PersistentVolumeClaims; what is refused is storage reachable from outside the
-  cluster by any means that has not been enumerated. Pull request #96 implements
-  that pivot: the admitted volume sources are derived BY SUBTRACTION (only
-  `local` and `csi` survive), against enumerated classes, provisioners, CSI
-  drivers, and local roots. The CSI driver list is currently empty, so the
-  practical stage-2 posture for CSI is unchanged from the previous
-  deny-by-kind — a driver install is still refused, but now because it is not on
-  the allowlist rather than because the kind is forbidden, and admitting one is
-  an allowlist entry in a reviewed change rather than a policy rewrite. Read
-  `policies/kyverno/disallow-undiscovered-storage.yaml` for the exact rules
-  rather than a summary here; a runbook that restates a policy drifts from it.
-  (Known-stale names: the policy `disallow-undiscovered-storage` and its rule
-  `disallow-persistent-storage-resources` still describe the retired
-  deny-by-kind stance. A rename is queued as a follow-up — it would collide with
-  two other in-flight branches today.)
-- **In `cloudflare-public`, `naranjo-online`, `lidersea-com`:** the full
-  restricted-workload, approved-image, exact-networking, media-payload,
-  release-readiness, and zero-capacity contracts. A site Deployment whose
-  readiness annotation is not `true`, or whose image is not the canonical
-  digest, stops being admitted.
-- **Nothing in `kube-system`, `flux-system`, or `kyverno`**, by explicit
-  exclusion — see below.
-
-### The namespaces that are never intercepted, and why
-
-Three exclusions, in two independent layers (engine `resourceFilters`, which is
-evaluated before any policy runs, and the webhook `namespaceSelector`, which
-stops the API server calling out at all). Both live in
-[`admission-install/enforce/config.yaml`](../../kubernetes/platform/admission-install/enforce/config.yaml):
-
-- `kube-system` — intercepting the control plane means a webhook outage can stop
-  CoreDNS, the CNI, or a static Pod mirror from being written.
-- `flux-system` — admission must never be able to block the reconciler that
-  would repair admission.
-- `kyverno` — self-exclusion. A controller that must pass its own webhook to
-  start cannot restart.
-
-The kubelet identity (`system:nodes`) is excluded for the same reason: without
-it, a webhook outage becomes a node outage.
-
-### The selector defect this replaced
-
-The committed sentinel's webhook scoped interception with
-`namespaceSelector: In [cloudflare-public, naranjo-online, lidersea-com]` —
-three hard-coded namespace **names**. An inclusion list is fail-open by
-construction: a namespace created tomorrow matches nothing, so nothing about it
-is ever validated, and the gap is silent.
-
-The install path therefore does not apply that object at all (registration is
-the controller's act — see below), and the reviewed interception scope is an
-**exclusion**: `NotIn [kube-system, flux-system, kyverno]`. A new namespace is
-intercepted by default; only the three lockout-critical namespaces are exempt.
-
-**Residual gap, stated rather than papered over.** The webhook will now *reach*
-a new namespace, but most policies still *match* by namespace name
-(`match.resources.namespaces: [cloudflare-public, naranjo-online, lidersea-com]`).
-A new namespace therefore inherits only the cluster-wide rules listed under
-blast radius — the Service, Ingress, Gateway, storage, and StatefulSet denials —
-and not the workload, image, or signature contracts. Closing that fully means
-changing what the committed policies match, which changes what they enforce in
-the existing namespaces too. That is a separate reviewed change, not something
-to slip into an install transaction.
-
-## Ordering, and the deadlock it avoids
-
-[`kubernetes/platform/prerequisites/network-policies.yaml`](../../kubernetes/platform/prerequisites/network-policies.yaml)
-declares a bare ingress+egress `default-deny` for the `kyverno` namespace and no
-allows, and
-[`kubernetes/reconciliation/admission.yaml`](../../kubernetes/reconciliation/admission.yaml)
-`dependsOn` `platform-prerequisites` with `wait: true`. Reconciled in that order
-against a cluster where the allows are absent, the controller can never reach
-the API server, never becomes Available, and the admission Kustomization waits
-forever on a readiness its own predecessor made impossible.
-
-The installer's phase order exists to make that unreachable:
+The installer classifies every rendered object into exactly one phase:
 
 1. `namespace`
-2. `bounds` — the ResourceQuota and LimitRange, before anything can schedule
-3. `network` — the deny **and its four allows in one apply**, so there is never
-   a window in which the namespace is closed and unreachable, nor one in which
-   it is open
-4. `controller` — CRDs, RBAC, config, Service, Deployments; then **wait** for
-   the policy CRD to be Established and every Deployment to be Available
-5. `policies` — only now, when the backend is proven, do the objects exist that
-   cause Kyverno to register webhooks
+2. `bounds`
+3. `network`
+4. `crds`
+5. `controller-prerequisites`
+6. `controller`
+7. `policies`
 
-There is deliberately **no webhook phase**. Kyverno writes its own webhook
-configurations, through its own RBAC, after it is running. A render that
-declares one is refused: applying a webhook by hand points the API server at a
-backend whose health nothing proved, which is the entire failure mode.
+The deny and all required network allows are one phase. Built-in objects receive
+strict client validation before any mutation. Kyverno policies cannot be
+strictly validated on a fresh cluster until the `clusterpolicies.kyverno.io`
+CRD exists, so the apply waits for that CRD to be `Established`, starts a fresh
+kubectl discovery process, and strictly dry-runs the policy phase immediately
+before applying it. The controller must become Available before policies can
+cause runtime webhook registration.
 
-The four allows, and what each is for:
+Between controller prerequisites and the controller Deployment, a disposable
+Pod uses exactly:
 
-| Policy | Direction | Destination | Why |
-| --- | --- | --- | --- |
-| `kyverno-admission-webhook` | ingress | API server `/32`, TCP 9443 | the API server must reach the webhook, or `Fail` means "refuse everything" |
-| `kyverno-dns` | egress | `kube-system` / `kube-dns`, 53 TCP+UDP | resolution for the API server and the Sigstore endpoints |
-| `kyverno-kube-apiserver` | egress | API server `/32`, TCP 6443 | watches, reports, and the controller's own webhook registration |
-| `kyverno-public-https` | egress | public addresses, TCP 443 | `verifyImages` — keyless verification is not an offline operation |
+- ServiceAccount `kyverno-admission-controller`;
+- the admission-controller `name`, `component`, and `part-of` labels selected by
+  the committed NetworkPolicies;
+- the digest-pinned `KYVERNO_NETWORK_CANARY_IMAGE`;
+- no automounted service-account token; and
+- `/agnhost connect --timeout=10s kubernetes.default.svc:443`.
 
-The API-server destination is committed as `192.0.2.0/32` (RFC 5737 TEST-NET-1),
-an address that can never match anything real: safety invariant 12 keeps the
-real one out of this public index permanently. The installer substitutes it from
-the bound kubeconfig context's `server` value — the same value the binding guard
-already proved — and refuses to apply anything in which the sentinel survives.
-Nothing is typed by hand and nothing reaches shell history.
+It must succeed, delete, and be proven absent before the controller phase.
 
-## Resource envelope
+## Immutable inputs
 
-Node figures recorded 2026-08-12; revalidate read-only before the ceremony.
+The operator target and the controller runtime path are separate contracts.
+Never derive a Pod NetworkPolicy peer from the operator kubeconfig endpoint.
 
-```
-node allocatable                      3250m CPU   5502Mi memory
-requested after the Flux install      1500m CPU    624Mi memory
-headroom                              1750m CPU   4878Mi memory
-
-Kyverno steady state
-  2 controllers x 1 replica x (100m / 192Mi)
-                                       200m CPU    384Mi memory
-                                     = 11.4% of CPU headroom
-                                     =  7.9% of memory headroom
-remaining for sites and connectors    1550m CPU   4494Mi memory
-```
-
-The `namespace-budget` ResourceQuota (`pods: 4`, `requests.cpu: 400m`,
-`requests.memory: 768Mi`, `limits.cpu: 2`, `limits.memory: 1536Mi`) is the part
-that holds: it is enforced by the API server, so the bound survives a future
-render that adds a controller, a replica-count mistake, or a values change
-nobody re-derived. Steady state uses half the request quota; the other half is
-the rolling-update surge.
-
-`replicas: 1` because this is one node — a second replica has nowhere to be
-scheduled that adds availability. `priorityClassName: system-cluster-critical`
-deliberately **above** the sites: an evicted admission controller with an
-enforcing webhook registered turns every matching write into a failure.
-Consumption is bounded by the quota; not being the first thing killed is what
-the priority class is for. The Flux controllers already ship at this class.
-
-## Preconditions for the apply — every one of them, and none of them local
-
-This runbook performs none of these and asserts none of them:
-
-1. The controller pins above exist in `versions.env` and the sentinel component
-   manifest has been replaced by the reviewed export, in a merged pull request.
-2. The peer platform lane's recovery window is **closed**, with `sudo -n` proven
-   unavailable on the host.
-3. That lane's Service-CIDR repair, controlled reboot, post-reboot acceptance,
-   and canaries have completed.
-4. `CODEX_PLATFORM_STABLE` has been signalled.
-5. The owner has authorized the install.
-
-**No reboot originates from this ceremony.** Nothing here restarts, reboots, or
-power-cycles the host, and an install that appears to need one has failed a
-precondition instead.
-
-Until all five hold, stop here. Reading the manifests and reproducing the render
-digests below requires none of them and is the intended use of this document
-today.
-
-## Step 0 — bind the target, from private custody
+The operator exports an exact kubeconfig, context, and API URL:
 
 ```sh
 export KUBECONFIG="$PROTECTED_KUBECONFIG"
 export KYVERNO_INSTALL_CONTEXT="$REVIEWED_CONTEXT"
-export KYVERNO_INSTALL_SERVER="$REVIEWED_SERVER"
+export KYVERNO_INSTALL_SERVER="$REVIEWED_OPERATOR_API_URL"
 ```
 
-All three are required for every mode that contacts the cluster. The installer
-proves the context exists in that kubeconfig, that the context's cluster names
-exactly `KYVERNO_INSTALL_SERVER`, and that the server is an IPv4 address — a
-name cannot be turned into a NetworkPolicy destination, and guessing one would
-be the deadlock above. Every `kubectl` call then passes `--kubeconfig`,
-`--context`, and `--server` explicitly; nothing is inferred from ambient state.
+Every kubectl call names all three, and the installer cross-checks the
+kubeconfig. The value is hashed into the transaction journal; it is not copied
+into a NetworkPolicy.
 
-## Step 1 — plan stage 1
+The controller reaches `kubernetes.default.svc`. Its contract is a private,
+regular, non-symlink mode-0600 file outside the checkout with exactly these
+sorted `KEY=value` records and no comments, whitespace, blank values, or extra
+keys:
+
+```text
+CNI_IDENTITY=<reviewed-selected-cni>
+DNS_NAME=kubernetes.default.svc
+KUBERNETES_ENDPOINT_CIDRS=<all-current-api-endpoints-as-sorted-/32-set>
+KUBERNETES_ENDPOINT_PORT=6443
+KUBERNETES_SERVICE_CIDR=<current-kubernetes-service-vip-/32>
+KUBERNETES_SERVICE_PORT=443
+KUBE_PROXY_MODE=<iptables|ipvs|nftables|ebpf-replacement>
+POLICY_DATAPLANE=<service-vip|endpoint>
+SCHEMA=website-infrastructure-kyverno-network-v1
+WEBHOOK_SOURCE_CIDRS=<all-current-control-plane-internal-ips-as-sorted-/32-set>
+```
+
+Set only the path:
+
+```sh
+export KYVERNO_RUNTIME_NETWORK_CONTRACT="$PROTECTED_ROOT/kyverno-network.env"
+```
+
+The installer parses this as data; it never sources it. It cross-checks the
+Service VIP/port, the complete endpoint set/port, and every current control-plane
+InternalIP, including HA peers. `POLICY_DATAPLANE` selects either Service VIP
+port 443 or the entire endpoint set port 6443 for Pod egress. The separate
+webhook ingress rule expands to every control-plane source. Both committed
+TEST-NET sentinels and the sentinel port must disappear or the transaction
+stops.
+
+Any CNI, kube-proxy mode, API endpoint, Service CIDR, or control-plane membership
+change invalidates this contract. Rebind and rerun the canaries before an
+install, promotion, or rollback; never widen a CIDR to make a test pass.
+
+`kustomize` and `kubectl` must resolve to absolute paths outside the checkout.
+The installer verifies both exact versions and executable SHA-256 pins from
+`versions.env`. Controller, helper, and canary images require full non-zero
+digests and must equal the reviewed pins.
+
+## Journal and recovery contract
+
+Stage 1 requires a new private journal path outside the checkout. It refuses a
+symlink or non-empty earlier record and creates the file under `umask 077`. Its
+header is:
+
+```text
+@transaction-v3|report-only|<render-sha256>|<operator-target-sha256>|<runtime-network-sha256>|<attempt-id>
+```
+
+Every following row is one rendered `kind|namespace|name` identity, written
+before application. Rollback validates the entire file before its first delete:
+schema, stage, render lock, hashed target, hashed private network contract,
+canonical attempt ID, exact cluster-scoped lock inventory, allowed kind, and
+`kyverno` as the only namespaced scope. It dispatches scope by kind, not by a
+journal field.
+
+Successful rollback appends `@rolled-back|<attempt-id>` and replay is refused.
+An enforce journal is never a deletion program; promotion rollback is demotion
+to report-only.
+
+`INT`, `TERM`, and `HUP` are transaction failures. During stage 1 the handler
+cleans the canary, rolls back the bound journal in reverse order, sweeps runtime
+webhooks, and proves no residue. During stage 2 it demotes; it never deletes the
+installation. An unproved recovery exits non-zero with `RECOVERY REQUIRED` and
+preserves the journal path.
+
+## Coordinator-only report-only live acceptance
+
+This section is a prepared acceptance plan, not permission to run it. The
+coordinator owns the only live lane. Do not begin until the stage-1 blockers are
+closed, `render.lock` has a separately reviewed `authorized=yes`, the exact head
+has independent static review, and the owner opens the bounded window. No step
+unsuspends Flux, handles SOPS/tunnel tokens, changes Cloudflare, deploys a site,
+or promotes enforcement.
+
+### 1. Read-only absence and collision preflight
+
+Record the exact commit and render receipts, then prove the expected empty
+starting state:
+
+```sh
+git rev-parse HEAD
+./scripts/install-kyverno-admission.sh --stage report-only --render
+kubectl get namespace kyverno
+kubectl get crd -o name | grep '\.kyverno\.io$'
+kubectl get clusterpolicy,policy -A
+kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration -o name | grep -i kyverno
+```
+
+Expected before the first accepted install: namespace, Kyverno CRDs, policies,
+and every reviewed/extraneous Kyverno webhook are absent. A forbidden read is
+not absence. A collision is a stop; the installer never adopts foreign state.
+
+Also record, without publishing private inventory, the selected CNI identity,
+kube-proxy mode, `kubernetes.default` Service, complete API endpoint set, and
+all current control-plane InternalIPs. Build the private mode-0600 contract and
+compare its SHA-256 in the protected evidence record.
+
+### 2. Rehearse, then install report-only only
 
 ```sh
 ./scripts/install-kyverno-admission.sh --stage report-only --plan
-```
-
-This renders the stage, proves the digest and object inventory against
-`render.lock`, proves the tools are the `versions.env` versions and are not
-resolved from inside the checkout, proves every image is one of the pinned
-digests, proves the lockout exclusions are in the bytes, proves the stage's
-action fields match the stage that was asked for, substitutes the API-server
-destination, client-validates every object with `--validate=strict`, and proves
-nothing it would create already exists. It mutates nothing.
-
-Record the printed digest with the commit SHA. A digest that does not reproduce
-means the tree, the tool, or the commit is not the reviewed one, and the
-ceremony stops.
-
-## Step 2 — apply stage 1
-
-```sh
 ./scripts/install-kyverno-admission.sh --stage report-only --apply \
   --journal "$PROTECTED_ROOT/kyverno-stage1.journal"
 ```
 
-The journal is required, and its path must be outside the checkout: it is the
-only record of what this attempt created, and it has to survive the process so
-an apply that dies between phases is still undoable by hand. That is enforced,
-not merely asked for — `--apply` refuses a journal path inside the checkout, a
-symlinked path, and a path that already records an earlier attempt, and it
-creates the file under `umask 077`.
+The recorded log must show all seven phases in order, strict built-in
+validation before mutation, CRD Established before policy validation, the exact
+pre-controller canary succeeding and disappearing, exact controller readiness,
+and the namespace annotations binding render, network contract, journal,
+attempt, and start time. Only Audit/Ignore is acceptable.
 
-If any phase fails, the installer rolls the journal back in reverse order,
-sweeps the webhook configurations Kyverno may already have registered for
-itself, and proves zero residue before exiting non-zero.
+### 3. Prove actual webhook and API paths
 
-## Step 3 — verify stage 1, and verify it is fail-open
+Inspect every runtime webhook by exact name and by the managed label. Record its
+Service reference, CA bundle presence, namespace selector, rules, timeout, and
+`failurePolicy: Ignore`. Then trigger a harmless admission request in the
+dedicated `kyverno-validation` namespace and require a fresh PolicyReport result.
+That result proves an actual API-server-to-webhook round trip from the effective
+control-plane source; controller logs must show no network timeout or TLS error.
 
-```sh
-kubectl -n kyverno get deploy,pods
-kubectl get clusterpolicy
-kubectl get validatingwebhookconfiguration -o yaml | grep -A2 failurePolicy
-kubectl get policyreports -A
-kubectl get clusterpolicyreports
-```
+The pre-controller canary already proves the Pod-to-API DNS/TCP path with the
+exact admission ServiceAccount and labels. Together, these two tests cover the
+opposite network directions. On HA, trigger admissions through every API-server
+endpoint or load-balancer backend and retain per-source evidence; any untested
+control-plane source is a stop.
 
-Expected: Deployments Available, Pods `Running` and not restarting, every
-reviewed policy present, **every registered webhook reporting
-`failurePolicy: Ignore`**, and reports being produced. A webhook reporting
-`Fail` at this point means the report-only overlay did not reach the cluster —
-demote immediately (step 6) and investigate before going further.
+### 4. Known-allow, known-deny, and ReplicaSet identity canaries
 
-Then leave it alone and let it observe real traffic. The reports are the
-evidence stage 2's gate demands, and they are also the only honest measurement
-of what enforcement will refuse.
+Create only disposable objects in `kyverno-validation`, with an evidence label
+and no secret, host access, public exposure, persistent storage, or external
+network dependency. Because stage 1 is report-only, both known-allow and
+known-deny requests must be admitted; their fresh report results must differ as
+expected.
 
-## Step 4 — the promotion gate
+For ReplicaSets:
 
-Do not run step 5 until all of these hold:
+1. create a bounded Deployment named `kyverno-validation` and record its UID;
+2. observe the built-in Deployment controller create its ReplicaSet;
+3. require the exact-owner rule and
+   `require-replicaset-controller-and-live-owner-uid` to pass for that
+   controller-created ReplicaSet;
+4. manually submit a raw ReplicaSet with a spoofed owner name/UID and require a
+   fresh failure result; and
+5. submit the same shape as an ordinary ServiceAccount and require the actor
+   check to fail.
 
-1. Stage 1 has been running long enough to have seen a real reconcile, a real
-   site deploy, and a real connector restart.
-2. Every violation in the accumulated reports has been read and is either
-   intended (the policy is right, the workload is wrong) or has produced a
-   reviewed policy change. **An unexplained violation is a stop.**
-3. The break-glass path below has been rehearsed by the operator who will run
-   step 5, on this cluster, so it is muscle memory rather than a document.
-4. The owner has authorized the promotion as a separate decision from step 2.
+Do not infer the controller username. Record the admission identity actually
+seen in Kyverno evidence and close `#100` only if it is exactly the reviewed
+value. Delete the canary namespace and prove all canary resources and reports
+are gone.
 
-## Step 5 — promote to stage 2
+### 5. Interrupt, rollback, break-glass, and residue proof
 
-> **STAGE 2 IS NOT AUTHORIZED.** The blocker table at the top of this document
-> is the gate, not the four conditions in step 4: promotion is blocked on #99,
-> #100 and #102, and #87 and #96 must land first. This step is written down so
-> the procedure is reviewable, not because it is available. `render.lock`
-> carries `stage.enforce.authorized=no` and the installer refuses `--stage
-> enforce --apply` before it binds a tool, so a reader who arrives at this
-> anchor without reading the top of the document is stopped by the script
-> rather than by this paragraph.
+Run one failure-injection attempt at a time from the known-empty starting state.
+Interrupt after each phase boundary in separate attempts and require the handler
+to roll back with a matching `@rolled-back|<attempt-id>` marker. A failure to
+prove rollback is a stop; preserve the journal and run:
 
 ```sh
-./scripts/install-kyverno-admission.sh --stage enforce --plan
-./scripts/install-kyverno-admission.sh --stage enforce --apply \
-  --journal "$PROTECTED_ROOT/kyverno-stage2.journal"
+./scripts/install-kyverno-admission.sh --stage report-only --rollback \
+  --journal "$PROTECTED_ROOT/kyverno-stage1.journal"
 ```
 
-The plan re-proves every guard and additionally proves stage 1's evidence. The
-apply re-applies the same objects with the two action fields changed; it creates
-nothing. If it fails, the installer **demotes** back to the report-only bytes
-rather than deleting anything — deleting an installation to revert a
-policy-action change would be a far larger act than the change being reverted.
-
-Verify immediately, and have step 6 ready in another shell:
-
-```sh
-kubectl get validatingwebhookconfiguration -o yaml | grep -A2 failurePolicy
-kubectl -n kyverno logs deploy/kyverno-admission-controller --tail=100
-kubectl -n naranjo-online get events --sort-by=.lastTimestamp | tail
-```
-
-## Step 6 — break-glass
-
-**If the cluster starts refusing writes, do this first and diagnose second.**
+For a successfully installed report-only instance, rehearse break-glass:
 
 ```sh
 ./scripts/install-kyverno-admission.sh --break-glass
 ```
 
-It deletes the Kyverno webhook configurations — by the reviewed names and by the
-`webhook.kyverno.io/managed-by=kyverno` label — and nothing else. The API server
-stops calling admission immediately; writes resume; the controllers, policies,
-and namespace all stay in place so the state is still diagnosable.
+The script tries every reviewed exact name, then the label backstop, accumulates
+delete errors, and succeeds only after exact-name and broad residue reads prove
+clear. It leaves controllers and policies for diagnosis. After recording that
+proof, use the bound stage-1 journal to remove the installation.
 
-If the script itself is unavailable, the two commands it runs are:
+Final state must equal the preflight: no `kyverno` namespace, no `*.kyverno.io`
+CRD, no ClusterPolicy/Policy, no reviewed or label-discovered Kyverno webhook,
+no canary namespace/object, and no changed Flux suspension. Record failures and
+their raw stderr; never translate a denied read into absence.
+
+### 5a. Optional ephemeral workload recreation
+
+The owner permits a coordinator-run acceptance to stop, delete, and recreate
+Pods and workload controllers, including the two Cloudflare connector
+Deployments, with downtime. This is optional and may not begin merely because
+report-only is installed. Before any delete, the live-lane record must contain:
+
+- an exact namespace/kind/name/UID inventory of every target and its Pods;
+- an exact desired-state render and SHA-256 from the repository which owns that
+  workload at a pinned commit;
+- a machine-checked deletion allowlist containing only ephemeral workload kinds
+  and proving that no `Secret`, SOPS/age file or key, PVC/PV, etcd/PKI object,
+  provider object, or private-key-bearing object can match;
+- the ordered redeploy and rollback commands, executed by one coordinator lane;
+- a measured delete-to-ready recovery-time objective, readiness threshold, and
+  timestamped residue ledger for every removed and recreated identity; and
+- pre-test and post-test acceptance for both public HTTPS sites.
+
+This repository owns the connector chart, not the two website application
+charts. Connector recreation may use the exact rendered chart from this head.
+Deleting a website workload requires an independently pinned render from its
+owning `naranjo.online` or `lidersea.com` repository; #91 evidence alone cannot
+authorize or reconstruct it. Missing ownership, hash, or rollback evidence is a
+stop, and the dedicated `kyverno-validation` canaries remain sufficient.
+
+Never delete or rewrite Cloudflare Tunnel/API tokens or the Kubernetes Secrets
+which hold them. Preserve SOPS/age ciphertext and keys, all private keys,
+domains, DNS zones, Tunnel/provider identities and state, routes, and recovery
+custody. A test which does not recover both HTTPS sites to their pre-test
+acceptance state has failed even if admission reports are correct.
+
+`StatefulSet`, `PersistentVolume`, `PersistentVolumeClaim`, database, and
+operator resources are not ephemeral by implication and never enter this
+deletion allowlist. A test targeting one requires a separate exact durability,
+backup/restore, recovery-time, data-integrity, and residue plan authorized for
+that object; otherwise it is preserved.
+
+### 6. Evidence and stop condition
+
+Evidence contains commit/render digests, tool versions and executable hashes,
+the private contract digest (not its private contents), transaction/journal
+digests and attempt ID, phase timestamps, exact object/controller inventories,
+webhook summaries without private addresses, canary results, and final residue
+inventory. It contains no kubeconfig, token, secret, private route, or raw
+network inventory.
+
+Stop after report-only cleanup. Enforcement remains prohibited even if every
+report-only check passes; its authorization is a later exact-head decision.
+
+## Break-glass reference
+
+If admission begins refusing writes, run the bound script first:
+
+```sh
+./scripts/install-kyverno-admission.sh --break-glass
+```
+
+If the checkout is unavailable, delete every exact runtime name while
+continuing after individual errors, then use the label backstop and prove the
+objects are absent. The reviewed exact inventory is:
+
+```text
+validating:
+  kyverno-policy-validating-webhook-cfg
+  kyverno-resource-validating-webhook-cfg
+  kyverno-exception-validating-webhook-cfg
+  kyverno-cel-exception-validating-webhook-cfg
+  kyverno-global-context-validating-webhook-cfg
+  kyverno-cleanup-validating-webhook-cfg
+  kyverno-ttl-validating-webhook-cfg
+mutating:
+  kyverno-policy-mutating-webhook-cfg
+  kyverno-resource-mutating-webhook-cfg
+  kyverno-verify-mutating-webhook-cfg
+```
+
+The final broad fallback commands are:
 
 ```sh
 kubectl delete validatingwebhookconfiguration -l webhook.kyverno.io/managed-by=kyverno
 kubectl delete mutatingwebhookconfiguration -l webhook.kyverno.io/managed-by=kyverno
 ```
 
-Deleting a webhook configuration is safe in a way that deleting the controller is
-not: it is the single object that makes the API server wait for an answer, and
-removing it cannot itself require an answer.
+Do not delete controller objects until webhook deletion is proven. Removing a
+controller first can leave a fail-closed webhook pointing at nothing.
 
-## Rollback
+## Step 5 — promote to stage 2
 
-- **Undo the promotion only** — back to fail-open, one apply:
+**NOT AUTHORIZED.** The future rehearsal command is shown only so its gate is
+reviewable. `#100`, `#101`, `#102`, and the `runtime-network-canary` must all be
+closed before a later exact-head decision can authorize promotion:
 
-  ```sh
-  ./scripts/install-kyverno-admission.sh --demote
-  ```
+```sh
+export KYVERNO_REPORT_ONLY_JOURNAL="$PROTECTED_ROOT/kyverno-stage1.journal"
+./scripts/install-kyverno-admission.sh --stage enforce --plan
+```
 
-- **Undo the installation** — remove exactly what an attempt created:
+It validates the journal and exact live binding, requires the lock's minimum
+observation interval, exact controller names, current generations, positive and
+fully available desired replicas, Audit at policy and rule level, and fresh
+timestamped PolicyReport/ClusterPolicyReport results naming a reviewed policy.
+Those checks are necessary but not sufficient: `#100`, `#101`, `#102`, the
+`runtime-network-canary`, fresh independent review, and explicit owner
+authorization all remain gates. No `--stage enforce --apply` is authorized by
+this runbook.
 
-  ```sh
-  ./scripts/install-kyverno-admission.sh --rollback \
-    --journal "$PROTECTED_ROOT/kyverno-stage1.journal"
-  ```
+## What stays untouched
 
-  It sweeps the runtime-registered webhook configurations first, deletes every
-  journaled identity in reverse order, and then **proves** no Kyverno webhook
-  configuration, `kyverno.io` CRD, or `kyverno` namespace remains. A rollback
-  that does not prove the cluster is clean is a hope, not a rollback.
-
-Neither path touches the websites. They are served by their tunnels
-independently of whether admission exists — which is also why the whole
-ceremony can be attempted, abandoned, and reattempted without a maintenance
-window.
-
-## What stays suspended
-
-Nothing in this ceremony changes any `suspend` field, and it never applies an
-object that carries one. `kubernetes/reconciliation/*.yaml` and the site
-releases remain `suspend: true` afterwards.
-
-Flipping any of them is a separate reviewed pull request whose preconditions
-include this install being complete **at stage 2** — a controller in stage 1
-reports violations and admits them, which is not admission control. Installing
-admission and un-suspending Flux are two decisions, taken in that order, by the
-owner.
+- Flux controllers and all reconciliation objects stay suspended.
+- SOPS/age and tunnel-token ceremonies stay deferred.
+- No Cloudflare, router, tunnel, route, DNS, SSH, host, reboot, or site action is
+  part of this transaction.
+- No live inventory or credential enters Git or pull-request evidence.
+- A report-only installation never establishes the precondition for a Flux
+  unsuspend; enforcement itself would need separate authorization first.

@@ -27,5 +27,8 @@ spec:
       retries: 0
       strategy: rollback
   values:
-    tunnel:
-      tokenRevision: not-configured
+    connectors:
+      naranjo-online:
+        tokenRevision: not-configured
+      lidersea-com:
+        tokenRevision: not-configured

@@ -1,12 +1,13 @@
-# Single-node sizing and scheduling, applied to every Kyverno Deployment by
-# label rather than by name so a promotion render that adds a controller cannot
-# ship an unbounded one.
+# Dated single-node sizing and scheduling, applied to every Kyverno Deployment
+# by label so a promotion render that adds a controller cannot ship an
+# unbounded one. Replica count deliberately remains owned by the reviewed
+# controller export: it is a capacity/availability decision, never a security
+# invariant, and a future HA control plane must be able to use multiple replicas
+# and failure domains without deleting an admission guard.
 #
-# replicas: 1 — this is a one-node cluster. A second replica has nowhere to be
-# scheduled that adds availability; it only doubles the reservation and, for a
-# webhook backend, doubles the number of endpoints that must stay healthy.
-# Availability here comes from the ResourceQuota, the restart policy, and the
-# staged failurePolicy, not from a replica the node cannot place.
+# The current sentinel export happens to declare one replica for the one-node
+# Pi. The capacity contract checks every positive desired replica plus rollout
+# surge against ResourceQuota; no patch here forces equality to one.
 #
 # priorityClassName: system-cluster-critical — deliberately ABOVE the sites.
 # Under memory pressure the kubelet must not evict the admission controller:
@@ -17,9 +18,6 @@
 #
 # resources — 100m/192Mi requested, 500m/384Mi ceiling, per controller. See
 # ../resource-controls.yaml for the arithmetic against the node envelope.
-- op: add
-  path: /spec/replicas
-  value: 1
 - op: add
   path: /spec/template/spec/priorityClassName
   value: system-cluster-critical

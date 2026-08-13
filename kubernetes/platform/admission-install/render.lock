@@ -25,7 +25,7 @@
 render.tool.name=kustomize
 render.tool.version=v5.8.1
 
-# STAGE-2 AUTHORIZATION — the promotion to enforce is NOT authorized.
+# MUTATING STAGE AUTHORIZATION — neither stage may be applied.
 #
 # Authorization is a REVIEWED DECISION, recorded here rather than remembered,
 # because a document that says "not authorized" is weaker than a script that
@@ -34,22 +34,33 @@ render.tool.version=v5.8.1
 # (which mutates nothing and is how the promotion gate is rehearsed and tested)
 # prints the same refusal as a warning and continues.
 #
-# Three findings block it, each tracked, each independently reproduced:
-#   #99   both require-signed-* policies render Audit with no rule-level action
-#         in the enforce root, so stage 2 does not enforce image signatures
-#   #100  the engine filters every ReplicaSet, so the release-readiness
-#         ownership boundary is inert at admission
-#   #102  the promotion has no canary and its evidence is not bound to the
-#         exact installation
-# Two further preconditions have since been SATISFIED and are recorded rather
-# than dropped: #87 (connector identity) and #96 (the storage pivot) have both
-# landed on main, and this branch has merged them.
+# Stage 1 is also an activation boundary. It remains unreachable until the
+# fresh-cluster CRD/provenance contract (#101) and the private selected-CNI/HA
+# runtime-network contract plus exact-ServiceAccount canary are reviewed.
+stage.report-only.authorized=no
+stage.report-only.blocked-by=#101, runtime-network-canary
+
+# Stage 2 inherits every stage-1 blocker and adds the enforcement findings:
+#   #100  the ReplicaSet controller username and exact live-owner lookup must
+#         be proven against the live API path in report-only mode
+#   #102  fresh positive/negative promotion canaries and evidence review remain
+#         dependent work (the transaction/journal binding is implemented here)
+#   runtime-network-canary is transitive from stage 1
+# Finding #99 is closed in these bytes: both signature policies are Enforce in
+# this root and the report-only overlay performs their sole Audit downgrade.
 #
 # Flipping this to `yes` is a reviewed change with peer/platform validation
 # recorded on the pull request that does it — never an edit made during a
 # ceremony.
 stage.enforce.authorized=no
-stage.enforce.blocked-by=#99, #100, #102 (#87, #96 landed and are merged into this branch)
+stage.enforce.blocked-by=#100, #101, #102, runtime-network-canary
+stage.enforce.minimum-observation-seconds=86400
+
+# Exact controller rollout inventory required for stage-1 evidence. A broad
+# label match cannot let an unrelated Deployment stand in for either component;
+# every name must report current generation, positive desired replicas, and
+# updated/available replicas equal to desired before promotion can rehearse.
+runtime.controllers.names=kyverno-admission-controller,kyverno-reports-controller
 
 # THE BASE THESE DIGESTS DESCRIBE.
 #
@@ -62,15 +73,15 @@ stage.enforce.blocked-by=#99, #100, #102 (#87, #96 landed and are merged into th
 # branch's own working tree, which is also the tree that lands. Re-derive them
 # in the same pull request as anything that changes a committed policy, and
 # keep the base recorded here so a reader can tell which tree they describe.
-render.base=93960bc8611078fb97a23f08f824a97d299884b6
+render.base=c63f357fbc77d55f6e60050f687cceb8723eda6c
 
 # STAGE 1 — kubernetes/platform/admission-install/report-only
-report-only.sha256=0746ddbb1ecadeb9dda1740333fc0583a99a52acf45511e5ec758866d9b345d2
-report-only.objects=22
+report-only.sha256=f622bf3415521d3e0ec9d8c97b6ba3c49d43b922369ce0939eaf50402918b45d
+report-only.objects=23
 
 # STAGE 2 — kubernetes/platform/admission-install/enforce
-enforce.sha256=f5d6536f197af2c75b6706d5a1a58e967de3d4f868673302ef81b4e54a736167
-enforce.objects=22
+enforce.sha256=d568367efaa3998b09a18948620cfd462f1e32e8be027815167cd1513fe18d6b
+enforce.objects=23
 
 # The inventory, by scope. Both stages carry the identical object set — stage 1
 # differs only in policy action fields — so one inventory governs both.
@@ -79,9 +90,9 @@ enforce.objects=22
 # objects a failed apply leaves behind outside the namespace, and the ones an
 # existing installation would collide with. The installer proves each is absent
 # before applying and removes exactly these on rollback.
-inventory.cluster-scoped=11
+inventory.cluster-scoped=12
 inventory.namespaced=11
-inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-services,ClusterPolicy/disallow-tenant-media-payloads,ClusterPolicy/disallow-undiscovered-storage,ClusterPolicy/require-approved-images,ClusterPolicy/require-exact-tenant-networking,ClusterPolicy/require-release-readiness,ClusterPolicy/require-restricted-workloads,ClusterPolicy/require-signed-lidersea-com,ClusterPolicy/require-signed-naranjo-online,ClusterPolicy/require-zero-site-capacity
+inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-services,ClusterPolicy/disallow-tenant-media-payloads,ClusterPolicy/disallow-undiscovered-storage,ClusterPolicy/require-approved-images,ClusterPolicy/require-exact-tenant-networking,ClusterPolicy/require-release-readiness,ClusterPolicy/require-replicaset-admission-identity,ClusterPolicy/require-restricted-workloads,ClusterPolicy/require-signed-lidersea-com,ClusterPolicy/require-signed-naranjo-online,ClusterPolicy/require-zero-site-capacity
 
 # The webhook configurations Kyverno registers for ITSELF at runtime. They are
 # not in the render and never will be — the controller writes them through its
@@ -111,8 +122,11 @@ runtime.webhooks.mutating=kyverno-policy-mutating-webhook-cfg,kyverno-resource-m
 #   cleanupController.enabled=false the reviewed policy set is validate-only;
 #                                  neither controller has work here, and both
 #                                  cost a Pod on a one-node cluster
-#   admissionController.replicas=1
-#   reportsController.replicas=1   report generation is stage 1's evidence
+#   admissionController/reportsController replicas and resources must match a
+#                 separately reviewed, dated capacity/availability decision;
+#                 one replica is never a security invariant, and a future HA
+#                 control plane uses multiple replicas and failure domains
+#   reportsController.enabled=true report generation is stage 1's evidence
 #
 # Until that export exists, kubernetes/platform/admission/kyverno/controllers.yaml
 # remains the fail-closed sentinel it is today and the installer refuses every

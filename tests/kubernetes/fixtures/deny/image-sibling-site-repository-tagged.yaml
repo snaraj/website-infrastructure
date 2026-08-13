@@ -1,0 +1,31 @@
+# The sibling site's image wearing this site's release tag, in this
+# site's namespace. The per-namespace canonical-repository rule is what
+# refuses it; permitting a tag must not soften the identity tuple
+# (safety invariant 14).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-sibling-site-repository-tagged
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-sibling-site-repository-tagged
+      image: ghcr.io/snaraj/lidersea-com:v0.1.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

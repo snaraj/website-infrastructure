@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "image", "tunnel", "origin", "liderseaOrigin", "resources"],
+  "required": ["replicaCount", "image", "tunnel", "connectors", "resources"],
   "properties": {
-    "replicaCount": {"type": "integer", "const": 2},
+    "replicaCount": {"type": "integer", "minimum": 1},
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -19,40 +19,72 @@
     "tunnel": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["secretName", "secretKey", "tokenRevision"],
+      "required": ["secretKey"],
       "properties": {
-        "secretName": {"type": "string", "const": "pi-websites-tunnel-token"},
-        "secretKey": {"type": "string", "const": "token"},
-        "tokenRevision": {"type": "string", "minLength": 1}
+        "secretKey": {"type": "string", "const": "token"}
       }
     },
-    "origin": {
+    "connectors": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["namespace", "podLabels", "port"],
+      "required": ["naranjo-online", "lidersea-com"],
       "properties": {
-        "namespace": {"type": "string", "const": "naranjo-online"},
-        "podLabels": {
-          "type": "object",
-          "required": ["app.kubernetes.io/name"],
-          "properties": {"app.kubernetes.io/name": {"type": "string", "const": "naranjo-online"}}
-        },
-        "port": {"type": "integer", "const": 8080}
-      }
-    },
-    "liderseaOrigin": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["namespace", "podLabels", "port"],
-      "properties": {
-        "namespace": {"type": "string", "const": "lidersea-com"},
-        "podLabels": {
+        "naranjo-online": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["app.kubernetes.io/name"],
-          "properties": {"app.kubernetes.io/name": {"type": "string", "const": "lidersea-com"}}
+          "required": ["instance", "secretName", "tokenRevision", "origin"],
+          "properties": {
+            "instance": {"type": "string", "const": "naranjo-online-tunnel"},
+            "secretName": {"type": "string", "const": "naranjo-online-tunnel-token"},
+            "tokenRevision": {
+              "type": "string",
+              "pattern": "^(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})$"
+            },
+            "origin": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["namespace", "podLabels", "port"],
+              "properties": {
+                "namespace": {"type": "string", "const": "naranjo-online"},
+                "podLabels": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["app.kubernetes.io/name"],
+                  "properties": {"app.kubernetes.io/name": {"type": "string", "const": "naranjo-online"}}
+                },
+                "port": {"type": "integer", "const": 8080}
+              }
+            }
+          }
         },
-        "port": {"type": "integer", "const": 8080}
+        "lidersea-com": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["instance", "secretName", "tokenRevision", "origin"],
+          "properties": {
+            "instance": {"type": "string", "const": "lidersea-com-tunnel"},
+            "secretName": {"type": "string", "const": "lidersea-com-tunnel-token"},
+            "tokenRevision": {
+              "type": "string",
+              "pattern": "^(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})$"
+            },
+            "origin": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["namespace", "podLabels", "port"],
+              "properties": {
+                "namespace": {"type": "string", "const": "lidersea-com"},
+                "podLabels": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["app.kubernetes.io/name"],
+                  "properties": {"app.kubernetes.io/name": {"type": "string", "const": "lidersea-com"}}
+                },
+                "port": {"type": "integer", "const": 8080}
+              }
+            }
+          }
+        }
       }
     },
     "resources": {"type": "object"}

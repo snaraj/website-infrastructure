@@ -1,0 +1,19 @@
+# proves: SR-2
+# rego-message: which is not an enumerated local means
+# SR-2. hostPath is denied as a PersistentVolume source outright rather than
+# root-checked: unlike a local volume it carries no node-affinity requirement, so
+# the same path is satisfied on every node, and it can name any directory the
+# kubelet can see including the control-plane state directories.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-hostpath-source
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  hostPath:
+    path: /mnt/local-pie-ssd/media
+    type: Directory

@@ -1,0 +1,23 @@
+# proves: SR-4
+# rego-message: uses local path outside the enumerated local root
+# Degenerate shape. `local:` is a STRING naming the control-plane configuration
+# directory rather than a mapping with a path. Nothing about it is admissible,
+# and nothing about it may be skipped.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-local-scalar
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local: /etc/kubernetes
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [storage-node-placeholder]

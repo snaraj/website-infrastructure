@@ -1,0 +1,42 @@
+# Cross-swap on the DEPLOYED token surface, naranjo direction. A fully
+# hardened naranjo connector Pod in exactly the shape the cluster runs --
+# no volumes, credential from env.valueFrom.secretKeyRef -- naming an
+# individually APPROVED Secret that belongs to the other website. Admitted
+# by every gate before this rule existed, because the mounted-volume rule
+# that refuses the same substitution passes vacuously on a Pod with no
+# volumes.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: naranjo-connector-with-lidersea-token-env
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: lidersea-com-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

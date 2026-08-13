@@ -360,6 +360,9 @@ if [[ "${mode}" == --apply-controllers || "${mode}" == --apply-sync || "${mode}"
   expected_inventory='100644 kubernetes/flux-system/access.yaml
 100644 kubernetes/flux-system/controllers/gotk-components.yaml
 100644 kubernetes/flux-system/controllers/kustomization.yaml
+100644 kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml
+100644 kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml
+100644 kubernetes/flux-system/controllers/patches/crd-controller-role.yaml
 100644 kubernetes/flux-system/controllers/patches/helm-controller.yaml
 100644 kubernetes/flux-system/controllers/patches/kustomize-controller.yaml
 100644 kubernetes/flux-system/controllers/patches/source-controller.yaml
@@ -943,7 +946,7 @@ def check_service_accounts(document, scope):
                 check_service_account(actual[key], key[0], key[1])
 
 
-def rule(api_groups=None, resources=None, verbs=None, non_resource_urls=None):
+def rule(api_groups=None, resources=None, verbs=None, non_resource_urls=None, resource_names=None):
     result = {"verbs": verbs or []}
     if api_groups is not None:
         result["apiGroups"] = api_groups
@@ -951,6 +954,8 @@ def rule(api_groups=None, resources=None, verbs=None, non_resource_urls=None):
         result["resources"] = resources
     if non_resource_urls is not None:
         result["nonResourceURLs"] = non_resource_urls
+    if resource_names is not None:
+        result["resourceNames"] = resource_names
     return result
 
 
@@ -969,22 +974,45 @@ def normalize_rules(rules):
 
 
 def cluster_role_rules():
-    wildcard_groups = [
-        "source.toolkit.fluxcd.io",
-        "kustomize.toolkit.fluxcd.io",
-        "helm.toolkit.fluxcd.io",
-        "notification.toolkit.fluxcd.io",
-        "image.toolkit.fluxcd.io",
-        "source.extensions.fluxcd.io",
+    # The narrowed shared ClusterRole (AUDIT S12). This mirrors
+    # kubernetes/flux-system/controllers/patches/crd-controller-role.yaml rule
+    # for rule: the generated wildcards, the cluster-wide Secret read, and
+    # `serviceaccounts/token` creation are gone, and what remains is the
+    # authority the three controllers exercise under their own identity. A live
+    # cluster still carrying the generated rules fails this verifier.
+    source_kinds = [
+        "buckets",
+        "externalartifacts",
+        "gitrepositories",
+        "helmrepositories",
+        "ocirepositories",
     ]
-    crd = [rule([group], ["*"], ["*"]) for group in wildcard_groups]
-    crd += [
-        rule([""], ["namespaces", "secrets", "configmaps", "serviceaccounts"], ["get", "list", "watch"]),
+    all_source_kinds = sorted(source_kinds + ["helmcharts"])
+    crd = [
+        rule(["source.toolkit.fluxcd.io"], source_kinds, ["get", "list", "watch", "update", "patch"]),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            ["helmcharts"],
+            ["get", "list", "watch", "create", "update", "patch", "delete"],
+        ),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            [name + "/status" for name in all_source_kinds],
+            ["get", "patch", "update"],
+        ),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            [name + "/finalizers" for name in all_source_kinds],
+            ["update"],
+        ),
+        rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations"], ["get", "list", "watch", "update", "patch"]),
+        rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations/status"], ["get", "patch", "update"]),
+        rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations/finalizers"], ["update"]),
+        rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], ["get", "list", "watch", "update", "patch"]),
+        rule(["helm.toolkit.fluxcd.io"], ["helmreleases/status"], ["get", "patch", "update"]),
+        rule(["helm.toolkit.fluxcd.io"], ["helmreleases/finalizers"], ["update"]),
+        rule([""], ["namespaces", "serviceaccounts", "configmaps"], ["get", "list", "watch"]),
         rule([""], ["events"], ["create", "patch"]),
-        rule([""], ["configmaps"], ["get", "list", "watch", "create", "update", "patch", "delete"]),
-        rule([""], ["configmaps/status"], ["get", "update", "patch"]),
-        rule(["coordination.k8s.io"], ["leases"], ["get", "list", "watch", "create", "update", "patch", "delete"]),
-        rule([""], ["serviceaccounts/token"], ["create"]),
         rule(verbs=["head"], non_resource_urls=["/livez/ping"]),
     ]
     aggregate_groups = [
@@ -1020,8 +1048,15 @@ def access_role_rules():
         rule([""], ["serviceaccounts", "resourcequotas", "limitranges"], mutate),
         rule(["networking.k8s.io"], ["networkpolicies"], mutate),
     ]
-    release = [
+    # The connector release still resolves its chart from a Git source; both
+    # sites resolve theirs from a signed OCI artifact, so their reconcilers
+    # apply an OCIRepository and never a GitRepository.
+    git_release = [
         rule(["source.toolkit.fluxcd.io"], ["gitrepositories"], mutate),
+        rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], mutate),
+    ]
+    oci_release = [
+        rule(["source.toolkit.fluxcd.io"], ["ocirepositories"], mutate),
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], mutate),
     ]
     helm = [
@@ -1029,7 +1064,44 @@ def access_role_rules():
         rule(["apps"], ["deployments"], mutate),
         rule(["networking.k8s.io"], ["networkpolicies"], mutate),
     ]
+    # Controller identity. These are the namespaced Roles that replace the
+    # deleted cluster-admin binding: leader election and controller-owned
+    # ConfigMaps, the SOPS key read, and the name-restricted impersonation
+    # grants through which every applied object actually reaches the API.
+    controller_runtime = [
+        rule(["coordination.k8s.io"], ["leases"], mutate),
+        rule([""], ["configmaps"], mutate),
+        rule([""], ["configmaps/status"], ["get", "update", "patch"]),
+    ]
     return {
+        ("flux-system", "flux-controller-runtime"): controller_runtime,
+        ("flux-system", "flux-controller-decryption"): [
+            rule([""], ["secrets"], ["get", "list", "watch"])
+        ],
+        ("flux-system", "flux-controller-impersonation"): [
+            rule(
+                [""],
+                ["serviceaccounts"],
+                ["impersonate"],
+                resource_names=[
+                    "root-reconciler",
+                    "platform-prerequisites-reconciler",
+                    "admission-reconciler",
+                    "platform-services-reconciler",
+                    "naranjo-online-reconciler",
+                    "lidersea-com-reconciler",
+                ],
+            )
+        ],
+        ("cloudflare-public", "flux-controller-impersonation"): [
+            rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
+        ],
+        ("naranjo-online", "flux-controller-impersonation"): [
+            rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
+        ],
+        ("lidersea-com", "flux-controller-impersonation"): [
+            rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
+        ],
         ("flux-system", "root-reconciler"): [
             rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations"], mutate)
         ],
@@ -1043,11 +1115,11 @@ def access_role_rules():
             rule([""], ["configmaps", "services", "serviceaccounts"], mutate),
             rule(["apps"], ["deployments"], mutate),
         ],
-        ("cloudflare-public", "flux-release-reconciler"): release + [
+        ("cloudflare-public", "flux-release-reconciler"): git_release + [
             rule([""], ["secrets"], mutate)
         ],
-        ("naranjo-online", "flux-release-reconciler"): release,
-        ("lidersea-com", "flux-release-reconciler"): release,
+        ("naranjo-online", "flux-release-reconciler"): oci_release,
+        ("lidersea-com", "flux-release-reconciler"): oci_release,
         ("cloudflare-public", "helm-reconciler"): helm,
         ("naranjo-online", "helm-reconciler"): helm,
         ("lidersea-com", "helm-reconciler"): helm,
@@ -1074,7 +1146,25 @@ def sa_subject(namespace, name):
 
 def expected_bindings():
     role = lambda name: {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name}
+    controllers = [sa_subject("flux-system", name) for name in sorted(CONTROLLER_NAMES)]
     result = {
+        ("flux-system", "flux-controller-runtime"): (role("flux-controller-runtime"), controllers),
+        ("flux-system", "flux-controller-decryption"): (
+            role("flux-controller-decryption"), [sa_subject("flux-system", "kustomize-controller")]
+        ),
+        ("flux-system", "flux-controller-impersonation"): (
+            role("flux-controller-impersonation"),
+            [sa_subject("flux-system", "kustomize-controller")],
+        ),
+        ("cloudflare-public", "flux-controller-impersonation"): (
+            role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
+        ),
+        ("naranjo-online", "flux-controller-impersonation"): (
+            role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
+        ),
+        ("lidersea-com", "flux-controller-impersonation"): (
+            role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
+        ),
         ("flux-system", "root-reconciler"): (role("root-reconciler"), [sa_subject("flux-system", "root-reconciler")]),
         ("cloudflare-public", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
         ("naranjo-online", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
@@ -1097,25 +1187,16 @@ def expected_cluster_bindings():
         "kind": "ClusterRole",
         "name": name,
     }
+    # `cluster-reconciler-flux-system` is deliberately absent: the reviewed
+    # desired state deletes it. A live cluster that still carries it binds
+    # cluster-admin to two protected accounts, so it is caught by
+    # binding_reaches_protected_account and this verifier fails — which is what
+    # makes `--verify` the proof that the narrowing actually landed, not just
+    # that the new authority was added beside the old.
     return {
-        "cluster-reconciler-flux-system": (
-            cluster_role("cluster-admin"),
-            [sa_subject("flux-system", "kustomize-controller"), sa_subject("flux-system", "helm-controller")],
-        ),
         "crd-controller-flux-system": (
             cluster_role("crd-controller-flux-system"),
-            [
-                sa_subject("flux-system", name)
-                for name in (
-                    "kustomize-controller",
-                    "helm-controller",
-                    "source-controller",
-                    "notification-controller",
-                    "image-reflector-controller",
-                    "image-automation-controller",
-                    "source-watcher",
-                )
-            ],
+            [sa_subject("flux-system", name) for name in sorted(CONTROLLER_NAMES)],
         ),
     }
 
@@ -1151,17 +1232,86 @@ def check_binding(value, key, expected, cluster=False):
     require(normalized_subjects(value.get("subjects")) == normalized_subjects(expected[1]))
 
 
-def binding_reaches_protected_account(value):
+# Kubernetes bootstraps these four ClusterRoleBindings on every cluster, and all
+# four reach every authenticated identity — which now includes the Flux accounts,
+# because the check below understands `system:authenticated`. They are
+# ALLOWLISTED BY NAME and pinned to their exact roleRef and subject set, so a
+# stock binding passes and a TAMPERED one — repointed at another ClusterRole, or
+# grown an extra subject — still fails.
+#
+# Without this the verifier refuses a conformant cluster: `--verify` reads every
+# ClusterRoleBinding on the cluster, unfiltered, and the runbook runs it
+# IMMEDIATELY AFTER the destructive deletion, so a false refusal aborts the
+# migration at its most delicate boundary and sends the operator into a rollback
+# that was never needed. Fail-closed, but wrong at the worst moment.
+#
+# The pins are the upstream defaults for the pinned Kubernetes minor. A cluster
+# whose defaults differ fails here and is a reviewed change, not a silent pass.
+BOOTSTRAPPED_CLUSTER_ROLE_BINDINGS = {
+    "system:basic-user": ("system:basic-user", ("system:authenticated",)),
+    "system:discovery": ("system:discovery", ("system:authenticated",)),
+    "system:public-info-viewer": (
+        "system:public-info-viewer", ("system:authenticated", "system:unauthenticated"),
+    ),
+    "system:service-account-issuer-discovery": (
+        "system:service-account-issuer-discovery", ("system:serviceaccounts",),
+    ),
+}
+
+
+def is_bootstrapped_cluster_role_binding(value):
+    """Whether ``value`` is EXACTLY one of the stock bindings, untampered."""
+
+    metadata = value.get("metadata")
+    require(isinstance(metadata, dict))
+    expected = BOOTSTRAPPED_CLUSTER_ROLE_BINDINGS.get(metadata.get("name"))
+    if expected is None:
+        return False
+    role_ref = value.get("roleRef")
+    require(isinstance(role_ref, dict))
+    if role_ref != {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": expected[0],
+    }:
+        return False
     subjects = value.get("subjects")
     require(isinstance(subjects, list))
-    protected_groups = {"system:serviceaccounts"} | {
+    actual = []
+    for subject in subjects:
+        require(isinstance(subject, dict))
+        if subject.get("kind") != "Group":
+            return False
+        actual.append(subject.get("name"))
+    return tuple(sorted(actual)) == tuple(sorted(expected[1]))
+
+
+def binding_reaches_protected_account(value):
+    # THREE subject forms, because a ServiceAccount is reachable by all three and
+    # a verifier that knew only two would accept a binding the repository's own
+    # RBAC model reports as granting authority: as a ServiceAccount subject, as
+    # the User `system:serviceaccount:<ns>:<name>`, or through a Group —
+    # `system:serviceaccounts`, `system:serviceaccounts:<ns>`, or
+    # `system:authenticated`, which every authenticated identity carries.
+    # Missing a form here is the same asymmetry that let a Role escape
+    # verification entirely: the live half must never be weaker than the model
+    # it mirrors.
+    subjects = value.get("subjects")
+    require(isinstance(subjects, list))
+    protected_groups = {"system:serviceaccounts", "system:authenticated"} | {
         "system:serviceaccounts:" + namespace for namespace, _ in PROTECTED_SERVICE_ACCOUNTS
+    }
+    protected_users = {
+        "system:serviceaccount:{}:{}".format(namespace, name)
+        for namespace, name in PROTECTED_SERVICE_ACCOUNTS
     }
     for subject in subjects:
         require(isinstance(subject, dict))
         if subject.get("kind") == "ServiceAccount" and (
             subject.get("namespace"), subject.get("name")
         ) in PROTECTED_SERVICE_ACCOUNTS:
+            return True
+        if subject.get("kind") == "User" and subject.get("name") in protected_users:
             return True
         if subject.get("kind") == "Group" and subject.get("name") in protected_groups:
             return True
@@ -1171,6 +1321,22 @@ def binding_reaches_protected_account(value):
 def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, scope):
     roles = index(role_doc, "Role")
     access_roles = access_role_rules()
+    cluster_role_expectations = cluster_role_rules()
+    # CLOSURE. Live, `get roles --all-namespaces` returns the whole cluster's
+    # Roles, so this verifier cannot compare sets the way the repository test
+    # does. What it can require is that every Role and ClusterRole named by a
+    # binding it verifies is itself in the rules mirror above: without this,
+    # deleting a Role from `access_role_rules` left its binding verified, its
+    # subjects verified, and its RULES compared against nothing at all — so the
+    # live object could grant anything and `--verify` would still pass.
+    for (namespace, _), expected in expected_bindings().items():
+        role_ref = expected[0]
+        require(role_ref.get("kind") == "Role")
+        require((namespace, role_ref.get("name")) in access_roles)
+    for expected in expected_cluster_bindings().values():
+        role_ref = expected[0]
+        require(role_ref.get("kind") == "ClusterRole")
+        require(role_ref.get("name") in cluster_role_expectations)
     if scope == "full":
         for key, expected in access_roles.items():
             require(key in roles)
@@ -1180,7 +1346,7 @@ def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, sco
             check_role(roles[key], key, access_roles[key])
 
     cluster_roles = index(cluster_role_doc, "ClusterRole", namespaced=False)
-    for name, expected in cluster_role_rules().items():
+    for name, expected in cluster_role_expectations.items():
         require(name in cluster_roles)
         check_role(cluster_roles[name], name, expected, cluster=True)
 
@@ -1199,6 +1365,8 @@ def check_rbac(role_doc, binding_doc, cluster_role_doc, cluster_binding_doc, sco
     for key, value in cluster_bindings.items():
         if key in expected_clusters:
             check_binding(value, key, expected_clusters[key], cluster=True)
+        elif is_bootstrapped_cluster_role_binding(value):
+            continue
         elif binding_reaches_protected_account(value):
             raise ContractError()
     require(set(expected_clusters) <= set(cluster_bindings))

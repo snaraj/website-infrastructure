@@ -68,8 +68,6 @@ data:
     [SelfSubjectAccessReview,*,*]
     [Binding,*,*]
     [Pod/binding,*,*]
-    [ReplicaSet,*,*]
-    [ReplicaSet/?*,*,*]
     [EphemeralReport,*,*]
     [ClusterEphemeralReport,*,*]
     [*/*,flux-system,*]

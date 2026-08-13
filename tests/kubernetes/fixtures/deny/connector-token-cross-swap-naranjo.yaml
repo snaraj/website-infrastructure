@@ -1,0 +1,44 @@
+# P1-2 cross-swap, naranjo direction. A fully hardened naranjo connector Pod
+# that mounts an individually APPROVED token — but lidersea's. Denied because a
+# connector's Secret must be bound to its own app.kubernetes.io/instance, not
+# merely be a member of the approved token set.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing both directions in one file would keep the file
+# "rejected" while a rego arm that accepts one direction went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: naranjo-connector-with-lidersea-token
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: tunnel-token
+          mountPath: /etc/cloudflared/token
+          readOnly: true
+  volumes:
+    - name: tunnel-token
+      secret:
+        secretName: lidersea-com-tunnel-token
+        defaultMode: 288
+        items:
+          - key: token
+            path: token

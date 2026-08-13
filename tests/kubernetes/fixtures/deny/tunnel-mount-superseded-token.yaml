@@ -1,0 +1,42 @@
+# The superseded shared token: a connector Pod that is otherwise fully hardened
+# but mounts pi-websites-tunnel-token. Denied — each connector may mount only its
+# own per-site tunnel-token Secret (naranjo-online-tunnel-token /
+# lidersea-com-tunnel-token). The Pod is otherwise valid so the mounted Secret
+# name is the sole denial (adding the old name back to the volume allowlist
+# flips this fixture to accepted).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cloudflared-superseded-token
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: tunnel-token
+          mountPath: /etc/cloudflared/token
+          readOnly: true
+  volumes:
+    - name: tunnel-token
+      secret:
+        secretName: pi-websites-tunnel-token
+        defaultMode: 288
+        items:
+          - key: token
+            path: token

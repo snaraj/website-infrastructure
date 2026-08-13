@@ -1,0 +1,45 @@
+# A workload in cloudflare-public claiming an identity that is NOT in the
+# reviewed connector inventory, and naming the Secret its own instance label
+# derives. Everything is internally consistent — that is the point. It must be
+# refused on the IDENTITY, before the derivation is ever reached: a derivation
+# with no closed inventory in front of it will happily manufacture a token name
+# for any label a caller invents.
+#
+# This is the fixture whose absence let the identity gate survive a full
+# mutation matrix: with `connector_instance in connector_deployments` deleted,
+# every other fixture still failed for its own reason and nothing noticed.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: connector-unreviewed-identity
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: invented-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: invented-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

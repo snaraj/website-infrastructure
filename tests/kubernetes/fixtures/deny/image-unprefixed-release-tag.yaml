@@ -1,0 +1,30 @@
+# The unprefixed version. ADR 0014 publishes `vMAJOR.MINOR.PATCH`; a bare
+# `0.1.9` is not a tag this platform ever creates, so accepting it would
+# admit a name no published artifact answers to.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-unprefixed-release-tag
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-unprefixed-release-tag
+      image: ghcr.io/snaraj/naranjo-online:0.1.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

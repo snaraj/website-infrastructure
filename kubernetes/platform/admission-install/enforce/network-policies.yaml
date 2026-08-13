@@ -14,14 +14,21 @@
 # isolated by it. There is no window in which the namespace is closed and
 # unreachable, and no window in which it is open.
 #
-# `192.0.2.0/32` is RFC 5737 TEST-NET-1: an address that can never match
-# anything real. Safety invariant 12 keeps the control-plane address out of
-# this public index permanently, so the committed bytes carry the reviewed
-# SHAPE with a fail-closed sentinel destination. The installer substitutes the
-# real address from the bound kubeconfig context's `server` value at apply
-# time — the same value the binding guard already proved — and refuses to apply
-# any document in which the sentinel survives. Nothing is typed by hand and
-# nothing reaches shell history.
+# The committed bytes carry two different RFC 5737 sentinels and grant no real
+# path. They are deliberately NOT derived from the operator kubeconfig:
+#
+#   192.0.2.10/32  every control-plane source that may call the webhook
+#   192.0.2.20/32  the selected CNI dataplane's Pod-to-API destination set
+#
+# `KYVERNO_INSTALL_SERVER` binds only the operator's kubectl target. Pods use
+# `https://kubernetes.default.svc:443`; whether a NetworkPolicy implementation
+# observes that Service VIP/443 before translation or the API endpoint(s)/6443
+# afterwards is a property of the selected CNI/kube-proxy dataplane. A private,
+# mode-0600 runtime network contract names that mode, its exact peer set, and
+# every HA control-plane webhook source. The installer cross-checks the contract
+# against the live Service/endpoints/nodes, expands these sentinels, substitutes
+# port 443 or 6443 as the mode requires, and refuses if any sentinel survives.
+# No private topology is committed or printed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -50,7 +57,7 @@ spec:
   ingress:
     - from:
         - ipBlock:
-            cidr: 192.0.2.0/32
+            cidr: 192.0.2.10/32
       ports:
         - port: 9443
           protocol: TCP
@@ -83,8 +90,12 @@ spec:
         - port: 53
           protocol: UDP
 ---
-# The API server itself: every controller watches policies and reports through
-# it, and the admission controller writes its own webhook configurations there.
+# The in-cluster Kubernetes Service path: every controller watches policies and
+# reports through `kubernetes.default.svc`, and the admission controller writes
+# its own webhook configurations through it. `65535` is a fail-closed port
+# sentinel. The runtime contract selects exactly one effective dataplane shape:
+# Service VIP peers on TCP 443, or translated API endpoint peers on TCP 6443.
+# The installer never substitutes the operator kubeconfig server here.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -99,9 +110,9 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 192.0.2.0/32
+            cidr: 192.0.2.20/32
       ports:
-        - port: 6443
+        - port: 65535
           protocol: TCP
 ---
 # Public HTTPS, for the `verifyImages` rules only. A NetworkPolicy selects

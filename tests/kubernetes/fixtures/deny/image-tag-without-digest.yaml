@@ -1,0 +1,31 @@
+# The tag WITHOUT the digest — the shape safety invariant 6 exists to
+# forbid. Adding a legible tag must never become an excuse to drop the
+# immutable reference, so this stays denied by the same anchored rules
+# that denied it before the tag was permitted at all.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-tag-without-digest
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-tag-without-digest
+      image: ghcr.io/snaraj/naranjo-online:v0.1.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

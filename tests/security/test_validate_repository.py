@@ -124,6 +124,7 @@ SITE_BASELINE_FILES = (
     ),
 )
 DIGEST_LINE = re.compile(r"(?m)^      digest: sha256:[0-9a-f]{64}$")
+TAG_LINE = re.compile(r"(?m)^      tag: v[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 def normalize_site_scaffold_baseline(root):
@@ -146,9 +147,15 @@ def normalize_site_scaffold_baseline(root):
         text, digest_lines = DIGEST_LINE.subn(
             "      digest: sha256:" + "0" * 64, text
         )
-        if digest_lines != 1:
+        # The release identity is one three-field state, so the baseline
+        # resets the tag to its sentinel alongside the digest; leaving the
+        # promoted tag would synthesise a half-advanced release the strict
+        # parser correctly refuses.
+        text, tag_lines = TAG_LINE.subn("      tag: " + MODULE.ZERO_TAG, text)
+        if digest_lines != 1 or tag_lines != 1:
             raise AssertionError(
-                "fixture release lacks one digest line: " + release
+                "fixture release lacks one digest line and one tag line: "
+                + release
             )
         release_path.write_bytes(text.encode("utf-8"))
         for relative in (release, parent):
@@ -177,15 +184,30 @@ def replace_once(root, relative, before, after):
     path.write_bytes(text.replace(before, after).encode("utf-8"))
 
 
+def resolve_connector_revisions(root, revision="rev-reviewed-test"):
+    """Resolve EVERY connector's own revision in the public release fixture.
+
+    Each website's connector carries its own revision, so a staged fixture must
+    resolve both; leaving one behind is the half-configured state the classifier
+    now refuses outright.
+    """
+
+    path = root / "kubernetes/platform/cloudflare-public/release/release.yaml"
+    text = path.read_text(encoding="utf-8")
+    before = "        tokenRevision: not-configured\n"
+    if text.count(before) != len(MODULE.PUBLIC_CONNECTOR_SITES):
+        raise AssertionError("public release connector revisions are not canonical")
+    path.write_bytes(
+        text.replace(
+            before, "        tokenRevision: {}\n".format(revision)
+        ).encode("utf-8")
+    )
+
+
 def configure_cloudflare_fixture(root):
     """Create the exact synthetic staged encrypted-Secret lifecycle."""
 
-    replace_once(
-        root,
-        "kubernetes/platform/cloudflare-public/release/release.yaml",
-        "      tokenRevision: not-configured\n",
-        "      tokenRevision: rev-reviewed-test\n",
-    )
+    resolve_connector_revisions(root)
     replace_once(
         root,
         "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
@@ -203,11 +225,17 @@ def configure_cloudflare_fixture(root):
     secret.write_bytes(synthetic_tunnel_secret().encode("utf-8"))
 
 
-def write_site_release(root, slug, *, suspended=True, ready=False, digest=None):
+def write_site_release(
+    root, slug, *, suspended=True, ready=False, digest=None, tag=None
+):
     """Write the complete narrow HelmRelease identity used by strict tests."""
 
     if digest is None:
         digest = "sha256:" + ("0" * 64)
+    if tag is None:
+        # Default to the sentinel so the default fixture is the `initial`
+        # phase in all three fields, not two of them.
+        tag = MODULE.ZERO_TAG
     domains = {
         "naranjo-online": "naranjo.online",
         "lidersea-com": "lidersea.com",
@@ -245,12 +273,14 @@ def write_site_release(root, slug, *, suspended=True, ready=False, digest=None):
         "    deploymentReady: {ready}\n"
         "    image:\n"
         "      repository: ghcr.io/snaraj/{slug}\n"
+        "      tag: {tag}\n"
         "      digest: {digest}\n".format(
             slug=slug,
             domain=domain,
             readiness=MODULE.RELEASE_CONTRACTS[slug]["readiness"],
             suspended=str(suspended).lower(),
             ready=str(ready).lower(),
+            tag=tag,
             digest=digest,
         )).encode("utf-8"))
     return release
@@ -1627,12 +1657,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
-            replace_once(
-                root,
-                "kubernetes/platform/cloudflare-public/release/release.yaml",
-                "      tokenRevision: not-configured\n",
-                "      tokenRevision: rev-reviewed-test\n",
-            )
+            resolve_connector_revisions(root)
             self.assertEqual(
                 MODULE.check_activation(root),
                 ["release transition state is unavailable or unsafe"],
@@ -1773,6 +1798,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             values={
                 ("deploymentReady",): "true",
                 ("image", "digest"): "sha256:" + ("a" * 64),
+                ("image", "tag"): "v1.2.3",
             }
         )
         self.assertEqual(
@@ -1784,16 +1810,43 @@ class RepositoryPolicyTests(unittest.TestCase):
             values={
                 ("deploymentReady",): "false",
                 ("image", "digest"): MODULE.ZERO_DIGEST,
+                ("image", "tag"): MODULE.ZERO_TAG,
             }
         )
         errors = MODULE.site_release_override_errors("example.invalid", staged)
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), 3)
         self.assertTrue(any(
             "must contain one nonzero image digest" in error for error in errors
         ))
         self.assertTrue(any(
+            "must contain one nonzero release tag" in error for error in errors
+        ))
+        self.assertTrue(any(
             "is not deploymentReady" in error for error in errors
         ))
+
+        # A release NAME that is not one exact published release is refused on
+        # its own, separately from the sentinel: a floating alias, an absent
+        # tag, and the unprefixed version each fail the production override.
+        for label, tag in (
+            ("floating alias", "latest"),
+            ("unprefixed", "1.2.3"),
+            ("absent", None),
+            ("digest in the tag field", "sha256:" + ("a" * 64)),
+        ):
+            values = {
+                ("deploymentReady",): "true",
+                ("image", "digest"): "sha256:" + ("a" * 64),
+            }
+            if tag is not None:
+                values[("image", "tag")] = tag
+            with self.subTest(label=label):
+                self.assertEqual(
+                    MODULE.site_release_override_errors(
+                        "example.invalid", types.SimpleNamespace(values=values)
+                    ),
+                    ["example.invalid HelmRelease override release tag is not canonical"],
+                )
 
 
 if __name__ == "__main__":

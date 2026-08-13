@@ -1,0 +1,26 @@
+# Cross-site reachability: the naranjo connector (instance=naranjo-online-tunnel)
+# attempts egress to the OTHER site's origin (lidersea-com). Denied: a
+# connector-egress policy's selected instance and its target origin must be the
+# same site, so connector A can never reach site B's origin.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-naranjo-online
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: naranjo-online-tunnel
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lidersea-com
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lidersea-com
+      ports:
+        - port: 8080
+          protocol: TCP

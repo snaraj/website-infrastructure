@@ -27,14 +27,32 @@ except ModuleNotFoundError:
 
 # _exact_keys refuses unreviewed provider fields instead of relying on API-server
 # defaults that could change the encryption or decryption path.
+#
+# Its diagnostics name only this validator's own literal vocabulary. The file
+# under inspection is the API server's EncryptionConfiguration, which carries
+# the secretbox key that encrypts every Kubernetes Secret at rest, and the
+# mapping this function is handed is the one holding that key. Echoing a field
+# name read back out of it would copy bytes from the most sensitive file on the
+# host into bootstrap output and CI logs, which is precisely the leak the
+# sibling publication-history validator refuses by construction. So an expected
+# field that is ABSENT is named — that name comes from the caller's literal
+# argument, never from the file — while fields that are PRESENT but unreviewed
+# are reported only as a count. An operator holds the file already; a count and
+# the reviewed vocabulary are enough to find the offending line, and never
+# enough to republish its contents.
 def _exact_keys(value, expected, label, errors):
     if not isinstance(value, dict):
         errors.append("{} must be a mapping".format(label))
         return False
+    reviewed = set(expected)
     actual = set(value)
-    if actual != set(expected):
-        errors.append("{} must contain exactly {}; found {}".format(
-            label, ", ".join(sorted(expected)), ", ".join(sorted(actual))
+    if actual != reviewed:
+        missing = sorted(reviewed - actual)
+        errors.append("{} must contain exactly {}; missing {}; unreviewed field count {}".format(
+            label,
+            ", ".join(sorted(reviewed)),
+            ", ".join(missing) if missing else "none",
+            len(actual - reviewed),
         ))
         return False
     return True

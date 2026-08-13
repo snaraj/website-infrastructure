@@ -1,0 +1,131 @@
+# Positive control for the reconciled two-connector, double-pinned edge model
+# (EDGE-DRIFT-001). Proves the exact live shape is ACCEPTED so the deny rules
+# below it are non-vacuous:
+#   - the naranjo site-ingress peer pins name + its own connector instance;
+#   - each connector-egress policy pins name + its own <site>-tunnel instance
+#     and reaches only its own site origin;
+#   - the shared DNS and edge policies keep the name-only selector.
+# The lidersea site-ingress peer is proven in allow/lidersea-hardened.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: naranjo-online-tunnel
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-dns
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-edge
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 7844
+          protocol: TCP
+        - port: 7844
+          protocol: UDP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-naranjo-online
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: naranjo-online-tunnel
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: naranjo-online
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: naranjo-online
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-lidersea-com
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+      app.kubernetes.io/instance: lidersea-com-tunnel
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: lidersea-com
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lidersea-com
+      ports:
+        - port: 8080
+          protocol: TCP

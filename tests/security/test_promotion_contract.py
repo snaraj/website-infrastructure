@@ -211,6 +211,7 @@ class PromotionContractTests(unittest.TestCase):
             "HelmRelease changed during registry or candidate verification",
             "parent Kustomization changed during registry or candidate verification",
             "--expect-digest",
+            "--expect-tag",
             "release review transaction",
             'trap on_failure ERR INT TERM HUP EXIT',
             '--root "${candidate_root}" emit-values',
@@ -227,6 +228,23 @@ class PromotionContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.script)
         self.assertNotIn("Verified and staged", self.script)
+        # The promotion advances the release NAME and the release BYTES in one
+        # transaction, from the pair three separate `oras resolve` calls proved
+        # the registry binds. A candidate built with only one of the two would
+        # publish a version the transaction never verified against the digest
+        # beside it — a legible reference that lies.
+        self.assertIn('--tag "${release_tag}" \\\n', self.script)
+        self.assertIn(
+            '--expect-digest "${digest}" --expect-tag "${release_tag}"',
+            self.script,
+        )
+        candidate_call = self.script[
+            self.script.index("create_release_candidate.py") :
+        ]
+        candidate_call = candidate_call[: candidate_call.index("\n  else\n")]
+        for required in ('--digest "${digest}"', '--tag "${release_tag}"'):
+            with self.subTest(required=required):
+                self.assertIn(required, candidate_call)
         self.assertNotIn("chart/values.yaml", self.script)
         self.assertNotIn('mv -f -- "${candidate_values}" "${values}"', self.script)
         self.assertNotIn('mv -f -- "${original_backup}" "${values}"', self.script)
