@@ -85,17 +85,23 @@ POLICY_NAMES = (
     "require-signed-naranjo-online",
     "require-signed-lidersea-com",
 )
+# Mirrors ``expected_network_policies`` in the validator, reconciled to a
+# read-only capture of the cluster on 2026-08-12. The two site namespaces carry
+# NO namespace-wide default-deny live (AUDIT NP7) and the cloudflare-public one
+# is named ``default-deny-all``, not what the committed prerequisites manifest
+# calls it.
 NETWORK_POLICY_IDENTITIES = (
-    ("cloudflare-public", "default-deny"),
+    ("cloudflare-public", "default-deny-all"),
     ("cloudflare-public", "cloudflared-dns"),
     ("cloudflare-public", "cloudflared-edge"),
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
-    ("naranjo-online", "default-deny"),
-    ("naranjo-online", "cloudflared-to-naranjo-online"),
-    ("lidersea-com", "default-deny"),
-    ("lidersea-com", "cloudflared-to-lidersea-com"),
+    ("naranjo-online", "ingress-to-naranjo-online"),
+    ("lidersea-com", "ingress-to-lidersea-com"),
 )
+# The one identity that must carry a NAMESPACE-WIDE podSelector, because a
+# default is only a default if it selects every Pod.
+NAMESPACE_WIDE_DEFAULT_DENY = ("cloudflare-public", "default-deny-all")
 
 
 def function_body(script, name, next_name):
@@ -392,12 +398,15 @@ class ReleaseGateContractTests(unittest.TestCase):
 
         network_policies = []
         for namespace, name in NETWORK_POLICY_IDENTITIES:
+            selector = {"matchLabels": {"contract": name}}
+            if (namespace, name) == NAMESPACE_WIDE_DEFAULT_DENY:
+                selector = {}
             policy = {
                 "apiVersion": "networking.k8s.io/v1",
                 "kind": "NetworkPolicy",
                 "metadata": {"namespace": namespace, "name": name},
                 "spec": {
-                    "podSelector": {"matchLabels": {"contract": name}},
+                    "podSelector": selector,
                     "policyTypes": ["Ingress", "Egress"],
                 },
             }
@@ -899,6 +908,74 @@ class ReleaseGateContractTests(unittest.TestCase):
             }
         )
         self._write("policies.json", value)
+        self._assert_rejected()
+
+    def _repoint_network_policy(self, namespace, name, **spec_changes):
+        """Change one policy in BOTH the live evidence and its desired file.
+
+        Changing only the live copy is what made the first version of these
+        three tests vacuous: the pre-existing spec-equality check rejected the
+        evidence for a mismatch against desired state, so all three passed with
+        the namespace-wide default-deny check DELETED. Moving both copies
+        together keeps every older check satisfied and leaves the new one as
+        the only thing that can fire.
+        """
+
+        live = self._read("networkpolicies.json")
+        for policy in live["items"]:
+            if (
+                policy["metadata"]["namespace"] == namespace
+                and policy["metadata"]["name"] == name
+            ):
+                policy["spec"].update(spec_changes)
+                desired = dict(policy)
+        self._write("networkpolicies.json", live)
+        self._write(
+            "desired-networkpolicy-{}-{}.json".format(namespace, name), desired
+        )
+
+    def test_scoped_default_deny_where_a_namespace_wide_one_is_required_fails_closed(self):
+        """A podSelector-scoped deny is not a default-deny.
+
+        The exact live shape of AUDIT NP7: a policy that looks like a
+        default-deny, is named like one, denies both directions — and selects
+        only some Pods, so anything else scheduled into the namespace is
+        unrestricted. Narrowing the surviving cloudflare-public one the same way
+        must fail rather than be accepted as equivalent.
+        """
+
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY,
+            podSelector={"matchLabels": {"app": "anything"}},
+        )
+        self._assert_rejected()
+
+    def test_ingress_only_default_deny_fails_closed(self):
+        """The other half of NP7: Ingress-only leaves egress wide open."""
+
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY, policyTypes=["Ingress"]
+        )
+        self._assert_rejected()
+
+    def test_a_closed_divergence_makes_its_own_declaration_fail(self):
+        """The declaration is a ratchet, not a permanent exemption.
+
+        The day a site namespace gains the namespace-wide default-deny it is
+        supposed to have, the recorded divergence becomes a lie, and a stale
+        justification has to fail exactly like a missing check — otherwise the
+        exemption outlives the gap and quietly re-permits its removal.
+
+        Widening the site's OWN policy rather than adding a second one, so the
+        inventory count is untouched and only the ratchet can object.
+        """
+
+        self._repoint_network_policy(
+            "naranjo-online",
+            "ingress-to-naranjo-online",
+            podSelector={},
+            policyTypes=["Ingress", "Egress"],
+        )
         self._assert_rejected()
 
     def test_missing_kustomization_observed_generation_fails_closed(self):

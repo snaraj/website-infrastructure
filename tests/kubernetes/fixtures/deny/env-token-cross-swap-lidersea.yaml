@@ -1,0 +1,38 @@
+# Cross-swap on the deployed token surface, lidersea direction. The other
+# arm of the same substitution: an arm proven in one direction only is an
+# arm that can be weakened in the other.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidersea-connector-with-naranjo-token-env
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: naranjo-online-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

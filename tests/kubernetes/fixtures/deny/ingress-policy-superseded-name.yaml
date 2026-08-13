@@ -1,0 +1,37 @@
+# The superseded policy NAME, and nothing else wrong. Every other field is
+# byte-identical to the accepted live shape in
+# allow/live-site-ingress-policies.yaml — same peer, same double pin, same
+# port — so the name is the sole failing condition and the name match cannot
+# be relaxed into an alternation that accepts both prefixes without this
+# fixture going green.
+#
+# It matters in this direction specifically: the reconciliation moves the
+# contract FROM this name, and a rename that merely added the new name would
+# leave an object nothing renders and nothing runs permanently admissible.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: naranjo-online-tunnel
+      ports:
+        - port: 8080
+          protocol: TCP

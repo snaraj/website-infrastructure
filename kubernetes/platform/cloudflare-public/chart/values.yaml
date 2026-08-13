@@ -1,4 +1,28 @@
-replicaCount: 2
+# One per connector, matching the cluster. NOT a universal rule and NOT a
+# schema constant: the owner's ruling of 2026-08-12 is that a replica count
+# must never be a hard limit, because a future application — or a stateful
+# workload such as a database — may legitimately need more. What IS enforced
+# is capacity: tests/security/test_namespace_capacity_contract.py requires a
+# release's replicas AND its rolling-update surge headroom to fit inside its
+# namespace's committed ResourceQuota, which permits 3 replicas where the quota
+# affords them.
+#
+# BE PRECISE ABOUT WHAT THAT RULE SAYS HERE, because the obvious summary is
+# wrong. With the surge-free strategy this chart ships, two replicas per
+# connector are ALLOWED: four Pods at 500m/256Mi is 2000m of a 2000m
+# limits.cpu budget and 1Gi of a 1Gi limits.memory budget — it fits, exactly.
+# What the rule refuses is two replicas paired with a SURGING strategy, which
+# is the combination this chart used to carry: `maxSurge: 1` then needs a
+# fifth Pod that the budget cannot pay for, so the rollout is refused and the
+# connectors become un-updatable without an outage. The trap was the pairing,
+# never the count on its own.
+#
+# So why 1: the cluster is one node, a second replica buys no availability
+# there, and two would consume the entire namespace budget with nothing spare
+# for anything else that namespace ever needs. That is a judgement about this
+# cluster, and the capacity rule is what would permit a different number the
+# day a namespace affords one.
+replicaCount: 1
 
 image:
   repository: cloudflare/cloudflared
