@@ -90,6 +90,7 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.metadata.namespace in site_namespaces
+  is_string(site_image_digest)
   not regex.match("^sha256:[0-9a-f]{64}$", site_image_digest)
   msg := sprintf("HelmRelease %s does not name a canonical image digest", [input.metadata.name])
 }
@@ -109,6 +110,7 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.metadata.namespace in site_namespaces
+  is_string(site_image_tag)
   not regex.match("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", site_image_tag)
   msg := sprintf("HelmRelease %s does not name a canonical release tag", [input.metadata.name])
 }
@@ -135,14 +137,38 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s does not state a well-formed image mapping", [input.metadata.name])
 }
 
-site_image_digest := digest if {
-  digest := object.get(site_image_mapping, "digest", "")
-  is_string(digest)
+# TOTAL accessors: defined for whatever value is present, of whatever type.
+#
+# The guarded form these replace (`x := object.get(...); is_string(x)`) was a
+# REVERSAL wearing the shape of a fix. Making the accessor undefined on a
+# non-string leaf does not hand the denial to `not` — in Rego,
+# `not <undefined rule>` succeeds but `not <builtin>(<undefined rule>)` does
+# NOT, and every consumer below passes the accessor to a builtin. The guard
+# therefore silently switched six digest shapes from DENIED to admitted.
+# Verified with a four-arm minimal policy and against origin/main.
+#
+# The type check belongs in its own deny arm, on a value that is defined, so
+# a present-but-non-string leaf is refused by a rule that actually fires.
+site_image_digest := object.get(site_image_mapping, "digest", "")
+
+site_image_tag := object.get(site_image_mapping, "tag", "")
+
+# Leaf-level type arms. `is_string` is undefined (not false) on a non-string,
+# and an undefined BUILTIN EXPRESSION under `not` does fire — unlike an
+# undefined RULE passed into one. The argument here is always defined, which
+# is the whole difference.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  not is_string(site_image_digest)
+  msg := sprintf("HelmRelease %s does not state a string image digest", [input.metadata.name])
 }
 
-site_image_tag := tag if {
-  tag := object.get(site_image_mapping, "tag", "")
-  is_string(tag)
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  not is_string(site_image_tag)
+  msg := sprintf("HelmRelease %s does not state a string release tag", [input.metadata.name])
 }
 
 deny contains msg if {

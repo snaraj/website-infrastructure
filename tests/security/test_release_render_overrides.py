@@ -263,6 +263,8 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             'sentinel_tag="HelmRelease ${website} still names the sentinel release tag"',
             'uncanonical_tag="HelmRelease ${website} does not name a canonical release tag"',
             'malformed_image="HelmRelease ${website} does not state a well-formed image mapping"',
+            'nonstring_digest="HelmRelease ${website} does not state a string image digest"',
+            'nonstring_tag="HelmRelease ${website} does not state a string release tag"',
             # A site root renders that site's chart source as well as its
             # release, so the vocabulary is exhaustive only if it names the
             # chart-source denials too. A correct chart source produces
@@ -280,13 +282,13 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         )
         self.assertIn(
             'forbidden=("$uncanonical" "$uncanonical_tag" "$malformed_image" '
-            '"$unverified" "$unbound")',
+            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
             helper,
         )
         self.assertIn(
             'forbidden=("$not_ready" "$zero_digest" "$uncanonical" '
             '"$sentinel_tag" "$uncanonical_tag" "$malformed_image" '
-            '"$unverified" "$unbound")',
+            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
             helper,
         )
         self.assertIn('for fragment in "${required[@]}"', helper)
@@ -648,6 +650,82 @@ class SiteReleasePolicyTests(unittest.TestCase):
                 self.assertIn(
                     expected, self.denials(suspend=False, ready=True, **kwargs)
                 )
+
+    def test_a_non_string_leaf_is_denied_not_skipped(self):
+        """The LEAF half of the same fail-open class, and the harder half.
+
+        The container shapes below (`spec`/`values`/`image`) were closed by the
+        `is_object` guards. The leaves were not, and a guarded accessor is the
+        wrong instrument for them: making `site_image_digest` UNDEFINED on a
+        non-string does not hand the denial to `not`, because in Rego
+        `not <undefined rule>` succeeds while `not <builtin>(<undefined rule>)`
+        does not — and every consumer passes the accessor to a builtin. That
+        construction silently turned six DENIED digest shapes into admitted
+        ones, which is a reversal wearing the shape of a fix.
+
+        The type check therefore lives in its own arm, over a total accessor.
+        Every shape below must produce its own denial; a corpus that stops at
+        the container levels never reaches this rule at all.
+        """
+
+        digest = "sha256:" + "ab" * 32
+        for label, value in (
+            ("null", "null"),
+            ("boolean", "true"),
+            ("number", "5"),
+            ("list", "[]"),
+            ("map", "{}"),
+        ):
+            for field, expected in (
+                ("digest", "does not state a string image digest"),
+                ("tag", "does not state a string release tag"),
+            ):
+                other = (
+                    "      tag: v1.2.3\n"
+                    if field == "digest"
+                    else "      digest: {}\n".format(digest)
+                )
+                document = textwrap.dedent(
+                    """\
+                    apiVersion: helm.toolkit.fluxcd.io/v2
+                    kind: HelmRelease
+                    metadata:
+                      name: naranjo-online
+                      namespace: naranjo-online
+                    spec:
+                      suspend: false
+                      values:
+                        deploymentReady: true
+                        image:
+                          repository: ghcr.io/snaraj/naranjo-online
+                    """
+                ) + other + "      {}: {}\n".format(field, value)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "release.yaml"
+                    path.write_text(document, encoding="utf-8")
+                    with self.subTest(field=field, shape=label):
+                        self.assertIn(
+                            "HelmRelease naranjo-online " + expected,
+                            release_policy_denials(path),
+                        )
+
+    def test_a_well_formed_release_produces_no_leaf_type_denial(self):
+        """The true negative the arms above must not cost.
+
+        A type arm that fires on a correct release would be worse than the
+        fail-open it replaced, so the accepted shape is asserted explicitly
+        rather than assumed from the other rows being green.
+        """
+
+        self.assertEqual(
+            self.denials(
+                suspend=False,
+                ready=True,
+                digest=REVIEWED_DIGEST,
+                tag=REVIEWED_TAG,
+            ),
+            set(),
+        )
 
     def test_a_degenerate_image_mapping_is_denied_not_skipped(self):
         """Rego's nested object.get fails OPEN on a non-object receiver.
