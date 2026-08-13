@@ -7,15 +7,24 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "redact_inventory.py"
 
+# A redactor that can be stalled by the inventory it is redacting fails open in
+# practice: the discovery pipeline hangs and the operator's escape hatch is to
+# read the unredacted capture. This ceiling sits three orders of magnitude above
+# a healthy run — microseconds of matching plus interpreter start-up — so it
+# cannot flake on a loaded machine, while a pattern that has acquired a
+# catastrophic-backtracking shape does not finish at all.
+ADVERSARIAL_SECONDS = 15
+
 
 class RedactionTests(unittest.TestCase):
-    def redact(self, value):
+    def redact(self, value, timeout=None):
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
             input=value,
             text=True,
             capture_output=True,
             check=True,
+            timeout=timeout,
         )
         return result.stdout
 
@@ -138,6 +147,52 @@ class RedactionTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, output)
+
+    def test_every_hardened_derivation_marker_spelling_stays_redacted(self):
+        """Pin the language the key-origin character class must accept.
+
+        A descriptor's key origin marks a hardened derivation step with `h`,
+        `H`, or `'`, and the path may be absent entirely. The pattern spells
+        that marker as one case-insensitive character class, so this fixes what
+        the class has to cover: a later edit cannot narrow the redaction to one
+        spelling and quietly publish the others.
+        """
+
+        origins = (
+            "[deadbeef/84h/0h/0h]",
+            "[DEADBEEF/84H/0H/0H]",
+            "[deadbeef/84'/0'/0']",
+            "[deadbeef/84h/0'/0H]",
+            "[deadbeef/0/1/2]",
+            "[deadbeef]",
+        )
+        output = self.redact(
+            "\n".join("descriptor={}".format(origin) for origin in origins) + "\n"
+        )
+        for origin in origins:
+            with self.subTest(origin=origin):
+                self.assertNotIn(origin, output)
+        self.assertEqual(output.count("[REDACTED_KEY_ORIGIN]"), len(origins))
+
+    def test_redactor_finishes_on_adversarial_key_origin_input(self):
+        """Discovery output is host-shaped, untrusted, and can be pumped.
+
+        Each line pumps one repetition axis of the key-origin pattern and then
+        denies it the closing bracket, which is the input shape that forces a
+        backtracking engine to explore every way of partitioning what it already
+        consumed. The assertion is a wall-clock ceiling over the whole stream
+        rather than any single match, so it stays meaningful for whatever the
+        pattern table grows into.
+        """
+
+        pumps = (
+            "descriptor=[deadbeef" + "/0h" * 40,
+            "descriptor=[deadbeef" + "/00000000" * 40,
+            "descriptor=[deadbeef" + "/0" * 200,
+            "descriptor=[deadbeef" + "/0'" * 40 + "/",
+        )
+        output = self.redact("\n".join(pumps) + "\n", timeout=ADVERSARIAL_SECONDS)
+        self.assertEqual(output.count("\n"), len(pumps))
 
 
 if __name__ == "__main__":

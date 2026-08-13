@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -8,12 +10,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .support import hermetic_git_environment
+from .support import hermetic_git_environment, load_script
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "pre-push-security.sh"
 HISTORY = ROOT / "scripts" / "validate_publication_history.py"
+# Loaded for its published-label table alone. The battery still drives the
+# validator as a subprocess, exactly as the hook does; importing it here only
+# lets an assertion compare emitted labels against the module's own vocabulary
+# instead of restating that vocabulary in a list that would drift.
+HISTORY_MODULE = load_script("validate_publication_history.py")
 HOOK = ROOT / ".githooks" / "pre-push"
 BASH = shutil.which("bash")
 if BASH is None and os.name == "nt":
@@ -457,6 +464,59 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             self.assertIn("age private identity", combined)
             self.assertNotIn(secret, combined)
             self.assertNotIn("transient.txt", combined)
+
+    def test_every_finding_line_is_label_commit_and_path_digest_only(self):
+        """The diagnostic shape itself, not one more not-echoed example.
+
+        The tests around this one each prove that a particular value stayed out
+        of a particular message. This one pins the grammar every finding line
+        must obey — a label, a validated commit id, and a truncated digest of
+        the path — and pins that the label came from the module's own table of
+        published labels rather than from anything the validator read. That is
+        the property which makes 'this validator cannot leak what it inspects'
+        a structural fact instead of a case-by-case observation, and it is what
+        a diagnostic that started interpolating matched content would break.
+        """
+
+        line_grammar = re.compile(
+            r"^FAIL publication history: (?P<label>[^;]+); commit=(?P<commit>[0-9a-f]{40})"
+            r"(?:; path_sha256=(?P<digest>[0-9a-f]{16}))?$"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository, baseline = initialize_history_repository(directory)
+            identity = "AGE-SECRET-" + "KEY-PQ-1" + ("A" * 96)
+            relative = "notes/quarterly-review-draft.txt"
+            target = repository / relative
+            target.parent.mkdir(parents=True)
+            target.write_text(identity + "\n", encoding="utf-8")
+            run_git(repository, "add", relative)
+            run_git(repository, "commit", "-m", "draft notes")
+            candidate = run_git(
+                repository, "rev-parse", "HEAD", text=True
+            ).stdout.strip()
+
+            result = run_history_validator(repository, baseline, candidate)
+
+            self.assertNotEqual(result.returncode, 0)
+            combined = result.stdout + result.stderr
+            self.assertNotIn(identity, combined)
+            self.assertNotIn(relative, combined)
+            self.assertNotIn("quarterly-review-draft", combined)
+
+            reported = [line for line in result.stderr.splitlines() if line.strip()]
+            self.assertNotEqual(reported, [])
+            published_labels = set(HISTORY_MODULE.PROHIBITED_CONTENT_PATTERNS)
+            expected_digest = hashlib.sha256(
+                relative.encode("utf-8")
+            ).hexdigest()[:16]
+            for line in reported:
+                with self.subTest(line=line):
+                    match = line_grammar.fullmatch(line)
+                    if match is None:
+                        self.fail("finding line escaped the grammar: {!r}".format(line))
+                    self.assertIn(match.group("label"), published_labels)
+                    self.assertEqual(match.group("commit"), candidate)
+                    self.assertEqual(match.group("digest"), expected_digest)
 
     def test_rejects_renamed_api_encryption_config_added_then_deleted(self):
         with tempfile.TemporaryDirectory() as directory:

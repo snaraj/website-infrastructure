@@ -47,6 +47,58 @@ class EncryptionConfigTests(unittest.TestCase):
                              "must contain exactly")
         self.assert_rejected(VALID.replace("      - secrets", "      - configmaps"), "exactly [secrets]")
 
+    def test_unreviewed_field_names_are_counted_and_never_echoed(self):
+        """The inspected file is the one holding the API server's secretbox key.
+
+        Its field names are bytes read out of that file, so a diagnostic that
+        echoed them would copy content from the most sensitive file on the host
+        into bootstrap output and CI logs. Unreviewed fields are reported as a
+        count; only this validator's own literal vocabulary is ever named back.
+        Both mappings below are exercised because the second one — the key entry
+        itself — is the mapping that sits alongside the secret scalar.
+        """
+
+        marker = "zz" + "unreviewedfieldname" + "zz"
+        for label, config in (
+            (
+                "EncryptionConfiguration",
+                VALID.replace(
+                    "kind: EncryptionConfiguration",
+                    "kind: EncryptionConfiguration\n{}: bar".format(marker),
+                ),
+            ),
+            (
+                "secretbox.keys[0]",
+                VALID.replace("              secret: ", "              {}: ".format(marker)),
+            ),
+        ):
+            with self.subTest(mapping=label):
+                errors = MODULE.validate(config)
+                self.assertNotEqual(errors, [])
+                self.assertFalse(
+                    any(marker in error for error in errors),
+                    "unreviewed field name echoed back: {}".format(errors),
+                )
+                self.assertTrue(
+                    any("{} must contain exactly".format(label) in error for error in errors),
+                    errors,
+                )
+                self.assertTrue(
+                    any("unreviewed field count 1" in error for error in errors), errors
+                )
+
+    def test_missing_reviewed_fields_are_still_named(self):
+        """Naming an ABSENT field is safe, and keeps the diagnostic actionable.
+
+        An expected-but-missing name is one of this validator's own literals and
+        never came from the configuration, so it stays in the message. Without
+        this the non-echo rule above would be satisfied just as well by an empty
+        diagnostic, which would tell an operator nothing.
+        """
+
+        errors = MODULE.validate(VALID.replace("              secret: ", "              zzz: "))
+        self.assertTrue(any("missing secret" in error for error in errors), errors)
+
 
 if __name__ == "__main__":
     unittest.main()
