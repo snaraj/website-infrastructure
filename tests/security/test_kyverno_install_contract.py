@@ -173,37 +173,8 @@ def pinned_version(key):
     raise AssertionError("versions.env has no " + key)
 
 
-def kubectl_is_pinned():
-    """Whether the ambient kubectl is the one versions.env pins.
-
-    It usually is not: `scripts/ci/install-tools.sh` provisions the policy
-    validators, not kubectl, so a CI runner uses whatever its image ships. The
-    installer's tool-binding guard then refuses BEFORE the pin guard — correct
-    behaviour, and the reason the real-repository refusal below is asserted
-    against whichever guard is reachable rather than against one message.
-    """
-
-    kubectl = shutil.which("kubectl")
-    if kubectl is None:
-        return False
-    completed = subprocess.run(
-        [kubectl, "version", "--client", "--output=json"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    match = re.search(r'"gitVersion":\s*"([^"]+)"', completed.stdout)
-    # `is not None` rather than a truthiness test: it is the form that actually
-    # narrows the Optional for a static checker, and this file must not contain
-    # a single unguarded access on a match object.
-    if match is None:
-        return False
-    return match.group(1) == pinned_version("KUBERNETES_VERSION")
-
-
 KUSTOMIZE_VERSION = kustomize_version()
 PINNED_RENDERER = kustomize_is_pinned()
-PINNED_KUBECTL = kubectl_is_pinned()
 NEEDS_RENDERER = "kustomize is not installed; render comparisons skipped"
 NEEDS_KUSTOMIZE = "kustomize is not installed"
 
@@ -1468,14 +1439,32 @@ class RealRepositoryTests(unittest.TestCase):
     def test_planning_the_real_repository_fails_closed(self):
         """Every apply path in THIS repository refuses, and names why.
 
-        Which guard refuses depends on the machine. The version-pinned Windows
-        renderer used for local render comparison cannot satisfy the separately
-        pinned Linux executable hash, while Linux CI may reach the kubectl
-        version guard or the intentionally missing controller pins. Every one
-        is a valid earlier fail-closed boundary; the assertion names them rather
-        than pretending a version match implies immutable tool identity.
+        Which guard refuses depends on the machine. A version string is not an
+        immutable tool identity: the Linux runner can carry the pinned kubectl
+        version in bytes whose digest is not the reviewed one. The closed
+        diagnostic vocabulary below therefore admits each earlier tool-binding
+        refusal, or the intentionally missing controller pin only after the
+        render lock matched. Anything else is an unreviewed reason for refusal,
+        not evidence that this repository's activation gate stayed closed.
         """
 
+        missing_pin = (
+            "install-kyverno-admission: versions.env has no reviewed "
+            "KYVERNO_VERSION; the Kyverno controller pins are a platform-lane "
+            "decision and this installer will not invent them (see "
+            "docs/runbooks/kyverno-install.md)"
+        )
+        immutable_guard = re.compile(
+            r"install-kyverno-admission: (?:"
+            r"kustomize executable sha256 [0-9a-f]{64} does not match "
+            r"versions\.env KUSTOMIZE_LINUX_AMD64_SHA256|"
+            r"kubectl is required|"
+            r"kubectl did not report a client version|"
+            r"kubectl is [^;\r\n]+; versions\.env pins "
+            + re.escape(pinned_version("KUBERNETES_VERSION"))
+            + r"|kubectl executable sha256 [0-9a-f]{64} does not match "
+            r"versions\.env KUBECTL_LINUX_AMD64_SHA256)"
+        )
         for stage in ("report-only", "enforce"):
             completed = subprocess.run(
                 [required_tool(BASH, BASH_REQUIRED), str(INSTALLER), "--stage", stage, "--plan"],
@@ -1483,26 +1472,22 @@ class RealRepositoryTests(unittest.TestCase):
                 text=True,
                 cwd=str(ROOT),
             )
-            with self.subTest(stage=stage, pinned_kubectl=PINNED_KUBECTL):
+            with self.subTest(stage=stage):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertNotIn("PLAN only", completed.stdout)
-                if PINNED_KUBECTL:
-                    self.assertIn(
-                        "versions.env has no reviewed KYVERNO_VERSION", completed.stderr
-                    )
-                    self.assertIn("platform-lane decision", completed.stderr)
+                diagnostic = completed.stderr.rstrip("\r\n")
+                if diagnostic == missing_pin:
                     # The render matched the lock before the pin guard fired, so
                     # the refusal is about the missing decision and nothing else.
                     self.assertIn("matches render.lock", completed.stdout)
                 else:
-                    self.assertRegex(
-                        completed.stderr,
-                        r"(?:kustomize executable sha256 [0-9a-f]{64} does not "
-                        r"match versions\.env KUSTOMIZE_LINUX_AMD64_SHA256|"
-                        r"kubectl is \S+; versions\.env pins "
-                        + re.escape(pinned_version("KUBERNETES_VERSION"))
-                        + r")",
+                    self.assertIsNotNone(
+                        immutable_guard.fullmatch(diagnostic),
+                        "planning refused for an unreviewed reason: {!r}".format(
+                            diagnostic
+                        ),
                     )
+                    self.assertNotIn("matches render.lock", completed.stdout)
 
 
 class RunbookTests(unittest.TestCase):

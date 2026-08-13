@@ -396,8 +396,12 @@ if [[ "$MODE" == '--scaffold' ]]; then
   assert_site_release_phase "${ARTIFACT_ROOT}/kubernetes-websites-lidersea-com.yaml" \
     lidersea-com "$lidersea_phase"
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-cloudflare-public-release.yaml" 'HelmRelease cloudflare-public remains suspended'
-  expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-naranjo-online is not enforced'
-  expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-lidersea-com is not enforced'
+  # The dormant desired-state signature policies remain Enforce/Fail. Only the
+  # explicit admission-install/report-only overlay may downgrade their rendered
+  # transaction bytes to Audit/Ignore; the base policy render must therefore be
+  # accepted outright even while every workload/reconciler remains inert.
+  conftest test --policy "${REPO_ROOT}/policies/release-conftest" \
+    "${ARTIFACT_ROOT}/policies-kyverno.yaml"
 elif [[ "$MODE" == '--release' ]]; then
   for rendered in "${rendered_files[@]}"; do
     conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$rendered"
