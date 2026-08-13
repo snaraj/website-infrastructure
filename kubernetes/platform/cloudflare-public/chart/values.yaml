@@ -1,4 +1,17 @@
-replicaCount: 2
+# One per connector, matching the cluster. NOT a universal rule and NOT a
+# schema constant: the owner's ruling of 2026-08-12 is that a replica count
+# must never be a hard limit, because a future application — or a stateful
+# workload such as a database — may legitimately need more. What IS enforced
+# is capacity: tests/security/test_namespace_capacity_contract.py requires a
+# release's replicas AND its rolling-update surge headroom to fit inside its
+# namespace's committed ResourceQuota, which permits 3 replicas where the quota
+# affords them and refuses 2 here, where it does not.
+#
+# Why 1 is right for this connector: the cluster is one node, so a second
+# replica buys no availability, and at 2 the namespace reaches limits.cpu 2/2
+# and limits.memory 1Gi/1Gi exactly — after which any rolling update needs a
+# pod the quota refuses, leaving the connectors un-updatable without an outage.
+replicaCount: 1
 
 image:
   repository: cloudflare/cloudflared

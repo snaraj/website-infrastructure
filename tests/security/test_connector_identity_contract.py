@@ -702,32 +702,69 @@ class SiteIngressPolicyNameTests(unittest.TestCase):
             "engines derive, for both sites, in order",
         )
 
-    DEGENERATE_ENV_FIXTURE = FIXTURES / "deny" / "connector-map-env.yaml"
-
-    def test_the_degenerate_env_shape_is_still_exercised(self):
-        """The killer for the non-list ``env`` refusal, pinned by inventory.
-
-        Deleting a deny fixture reddens nothing on its own — the runner is a
-        glob — so the one fixture that distinguishes the refusal from its
-        absence is pinned here. It was written because the refusal SURVIVED
-        this round's first mutation matrix: with a map-shaped ``env`` whose
-        values are otherwise valid, Rego's ``every entry in`` walks the map's
-        values, every value checks out, and the Pod is admitted.
-        """
-
-        text = self.DEGENERATE_ENV_FIXTURE.read_text(encoding="utf-8")
-        self.assertIn(
+    # Fixture -> the SHAPE that fixture exists to carry, and the guard that
+    # goes untested the moment it stops carrying it.
+    #
+    # NEITHER engine's runner can see a deny fixture disappear. Conftest's is a
+    # glob, so a deleted file is simply one fewer file. `kyverno test` is worse:
+    # with a listed resource file removed it prints `error: open ...: no such
+    # file or directory`, then reports every remaining row green AND EXITS 0 —
+    # a fourth invisibility mechanism on top of the three already recorded
+    # (out-of-match, narrowed-to-nobody, rule-renamed). Measured on this suite.
+    #
+    # So the corpus is pinned by inventory. Every entry here was written to kill
+    # a mutant that SURVIVED a full matrix while every suite stayed green, and
+    # each one is a missing SHAPE rather than a missing assertion: no fixture in
+    # this repository carried an init container, an ephemeral container, an
+    # unreviewed identity in that namespace, or a map-shaped env, so the code
+    # that handles them was deletable in silence.
+    TOKEN_BINDING_DENY_CORPUS = {
+        "connector-map-env.yaml": (
             "      env:\n        TUNNEL_TOKEN:\n",
-            text,
-            "the fixture must keep a MAP-shaped env; as a list it stops "
-            "distinguishing the non-list refusal from its removal",
-        )
-        self.assertIn(
             "              name: naranjo-online-tunnel-token",
-            text,
-            "the map's values must stay individually VALID, or the fixture is "
-            "refused for the wrong reason and the refusal goes untested",
-        )
+        ),
+        "env-token-unreviewed-identity.yaml": (
+            "    app.kubernetes.io/instance: invented-tunnel",
+            "              name: invented-tunnel-token",
+        ),
+        "env-token-init-container-cross-site.yaml": (
+            "  initContainers:",
+            "              name: lidersea-com-tunnel-token",
+        ),
+        "env-token-ephemeral-container-cross-site.yaml": (
+            "  ephemeralContainers:",
+            "              name: lidersea-com-tunnel-token",
+        ),
+        "env-token-wrong-key.yaml": (
+            "              name: naranjo-online-tunnel-token",
+            "              key: credentials.json",
+        ),
+        "env-token-envfrom-cross-site.yaml": (
+            "      envFrom:",
+            "            name: lidersea-com-tunnel-token",
+        ),
+    }
+
+    def test_the_token_binding_deny_corpus_is_complete(self):
+        """Every shape whose absence let a guard survive a full matrix."""
+
+        for name, required in self.TOKEN_BINDING_DENY_CORPUS.items():
+            with self.subTest(fixture=name):
+                path = self.FIXTURES / "deny" / name
+                self.assertTrue(
+                    path.is_file(),
+                    "{} is gone; neither engine's runner reports a deleted "
+                    "deny fixture as a failure".format(name),
+                )
+                text = path.read_text(encoding="utf-8")
+                for fragment in required:
+                    self.assertIn(
+                        fragment,
+                        text,
+                        "{} no longer carries the shape it exists to test; "
+                        "it is now refused for some other reason and the "
+                        "guard it was written for is untested".format(name),
+                    )
 
     def test_the_superseded_name_is_still_exercised_as_a_denial(self):
         """A rename that merely ADDED the new name would pass without this."""

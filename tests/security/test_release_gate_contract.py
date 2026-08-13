@@ -910,6 +910,30 @@ class ReleaseGateContractTests(unittest.TestCase):
         self._write("policies.json", value)
         self._assert_rejected()
 
+    def _repoint_network_policy(self, namespace, name, **spec_changes):
+        """Change one policy in BOTH the live evidence and its desired file.
+
+        Changing only the live copy is what made the first version of these
+        three tests vacuous: the pre-existing spec-equality check rejected the
+        evidence for a mismatch against desired state, so all three passed with
+        the namespace-wide default-deny check DELETED. Moving both copies
+        together keeps every older check satisfied and leaves the new one as
+        the only thing that can fire.
+        """
+
+        live = self._read("networkpolicies.json")
+        for policy in live["items"]:
+            if (
+                policy["metadata"]["namespace"] == namespace
+                and policy["metadata"]["name"] == name
+            ):
+                policy["spec"].update(spec_changes)
+                desired = dict(policy)
+        self._write("networkpolicies.json", live)
+        self._write(
+            "desired-networkpolicy-{}-{}.json".format(namespace, name), desired
+        )
+
     def test_scoped_default_deny_where_a_namespace_wide_one_is_required_fails_closed(self):
         """A podSelector-scoped deny is not a default-deny.
 
@@ -920,21 +944,18 @@ class ReleaseGateContractTests(unittest.TestCase):
         must fail rather than be accepted as equivalent.
         """
 
-        value = self._read("networkpolicies.json")
-        for policy in value["items"]:
-            if policy["metadata"]["name"] == NAMESPACE_WIDE_DEFAULT_DENY[1]:
-                policy["spec"]["podSelector"] = {"matchLabels": {"app": "anything"}}
-        self._write("networkpolicies.json", value)
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY,
+            podSelector={"matchLabels": {"app": "anything"}},
+        )
         self._assert_rejected()
 
     def test_ingress_only_default_deny_fails_closed(self):
         """The other half of NP7: Ingress-only leaves egress wide open."""
 
-        value = self._read("networkpolicies.json")
-        for policy in value["items"]:
-            if policy["metadata"]["name"] == NAMESPACE_WIDE_DEFAULT_DENY[1]:
-                policy["spec"]["policyTypes"] = ["Ingress"]
-        self._write("networkpolicies.json", value)
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY, policyTypes=["Ingress"]
+        )
         self._assert_rejected()
 
     def test_a_closed_divergence_makes_its_own_declaration_fail(self):
@@ -944,18 +965,17 @@ class ReleaseGateContractTests(unittest.TestCase):
         supposed to have, the recorded divergence becomes a lie, and a stale
         justification has to fail exactly like a missing check — otherwise the
         exemption outlives the gap and quietly re-permits its removal.
+
+        Widening the site's OWN policy rather than adding a second one, so the
+        inventory count is untouched and only the ratchet can object.
         """
 
-        value = self._read("networkpolicies.json")
-        value["items"].append(
-            {
-                "apiVersion": "networking.k8s.io/v1",
-                "kind": "NetworkPolicy",
-                "metadata": {"namespace": "naranjo-online", "name": "default-deny"},
-                "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
-            }
+        self._repoint_network_policy(
+            "naranjo-online",
+            "ingress-to-naranjo-online",
+            podSelector={},
+            policyTypes=["Ingress", "Egress"],
         )
-        self._write("networkpolicies.json", value)
         self._assert_rejected()
 
     def test_missing_kustomization_observed_generation_fails_closed(self):
