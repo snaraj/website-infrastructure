@@ -1,0 +1,31 @@
+# A second registry host smuggled through the tag position. The previous
+# coarse rule matched `<approved-prefix>.+@sha256:`, so any bytes at all
+# could sit between the approved prefix and the digest; the closed
+# character classes that replaced it refuse a `/` there.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-tag-smuggling-a-registry
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-tag-smuggling-a-registry
+      image: ghcr.io/snaraj/naranjo-online:evil.example/naranjo-online@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

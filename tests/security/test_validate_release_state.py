@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE = load_script("validate_release_state.py")
 
 NONZERO_DIGEST = "sha256:" + ("a" * 64)
+NONZERO_TAG = "v1.2.3"
 SITE_DOMAINS = {
     "naranjo-online": "naranjo.online",
     "lidersea-com": "lidersea.com",
@@ -43,6 +44,7 @@ def website_release_text(
     suspended=True,
     ready=False,
     digest=MODULE.ZERO_DIGEST,
+    tag=MODULE.ZERO_TAG,
     repository=None,
     extra_values="",
 ):
@@ -80,6 +82,7 @@ def website_release_text(
         "    deploymentReady: {ready}\n"
         "    image:\n"
         "      repository: {repository}\n"
+        "      tag: {tag}\n"
         "      digest: {digest}\n"
         "{extra_values}"
     ).format(
@@ -89,6 +92,7 @@ def website_release_text(
         suspended=str(suspended).lower(),
         ready=str(ready).lower(),
         repository=repository,
+        tag=tag,
         digest=digest,
         extra_values=extra_values,
     )
@@ -233,6 +237,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                     "naranjo-online",
                     ready=True,
                     digest=NONZERO_DIGEST,
+                    tag=NONZERO_TAG,
                 ),
             )
             self.assertEqual(MODULE.site_phase("naranjo-online", root), "promoted")
@@ -250,18 +255,52 @@ class StrictReleaseStateTests(unittest.TestCase):
                     root,
                     "sha256:" + ("b" * 64),
                 )
+            # The expected-tag guard is the tag's exact counterpart: a caller
+            # that names the release it verified must find that release here.
+            self.assertEqual(
+                MODULE.site_phase("naranjo-online", root, None, NONZERO_TAG),
+                "promoted",
+            )
+            for wrong_tag in ("v9.9.9", "latest", "0.1.9", MODULE.ZERO_TAG):
+                with self.subTest(expected_tag=wrong_tag):
+                    with self.assertRaises(MODULE.CanonicalYamlError):
+                        MODULE.site_phase("naranjo-online", root, None, wrong_tag)
 
-            for ready, digest in (
-                (False, NONZERO_DIGEST),
-                (True, MODULE.ZERO_DIGEST),
+            # Every half-advanced combination of the three-field identity is
+            # an unsafe mixed state, including the two that move the release
+            # NAME and the release BYTES apart.
+            for ready, digest, tag in (
+                (False, NONZERO_DIGEST, NONZERO_TAG),
+                (True, MODULE.ZERO_DIGEST, MODULE.ZERO_TAG),
+                (True, NONZERO_DIGEST, MODULE.ZERO_TAG),
+                (True, MODULE.ZERO_DIGEST, NONZERO_TAG),
+                (False, MODULE.ZERO_DIGEST, NONZERO_TAG),
+                (False, NONZERO_DIGEST, MODULE.ZERO_TAG),
             ):
-                with self.subTest(ready=ready, digest=digest):
+                with self.subTest(ready=ready, digest=digest, tag=tag):
                     write_lf(
                         release_path(root, "naranjo-online"),
                         website_release_text(
                             "naranjo-online",
                             ready=ready,
                             digest=digest,
+                            tag=tag,
+                        ),
+                    )
+                    with self.assertRaises(MODULE.CanonicalYamlError):
+                        MODULE.site_phase("naranjo-online", root)
+
+            # A tag outside the release grammar is refused by the closed line
+            # allowlist before any value is interpreted.
+            for bad_tag in ("latest", "0.1.9", "v0.1", "vmain", "v01.2.3"):
+                with self.subTest(bad_tag=bad_tag):
+                    write_lf(
+                        release_path(root, "naranjo-online"),
+                        website_release_text(
+                            "naranjo-online",
+                            ready=True,
+                            digest=NONZERO_DIGEST,
+                            tag=bad_tag,
                         ),
                     )
                     with self.assertRaises(MODULE.CanonicalYamlError):
@@ -731,8 +770,9 @@ class StrictReleaseStateTests(unittest.TestCase):
                 "deploymentReady: false\n"
                 "image:\n"
                 "  repository: ghcr.io/snaraj/naranjo-online\n"
+                "  tag: {}\n"
                 "  digest: {}\n"
-            ).format(MODULE.ZERO_DIGEST)
+            ).format(MODULE.ZERO_TAG, MODULE.ZERO_DIGEST)
             state = MODULE.load_helm_release("naranjo-online", root)
             self.assertEqual(state.values_text, expected)
 

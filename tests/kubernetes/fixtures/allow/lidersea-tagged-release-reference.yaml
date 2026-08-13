@@ -1,0 +1,32 @@
+# The lidersea half of the legible reference. Each site's canonical rule is
+# its own (safety invariant 14), so proving naranjo's proves nothing here:
+# a fixture set confined to one namespace leaves the other site's rule
+# unexercised, and a mutation matrix confined to one namespace reports a
+# survivor that is really a coverage hole.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidersea-tagged
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: lidersea-tagged
+      image: ghcr.io/snaraj/lidersea-com:v0.1.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
