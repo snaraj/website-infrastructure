@@ -13,7 +13,7 @@ What each ceremony is for:
 
 | Ceremony | Trigger | Credential |
 |---|---|---|
-| A — two-toggle edge remediation | the pre-toggle probe reports the redirect and TLS-floor gaps | none for the probe; dashboard session for the toggles |
+| A — two-toggle edge remediation | superseded; use `docs/runbooks/cloudflare-edge-hardening.md` | see the authoritative hardening runbook; no current live authorization exists |
 | B — per-site Tunnel token rotation | quarterly drill, or suspected/confirmed compromise | Tunnel token (owner), plus a short-lived API token for force-disconnect |
 | C — read-only account audit | after any edge change, and on a routine cadence | one just-in-time READ-ONLY API token, at most 60 minutes |
 
@@ -37,185 +37,16 @@ Two commands appear throughout:
 
 ---
 
-## Ceremony A — the two-toggle edge remediation
+## Historical Ceremony A — superseded; do not execute
 
-Two zone settings are below their target state on both zones: plaintext HTTP is
-served instead of redirected, and the minimum TLS version is 1.0. Everything
-else in the target state is already met, so this ceremony changes exactly two
-settings per zone and nothing else.
-
-### A.0 Preconditions
-
-1. A maintenance moment the owner chose. Both changes take effect within
-   seconds and are reversible in the same place.
-2. The current edge-to-origin encryption mode is `full` or `strict`. Confirm it
-   with ceremony C first (`zone-setting[<zone>/ssl]`). This matters: the loop
-   hazard described in A.4 is real only under the `flexible` mode.
-3. The application-side redirect behaviour has two halves, and they are **not
-   equally true today**. Read both before relying on either:
-
-   a. **Merged in Git — verifiable now.** Each site's application answers a
-      request carrying an `X-Forwarded-Proto: http` header with a 308 to the
-      same URL over https, and gates `Strict-Transport-Security` to https
-      responses. Confirm by reading each site repository at its current
-      default branch.
-   b. **Not yet observable at the edge.** The images currently running predate
-      those merges. Today both origins answer plaintext with `200` and emit
-      HSTS over cleartext; `scripts/edge-probe.sh` records that as
-      `hsts-over-cleartext present`. The behaviour ships with the next
-      application release. **Do not read (a) as a statement about the live
-      origin** until that deploy has landed and the probe's record item flips
-      to `absent`.
-
-   This split matters because A.4's loop-safety conclusion must not lean on a
-   behaviour that is merged but undeployed. It does not — see A.4.
-4. Nobody is mid-rotation on either Tunnel. Ceremonies A and B never overlap.
-
-### A.1 Pre-toggle probe — expect gaps, and record them
-
-```sh
-scripts/edge-probe.sh --rounds 2 --round-gap 20 | tee edge-probe-before.txt
-```
-
-Expected today, per the 2026-08-12 attestation and reproduced by this script:
-`GAP` on `http-redirect-root`, `http-redirect-path-query`, `tls10-refused` and
-`tls11-refused` for **both** zones — eight gaps — and `PASS` on everything else,
-including `zero-rtt-off`, `hsts-exact`, `tls13-accepted`, `readyz`,
-`www-absent`, `site-identity` and `sites-distinct`.
-
-Read four things before continuing:
-
-- the `RESULT` line: `gap=8 skip=0 error=0 divergent=0`. A `skip` means the
-  local TLS client could not be proven able to speak a protocol, so that item
-  says nothing about the edge; fix the client before trusting the ceremony.
-  A `divergent` means two rounds disagreed; re-run before changing anything.
-  (`inapplicable` is different and harmless — it counts items outside the
-  selected scope, such as cross-zone distinctness in a single-zone run.)
-- the capability preflight block: all four protocols must read `capable`.
-- the `dnssec` rows: `naranjo.online` signed and validating, `lidersea.com`
-  unsigned. `lidersea.com` unsigned is the recorded expectation, not a defect.
-- the `hsts-over-cleartext` record rows. `present` means the running
-  application build still predates the https-gated HSTS change (precondition
-  A.0.3b), which is the expected state until that release deploys. It is a
-  deployed-state signal only; browsers ignore HSTS received over cleartext, so
-  it is neither a control nor a blocker for this ceremony.
-
-Keep `edge-probe-before.txt` outside the repository. It contains no credential
-and no private identifier, but it is a point-in-time observation, not a
-committed artifact.
-
-### A.2 The two toggles, one zone at a time
-
-For each zone, in the Cloudflare dashboard, with the zone selected:
-
-1. **SSL/TLS → Edge Certificates → Always Use HTTPS** → **On**.
-2. **SSL/TLS → Edge Certificates → Minimum TLS Version** → **TLS 1.2**.
-
-Nothing else on that page changes. In particular do not enable managed HSTS
-(the application owns `Strict-Transport-Security`), do not enable Opportunistic
-Encryption, TLS 1.3 or 0-RTT settings that are already at their target, and do
-not touch Automatic HTTPS Rewrites — it rewrites subresource URLs and is not a
-redirect, so it neither substitutes for toggle 1 nor belongs in this change.
-
-Do the first zone completely, verify it with A.3 limited to that zone, and only
-then do the second. Two zones changed together share one failure.
-
-```sh
-scripts/edge-probe.sh --zone naranjo.online --enforce --rounds 2
-```
-
-**This single-zone enforcing run is meaningful and must exit 0.** Cross-zone
-distinctness cannot be evaluated with one zone in the run, so it is reported
-`INAPPLICABLE` and does not fail the run — an item outside the selected scope
-has nothing to prove. Everything that *can* be evaluated for the toggled zone
-still has to pass. A nonzero exit here is a real failure of the half-completed
-ceremony: stop, do not toggle the second zone, and read the table. Never wave
-a nonzero exit through because "it is only one zone".
-
-Safety invariant 9 applies: these are dashboard mutations, therefore break-glass
-by definition. Record the exact settings changed, and reconcile them into the
-Cloudflare OpenTofu roots immediately afterwards so the next plan does not
-propose reverting them.
-
-### A.3 Post-toggle probe — enforce
-
-```sh
-scripts/edge-probe.sh --enforce --rounds 2 --round-gap 20 | tee edge-probe-after.txt
-```
-
-Required result: exit code 0 and `gap=0 skip=0 error=0 divergent=0`. The four
-previously failing items must now read:
-
-| Item | Required observation |
-|---|---|
-| `http-redirect-root` | `http_code=301` (or `308`), `location=https://<zone>/`, `chain=1:200` |
-| `http-redirect-path-query` | `location=https://<zone>/readyz?probe=1&x=2` — path **and** query preserved |
-| `tls10-refused` | `refused` |
-| `tls11-refused` | `refused` |
-
-Two failure shapes deserve their own reading:
-
-- A redirect that drops the query string, or that produces more than one hop,
-  is a **failed** remediation even though HTTP now redirects. The probe asserts
-  the whole shape for exactly this reason.
-- `tls10-refused` reporting `SKIP` instead of `refused` is a *client* problem,
-  never a server pass. The probe proves the local client can speak TLS 1.0
-  against a loopback server before it will assert anything about the edge; if
-  that proof fails the item is skipped loudly. Never read a skip as success.
-
-Then run ceremony C and confirm the configuration side agrees:
-`zone-setting[<zone>/always_use_https] value=on` and
-`zone-setting[<zone>/min_tls_version] value=1.2` on both zones. Behaviour and
-configuration agreeing is the actual completion criterion; either alone is a
-weaker claim.
-
-### A.4 The loop hazard, and why there is no loop here
-
-The classic redirect loop is: the edge terminates TLS and forwards to the origin
-over plaintext, the origin sees a plaintext request and redirects to https, the
-edge serves that redirect, and the client arrives back at the same place. It
-requires the edge-to-origin leg to be plaintext *while the origin insists on
-https*.
-
-That combination does not exist here. **The conclusion rests on reason 1
-alone**, which is a property of the edge and holds regardless of which
-application build is deployed:
-
-1. **Load-bearing.** With Always Use HTTPS on, a plaintext request is answered
-   by the edge with a 30x before it ever reaches an origin. No plaintext
-   request survives to the origin, so whatever the origin would have done with
-   one cannot close a loop.
-
-2. **Defence in depth, and not yet deployed.** On the https path the connector
-   presents the request to the application with `X-Forwarded-Proto: https`, so
-   the application's fail-closed exact-match redirect does not fire; that
-   redirect only ever fires on an explicit `http` forwarded-proto. This is
-   precondition A.0.3a — merged in Git, **not** running at the edge yet
-   (A.0.3b). It is written here because it will matter after the next
-   application release, and because a reader must not mistake it for part of
-   today's safety argument. Reason 1 does not depend on it.
-
-The check that keeps reason 1 true is precondition A.0.2: the `flexible` edge-
-to-origin mode is the one that would manufacture the loop, and ceremony C fails
-the run if the mode is ever `flexible` or `off`.
-
-If a loop is nevertheless observed — a browser reporting too many redirects, or
-`chain=` above 1 in the probe — roll back immediately per A.5 and do not
-re-toggle until the origin behaviour has been re-read.
-
-### A.5 Rollback
-
-Rollback is the same two controls in the same place, set back:
-
-1. **Minimum TLS Version** → its previous value.
-2. **Always Use HTTPS** → **Off**.
-
-Reverse order of application: turn the redirect off first if the symptom is a
-loop, since that is the control that changed reachability. Then re-run
-`scripts/edge-probe.sh` without `--enforce` and confirm the observations match
-`edge-probe-before.txt` item for item. Rolling back restores a known-worse
-security posture, so it is an incident, not a resting state: record why, and
-schedule the retry.
+The former dashboard-toggle procedure was removed because it bypassed the
+existing site-owned OpenTofu resources and their state custody. The only
+authoritative Draft transaction is
+`docs/runbooks/cloudflare-edge-hardening.md`. It remains live-blocked and
+requires a hash-bound saved plan, exact provider readback, the frozen legacy-
+capable SslStream client, serialized per-zone acceptance, and captured-value
+rollback. Do not reconstruct the removed dashboard procedure from repository
+history.
 
 ---
 

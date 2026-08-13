@@ -61,9 +61,20 @@ zone_setting_contracts := {
   "ssl": {"setting_id": "ssl", "value": "full"},
 }
 
+# Only these two already-owned resources may change in the edge-hardening
+# transaction. Their before values are the frozen read-only baseline. A later
+# steady-state plan may report either resource as no-op at its target, but an
+# update from any other value is not this reviewed transaction.
+edge_hardening_prechange_values := {
+  "always_use_https": "off",
+  "min_tls_version": "1.0",
+}
+
+edge_hardening_setting_keys := object.keys(edge_hardening_prechange_values)
+
 # Identity objects that already exist live: a plan may confirm them, never
-# change them. Ingress configuration and zone settings may legitimately move to
-# the exact committed target, so they accept an update.
+# change them. The transaction-specific rule below also keeps the adopted
+# ingress configuration and every non-target zone setting at no-op.
 adopted_identity_types := {
   "cloudflare_zero_trust_tunnel_cloudflared",
   "cloudflare_dns_record",
@@ -212,6 +223,11 @@ change_after(address) := after if {
   some change in managed_changes
   change.address == address
   after := change.change.after
+}
+
+managed_change(address) := change if {
+  some change in managed_changes
+  change.address == address
 }
 
 configuration_resource(address) := resource if {
@@ -427,7 +443,7 @@ admin_api_exact if {
 
 # One site root, proved whole: the adopted Tunnel identity, its exact single
 # public ingress plus terminal catch-all, its own proxied apex CNAME derived
-# from that same Tunnel, and the five zone settings that carry the security
+# from that same Tunnel, and the six zone settings that carry the security
 # target state. Nothing here reaches the other site.
 site_root_exact(name) if {
   contract := site_contracts[name]
@@ -483,6 +499,34 @@ exact_zone_setting(contract, setting_key, setting, zone_id) if {
   planned.setting_id == setting.setting_id
   planned.value == setting.value
   has_exact_reference(address, "zone_id", sprintf("var.%s", [contract.zone_variable]))
+  zone_setting_transition_exact(address, setting, zone_id)
+}
+
+zone_setting_transition_exact(address, setting, zone_id) if {
+  change := managed_change(address)
+  change.change.actions == ["no-op"]
+  before := object.get(change.change, "before", null)
+  before != null
+  before.zone_id == zone_id
+  before.setting_id == setting.setting_id
+  before.value == setting.value
+}
+
+zone_setting_transition_exact(address, setting, zone_id) if {
+  prechange_value := edge_hardening_prechange_values[setting.setting_id]
+  change := managed_change(address)
+  change.change.actions == ["update"]
+  before := object.get(change.change, "before", null)
+  before != null
+  before.zone_id == zone_id
+  before.setting_id == setting.setting_id
+  before.value == prechange_value
+}
+
+site_hardening_update_address(address) if {
+  contract := site_contracts[phase]
+  some setting_key in edge_hardening_setting_keys
+  address == sprintf("cloudflare_zone_setting.%s_%s", [contract.slug, setting_key])
 }
 
 adoption_action(actions) if {
@@ -620,6 +664,26 @@ deny contains msg if {
   change.type in adopted_identity_types
   change.change.actions != ["no-op"]
   msg := sprintf("adopted Tunnel and apex identity must plan as no-op: %s", [change.address])
+}
+
+deny contains msg if {
+  phase in adopt_only_phases
+  some change in managed_changes
+  change.change.actions == ["update"]
+  not site_hardening_update_address(change.address)
+  msg := sprintf("only the existing HTTPS and minimum-TLS setting owners may update: %s", [change.address])
+}
+
+deny contains msg if {
+  contract := site_contracts[phase]
+  some setting_key in edge_hardening_setting_keys
+  setting := zone_setting_contracts[setting_key]
+  address := sprintf("cloudflare_zone_setting.%s_%s", [contract.slug, setting_key])
+  change := managed_change(address)
+  change.change.actions == ["update"]
+  before := object.get(change.change, "before", {})
+  object.get(before, "value", null) != edge_hardening_prechange_values[setting.setting_id]
+  msg := sprintf("zone setting %s pre-change value does not match the frozen baseline in %s", [setting.setting_id, phase])
 }
 
 # Safety invariant 3: no origin address record may ever reach a zone here.
