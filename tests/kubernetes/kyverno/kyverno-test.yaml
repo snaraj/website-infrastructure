@@ -16,6 +16,9 @@ resources:
   - ../fixtures/deny/image-unprefixed-release-tag.yaml
   - ../fixtures/deny/image-tag-smuggling-a-registry.yaml
   - ../fixtures/deny/image-sibling-site-repository-tagged.yaml
+  - ../fixtures/allow/lidersea-tagged-release-reference.yaml
+  - ../fixtures/deny/image-lidersea-floating-tag.yaml
+  - ../fixtures/deny/image-lidersea-sibling-repository.yaml
 results:
   - policy: require-restricted-workloads
     rule: require-restricted-pod
@@ -85,5 +88,15 @@ results:
   - policy: require-approved-images
     rule: require-approved-digest
     resources: [image-tag-without-digest, image-tag-smuggling-a-registry]
+    kind: Pod
+    result: fail
+  - policy: require-approved-images
+    rule: require-canonical-lidersea-image
+    resources: [lidersea-tagged]
+    kind: Pod
+    result: pass
+  - policy: require-approved-images
+    rule: require-canonical-lidersea-image
+    resources: [image-lidersea-floating-tag, image-lidersea-sibling-repository]
     kind: Pod
     result: fail

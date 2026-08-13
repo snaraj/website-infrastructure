@@ -45,6 +45,7 @@ DIGEST = "sha256:" + "11" * 32
 # fixtures are one document per file on purpose — a multi-document deny fixture
 # asserted at file level hides the weakening of any single arm.
 CANONICAL = "container {name} must use the canonical image repository for namespace naranjo-online"
+CANONICAL_LIDERSEA = "container {name} must use the canonical image repository for namespace lidersea-com"
 APPROVED = "container {name} image must use an approved registry and full digest"
 
 # Kyverno's counterpart rules, named individually. Asserting the POLICY was
@@ -56,6 +57,7 @@ APPROVED = "container {name} image must use an approved registry and full digest
 # still caught the same Pod. Rule-level expectations are what closed it.
 DIGEST_RULE = "require-approved-digest"
 CANONICAL_RULE = "require-canonical-naranjo-image"
+CANONICAL_LIDERSEA_RULE = "require-canonical-lidersea-image"
 
 ROWS = (
     ("allow/tagged-release-reference.yaml", "tagged", (), frozenset()),
@@ -88,6 +90,23 @@ ROWS = (
         "image-sibling-site-repository-tagged",
         (CANONICAL,),
         frozenset({CANONICAL_RULE}),
+    ),
+    # The lidersea half. Each site's canonical rule matches only its own
+    # namespace, so a fixture set confined to naranjo leaves lidersea's rule
+    # completely unexercised — which showed up in this change's own matrix as
+    # a survivor that was really a coverage hole, not a good guard.
+    ("allow/lidersea-tagged-release-reference.yaml", "lidersea-tagged", (), frozenset()),
+    (
+        "deny/image-lidersea-floating-tag.yaml",
+        "image-lidersea-floating-tag",
+        (CANONICAL_LIDERSEA,),
+        frozenset({DIGEST_RULE, CANONICAL_LIDERSEA_RULE}),
+    ),
+    (
+        "deny/image-lidersea-sibling-repository.yaml",
+        "image-lidersea-sibling-repository",
+        (CANONICAL_LIDERSEA,),
+        frozenset({CANONICAL_LIDERSEA_RULE}),
     ),
 )
 
