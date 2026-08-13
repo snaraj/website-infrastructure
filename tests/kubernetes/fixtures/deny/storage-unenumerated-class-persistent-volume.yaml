@@ -1,0 +1,24 @@
+# proves: SR-7
+# rego-message: must declare an enumerated storageClassName
+# SR-7. The volume is genuinely local and correctly rooted, but it claims a class
+# nobody enumerated. The class name is part of the means, so an unenumerated one
+# is an unenumerated means.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-unenumerated-class
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nas-bulk
+  local:
+    path: /mnt/local-pie-ssd/media
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [storage-node-placeholder]

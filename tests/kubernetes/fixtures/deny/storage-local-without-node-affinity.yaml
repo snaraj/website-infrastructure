@@ -1,0 +1,17 @@
+# proves: SR-6
+# rego-message: must pin itself to named nodes with a bounded required nodeAffinity
+# SR-6. A local volume with no required node affinity is satisfiable on every
+# node, so one reviewed directory silently becomes a directory on any machine
+# that ever joins the cluster.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-local-unpinned
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /mnt/local-pie-ssd/media

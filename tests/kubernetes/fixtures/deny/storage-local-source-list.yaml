@@ -1,0 +1,25 @@
+# proves: SR-4
+# rego-message: uses local path outside the enumerated local root
+# Degenerate shape. `local:` is a LIST whose one element names the control-plane
+# state directory. A reader skimming for `path:` finds one; no field access the
+# policy performs can reach it, so the object must deny rather than evaluate to
+# nothing.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-local-list
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    - path: /var/lib/etcd
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [storage-node-placeholder]

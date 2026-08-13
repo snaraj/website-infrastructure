@@ -266,6 +266,11 @@ for rendered in "${rendered_files[@]}"; do
 done
 
 bash "${REPO_ROOT}/scripts/test-policy-fixtures.sh"
+# The storage gate is expressed twice — Kyverno CEL at admission, Rego in CI —
+# and the two engines evaluate degenerate shapes differently, so agreeing on
+# text is not agreeing on behaviour. This feeds the same objects to both and
+# fails on any disagreement.
+bash "${REPO_ROOT}/scripts/test-storage-engine-parity.sh"
 kyverno test "${REPO_ROOT}/tests/kubernetes/kyverno"
 
 expect_release_rejection() {

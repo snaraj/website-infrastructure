@@ -1,0 +1,20 @@
+# proves: SR-12
+# rego-message: must not populate itself from
+# SR-12. The class is enumerated and the claim still imports its contents from
+# somewhere else — a snapshot object, and with dataSourceRef potentially another
+# namespace. That is a data flow the enumeration never described.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-imported-claim
+  namespace: naranjo-online
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: local-pie-ssd
+  resources:
+    requests:
+      storage: 1Gi
+  dataSourceRef:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: imported-media

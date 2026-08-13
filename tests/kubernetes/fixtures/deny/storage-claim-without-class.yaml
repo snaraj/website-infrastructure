@@ -1,0 +1,15 @@
+# proves: SR-11
+# rego-message: must name an enumerated storageClassName
+# SR-11. A claim with no storageClassName is not neutral: it binds through
+# whatever class is marked default in the cluster, so the means is chosen by
+# installation order rather than by the enumeration.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-classless-claim
+  namespace: naranjo-online
+spec:
+  accessModes: [ReadOnlyMany]
+  resources:
+    requests:
+      storage: 1Gi
