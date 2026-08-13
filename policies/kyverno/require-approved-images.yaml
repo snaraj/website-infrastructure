@@ -5,6 +5,17 @@ metadata:
   annotations:
     policies.kyverno.io/category: Software Supply Chain Security
     policies.kyverno.io/description: Enforce canonical tenant publishers, nonzero immutable sha256 digests, and fail-closed admission.
+    # A reference may name its published release tag in front of the digest —
+    # `repo:vMAJOR.MINOR.PATCH@sha256:...`, already the form of the connector,
+    # Flux and Kyverno images — so an operator reading `kubectl describe pod`
+    # can see which release is running. Only the digest ever resolves: the
+    # `@sha256:` suffix stays mandatory and anchored (safety invariant 6), the
+    # all-zero sentinel stays denied below, and the tag alternative is closed
+    # to the site publishers' own SemVer form so `:latest`, a branch name, or
+    # a second registry host cannot ride in through it. Kyverno's
+    # `verifyImages` rules are unaffected: they match the NORMALISED reference,
+    # which drops the tag when a digest is present, so signature and provenance
+    # verification keep addressing the identical digest.
 spec:
   admission: true
   background: true
@@ -27,7 +38,7 @@ spec:
             deny:
               conditions:
                 any:
-                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+(:v[0-9]+[.][0-9]+[.][0-9]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
                     operator: NotEquals
                     value: true
                   - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
@@ -37,7 +48,7 @@ spec:
             deny:
               conditions:
                 any:
-                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+(:v[0-9]+[.][0-9]+[.][0-9]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
                     operator: NotEquals
                     value: true
                   - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
@@ -47,7 +58,7 @@ spec:
             deny:
               conditions:
                 any:
-                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
+                  - key: "{{ regex_match('^(ghcr[.]io/snaraj/[A-Za-z0-9._/-]+(:v[0-9]+[.][0-9]+[.][0-9]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$', element.image) }}"
                     operator: NotEquals
                     value: true
                   - key: "{{ ends_with(element.image, '@sha256:0000000000000000000000000000000000000000000000000000000000000000') }}"
@@ -67,7 +78,7 @@ spec:
             deny:
               conditions:
                 any:
-                  - key: "{{ regex_match('^ghcr[.]io/snaraj/naranjo-online@sha256:[0-9a-f]{64}$', element.image) }}"
+                  - key: "{{ regex_match('^ghcr[.]io/snaraj/naranjo-online(:v[0-9]+[.][0-9]+[.][0-9]+)?@sha256:[0-9a-f]{64}$', element.image) }}"
                     operator: NotEquals
                     value: true
     - name: require-canonical-lidersea-image
@@ -84,7 +95,7 @@ spec:
             deny:
               conditions:
                 any:
-                  - key: "{{ regex_match('^ghcr[.]io/snaraj/lidersea-com@sha256:[0-9a-f]{64}$', element.image) }}"
+                  - key: "{{ regex_match('^ghcr[.]io/snaraj/lidersea-com(:v[0-9]+[.][0-9]+[.][0-9]+)?@sha256:[0-9a-f]{64}$', element.image) }}"
                     operator: NotEquals
                     value: true
     - name: require-canonical-cloudflared-image

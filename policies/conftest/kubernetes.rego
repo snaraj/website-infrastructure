@@ -1094,13 +1094,24 @@ deny contains msg if {
   msg := sprintf("%s %s must run as non-root", [input.kind, input.metadata.name])
 }
 
+# The canonical publisher per tenant namespace, and the exact shape of the
+# reference that names it. A reference may carry the published release tag in
+# front of the digest — `repo:vMAJOR.MINOR.PATCH@sha256:...`, the form the
+# connector, Flux and Kyverno images already use — so an operator reading
+# `kubectl describe pod` sees which release is running. The tag is legibility
+# only and is never what resolves: the `@sha256:` suffix stays MANDATORY and
+# anchored, so safety invariant 6 is untouched and dropping the digest for a
+# bare tag is still denied. The tag shape is closed to the site publishers'
+# own SemVer form, so `:latest`, a branch name, or a second registry host
+# cannot ride in through it. Repository hosts are now dot-escaped, which is
+# strictly narrower than the unescaped literals this replaced.
 deny contains msg if {
   is_workload
   restricted_namespace
   namespace := input.metadata.namespace
   expected_repository := {
-    "naranjo-online": "ghcr.io/snaraj/naranjo-online",
-    "lidersea-com": "ghcr.io/snaraj/lidersea-com",
+    "naranjo-online": "ghcr[.]io/snaraj/naranjo-online(:v[0-9]+[.][0-9]+[.][0-9]+)?",
+    "lidersea-com": "ghcr[.]io/snaraj/lidersea-com(:v[0-9]+[.][0-9]+[.][0-9]+)?",
     "cloudflare-public": "cloudflare/cloudflared:[A-Za-z0-9._-]+",
   }[namespace]
   some container in containers
@@ -1185,10 +1196,18 @@ deny contains msg if {
   msg := sprintf("volume %s must not use hostPath", [volume.name])
 }
 
+# The coarse registry rule that covers every workload, tenant or platform.
+# It is TIGHTER than the `.+` it replaces: the repository path and the optional
+# release tag are each a closed character class, so a reference can no longer
+# smuggle `/`, `@`, or a second `:` between the approved host prefix and the
+# digest. The digest remains mandatory and anchored; the tag remains optional
+# here because the exact per-namespace tag shape is pinned by the canonical
+# repository rule above, and because the digest-only form must stay valid for
+# a rollback pin that names no release.
 deny contains msg if {
   is_workload
   some container in containers
-  not regex.match("^(ghcr\\.io/(snaraj|fluxcd)/|reg\\.kyverno\\.io/kyverno/|cloudflare/cloudflared:).+@sha256:[0-9a-f]{64}$", container.image)
+  not regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|reg[.]kyverno[.]io/kyverno/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", container.image)
   msg := sprintf("container %s image must use an approved registry and full digest", [container.name])
 }
 

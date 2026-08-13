@@ -94,9 +94,55 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s does not name a canonical image digest", [input.metadata.name])
 }
 
+# The release TAG is the human half of the same identity and is gated exactly
+# like the digest: a released site must have advanced off the v0.0.0 sentinel
+# and must name one canonical SemVer release. Two arms, not one, so a sentinel
+# tag and a malformed tag are distinguishable in the denial output — the
+# renderer's closed denial vocabulary asserts each by message.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  site_image_tag == "v0.0.0"
+  msg := sprintf("HelmRelease %s still names the sentinel release tag", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  not regex.match("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", site_image_tag)
+  msg := sprintf("HelmRelease %s does not name a canonical release tag", [input.metadata.name])
+}
+
+# Rego's object.get raises a builtin type error on a non-object receiver, and
+# under OPA's default non-strict mode that error makes the ENCLOSING deny body
+# undefined — the rule silently does not fire. A nested `object.get` chain is
+# therefore fail-open on a degenerate `spec`, `values`, or `image` value. Every
+# level below is guarded, and a degenerate shape is denied by its own arm
+# instead of skipped.
+site_image_mapping := image if {
+  spec := input.spec
+  is_object(spec)
+  values := object.get(spec, "values", {})
+  is_object(values)
+  image := object.get(values, "image", {})
+  is_object(image)
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.metadata.namespace in site_namespaces
+  not site_image_mapping
+  msg := sprintf("HelmRelease %s does not state a well-formed image mapping", [input.metadata.name])
+}
+
 site_image_digest := digest if {
-  values := object.get(input.spec, "values", {})
-  digest := object.get(object.get(values, "image", {}), "digest", "")
+  digest := object.get(site_image_mapping, "digest", "")
+  is_string(digest)
+}
+
+site_image_tag := tag if {
+  tag := object.get(site_image_mapping, "tag", "")
+  is_string(tag)
 }
 
 deny contains msg if {

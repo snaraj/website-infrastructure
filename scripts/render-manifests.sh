@@ -300,6 +300,12 @@ assert_site_release_phase() {
   local not_ready="HelmRelease ${website} is not marked ready"
   local zero_digest="HelmRelease ${website} still names the all-zero image digest"
   local uncanonical="HelmRelease ${website} does not name a canonical image digest"
+  # The release tag is gated exactly like the digest, so the closed vocabulary
+  # names its two arms too. A site that advanced only one of the pair lands in
+  # `staged`'s forbidden set and is caught there.
+  local sentinel_tag="HelmRelease ${website} still names the sentinel release tag"
+  local uncanonical_tag="HelmRelease ${website} does not name a canonical release tag"
+  local malformed_image="HelmRelease ${website} does not state a well-formed image mapping"
   # A site root also renders that site's chart source, so the closed
   # vocabulary below is only exhaustive if it names that object's denials too.
   # A correct chart source produces neither fragment in ANY phase, so both are
@@ -319,12 +325,12 @@ assert_site_release_phase() {
       # because the all-zero sentinel is canonical in shape. Listing the full
       # vocabulary in every arm is what makes the staged arm's forbidden set —
       # where these checks are load-bearing — obviously exhaustive.
-      required=("$suspended" "$not_ready" "$zero_digest")
-      forbidden=("$uncanonical" "$unverified" "$unbound")
+      required=("$suspended" "$not_ready" "$zero_digest" "$sentinel_tag")
+      forbidden=("$uncanonical" "$uncanonical_tag" "$malformed_image" "$unverified" "$unbound")
       ;;
     staged)
       required=("$suspended")
-      forbidden=("$not_ready" "$zero_digest" "$uncanonical" "$unverified" "$unbound")
+      forbidden=("$not_ready" "$zero_digest" "$uncanonical" "$sentinel_tag" "$uncanonical_tag" "$malformed_image" "$unverified" "$unbound")
       ;;
     active)
       # An active site must satisfy the release policy outright; that single
