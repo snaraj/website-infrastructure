@@ -1025,7 +1025,8 @@ class SkillStructureTests(unittest.TestCase):
             "this doctrine alone is never live acceptance evidence",
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, main)
+                if fragment not in main:
+                    self.fail("ephemeral recreation control is missing")
 
     def test_skill_explicitly_discovers_portable_variants(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
