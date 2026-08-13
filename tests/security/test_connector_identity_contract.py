@@ -352,12 +352,24 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
             "              kinds: [Pod]\n"
             "              namespaces: [cloudflare-public]",
         ),
+        # The env/secretKeyRef surface: the one the cluster actually runs, so
+        # a narrowing here stops covering the only token delivery in
+        # production while the volume rule above keeps reporting green on a
+        # shape nothing deploys.
+        "allow-only-own-instance-token-env": (
+            "STORAGE_POLICY",
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [Pod]\n"
+            "              namespaces: [cloudflare-public]",
+        ),
     }
     # The CEL of the rules that carry the inventory inside an expression rather
     # than in ``names:``. Same binding, different syntax.
     CEL_INVENTORIES = {
         "require-connector-identity-tuple": "READINESS_POLICY",
         "allow-only-tunnel-token-volume": "STORAGE_POLICY",
+        "allow-only-own-instance-token-env": "STORAGE_POLICY",
     }
 
     def test_every_connector_rule_matches_exactly_the_reviewed_stanza(self):
@@ -565,6 +577,144 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
             {name.strip() for name in matched.split(",")},
             rendered,
             "the admission match list drifted from the rendered connectors",
+        )
+
+
+class SiteIngressPolicyNameTests(unittest.TestCase):
+    """The other half of the double pin: the site's own ingress policy.
+
+    The connector-egress rules above are only half of the cross-site guard —
+    the site side is a NetworkPolicy that lives in the site repositories and
+    names the connector instance it admits. This repository asserts that
+    object's exact NAME in two engines, and until 2026-08-12 it asserted a
+    name that exists nowhere: a live capture showed the objects are
+    ``ingress-to-<namespace>``, both site charts render that, and this
+    repository alone still demanded the superseded ``cloudflared-to-`` prefix.
+    Every gate was green because every fixture agreed with the contract and
+    the contract agreed with the fixtures.
+
+    So the prefix is pinned three ways here — the two engines against each
+    other, and both against a fixture built from the captured objects — and
+    the superseded prefix is pinned as still-refused, because a rename that
+    merely ADDED the new name would leave the dead one admissible forever.
+    """
+
+    REGO = REPO_ROOT / "policies" / "conftest" / "kubernetes.rego"
+    NETWORKING_POLICY = (
+        REPO_ROOT / "policies" / "kyverno" / "require-exact-tenant-networking.yaml"
+    )
+    FIXTURES = REPO_ROOT / "tests" / "kubernetes" / "fixtures"
+    LIVE_FIXTURE = FIXTURES / "allow" / "live-site-ingress-policies.yaml"
+    SUPERSEDED_FIXTURE = FIXTURES / "deny" / "ingress-policy-superseded-name.yaml"
+
+    SITE_NAMESPACES = ("naranjo-online", "lidersea-com")
+    SUPERSEDED_PREFIX = "cloudflared-to-"
+    # Delivery-lane requirement 7: shared checks keep capability names
+    # generic, so the binding could change provider without rewriting them.
+    # The superseded prefix was a provider name; the reconciled one is not.
+    PROVIDER_TOKENS = ("cloudflare", "cloudflared", "argo", "ngrok", "tailscale")
+
+    def rego_prefix(self):
+        return capture(
+            r'site_ingress_policy_name\(namespace\) := '
+            r'sprintf\("([^%"]*)%s", \[namespace\]\)',
+            self.REGO.read_text(encoding="utf-8"),
+            "the Conftest site-ingress policy name derivation",
+        )
+
+    def cel_prefix(self):
+        return capture(
+            r"object\.metadata\.name == '([^']*)' \+ object\.metadata\.namespace",
+            self.NETWORKING_POLICY.read_text(encoding="utf-8"),
+            "the Kyverno site-ingress policy name derivation",
+        )
+
+    def fixture_names(self, fixture):
+        return re.findall(r"(?m)^  name: (\S+)$", fixture.read_text(encoding="utf-8"))
+
+    def test_both_engines_derive_the_same_policy_name(self):
+        """Two engines that disagree on the name enforce two contracts."""
+
+        self.assertEqual(
+            self.rego_prefix(),
+            self.cel_prefix(),
+            "Conftest and Kyverno must demand the same site-ingress policy "
+            "name; whichever engine is installed would otherwise enforce a "
+            "different contract from the one the other proves",
+        )
+
+    def test_the_derivation_is_actually_called_by_the_ingress_rule(self):
+        """A correct helper nothing calls is an unwired patch.
+
+        ``valid_site_ingress_policy`` could keep a literal of its own while
+        the derivation above stays perfectly correct and perfectly unused, and
+        every other assertion in this class would still pass.
+        """
+
+        rule = capture(
+            r"(?s)valid_site_ingress_policy if \{(.*?)\n\}",
+            self.REGO.read_text(encoding="utf-8"),
+            "the Conftest site-ingress rule body",
+        )
+        self.assertIn(
+            "input.metadata.name == site_ingress_policy_name(namespace)",
+            rule,
+            "the site-ingress rule must compare against the derivation, not "
+            "against a literal of its own",
+        )
+
+    def test_the_policy_name_names_no_provider(self):
+        prefix = self.rego_prefix()
+        for token in self.PROVIDER_TOKENS:
+            with self.subTest(token=token):
+                self.assertNotIn(
+                    token,
+                    prefix,
+                    "the site-ingress policy name must stay provider-neutral: "
+                    "the site repositories forbid a provider name in their "
+                    "chart templates, so demanding one here is a contract no "
+                    "site can satisfy",
+                )
+
+    def test_the_superseded_prefix_is_gone_from_both_engines(self):
+        for policy in (self.REGO, self.NETWORKING_POLICY):
+            with self.subTest(policy=policy.name):
+                self.assertNotIn(
+                    self.SUPERSEDED_PREFIX,
+                    "\n".join(
+                        line
+                        for line in policy.read_text(encoding="utf-8").split("\n")
+                        if not line.lstrip().startswith("#")
+                    ),
+                    "{} still enforces the superseded policy name".format(
+                        policy.name
+                    ),
+                )
+
+    def test_the_captured_positive_control_carries_the_derived_names(self):
+        """Binds the contract to the objects that were actually captured."""
+
+        prefix = self.rego_prefix()
+        self.assertEqual(
+            self.fixture_names(self.LIVE_FIXTURE),
+            [prefix + namespace for namespace in self.SITE_NAMESPACES],
+            "the accepted-shape fixture must carry exactly the names both "
+            "engines derive, for both sites, in order",
+        )
+
+    def test_the_superseded_name_is_still_exercised_as_a_denial(self):
+        """A rename that merely ADDED the new name would pass without this."""
+
+        names = self.fixture_names(self.SUPERSEDED_FIXTURE)
+        self.assertEqual(len(names), 1, "one document per deny fixture")
+        self.assertTrue(
+            names[0].startswith(self.SUPERSEDED_PREFIX),
+            "the deny fixture must still carry the superseded prefix",
+        )
+        self.assertFalse(
+            names[0].startswith(self.rego_prefix()),
+            "the deny fixture must not have been renamed along with the "
+            "contract; it exists to prove the dead name is still refused",
         )
 
 

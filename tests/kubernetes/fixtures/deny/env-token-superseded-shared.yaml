@@ -1,0 +1,39 @@
+# The superseded SHARED token, asserted behaviourally on the deployed
+# surface. A structural "the literal is absent from the policy" guard
+# cannot see the name re-entering by concatenation; this fixture can,
+# because the Pod is refused on the reference it actually declares.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: connector-with-superseded-shared-token-env
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pi-websites-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

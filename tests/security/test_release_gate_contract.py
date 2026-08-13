@@ -92,9 +92,9 @@ NETWORK_POLICY_IDENTITIES = (
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
     ("naranjo-online", "default-deny"),
-    ("naranjo-online", "cloudflared-to-naranjo-online"),
+    ("naranjo-online", "ingress-to-naranjo-online"),
     ("lidersea-com", "default-deny"),
-    ("lidersea-com", "cloudflared-to-lidersea-com"),
+    ("lidersea-com", "ingress-to-lidersea-com"),
 )
 
 

@@ -1,0 +1,74 @@
+# Positive control for the token-delivery surface the cluster ACTUALLY runs.
+# Derived from a read-only capture of both connector Pods on 2026-08-12: zero
+# volumes, zero volumeMounts, and the credential injected as `TUNNEL_TOKEN`
+# from each connector's OWN Secret through `valueFrom.secretKeyRef`. The
+# committed chart still renders the mounted-volume form instead, so without
+# this control every fixture in the repository would describe a shape nothing
+# deploys — which is exactly how the substitution the deny fixtures beside it
+# refuse stayed admissible on the running Pods.
+#
+# It also proves those deny fixtures are non-vacuous: change one character of
+# either secretKeyRef name here and this file stops being accepted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: naranjo-connector-env-token
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: naranjo-online-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidersea-connector-env-token
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        - name: TUNNEL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: lidersea-com-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

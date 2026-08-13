@@ -82,6 +82,41 @@ spec:
                 has(volume.secret.items) && volume.secret.items.size() == 1 &&
                 volume.secret.items[0].key == 'token' && volume.secret.items[0].path == 'token'))
               message: Each site connector Pod may mount only its own matching tunnel-token Secret.
+    # The token surface the cluster actually runs. Captured live 2026-08-12:
+    # both connector Pods declare ZERO volumes and read the credential from
+    # `env: TUNNEL_TOKEN` with `valueFrom.secretKeyRef`, so the volume rule
+    # above passes them vacuously through its `!has(object.spec.volumes)` arm
+    # and the cross-site substitution it refuses was still admitted here. Same
+    # derivation, same identity root: the Secret name must equal this Pod's own
+    # instance label plus `-token`. `envFrom` is refused outright because a
+    # `secretRef` there injects every key of the named Secret with no key
+    # selector to bind; the deployed connectors declare none.
+    - name: allow-only-own-instance-token-env
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [cloudflare-public]
+      validate:
+        failureAction: Enforce
+        cel:
+          expressions:
+            - expression: >-
+                has(object.metadata.labels) &&
+                'app.kubernetes.io/instance' in object.metadata.labels &&
+                object.metadata.labels['app.kubernetes.io/instance'] in
+                ['naranjo-online-tunnel', 'lidersea-com-tunnel'] &&
+                (object.spec.containers +
+                (has(object.spec.initContainers) ? object.spec.initContainers : []) +
+                (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : []))
+                .all(container, !has(container.envFrom) &&
+                (!has(container.env) || container.env.all(entry,
+                !has(entry.valueFrom) || !has(entry.valueFrom.secretKeyRef) ||
+                (entry.valueFrom.secretKeyRef.name ==
+                object.metadata.labels['app.kubernetes.io/instance'] + '-token' &&
+                entry.valueFrom.secretKeyRef.key == 'token' &&
+                !has(entry.valueFrom.secretKeyRef.optional)))))
+              message: Each site connector Pod may read its Tunnel token only from its own matching Secret, and never through envFrom.
     - name: disallow-legacy-service-account-token-secrets
       match:
         any:
