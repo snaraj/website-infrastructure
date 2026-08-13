@@ -1,0 +1,47 @@
+# CodeQL analysis configuration.
+#
+# This file exists so the one coverage decision this repository makes about
+# its own security analysis is reviewable in a diff, with its justification
+# attached, instead of surviving as a set of dismissals in the GitHub UI that
+# no checkout can show and no gate can re-verify.
+#
+# WHAT STAYS ANALYZED. The default query suite runs unchanged. `scripts/**` —
+# the platform's production surface, the validators and the redaction tooling
+# that run in the bootstrap path and behind every gate — is fully analyzed and
+# is never excluded here. That surface has already earned the analysis: the
+# findings it raised drove real corrections, including a classifier that
+# accepted a look-alike API group without deriving any authority from it.
+#
+# WHAT IS EXCLUDED, AND WHY. The `tests` tree is excluded. Its batteries exist
+# to prove that the secret-detection gates REJECT credential-shaped material,
+# so each battery must construct credential shapes and write them somewhere the
+# gate under test will read them. CodeQL's clear-text-storage query classifies
+# sensitive data from identifier names, so it flags precisely the fixture a
+# battery is required to build. On the first analysis after the site extraction
+# it opened 18 alerts across four batteries; every one is a synthetic value
+# assembled in-process from repeated characters or a deterministic byte range,
+# and no alert in this tree has ever been a true positive. The mismatch is
+# structural rather than incidental: the subject matter of these tests IS
+# credential shapes, so the query keeps firing for exactly as long as the tests
+# keep proving the gates work, and each new battery re-opens it.
+#
+# WHY REMOVING COVERAGE IS DEFENSIBLE HERE. Four content-based controls already
+# cover this same tree and none of them is weakened by this file: the pinned
+# working-tree secret scan, the same scan over the exact outgoing history range
+# in the publication gate, that scan again in pull-request CI with
+# `--ignore-gitleaks-allow` against a verified-empty ignore file, and the
+# exact-index secret scan in the repository validator. Those match on CONTENT,
+# not on identifier names, and no allowlist entry is honored on the merge path.
+# The residual risk this file accepts is named, not hidden: a non-secret defect
+# class in test-only code — an inefficient regular expression in a fixture
+# helper, say — is no longer reported. Test helpers are not attack surface and
+# do not ship, so that trade is deliberate.
+#
+# The scope above is enforced, not merely described:
+# `tests/security/test_codeql_contract.py` pins this file's exact top-level
+# keys and its exact exclusion list, and pins that the workflow still points at
+# it. Widening the exclusion toward `scripts`, or adding a `queries` or
+# `query-filters` stanza that narrows what runs over the production surface,
+# turns the suite red.
+paths-ignore:
+  - tests
