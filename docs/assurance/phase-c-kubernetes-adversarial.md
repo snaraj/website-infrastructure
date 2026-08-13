@@ -33,6 +33,39 @@ the inert scaffold (admission not enforced yet is itself asserted).
 Residual → G: webhook failure-policy behavior, audit-log emission, PSA
 runtime decisions need a live control plane (fixed read-only canaries).
 
+## 2a. Storage external reachability — proof level: policy + structural
+
+Positive: `fixtures/allow/storage-enumerated-local.yaml` (the enumerated
+class, a local PersistentVolume under the enumerated root pinned to NAMED
+nodes, and a claim naming the same class) passes both engines.
+Negative: 36 single-object deny fixtures, at least one per rule and
+several rules carrying more — network and block sources, cloud and unknown
+CSI drivers, hostPath, a path outside the root, a traversal that survives
+prefix matching, an unpinned local volume and an every-node one, zero and
+two sources, an unenumerated class on both the volume and the class object,
+remote parameters, a classless claim, an imported claim, a CSIDriver, a
+VolumeAttributesClass and two references to one, PersistentVolume mount
+options, structurally unusable objects, and the degenerate-shape corpus
+(null/scalar/list values under `local`, `csi`, `nodeAffinity`,
+`dataSourceRef`, `parameters`, and `spec`) that proved eight fail-open
+divergences between the two engines.
+Structural: `tests/security/test_storage_exposure_policy_contract.py`
+derives the covered kinds from the rule's own CEL expressions and pins the
+match block to them, because `kyverno test` reports an unmatched resource
+as `Pass / Excluded` and a skipped one as a PASS — a narrowed match block,
+a userInfo narrowing (`clusterRoles`/`roles`/`subjects`), or
+`spec.admission: false` each leave every behavioural row green while the
+gate covers nothing. The same battery pins the six enumerations
+byte-identical across Kyverno and Conftest, pins the non-source field list
+name-for-name, and pins `admission: true`.
+Differential: `scripts/test-storage-engine-parity.sh` runs the whole corpus
+through BOTH engines and fails on any verdict disagreement or any `skip`,
+because text lockstep is not behavioural lockstep.
+Residual → G: a manifest cannot prove what a node path is bound to
+(bind mount, network client mount, symlink); that is mount-time evidence,
+and the required host-side closure is enumerated in the
+[storage-admission runbook](../runbooks/storage-admission.md).
+
 ## 3. Workload confinement — proof level: policy
 
 Positive: `fixtures/allow/hardened.yaml` + `lidersea-hardened.yaml` pass

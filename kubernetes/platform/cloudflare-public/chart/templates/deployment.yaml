@@ -1,28 +1,45 @@
+{{- /*
+Explicit site order keeps the rendered document sequence fixed and auditable.
+Each connector's annotation reads ITS OWN tokenRevision, so rotating one
+Tunnel leaves the other Deployment byte-for-byte unchanged (ADR 0015's
+one-Tunnel-at-a-time rotation).
+*/ -}}
+{{- range $site := list "naranjo-online" "lidersea-com" }}
+{{- $connector := index $.Values.connectors $site }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cloudflared
-  namespace: {{ .Release.Namespace }}
+  name: {{ $connector.instance }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "cloudflare-public.labels" . | nindent 4 }}
+    {{- include "cloudflare-public.connectorLabels" (dict "root" $ "instance" $connector.instance) | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ $.Values.replicaCount }}
   revisionHistoryLimit: 3
+  {{- /*
+  Reconciled to the cluster on 2026-08-12. On a single node, surge-then-drain
+  cannot place the extra Pod anywhere useful and its headroom has to be paid
+  for out of the same namespace quota that bounds the steady state; taking one
+  connector down and replacing it is what actually completes here. The tunnel
+  drains in seconds and the other website's connector is untouched, which is
+  the same one-at-a-time property ADR 0015 gives rotation.
+  */}}
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "cloudflare-public.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: {{ include "cloudflare-public.name" $ }}
+      app.kubernetes.io/instance: {{ $connector.instance }}
   template:
     metadata:
       labels:
-        {{- include "cloudflare-public.labels" . | nindent 8 }}
+        {{- include "cloudflare-public.connectorLabels" (dict "root" $ "instance" $connector.instance) | nindent 8 }}
       annotations:
-        platform.snaraj.dev/tunnel-token-revision: {{ .Values.tunnel.tokenRevision | quote }}
+        platform.snaraj.dev/tunnel-token-revision: {{ $connector.tokenRevision | quote }}
     spec:
       automountServiceAccountToken: false
       serviceAccountName: cloudflared
@@ -36,8 +53,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: cloudflared
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ .Values.image.digest }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}@{{ $.Values.image.digest }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
           args:
             - tunnel
             - --no-autoupdate
@@ -72,7 +89,7 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 2
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml $.Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -86,8 +103,9 @@ spec:
       volumes:
         - name: tunnel-token
           secret:
-            secretName: {{ .Values.tunnel.secretName }}
+            secretName: {{ $connector.secretName }}
             defaultMode: 0440
             items:
-              - key: {{ .Values.tunnel.secretKey }}
+              - key: {{ $.Values.tunnel.secretKey }}
                 path: token
+{{- end }}

@@ -18,7 +18,7 @@ is denied with no DNS or API-server allow in force. That refusal is the
 executable form of the install-ordering deadlock:
 
 ``FreshClusterDryRunGateTests`` drives the pre-apply gate through the
-fresh-cluster shape it must accept — 14 cluster-scoped ``created`` plus 11
+fresh-cluster shape it must accept — 13 cluster-scoped ``created`` plus 11
 children reporting ``namespaces "flux-system" not found``
 (kubernetes/kubernetes#83562, which the old "all 25 must be created" gate could
 never pass) — and the genuine failures it must still refuse.
@@ -51,6 +51,7 @@ GIT = shutil.which("git")
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLERS = ROOT / "kubernetes" / "flux-system" / "controllers"
 EGRESS = ROOT / "kubernetes" / "flux-system" / "egress"
+CANARY = ROOT / "kubernetes" / "flux-system" / "canary"
 INSTALLER = ROOT / "scripts" / "install-flux-controllers.sh"
 RUNBOOK = ROOT / "docs" / "runbooks" / "flux-install.md"
 RENDERER = ROOT / "scripts" / "render-manifests.sh"
@@ -92,9 +93,10 @@ EXPECTED_EXCLUDED_RANGES = (
     "240.0.0.0/4",
 )
 
-# The 13 cluster-scoped objects that a `kubectl delete namespace flux-system`
-# cannot remove, and the Namespace itself. The installer's rollback and the
-# runbook's removal procedure are both measured against this list.
+# The 12 non-namespaced objects that a `kubectl delete namespace flux-system`
+# cannot remove. The installer's rollback and the runbook's removal procedure
+# are both measured against this effective, post-overlay list; the deleted
+# generated cluster-admin binding is deliberately absent.
 CLUSTER_SCOPED_CRDS = (
     "buckets.source.toolkit.fluxcd.io",
     "externalartifacts.source.toolkit.fluxcd.io",
@@ -111,14 +113,21 @@ CLUSTER_SCOPED_ROLES = (
     "flux-view-flux-system",
 )
 CLUSTER_SCOPED_BINDINGS = (
-    "cluster-reconciler-flux-system",
     "crd-controller-flux-system",
 )
 CONTROLLER_DEPLOYMENTS = ("source-controller", "kustomize-controller", "helm-controller")
+CANARY_NAME = "flux-api-reachability-canary"
+CANARY_IMAGE = (
+    "registry.k8s.io/kubectl:v1.36.3@sha256:"
+    "6e4fce3c83651edb91b74bc67701c5cd263dd8aa3cd4254b1798d6425a5ab789"
+)
 
 # RFC 5737 documentation space throughout: TEST-NET-2 is the fixture's reviewed
 # API server, TEST-NET-3 the decoy context nobody named.
 FIXTURE_SERVER = "https://198.51.100.10:6443"
+# Deliberately different from the operator endpoint: policy backends are
+# explicit selected-CNI evidence and must never be inferred from --server.
+FIXTURE_API_ENDPOINT = "198.51.100.20"
 FIXTURE_CONTEXT = "reviewed-operator"
 FIXTURE_OTHER_SERVER = "https://203.0.113.7:6443"
 FIXTURE_OTHER_CONTEXT = "some-other-cluster"
@@ -265,6 +274,43 @@ class ControllerFlagScopeTests(unittest.TestCase):
         )
 
 
+class ApiCanaryManifestTests(unittest.TestCase):
+    """The pre-controller probe is one immutable, least-privilege Pod."""
+
+    def test_canary_uses_the_source_controller_identity_and_network_selector(self):
+        text = read(CANARY / "pod.yaml")
+        for fragment in (
+            "name: " + CANARY_NAME,
+            "namespace: flux-system",
+            "app: source-controller",
+            "app.kubernetes.io/part-of: flux",
+            "serviceAccountName: source-controller",
+            "value: kubernetes.default.svc",
+            "- --raw=/api",
+            "automountServiceAccountToken: true",
+            "readOnlyRootFilesystem: true",
+            "allowPrivilegeEscalation: false",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
+        self.assertNotRegex(text, r"(?m)^\s*(hostNetwork|hostPID|hostIPC):\s*true$")
+        self.assertNotIn("kind: Secret", text)
+
+    def test_canary_image_is_the_exact_versions_pin_and_policy_exception(self):
+        versions = read(VERSIONS)
+        match = re.search(r"(?m)^FLUX_API_CANARY_IMAGE=(\S+)$", versions)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), CANARY_IMAGE)
+        self.assertIn("image: " + CANARY_IMAGE, read(CANARY / "pod.yaml"))
+        self.assertIn(CANARY_IMAGE, read(REGO))
+
+    def test_canary_is_rendered_but_not_reachable_from_the_flux_bootstrap_root(self):
+        self.assertIn("kubernetes/flux-system/canary", read(RENDERER))
+        self.assertIn("CANARY_TARGET='kubernetes/flux-system/canary'", read(INSTALLER))
+        root = read(ROOT / "kubernetes" / "flux-system" / "kustomization.yaml")
+        self.assertNotRegex(root, r"(?m)^\s*-\s*canary\s*$")
+
+
 class EgressAllowlistTests(unittest.TestCase):
     def setUp(self):
         self.text = read(EGRESS / "network-policies.yaml")
@@ -302,7 +348,7 @@ class EgressAllowlistTests(unittest.TestCase):
             [value for value in destinations if value != "0.0.0.0/0"],
             ["192.0.2.0/32"],
         )
-        self.assertIn("sentinel-until-reviewed-control-plane-endpoint", self.text)
+        self.assertIn("sentinel-until-private-calico-api-endpoint-set", self.text)
 
     def test_the_overlay_is_rendered_but_unreachable_from_the_bootstrap_root(self):
         self.assertRegex(
@@ -317,21 +363,17 @@ class EgressAllowlistTests(unittest.TestCase):
         )
 
     def test_the_api_server_allow_has_exactly_the_reviewed_shape(self):
-        # The disclosed residual (runbook step 3, residual risk 4) is that a
-        # NetworkPolicy selects the API server by ADDRESS, while an in-Pod client
-        # reaches it through the `kubernetes` Service -- so on an enforcing CNI
-        # this allow may target the wrong destination and the controllers can end
-        # up API-isolated. That residual is accepted because it is disclosed and
-        # fails closed. What must not happen is it silently WIDENING while the
-        # disclosure stays put: a `/16` instead of a `/32`, a second port, a
-        # second peer, a podSelector opened to the namespace. Existence-by-name
-        # cannot see any of that, so the document body is pinned byte for byte.
+        # The public manifest is a non-routable TEMPLATE. The installer expands
+        # this one peer to an exact private Calico post-DNAT endpoint set and
+        # round-trips it back to these bytes before the canary proves the path.
+        # A wider CIDR, second committed peer, extra port, or selector widening
+        # must therefore fail here rather than becoming a new template shape.
         document = self.text.split("\n  name: flux-controllers-kube-apiserver\n", 1)[1]
         self.assertEqual(
             document,
             "  namespace: flux-system\n"
             "  annotations:\n"
-            "    platform.snaraj.dev/readiness: sentinel-until-reviewed-control-plane-endpoint\n"
+            "    platform.snaraj.dev/readiness: sentinel-until-private-calico-api-endpoint-set\n"
             "spec:\n"
             "  podSelector:\n"
             "    matchLabels:\n"
@@ -519,16 +561,16 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn("does not enforce restricted Pod Security", self.text)
 
     def test_it_dry_runs_before_it_applies_and_bounds_the_inventory(self):
-        # The gate keeps a server-side dry run and the exact-25 bound, and now
-        # also carries the fresh-cluster classification (14 cluster-scoped +
+        # The gate keeps a server-side dry run and the exact-24 bound, and now
+        # also carries the fresh-cluster classification (13 cluster-scoped +
         # 11 namespace-not-found children) and the namespace-independent
         # corroboration (client-side strict validation). The behaviour is
         # exercised in FreshClusterDryRunGateTests; these pins fail if the
-        # corrected gate is reverted to the old "all 25 must be created" shape.
+        # corrected gate is reverted to the old "all must be created" shape.
         self.assertIn("--dry-run=server", self.text)
         self.assertIn("--dry-run=client --validate=strict", self.text)
-        self.assertIn("EXPECTED_OBJECTS=25", self.text)
-        self.assertIn("EXPECTED_CLUSTER_SCOPED=14", self.text)
+        self.assertIn("EXPECTED_OBJECTS=24", self.text)
+        self.assertIn("EXPECTED_CLUSTER_SCOPED=13", self.text)
         self.assertIn("EXPECTED_NAMESPACED=11", self.text)
         self.assertIn('namespaces "flux-system" not found', self.text)
         plan_index = self.text.index('"$MODE" == \'--plan\'')
@@ -543,10 +585,10 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotIn("apply -k", self.text)
 
     def test_the_phase_constants_partition_the_reviewed_inventory(self):
-        # 22 + 3 = 25 and 4 + 1 = 5. Constants that stopped adding up would let
+        # 21 + 3 = 24 and 4 + 1 = 5. Constants that stopped adding up would let
         # a phase quietly drop an object; the installer re-checks the same sums
         # at run time against the actual split.
-        self.assertIn("EXPECTED_PREREQUISITES=22", self.text)
+        self.assertIn("EXPECTED_PREREQUISITES=21", self.text)
         self.assertIn("EXPECTED_WORKLOADS=3", self.text)
         self.assertIn("EXPECTED_EGRESS_POLICIES=5", self.text)
         self.assertIn("EXPECTED_STARTUP_POLICIES=4", self.text)
@@ -575,6 +617,9 @@ class InstallerGuardTests(unittest.TestCase):
             "KUBECTL_ARM64_SHA256",
             "--expect-render-sha256",
             "--expect-egress-sha256",
+            "--expect-canary-sha256",
+            "--cni-provider",
+            "--api-endpoint",
             "--expect-commit",
             "status --porcelain",
         ):
@@ -584,14 +629,14 @@ class InstallerGuardTests(unittest.TestCase):
     def test_the_kubectl_digest_pins_it_reads_exist_in_versions_env(self):
         # A pin name that drifted out of versions.env would make the digest
         # binding die on every run; a pin that was never there would make it
-        # vacuous. versions.env is platform-lane and read-only from here, so
-        # this asserts the coupling rather than repairing it.
+        # vacuous. This asserts the committed cross-file coupling.
         versions = read(VERSIONS)
         for key in (
             "KUSTOMIZE_VERSION",
             "KUBERNETES_VERSION",
             "KUBECTL_LINUX_AMD64_SHA256",
             "KUBECTL_ARM64_SHA256",
+            "FLUX_API_CANARY_IMAGE",
         ):
             with self.subTest(pin=key):
                 self.assertRegex(versions, r"(?m)^{}=\S+$".format(re.escape(key)))
@@ -612,7 +657,7 @@ class InstallDocumentationTests(unittest.TestCase):
             "kubectl delete namespace flux-system",
             "separate reviewed pull request",
             "Kyverno is not installed",
-            "cluster-admin",
+            "never restores `cluster-admin`",
             "fulcio.sigstore.dev",
             # The fresh-vs-existing dry-run semantics: the ns-not-found on the
             # children is documented as expected, not a failure (the P3 fix).
@@ -628,9 +673,13 @@ class InstallDocumentationTests(unittest.TestCase):
         text = read(RUNBOOK)
         for fragment in (
             "--expect-render-sha256",
+            "--expect-egress-sha256",
+            "--expect-canary-sha256",
             "--kubeconfig",
             "--context",
             "--server",
+            "--cni-provider",
+            "--api-endpoint",
             "--open-public-egress",
             "deadlock",
         ):
@@ -639,8 +688,8 @@ class InstallDocumentationTests(unittest.TestCase):
         # The readiness check must come after the startup allows, not before:
         # the ordering the runbook describes has to be the one the installer
         # performs, or the document re-creates the defect in prose. The old
-        # runbook applied the controllers, demanded 3/3 at 1/1, and only then
-        # applied any allow -- which on an enforcing CNI can never pass.
+        # runbook demanded a fixed one-replica status before applying any allow,
+        # which on an enforcing CNI can never pass and cannot scale to N replicas.
         rationale = text.index("Why the apply is ordered")
         apply_step = text.index("## Step 2 — apply, in phases")
         verify_step = text.index("## Step 3 — verify the controllers")
@@ -648,7 +697,10 @@ class InstallDocumentationTests(unittest.TestCase):
         self.assertLess(rationale, apply_step)
         self.assertLess(apply_step, verify_step)
         self.assertLess(verify_step, public_step)
-        self.assertIn("three Deployments `1/1`", text[verify_step:public_step])
+        verification = text[verify_step:public_step]
+        self.assertIn("positive desired replica count", verification)
+        self.assertIn("zero unavailable replicas", verification)
+        self.assertNotIn("`1/1`", verification)
         # ... and the phase table has to name the API-server allow before the
         # Deployments, which is the whole ordering in one line.
         self.assertLess(
@@ -851,11 +903,11 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
 
 
 def _reviewed_render() -> str:
-    """A faithful 25-object skeleton of the reviewed controller render.
+    """A faithful 24-object skeleton of the reviewed controller render.
 
     The stubbed ``kustomize`` prints this, so the installer's own content gates
     (no Flux CR, no Secret, no blanket egress, restricted Pod Security enforced,
-    exactly 25 ``kind:`` lines) run against it, its inventory cross-check finds
+    exactly 24 ``kind:`` lines) run against it, its inventory cross-check finds
     the exact reviewed CRD/ClusterRole/ClusterRoleBinding/Deployment names in
     it, and its document splitter has the same ``---``-separated, two-space
     indented shape ``kustomize`` emits. Only structure matters here —
@@ -911,8 +963,8 @@ def _render_with_an_unrecognized_deployment() -> str:
     """The reviewed render with one document the splitter cannot see is a Deployment.
 
     The Service document is replaced by a fourth Deployment whose ``kind`` is
-    quoted. Every count the installer takes still adds up — 25 objects, the three
-    reviewed Deployment names still derive exactly, 22 + 3 still partitions — and
+    quoted. Every count the installer takes still adds up — 24 objects, the three
+    reviewed Deployment names still derive exactly, 21 + 3 still partitions — and
     the document splitter, which matches ``^kind: Deployment$``, leaves this one
     in phase 1. That is the whole hazard: a workload created into the namespace
     BEFORE its egress allows exist, which on an enforcing CNI is the deadlock
@@ -946,16 +998,35 @@ def _reviewed_egress_render() -> str:
     for policy in EXPECTED_EGRESS_POLICIES:
         document = (
             "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
-            "  name: {}\n  namespace: flux-system\nspec:\n  policyTypes:\n"
-            "  - Egress\n".format(policy)
+            "  name: {}\n  namespace: flux-system\nspec:\n"
+            "  podSelector:\n    matchLabels:\n      app.kubernetes.io/part-of: flux\n"
+            "  policyTypes:\n    - Egress\n".format(policy)
         )
         if policy == "flux-controllers-kube-apiserver":
             document += (
-                "  egress:\n  - to:\n    - ipBlock:\n        cidr: 192.0.2.0/32\n"
-                "    ports:\n    - port: 6443\n      protocol: TCP\n"
+                "  egress:\n    - to:\n        - ipBlock:\n"
+                "            cidr: 192.0.2.0/32\n"
+                "      ports:\n        - port: 6443\n          protocol: TCP\n"
             )
         docs.append(document)
     return "---\n".join(docs)
+
+
+def _reviewed_canary_render() -> str:
+    """One immutable Pod at the source-controller identity/policy boundary."""
+
+    return (
+        "apiVersion: v1\nkind: Pod\nmetadata:\n"
+        "  name: flux-api-reachability-canary\n  namespace: flux-system\n"
+        "  labels:\n    app: source-controller\n"
+        "    app.kubernetes.io/part-of: flux\nspec:\n"
+        "  serviceAccountName: source-controller\n  containers:\n"
+        "    - name: kubernetes-api\n      image: {}\n"
+        "      env:\n        - name: KUBERNETES_SERVICE_HOST\n"
+        "          value: kubernetes.default.svc\n"
+        "      args:\n        - --request-timeout=15s\n"
+        "        - get\n        - --raw=/api\n"
+    ).format(CANARY_IMAGE)
 
 
 _KUSTOMIZE_STUB = r"""#!/usr/bin/env bash
@@ -966,6 +1037,7 @@ case "${1:-}" in
     case "${2:-}" in
       */controllers) cat "${FLUX_STUB_ASSETS}/controllers.yaml"; exit 0 ;;
       */egress) cat "${FLUX_STUB_ASSETS}/egress.yaml"; exit 0 ;;
+      */canary) cat "${FLUX_STUB_ASSETS}/canary.yaml"; exit 0 ;;
     esac
     printf 'stub kustomize: unknown root: %s\n' "${2:-}" >&2; exit 9 ;;
 esac
@@ -1031,6 +1103,7 @@ canonical() {
     clusterrole*) printf 'clusterrole.rbac.authorization.k8s.io' ;;
     networkpolicy*) printf 'networkpolicy.networking.k8s.io' ;;
     deployment*) printf 'deployment.apps' ;;
+    pod*) printf 'pod' ;;
     serviceaccount*) printf 'serviceaccount' ;;
     resourcequota*) printf 'resourcequota' ;;
     service*) printf 'service' ;;
@@ -1073,6 +1146,7 @@ document_for() {
       if (k == "ServiceAccount") { return "serviceaccount" }
       if (k == "Service") { return "service" }
       if (k == "Deployment") { return "deployment.apps" }
+      if (k == "Pod") { return "pod" }
       return tolower(k)
     }
     function flush() {
@@ -1101,6 +1175,7 @@ emit() {
       if (k == "ServiceAccount") { return "serviceaccount" }
       if (k == "Service") { return "service" }
       if (k == "Deployment") { return "deployment.apps" }
+      if (k == "Pod") { return "pod" }
       return tolower(k)
     }
     function flush() {
@@ -1200,7 +1275,11 @@ case "$verb" in
     denied="${state}/deny-all"; resolves="${state}/dns"; reaches="${state}/apiserver"
     grep -qE '^  name: allow-egress[[:space:]]*$' "$manifest" && : >"$denied"
     grep -qE '^  name: flux-controllers-dns[[:space:]]*$' "$manifest" && : >"$resolves"
-    grep -qE '^  name: flux-controllers-kube-apiserver[[:space:]]*$' "$manifest" && : >"$reaches"
+    if grep -qE '^  name: flux-controllers-kube-apiserver[[:space:]]*$' "$manifest" \
+       && grep -qF "cidr: ${FLUX_STUB_API_ENDPOINT}/32" "$manifest" \
+       && grep -qE '^[[:space:]]+- port: 6443[[:space:]]*$' "$manifest"; then
+      : >"$reaches"
+    fi
     if grep -qE '^kind: Deployment[[:space:]]*$' "$manifest"; then
       if [[ -f "$denied" ]] && { [[ ! -f "$resolves" ]] || [[ ! -f "$reaches" ]]; }; then
         printf 'stub kubectl: DEADLOCK: controller Deployments created while flux-system egress is denied with no DNS/API-server allow in force\n' >&2
@@ -1230,8 +1309,65 @@ case "$verb" in
       emitted=$((emitted + 1))
     done < <(emit "$manifest" '' '')
     exit 0 ;;
+  create)
+    if [[ -n "${FLUX_STUB_DELAY_ON:-}" && "$manifest" == *"${FLUX_STUB_DELAY_ON}"* ]]; then
+      sleep "${FLUX_STUB_DELAY:-3}"
+    fi
+    printf '%s\n' "$(basename -- "$manifest")" >>"${state}/applied.log"
+    while IFS=' ' read -r entry _; do
+      [[ -n "$entry" ]] || continue
+      if registry_labels "$entry" >/dev/null 2>&1; then
+        printf 'Error from server (AlreadyExists): %s already exists\n' "$entry" >&2
+        exit 1
+      fi
+      if [[ "$entry" == "pod/${FLUX_STUB_CANARY_NAME}" ]]; then
+        if [[ ! -f "${state}/dns" || ! -f "${state}/apiserver" \
+              || "${FLUX_STUB_CANARY_DENY:-0}" == '1' ]]; then
+          printf 'stub kubectl: canary denied by the modelled DNS/API policy boundary\n' >&2
+          exit 80
+        fi
+      fi
+      registry_add "$entry"
+      document_for "$manifest" "$entry" >"$(object_file "$entry")"
+      if [[ -n "${FLUX_STUB_MUTATE_CREATE_ON:-}" \
+            && "$manifest" == *"${FLUX_STUB_MUTATE_CREATE_ON}"* ]]; then
+        printf '# modelled post-create drift\n' >>"$(object_file "$entry")"
+      fi
+      if [[ "$entry" == "pod/${FLUX_STUB_CANARY_NAME}" ]]; then
+        : >"${state}/canary-succeeded"
+      fi
+      if [[ -n "${FLUX_STUB_CREATE_RESPONSE_LOSS_ON:-}" \
+            && "$manifest" == *"${FLUX_STUB_CREATE_RESPONSE_LOSS_ON}"* ]]; then
+        printf 'stub kubectl: response lost after persistence\n' >&2
+        exit 52
+      fi
+      printf '%s created\n' "$entry"
+    done < <(emit "$manifest" '' '')
+    exit 0 ;;
   get)
+    if [[ "$namespace" == 'kube-system' && "${1:-}" == 'daemonset' \
+          && "${2:-}" == 'calico-node' ]]; then
+      if [[ "${FLUX_STUB_CNI_FAILURE:-}" == '1' ]]; then
+        printf 'Error from server (Forbidden): daemonsets.apps "calico-node" is forbidden\n' >&2
+        exit 1
+      fi
+      printf '%s' "${FLUX_STUB_CNI_IDENTITY:-calico-node|calico-node|calico-node}"
+      exit 0
+    fi
     target="${1:-}"
+    if [[ "$target" == *.fluxcd.io && "$arguments" == *'--all-namespaces -o name'* ]]; then
+      case "${FLUX_STUB_IDLE_FAILURE:-}" in
+        forbidden)
+          printf 'Error from server (Forbidden): %s is forbidden\n' "$target" >&2
+          exit 1 ;;
+        timeout)
+          printf 'Unable to connect to the server: context deadline exceeded\n' >&2
+          exit 1 ;;
+        malformed)
+          printf 'warning-not-an-object-count\n'
+          exit 0 ;;
+      esac
+    fi
     if [[ "$target" == */* ]]; then
       key="$target"
     elif [[ -n "${2:-}" && "${2:0:1}" != '-' ]]; then
@@ -1248,7 +1384,8 @@ case "$verb" in
     fi
     case "$arguments" in
       *jsonpath=\{.metadata.labels\}*) printf '%s' "$labels" ;;
-      *jsonpath=*readyReplicas*) printf '%s' "${FLUX_STUB_READINESS:-1/1}" ;;
+      *jsonpath=*observedGeneration*) printf '%s' "${FLUX_STUB_READINESS:-1|1|1|1|1|1|1||END}" ;;
+      *jsonpath=\{.status.phase\}*) printf '%s' "${FLUX_STUB_CANARY_PHASE:-Succeeded}" ;;
       *) printf '%s\n' "$key" ;;
     esac
     exit 0 ;;
@@ -1271,6 +1408,19 @@ case "$verb" in
     registry_remove "$target"
     printf '%s deleted\n' "$target"
     exit 0 ;;
+  wait)
+    wait_target=''
+    for argument in "$@"; do
+      case "$argument" in pod/*) wait_target="$argument" ;; esac
+    done
+    if [[ "$wait_target" == "pod/${FLUX_STUB_CANARY_NAME}" \
+          && -f "${state}/canary-succeeded" \
+          && "${FLUX_STUB_CANARY_WAIT_FAILURE:-0}" != '1' ]]; then
+      printf '%s condition met\n' "$wait_target"
+      exit 0
+    fi
+    printf 'error: timed out waiting for the condition on %s\n' "$wait_target" >&2
+    exit 1 ;;
 esac
 printf 'stub kubectl: unhandled args: %s\n' "$*" >&2
 exit 99
@@ -1301,12 +1451,21 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         )
         cls.assets = cls.base / "assets"
         cls.assets.mkdir()
-        (cls.assets / "controllers.yaml").write_text(_reviewed_render(), encoding="utf-8")
-        (cls.assets / "egress.yaml").write_text(
-            _reviewed_egress_render(), encoding="utf-8"
+        # Kustomize emits byte-stable LF YAML on every supported runner. Use
+        # bytes here so Windows text-mode newline translation does not turn the
+        # fixture into a different render before the exact round-trip guard.
+        (cls.assets / "controllers.yaml").write_bytes(_reviewed_render().encode("utf-8"))
+        (cls.assets / "egress.yaml").write_bytes(
+            _reviewed_egress_render().encode("utf-8")
+        )
+        (cls.assets / "canary.yaml").write_bytes(
+            _reviewed_canary_render().encode("utf-8")
         )
         cls.egress_sha256 = hashlib.sha256(
             (cls.assets / "egress.yaml").read_bytes()
+        ).hexdigest()
+        cls.canary_sha256 = hashlib.sha256(
+            (cls.assets / "canary.yaml").read_bytes()
         ).hexdigest()
         # A second asset set whose Deployment kinds the document splitter cannot
         # recognize. See UnrecognizedDeploymentTests: it is the input that makes
@@ -1314,11 +1473,14 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         # makes deleting that refusal a failure.
         cls.unrecognized_assets = cls.base / "assets-unrecognized-deployment"
         cls.unrecognized_assets.mkdir()
-        (cls.unrecognized_assets / "controllers.yaml").write_text(
-            _render_with_an_unrecognized_deployment(), encoding="utf-8"
+        (cls.unrecognized_assets / "controllers.yaml").write_bytes(
+            _render_with_an_unrecognized_deployment().encode("utf-8")
         )
-        (cls.unrecognized_assets / "egress.yaml").write_text(
-            _reviewed_egress_render(), encoding="utf-8"
+        (cls.unrecognized_assets / "egress.yaml").write_bytes(
+            _reviewed_egress_render().encode("utf-8")
+        )
+        (cls.unrecognized_assets / "canary.yaml").write_bytes(
+            _reviewed_canary_render().encode("utf-8")
         )
         cls.unrecognized_sha256 = hashlib.sha256(
             (cls.unrecognized_assets / "controllers.yaml").read_bytes()
@@ -1356,7 +1518,8 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         (repo / "scripts").mkdir(parents=True)
         (repo / "kubernetes" / "flux-system" / "controllers").mkdir(parents=True)
         (repo / "kubernetes" / "flux-system" / "egress").mkdir(parents=True)
-        for target in ("controllers", "egress"):
+        (repo / "kubernetes" / "flux-system" / "canary").mkdir(parents=True)
+        for target in ("controllers", "egress", "canary"):
             (repo / "kubernetes" / "flux-system" / target / "kustomization.yaml").write_text(
                 "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n",
                 encoding="utf-8",
@@ -1367,11 +1530,13 @@ class InstallerBehaviourTestCase(unittest.TestCase):
             "KUSTOMIZE_VERSION={}\n"
             "KUBERNETES_VERSION={}\n"
             "KUBECTL_LINUX_AMD64_SHA256={}\n"
-            "KUBECTL_ARM64_SHA256={}\n".format(
+            "KUBECTL_ARM64_SHA256={}\n"
+            "FLUX_API_CANARY_IMAGE={}\n".format(
                 FIXTURE_KUSTOMIZE_VERSION,
                 FIXTURE_KUBECTL_VERSION,
                 digest,
                 hashlib.sha256(b"a different platform's kubectl").hexdigest(),
+                CANARY_IMAGE,
             ),
             encoding="utf-8",
         )
@@ -1449,7 +1614,7 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         if scenario == "fresh-crb-present":
             rows.append(
                 "clusterrolebinding.rbac.authorization.k8s.io/"
-                "cluster-reconciler-flux-system " + owned
+                "crd-controller-flux-system " + owned
             )
         (state / "registry").write_text(
             "".join(row + "\n" for row in rows), encoding="utf-8"
@@ -1496,9 +1661,12 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         path_prefix=(),
         digest=None,
         egress_digest=None,
+        canary_digest=None,
         commit=None,
         context=FIXTURE_CONTEXT,
         server=FIXTURE_SERVER,
+        cni_provider="calico",
+        api_endpoints=None,
         kubeconfig=None,
         repo=None,
         assets=None,
@@ -1516,6 +1684,8 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         environment["FLUX_STUB_ASSETS"] = str(assets or self.assets)
         environment["FLUX_STUB_KUSTOMIZE_VERSION"] = FIXTURE_KUSTOMIZE_VERSION
         environment["FLUX_STUB_KUBECTL_VERSION"] = FIXTURE_KUBECTL_VERSION
+        environment["FLUX_STUB_API_ENDPOINT"] = FIXTURE_API_ENDPOINT
+        environment["FLUX_STUB_CANARY_NAME"] = CANARY_NAME
         environment.update(extra_environment or {})
         repository = repo or self.repo
         argv = [
@@ -1528,6 +1698,7 @@ class InstallerBehaviourTestCase(unittest.TestCase):
                 ("--kubeconfig", str(kubeconfig or self.kubeconfig)),
                 ("--context", context),
                 ("--server", server),
+                ("--cni-provider", cni_provider),
                 (
                     "--expect-render-sha256",
                     self.render_sha256 if digest is None else digest,
@@ -1536,12 +1707,19 @@ class InstallerBehaviourTestCase(unittest.TestCase):
                     "--expect-egress-sha256",
                     self.egress_sha256 if egress_digest is None else egress_digest,
                 ),
+                (
+                    "--expect-canary-sha256",
+                    self.canary_sha256 if canary_digest is None else canary_digest,
+                ),
                 ("--expect-commit", self.commit if commit is None else commit),
             )
             for flag, value in bindings:
                 if flag in omit:
                     continue
                 argv += [flag, value]
+            if "--api-endpoint" not in omit:
+                for endpoint in api_endpoints or (FIXTURE_API_ENDPOINT,):
+                    argv += ["--api-endpoint", endpoint]
         return argv, environment, repository
 
     def _run(
@@ -1575,8 +1753,22 @@ class InstallerBehaviourTestCase(unittest.TestCase):
         argv, environment, repository = self._argv_and_environment(
             mode, scenario=scenario, state=state, extra_environment=extra_environment
         )
+        launch_argv = argv
+        msys_pid_file = state / "msys.pid"
+        if os.name == "nt":
+            # Windows' process id is not the pid in MSYS Bash's process table.
+            # Record Bash's own pid before exec so a second MSYS process can
+            # deliver the real POSIX TERM that exercises the production trap.
+            launch_argv = [
+                required_tool(BASH, BASH_REQUIRED),
+                "-c",
+                'pid_file="$1"; shift; printf "%s\\n" "$$" >"$pid_file"; exec bash "$@"',
+                "flux-signal-target",
+                str(msys_pid_file),
+                *argv[1:],
+            ]
         process = subprocess.Popen(
-            argv,
+            launch_argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1597,7 +1789,24 @@ class InstallerBehaviourTestCase(unittest.TestCase):
                 time.sleep(0.05)
             else:  # pragma: no cover - only on a pathologically slow host
                 self.fail("the installer never reached " + str(wait_for))
-            process.send_signal(signal.SIGTERM)
+            if os.name == "nt":
+                # Python maps SIGTERM to TerminateProcess on Windows, which
+                # bypasses Bash traps. Deliver TERM from the same MSYS runtime
+                # so this drives the handler production receives on Linux.
+                subprocess.run(
+                    [
+                        required_tool(BASH, BASH_REQUIRED),
+                        "-c",
+                        'kill -TERM "$(cat -- "$1")"',
+                        "flux-signal-helper",
+                        str(msys_pid_file),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                process.send_signal(signal.SIGTERM)
             _, errors = process.communicate(timeout=120)
         finally:
             if process.poll() is None:  # pragma: no cover - defensive
@@ -1611,7 +1820,7 @@ class FixtureFidelityTests(InstallerBehaviourTestCase):
 
     def test_the_render_skeleton_matches_the_reviewed_shape(self):
         render = _reviewed_render()
-        self.assertEqual(render.count("\nkind:") + render.startswith("kind:"), 25)
+        self.assertEqual(render.count("\nkind:") + render.startswith("kind:"), 24)
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", render)
         self.assertNotIn("kind: Secret", render)
         self.assertEqual(_reviewed_egress_render().count("\nkind:"), 5)
@@ -1635,7 +1844,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
     Namespace, and ``kubectl apply --dry-run=server`` does not persist it
     (kubernetes/kubernetes#83562), so the 11 namespaced children report
     ``namespaces "flux-system" not found`` and kubectl exits non-zero on a fresh
-    cluster. The previous gate demanded all 25 objects report ``created`` and so
+    cluster. The previous gate demanded every object report ``created`` and so
     could never pass the fresh install it exists to perform.
     """
 
@@ -1643,7 +1852,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
         completed = self._run(scenario="fresh-ok")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn(
-            "fresh-cluster dry run clean (14 created + 11 expected namespace-not-found)",
+            "fresh-cluster dry run clean (13 created + 11 expected namespace-not-found)",
             completed.stdout,
         )
         self.assertIn("PLAN only; no mutation attempted", completed.stdout)
@@ -1651,7 +1860,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
     def test_existing_cluster_shape_is_accepted(self):
         completed = self._run(scenario="existing-ok")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertIn("existing-cluster dry run clean (25 objects)", completed.stdout)
+        self.assertIn("existing-cluster dry run clean (24 objects)", completed.stdout)
 
     def test_a_foreign_object_in_the_dry_run_fails_closed(self):
         completed = self._run(scenario="fresh-foreign")
@@ -1684,7 +1893,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
         completed = self._run(scenario="fresh-crb-present")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "clusterrolebinding cluster-reconciler-flux-system already exists",
+            "clusterrolebinding crd-controller-flux-system already exists",
             completed.stderr,
         )
 
@@ -1699,7 +1908,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
         self.assertIn("applied; Flux is installed and inert", completed.stdout)
 
     def test_apply_refuses_an_existing_install_and_touches_nothing(self):
-        # The peer's P1: on the existing path the 22 phase-1 objects are rewritten
+        # The peer's P1: on the existing path the 21 phase-1 objects are rewritten
         # as `configured` with no prestate recorded, so a later failure rolls back
         # nothing and reports "the cluster is unchanged" over a namespace whose
         # RBAC, CRDs and policies were just rewritten. The scope of an honest
@@ -1718,9 +1927,9 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
         )
 
     def test_the_existing_path_probes_ownership_of_every_namespaced_object(self):
-        # The probe used to stop at the 14 cluster-scoped objects while the
+        # The probe used to stop at the cluster-scoped objects while the
         # script claimed foreign ownership "stops the install before anything is
-        # applied" of all 25. A foreign NetworkPolicy inside flux-system passed
+        # applied" of all 24. A foreign NetworkPolicy inside flux-system passed
         # the dry run and would have been overwritten.
         state = self._state("existing-ok")
         registry = state / "registry"
@@ -1748,8 +1957,9 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
     """P1-A: the controllers are never created into an egress-denied namespace.
 
     The bundle applies ``allow-egress`` patched to a namespace-wide deny, and
-    the runbook then requires all three Deployments ``1/1`` before any allow is
-    applied. On a NetworkPolicy-enforcing CNI those controllers have no DNS and
+    the runbook then requires all positive desired replicas to be current,
+    updated, available, and ready before any allow is applied. On a
+    NetworkPolicy-enforcing CNI those controllers have no DNS and
     no API server at creation, so leader election and cache sync cannot
     complete and the readiness step can never pass. The stubbed cluster refuses
     exactly that sequence, so these tests fail if the ordering regresses.
@@ -1764,9 +1974,72 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
             [
                 "phase-1-prerequisites.yaml",
                 "phase-2-startup-egress.yaml",
+                "api-canary.yaml",
                 "phase-3-workloads.yaml",
             ],
         )
+
+    def test_the_api_canary_is_removed_before_any_controller_is_created(self):
+        completed = self._run("--apply", scenario="fresh-ok")
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        calls = read(Path(completed.state) / "calls.log")
+        self.assertLess(
+            calls.index("create -f"),
+            calls.index("delete pod/" + CANARY_NAME),
+        )
+        self.assertLess(
+            calls.index("delete pod/" + CANARY_NAME),
+            calls.index("phase-3-workloads.yaml"),
+        )
+        self.assertNotIn("pod/" + CANARY_NAME, read(Path(completed.state) / "registry"))
+        self.assertIn("authenticated in-cluster API path proved", completed.stdout)
+
+    def test_canary_denial_rolls_back_before_controller_creation(self):
+        completed = self._run(
+            "--apply",
+            scenario="fresh-ok",
+            extra_environment={"FLUX_STUB_CANARY_DENY": "1"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("did not succeed", completed.stderr)
+        self.assertNotIn("phase-3-workloads.yaml", read(Path(completed.state) / "applied.log"))
+        self.assertEqual(read(Path(completed.state) / "registry").strip(), "")
+
+    def test_canary_create_response_loss_is_discovered_and_rolled_back(self):
+        completed = self._run(
+            "--apply",
+            scenario="fresh-ok",
+            extra_environment={"FLUX_STUB_CREATE_RESPONSE_LOSS_ON": "api-canary"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("response may have been lost", completed.stderr)
+        self.assertIn("rollback complete", completed.stderr)
+        self.assertEqual(read(Path(completed.state) / "registry").strip(), "")
+        self.assertNotIn("phase-3-workloads.yaml", read(Path(completed.state) / "applied.log"))
+
+    def test_wrong_calico_backend_set_cannot_reach_the_api(self):
+        completed = self._run(
+            "--apply",
+            scenario="fresh-ok",
+            api_endpoints=("198.51.100.99",),
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("did not succeed", completed.stderr)
+        self.assertNotIn("phase-3-workloads.yaml", read(Path(completed.state) / "applied.log"))
+
+    def test_multi_endpoint_api_set_remains_exact_and_extensible(self):
+        completed = self._run(
+            "--apply",
+            scenario="fresh-ok",
+            api_endpoints=(FIXTURE_API_ENDPOINT, "198.51.100.21"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        policy_files = list((Path(completed.state) / "objects").glob("*kube-apiserver"))
+        self.assertEqual(len(policy_files), 1)
+        policy = read(policy_files[0])
+        self.assertIn("cidr: {}/32".format(FIXTURE_API_ENDPOINT), policy)
+        self.assertIn("cidr: 198.51.100.21/32", policy)
+        self.assertNotIn("192.0.2.0/32", policy)
 
     def test_no_controller_deployment_is_applied_before_the_startup_allows(self):
         # The executable ordering regression: the modelled cluster exits 80 with
@@ -1782,7 +2055,7 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
         calls = read(Path(completed.state) / "calls.log")
         self.assertIn("phase-1-prerequisites.yaml", calls)
         self.assertIn(
-            "install-flux-controllers: phase prerequisites: applying 22 object(s)",
+            "install-flux-controllers: phase prerequisites: applying 21 object(s)",
             completed.stdout,
         )
         self.assertIn(
@@ -1843,18 +2116,53 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
         self.assertIn("public HTTPS allowed", completed.stdout)
         self.assertIn(PUBLIC_EGRESS_POLICY, read(state / "registry"))
 
-    def test_the_deferred_public_allow_refuses_an_unhealthy_controller(self):
+    def test_readiness_accepts_two_of_two_without_a_replica_constant(self):
         state = self._installed()
         completed = self._run(
             "--open-public-egress",
             scenario="existing-ok",
             state=state,
-            extra_environment={"FLUX_STUB_READINESS": "0/1"},
+            extra_environment={"FLUX_STUB_READINESS": "7|2|7|2|2|2|2|0|END"},
         )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("not 1/1", completed.stderr)
-        self.assertIn("public egress stays shut", completed.stderr)
-        self.assertNotIn(PUBLIC_EGRESS_POLICY, read(state / "registry"))
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn(PUBLIC_EGRESS_POLICY, read(state / "registry"))
+
+    def test_readiness_refuses_zero_generation_lag_partial_and_malformed(self):
+        cases = {
+            "zero desired": "1|0|1|0|0|0|0||END",
+            "generation lag": "2|1|1|1|1|1|1||END",
+            "partial rollout": "2|2|2|2|1|1|1|1|END",
+            "malformed": "not-a-status",
+        }
+        for label, readiness in cases.items():
+            with self.subTest(case=label):
+                state = self._installed()
+                completed = self._run(
+                    "--open-public-egress",
+                    scenario="existing-ok",
+                    state=state,
+                    extra_environment={"FLUX_STUB_READINESS": readiness},
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("public egress stays shut", completed.stderr)
+                self.assertNotIn(PUBLIC_EGRESS_POLICY, read(state / "registry"))
+
+    def test_idle_probe_fails_closed_on_forbidden_timeout_and_malformed_output(self):
+        for failure in ("forbidden", "timeout", "malformed"):
+            with self.subTest(failure=failure):
+                state = self._installed()
+                completed = self._run(
+                    "--open-public-egress",
+                    scenario="existing-ok",
+                    state=state,
+                    extra_environment={"FLUX_STUB_IDLE_FAILURE": failure},
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertRegex(
+                    completed.stderr,
+                    r"(?:API/RBAC/timeout failure keeps|malformed output;).*public egress (?:stays )?shut",
+                )
+                self.assertNotIn(PUBLIC_EGRESS_POLICY, read(state / "registry"))
 
     def test_the_deferred_public_allow_refuses_while_anything_is_reconciling(self):
         # "healthy AND IDLE" was a claim in the message with nothing measuring
@@ -1879,8 +2187,8 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
 
     def test_the_deferred_public_allow_refuses_a_live_closure_that_drifted(self):
         # Existence by name cannot tell the reviewed API-server /32 from one
-        # widened to a subnet. Here the install was bound to one API server and
-        # the deferred step to another, so the live API-server allow is no longer
+        # widened to a subnet. Here the install was bound to one explicit Calico
+        # backend set and the deferred step to another, so the live allow is no longer
         # the render this run would extend: the server dry run says `configured`
         # instead of `unchanged`, and the step refuses.
         state = self._installed()
@@ -1888,8 +2196,7 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
             "--open-public-egress",
             scenario="existing-ok",
             state=state,
-            context=FIXTURE_OTHER_CONTEXT,
-            server=FIXTURE_OTHER_SERVER,
+            api_endpoints=("198.51.100.99",),
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
@@ -1918,12 +2225,88 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("is not in the cluster", completed.stderr)
 
+    def test_public_policy_is_absent_only_and_never_adopts_a_collision(self):
+        for labels in (
+            '{"app.kubernetes.io/part-of":"foreign"}',
+            '{"app.kubernetes.io/instance":"flux-system","app.kubernetes.io/part-of":"flux"}',
+        ):
+            with self.subTest(labels=labels):
+                state = self._installed()
+                before = read(state / "registry")
+                with (state / "registry").open("a", encoding="utf-8") as registry:
+                    registry.write(
+                        "networkpolicy.networking.k8s.io/{} {}\n".format(
+                            PUBLIC_EGRESS_POLICY, labels
+                        )
+                    )
+                completed = self._run(
+                    "--open-public-egress", scenario="existing-ok", state=state
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("absent-only transaction", completed.stderr)
+                self.assertIn(
+                    "networkpolicy.networking.k8s.io/" + PUBLIC_EGRESS_POLICY,
+                    read(state / "registry"),
+                )
+                self.assertTrue(read(state / "registry").startswith(before))
+                self.assertNotIn("phase-4-public-egress.yaml", read(state / "applied.log"))
+
+    def test_public_create_response_loss_is_compensated_to_exact_prestate(self):
+        state = self._installed()
+        before = read(state / "registry")
+        completed = self._run(
+            "--open-public-egress",
+            scenario="existing-ok",
+            state=state,
+            extra_environment={
+                "FLUX_STUB_CREATE_RESPONSE_LOSS_ON": "phase-4-public-egress"
+            },
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("response may have been lost", completed.stderr)
+        self.assertIn("rollback complete", completed.stderr)
+        self.assertEqual(read(state / "registry"), before)
+
+    def test_public_poststate_drift_rolls_back_the_object_this_attempt_created(self):
+        state = self._installed()
+        before = read(state / "registry")
+        completed = self._run(
+            "--open-public-egress",
+            scenario="existing-ok",
+            state=state,
+            extra_environment={"FLUX_STUB_MUTATE_CREATE_ON": "phase-4-public-egress"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("poststate differs", completed.stderr)
+        self.assertIn("rollback complete", completed.stderr)
+        self.assertEqual(read(state / "registry"), before)
+
+    def test_public_policy_uses_create_not_reconciling_apply(self):
+        state = self._installed()
+        completed = self._run(
+            "--open-public-egress", scenario="existing-ok", state=state
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        calls = read(state / "calls.log")
+        self.assertRegex(calls, r"(?m) create -f .+phase-4-public-egress[.]yaml$")
+        public_apply_lines = [
+            line
+            for line in calls.splitlines()
+            if " apply -f " in line and "phase-4-public-egress.yaml" in line
+        ]
+        self.assertEqual(
+            len(public_apply_lines),
+            1,
+            "the only apply of the public manifest must be the post-create exact-state dry run",
+        )
+        self.assertIn("--dry-run=server", public_apply_lines[0])
+
 
 class ToolAndTargetBindingTests(InstallerBehaviourTestCase):
     """P1-B: an unidentified tool or an unnamed cluster stops the install."""
 
     def test_a_hostile_kubectl_earlier_on_path_is_refused(self):
-        # Codex's demonstration: a fake kubectl produced 25 accepted dry-run
+        # Codex's demonstration: a fake kubectl produced a full accepted dry-run
         # lines, an accepted apply, and exit 0. It behaves identically here;
         # only its sha256 differs from the versions.env pin.
         completed = self._run(path_prefix=(self.hostile_bin,))
@@ -1975,8 +2358,11 @@ class ToolAndTargetBindingTests(InstallerBehaviourTestCase):
         for flag, fragment in (
             ("--context", "--context is required"),
             ("--server", "--server is required"),
+            ("--cni-provider", "--cni-provider is required"),
+            ("--api-endpoint", "--api-endpoint is required"),
             ("--expect-render-sha256", "--expect-render-sha256 is required"),
             ("--expect-egress-sha256", "--expect-egress-sha256 is required"),
+            ("--expect-canary-sha256", "--expect-canary-sha256 is required"),
             ("--expect-commit", "--expect-commit is required"),
         ):
             with self.subTest(binding=flag):
@@ -2000,15 +2386,52 @@ class ToolAndTargetBindingTests(InstallerBehaviourTestCase):
         )
         self.assertEqual(read(Path(completed.state) / "calls.log").count("apply"), 0)
 
+    def test_a_drifted_canary_digest_is_refused_before_cluster_contact(self):
+        completed = self._run(canary_digest="0" * 64)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("executable in-Pod proof is not the reviewed one", completed.stderr)
+        self.assertEqual(
+            read(Path(completed.state) / "calls.log").splitlines(),
+            ["version --client -o yaml"],
+        )
+
+    def test_unreviewed_or_unproven_cni_identity_is_refused(self):
+        unsupported = self._run(cni_provider="cilium")
+        self.assertNotEqual(unsupported.returncode, 0)
+        self.assertIn("no reviewed API-destination contract", unsupported.stderr)
+        for environment in (
+            {"FLUX_STUB_CNI_FAILURE": "1"},
+            {"FLUX_STUB_CNI_IDENTITY": "calico-node|calico-node|other"},
+        ):
+            with self.subTest(environment=environment):
+                completed = self._run(extra_environment=environment)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("selected", completed.stderr)
+
+    def test_api_endpoint_inputs_are_canonical_unique_unicast_addresses(self):
+        for endpoints in (
+            ("198.51.100.020",),
+            ("127.0.0.1",),
+            ("not-an-ip",),
+            (FIXTURE_API_ENDPOINT, FIXTURE_API_ENDPOINT),
+        ):
+            with self.subTest(endpoints=endpoints):
+                completed = self._run(api_endpoints=endpoints)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertRegex(completed.stderr, r"canonical unicast|must be unique")
+                self.assertEqual(read(Path(completed.state) / "calls.log").strip(), "")
+
     def test_a_widened_egress_allow_is_refused_although_the_controller_render_is_intact(self):
         # The exact probe the peer ran: change only the egress root, keep the
         # reviewed controller digest. Before this round it exited 0.
         widened = self.base / "assets-widened-egress"
         widened.mkdir(exist_ok=True)
         shutil.copy2(self.assets / "controllers.yaml", widened / "controllers.yaml")
-        (widened / "egress.yaml").write_text(
-            _reviewed_egress_render().replace("port: 6443", "port: 6443\n    - port: 22"),
-            encoding="utf-8",
+        shutil.copy2(self.assets / "canary.yaml", widened / "canary.yaml")
+        (widened / "egress.yaml").write_bytes(
+            _reviewed_egress_render()
+            .replace("port: 6443", "port: 6443\n    - port: 22")
+            .encode("utf-8"),
         )
         completed = self._run(assets=widened)
         self.assertNotEqual(completed.returncode, 0)
@@ -2029,15 +2452,16 @@ class ToolAndTargetBindingTests(InstallerBehaviourTestCase):
         normalized = self.base / "assets-unnormalized-egress"
         normalized.mkdir(exist_ok=True)
         shutil.copy2(self.assets / "controllers.yaml", normalized / "controllers.yaml")
+        shutil.copy2(self.assets / "canary.yaml", normalized / "canary.yaml")
         body = _reviewed_egress_render().rstrip("\n")
-        (normalized / "egress.yaml").write_text(body, encoding="utf-8")
+        (normalized / "egress.yaml").write_bytes(body.encode("utf-8"))
         completed = self._run(
             assets=normalized,
             egress_digest=hashlib.sha256(body.encode("utf-8")).hexdigest(),
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "line(s) of the reviewed egress render; exactly one line may differ",
+            "the API endpoint-set substitution changed bytes outside",
             completed.stderr,
         )
         self.assertEqual(read(Path(completed.state) / "calls.log").count("apply"), 0)
@@ -2119,7 +2543,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         self.assertIn("phase workloads apply failed", completed.stderr)
         self.assertIn("rollback complete", completed.stderr)
         # The proof that matters: nothing of this attempt survives, and that
-        # includes the 13 cluster-scoped objects `delete namespace` cannot reach.
+        # includes all 12 non-namespaced objects `delete namespace` cannot reach.
         registry = read(Path(completed.state) / "registry")
         for name in CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS:
             with self.subTest(object=name):
@@ -2157,7 +2581,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
 
     def test_an_owned_install_is_never_reapplied_over(self):
         # This replaces a test that asserted the OLD behaviour verbatim: an
-        # upgrade over an owned install rewrote 22 objects as `configured`, kept
+        # upgrade over an owned install rewrote 21 objects as `configured`, kept
         # an empty ledger, and printed "this attempt created nothing; the cluster
         # is unchanged". The names still existed, which is all the old assertion
         # checked, so the misleading all-clear was pinned rather than caught.
@@ -2181,7 +2605,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         # server while its confirmation line does not reach the operator -- a
         # dropped connection, or a signal delivered between the create and the
         # print -- and a ledger fed only by stdout would then roll back nothing
-        # while 22 objects, 14 of them cluster-scoped, stayed behind. The ledger
+        # while 21 objects, 13 of them cluster-scoped (Namespace included), stayed behind.
         # is re-derived from the cluster, so the rollback is still complete.
         completed = self._run(
             "--apply",
@@ -2199,7 +2623,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
     def test_a_ledger_that_recorded_nothing_reports_a_cluster_that_changed_nothing(self):
         # The other direction, and the only path on which "created nothing" is
         # true: the first phase fails before its first object is created. It is
-        # also the proof that the 25 client-dry-run lines printed moments earlier
+        # also the proof that the 24 client-dry-run lines printed moments earlier
         # never entered the ledger -- had they, this would try to delete them.
         completed = self._run(
             "--apply",
@@ -2216,8 +2640,8 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
     def test_a_signal_mid_transaction_never_leaves_silent_residue(self):
         # The gap a failed-phase rollback does not cover: a Ctrl-C, a hangup or a
         # `kill` during the apply leaves everything the earlier phases created,
-        # including all 14 cluster-scoped objects that no `delete namespace` can
-        # remove, with no undo and no list. The signal must take the same
+        # including all 12 non-namespaced objects, that a namespace delete
+        # cannot remove, with no undo and no list. The signal must take the same
         # rollback path a failed phase takes.
         returncode, errors, state = self._run_until_signalled(
             "--apply",
@@ -2317,13 +2741,24 @@ class RefusalCoverageTests(unittest.TestCase):
         "--kubeconfig is required": "test_the_ambient_target_is_never_used",
         "--context is required": "test_each_binding_is_required_on_its_own",
         "--server is required": "test_each_binding_is_required_on_its_own",
+        "--cni-provider is required": "test_each_binding_is_required_on_its_own",
+        "--api-endpoint is required": "test_each_binding_is_required_on_its_own",
         "--expect-render-sha256 is required": "test_each_binding_is_required_on_its_own",
         "--expect-egress-sha256 is required": "test_each_binding_is_required_on_its_own",
+        "--expect-canary-sha256 is required": "test_each_binding_is_required_on_its_own",
         "--expect-commit is required": "test_each_binding_is_required_on_its_own",
+        "no reviewed API-destination contract":
+            "test_unreviewed_or_unproven_cni_identity_is_refused",
+        "could not prove the selected Calico CNI identity":
+            "test_unreviewed_or_unproven_cni_identity_is_refused",
         "the installer and its guards are not the reviewed ones":
             "test_a_commit_other_than_the_reviewed_one_is_refused",
         "the egress bytes this would apply are not the reviewed ones":
             "test_a_widened_egress_allow_is_refused_although_the_controller_render_is_intact",
+        "the API endpoint-set substitution changed bytes outside":
+            "test_a_substitution_that_changes_more_than_the_sentinel_is_refused",
+        "the in-Pod Kubernetes Service/API canary did not succeed":
+            "test_canary_denial_rolls_back_before_controller_creation",
         "matches no versions.env kubectl digest pin":
             "test_a_hostile_kubectl_earlier_on_path_is_refused",
         "the install inputs carry uncommitted modifications":
@@ -2336,10 +2771,16 @@ class RefusalCoverageTests(unittest.TestCase):
             "test_a_deployment_the_splitter_cannot_recognize_stops_the_install",
         "--apply installs only onto a fresh cluster":
             "test_apply_refuses_an_existing_install_and_touches_nothing",
+        "API/RBAC/timeout failure keeps public egress shut":
+            "test_idle_probe_fails_closed_on_forbidden_timeout_and_malformed_output",
         "the controllers are reconciling, not idle":
             "test_the_deferred_public_allow_refuses_while_anything_is_reconciling",
         "the live startup egress policies are not the reviewed shape":
             "test_the_deferred_public_allow_refuses_a_live_closure_that_drifted",
+        "this absent-only transaction never adopts":
+            "test_public_policy_is_absent_only_and_never_adopts_a_collision",
+        "poststate differs from the exact reviewed object":
+            "test_public_poststate_drift_rolls_back_the_object_this_attempt_created",
     }
 
     @classmethod
@@ -2417,7 +2858,7 @@ class InstallCeremonyValidatorTests(unittest.TestCase):
 
     def test_the_cluster_scoped_inventory_is_derived_and_not_empty(self):
         derived = self.module.cluster_scoped_flux_objects(ROOT)
-        self.assertEqual(len(derived), 13, "8 CRDs + 3 ClusterRoles + 2 bindings")
+        self.assertEqual(len(derived), 12, "8 CRDs + 3 ClusterRoles + 1 binding")
         self.assertEqual(
             set(derived),
             set(CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS),
@@ -2452,18 +2893,7 @@ class InstallCeremonyValidatorTests(unittest.TestCase):
         )
 
     def test_a_deleted_refusal_fails(self):
-        for refusal in (
-            "--server is required",
-            "--expect-egress-sha256 is required",
-            "--expect-commit is required",
-            "matches no versions.env kubectl digest pin",
-            "is not owned by this install",
-            "ROLLBACK INCOMPLETE",
-            "the ordering that prevents the egress deadlock is broken",
-            "--apply installs only onto a fresh cluster",
-            "the controllers are reconciling, not idle",
-            "the live startup egress policies are not the reviewed shape",
-        ):
+        for refusal in self.module.FLUX_INSTALLER_REFUSALS:
             with self.subTest(refusal=refusal):
                 tree = self._tree()
                 installer = tree / "scripts" / "install-flux-controllers.sh"
@@ -2492,7 +2922,7 @@ class InstallCeremonyValidatorTests(unittest.TestCase):
         tree = self._tree()
         runbook = tree / "docs" / "runbooks" / "flux-install.md"
         runbook.write_text(
-            read(runbook).replace("is **not\n  sufficient**", "is sufficient"),
+            read(runbook).replace("is **not sufficient**", "is sufficient"),
             encoding="utf-8",
         )
         errors = self.module.flux_install_ceremony_errors(tree)

@@ -1,0 +1,32 @@
+# A floating alias in front of a real digest. The digest would still be
+# what runs, so this is not a supply-chain break — it is a LEGIBILITY
+# break, which is the whole point of carrying a tag: `latest` tells an
+# operator nothing and can be re-pointed at will. Only one exact
+# published release name is accepted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-floating-tag
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-floating-tag
+      image: ghcr.io/snaraj/naranjo-online:latest@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

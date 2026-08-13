@@ -119,6 +119,75 @@ delivery-lane changes never edit platform-lane files, and platform
 decisions (the safety invariants above, including PLAT-DEC-001) are
 referenced from here, never restated or reworded.
 
+**Lane-surface rulings (owner, 2026-08-12).** Load-bearing surfaces the two
+lists above never named, each assigned once so the question stops being
+re-adjudicated per pull request:
+
+- `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
+  docs. `bootstrap.sh` embeds the inventory and desired-state assertions
+  covering the delivery-owned `kubernetes/flux-system/**` manifests, and
+  that model is the mechanism that proves the cluster matches them. Its
+  live-apply custody surface stays PLATFORM-owned and stays blocked: the
+  `--apply-controllers` / `--apply-sync` / `--verify` stop, the four
+  sibling entry points `install-sops-age-secret.sh`,
+  `verify-sops-age-secret.sh`, `verify-sops-ciphertext.sh`, and
+  `verify.sh` in their entirety — each blocked by the same reviewed-blob
+  stop — the trusted reviewed-blob launcher requirement, and the
+  credential-custody preconditions. The split is by responsibility, not
+  by line range — a delivery-lane change may correct what the model
+  asserts about reviewed state, never what the custody surface above
+  permits or requires.
+- `policies/conftest/**`, `policies/kyverno/**`, and
+  `policies/release-conftest/**` — DELIVERY. The enumeration is exact,
+  not shorthand for `policies/**`: these three subtrees are the
+  executable expression of the gates this lane already owns. Every other
+  file under `policies/` — the pinned secret-scan policy
+  `policies/gitleaks.toml` among them — is unchanged by this ruling and
+  reached only through the rule below. One caveat: a change to ADMISSION
+  policy semantics needs independent validation by the platform (peer)
+  lane, recorded on the pull request, before enforcement is enabled
+  anywhere.
+- `.githooks/**` — DELIVERY: the pre-push hook implements delivery-lane
+  requirements 2 and 3. Changing what it PERMITS is a security-control
+  change and needs an owner decision, not a lane call (issue #83).
+- `kubernetes/flux-system/**` — DELIVERY: the GitOps desired state this
+  lane authors, and what the reviewed-state model above pins.
+- `kubernetes/websites/*/release.yaml` — DELIVERY when the change is
+  produced by `scripts/promote-image.sh` and the pull request carries its
+  evidence, under the owner's standing deploy grant. Outside
+  `kubernetes/flux-system/**`, that promotion surface and the
+  `cloudflare-public` row below are the only parts of `kubernetes/**`
+  this ruling assigns to the delivery lane; `kubernetes/reconciliation/**`,
+  the rest of `kubernetes/platform/**`, and the remaining
+  `kubernetes/websites/**` files are unchanged by this ruling and stay
+  unruled — reach them only through the rule below.
+- `kubernetes/platform/cloudflare-public/**` — DELIVERY, DERIVED from the
+  Cloudflare/edge re-cut recorded in the paragraph above, not granted
+  here: that re-cut names only `infrastructure/cloudflare/**` and the
+  Cloudflare ADRs, and this tree is the same edge surface's in-cluster
+  half — the public Tunnel connector chart and its suspended release, the
+  cluster end of the tunnel whose provider-side configuration this lane
+  already owns, serving the sites this lane promotes through the row
+  above. PR #87 already writes it under this reading. Amend this row if
+  the owner or the platform (peer) lane rules otherwise.
+- `kubernetes/platform/admission-install/**` — NOT transferred. It is
+  platform-shaped admission-control install machinery and the platform
+  (peer) lane remains its ruling authority. The delivery lane is
+  authoring it under the owner's 2026-08-12 authorization to install
+  Kyverno (issue #88): that is a DECLARED CROSSING under the rule below,
+  not a lane transfer, and it grants no standing claim on the tree.
+  Promotion to enforcement still needs independent validation by the
+  platform (peer) lane, recorded on the pull request. Amend this row if
+  the owner or the platform (peer) lane rules otherwise.
+
+**A path in neither list is not implicitly delivery.** Silence is not
+permission. Declare the crossing in the pull request body before touching
+the path, obtain an owner or peer ruling (a scope adjudication only —
+never a merge approval, and the owner alone merges), and then — this part
+is an obligation, not a courtesy — amend the rulings above with the
+answer, in the same pull request or the next one you open. A ruling left
+in a review thread is a question the next agent has to ask again.
+
 Delivery-lane requirements, explicit and numbered:
 
 1. Zero spend, no external processors: checks run with pinned local tools

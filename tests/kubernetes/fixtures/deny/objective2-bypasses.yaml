@@ -382,3 +382,32 @@ rules:
   - apiGroups: [apps]
     resources: [deployments, replicasets]
     verbs: [get, list, watch, create, update, patch, delete]
+---
+# EDGE-DRIFT-001 regression: the canonical site-ingress policy with a name-only
+# peer was the ACCEPTED shape before the double-pin; it must now be DENIED
+# because the peer no longer pins this site's own connector instance
+# (naranjo-online-tunnel). Named canonically and otherwise exact, so the
+# instance pin is the sole failing condition.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []

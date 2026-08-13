@@ -1,3 +1,13 @@
+{{- /*
+The two per-connector origin egress policies are written explicitly, one per
+site, looked up by their exact site key and carrying their literal
+cloudflared-<site> names, so each site's egress leg stays auditable in place
+and the reconciliation cannot silently drop one. Each is the egress half of the
+double-pin; the site chart pins the reciprocal ingress peer to the same
+<site>-tunnel instance.
+*/ -}}
+{{- $naranjo := index .Values.connectors "naranjo-online" -}}
+{{- $lidersea := index .Values.connectors "lidersea-com" -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -6,10 +16,11 @@ metadata:
   labels:
     {{- include "cloudflare-public.labels" . | nindent 4 }}
 spec:
+  # Shared name-only selector: cluster DNS is identical for every connector,
+  # so both site connectors resolve through this one policy.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cloudflare-public.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
   policyTypes: [Egress]
   egress:
     - to:
@@ -33,10 +44,11 @@ metadata:
   labels:
     {{- include "cloudflare-public.labels" . | nindent 4 }}
 spec:
+  # Shared name-only selector: reaching the Cloudflare edge on 7844 is identical
+  # for every connector, so both site connectors share this one policy.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cloudflare-public.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
   policyTypes: [Egress]
   egress:
     - to:
@@ -63,23 +75,25 @@ metadata:
   name: cloudflared-naranjo-online
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "cloudflare-public.labels" . | nindent 4 }}
+    {{- include "cloudflare-public.connectorLabels" (dict "root" $ "instance" $naranjo.instance) | nindent 4 }}
 spec:
+  # Per-connector name+instance selector: only the naranjo connector may reach
+  # the naranjo origin.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cloudflare-public.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ $naranjo.instance }}
   policyTypes: [Egress]
   egress:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.origin.namespace }}
+              kubernetes.io/metadata.name: {{ $naranjo.origin.namespace }}
           podSelector:
             matchLabels:
-              {{- toYaml .Values.origin.podLabels | nindent 14 }}
+              {{- toYaml $naranjo.origin.podLabels | nindent 14 }}
       ports:
-        - port: {{ .Values.origin.port }}
+        - port: {{ $naranjo.origin.port }}
           protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1
@@ -88,21 +102,23 @@ metadata:
   name: cloudflared-lidersea-com
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "cloudflare-public.labels" . | nindent 4 }}
+    {{- include "cloudflare-public.connectorLabels" (dict "root" $ "instance" $lidersea.instance) | nindent 4 }}
 spec:
+  # Per-connector name+instance selector: only the lidersea connector may reach
+  # the lidersea origin.
   podSelector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cloudflare-public.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ $lidersea.instance }}
   policyTypes: [Egress]
   egress:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.liderseaOrigin.namespace }}
+              kubernetes.io/metadata.name: {{ $lidersea.origin.namespace }}
           podSelector:
             matchLabels:
-              {{- toYaml .Values.liderseaOrigin.podLabels | nindent 14 }}
+              {{- toYaml $lidersea.origin.podLabels | nindent 14 }}
       ports:
-        - port: {{ .Values.liderseaOrigin.port }}
+        - port: {{ $lidersea.origin.port }}
           protocol: TCP

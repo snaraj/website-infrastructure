@@ -168,6 +168,12 @@ declare -a SIGNATURE_POLICY_ROWS=(
 signature_row='' signature_site='' signature_workflow=''
 for signature_row in "${SIGNATURE_POLICY_ROWS[@]}"; do
   IFS='|' read -r signature_site signature_workflow <<<"$signature_row"
+  # Reconcile-time half of the same identity tuple: the site's published chart
+  # source must demand a cosign signature from exactly this site's tag-triggered
+  # publisher before source-controller will produce an artifact from it.
+  python3 -B "${REPO_ROOT}/scripts/validate_signature_policy.py" chart-source \
+    --file "${REPO_ROOT}/kubernetes/websites/${signature_site}/source.yaml" \
+    --site "$signature_site"
   policy_name="require-signed-${signature_site}"
   policy_file="${REPO_ROOT}/policies/kyverno/${policy_name}.yaml"
   [[ -f "$policy_file" ]] || die "missing staged signature policy ${policy_name}"
@@ -185,6 +191,7 @@ declare -a CHART_ROWS=(
   "cloudflare-public|cloudflare-public|kubernetes/platform/cloudflare-public/chart"
 )
 declare -a KUSTOMIZE_TARGETS=(
+  kubernetes/flux-system/canary
   kubernetes/flux-system/egress
   kubernetes/reconciliation
   kubernetes/platform/prerequisites
@@ -261,6 +268,11 @@ for rendered in "${rendered_files[@]}"; do
 done
 
 bash "${REPO_ROOT}/scripts/test-policy-fixtures.sh"
+# The storage gate is expressed twice — Kyverno CEL at admission, Rego in CI —
+# and the two engines evaluate degenerate shapes differently, so agreeing on
+# text is not agreeing on behaviour. This feeds the same objects to both and
+# fails on any disagreement.
+bash "${REPO_ROOT}/scripts/test-storage-engine-parity.sh"
 kyverno test "${REPO_ROOT}/tests/kubernetes/kyverno"
 
 expect_release_rejection() {
@@ -295,6 +307,25 @@ assert_site_release_phase() {
   local not_ready="HelmRelease ${website} is not marked ready"
   local zero_digest="HelmRelease ${website} still names the all-zero image digest"
   local uncanonical="HelmRelease ${website} does not name a canonical image digest"
+  # The release tag is gated exactly like the digest, so the closed vocabulary
+  # names its two arms too. A site that advanced only one of the pair lands in
+  # `staged`'s forbidden set and is caught there.
+  local sentinel_tag="HelmRelease ${website} still names the sentinel release tag"
+  local uncanonical_tag="HelmRelease ${website} does not name a canonical release tag"
+  local malformed_image="HelmRelease ${website} does not state a well-formed image mapping"
+  # Leaf-level type refusals. A present-but-non-string digest or tag is a
+  # distinct denial from a malformed CONTAINER, and both belong in the closed
+  # vocabulary or the phase proof cannot see them.
+  local nonstring_digest="HelmRelease ${website} does not state a string image digest"
+  local nonstring_tag="HelmRelease ${website} does not state a string release tag"
+  # A site root also renders that site's chart source, so the closed
+  # vocabulary below is only exhaustive if it names that object's denials too.
+  # A correct chart source produces neither fragment in ANY phase, so both are
+  # forbidden everywhere rather than required anywhere: an unverified or
+  # misattributed chart source can never be an expected reason for this
+  # artifact to be denied.
+  local unverified="chart source ${website}/${website}-chart does not require cosign verification"
+  local unbound="chart source ${website}/${website}-chart does not bind exactly one keyless publisher identity"
   local result='' fragment=''
   local -a required=() forbidden=()
 
@@ -306,12 +337,12 @@ assert_site_release_phase() {
       # because the all-zero sentinel is canonical in shape. Listing the full
       # vocabulary in every arm is what makes the staged arm's forbidden set —
       # where these checks are load-bearing — obviously exhaustive.
-      required=("$suspended" "$not_ready" "$zero_digest")
-      forbidden=("$uncanonical")
+      required=("$suspended" "$not_ready" "$zero_digest" "$sentinel_tag")
+      forbidden=("$uncanonical" "$uncanonical_tag" "$malformed_image" "$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")
       ;;
     staged)
       required=("$suspended")
-      forbidden=("$not_ready" "$zero_digest" "$uncanonical")
+      forbidden=("$not_ready" "$zero_digest" "$uncanonical" "$sentinel_tag" "$uncanonical_tag" "$malformed_image" "$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")
       ;;
     active)
       # An active site must satisfy the release policy outright; that single

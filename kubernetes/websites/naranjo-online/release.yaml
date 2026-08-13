@@ -12,14 +12,15 @@ spec:
   serviceAccountName: helm-reconciler
   driftDetection:
     mode: enabled
-  chart:
-    spec:
-      chart: ./chart
-      reconcileStrategy: Revision
-      sourceRef:
-        kind: GitRepository
-        name: naranjo-online-source
-      interval: 10m0s
+  # The chart artifact comes from the signature-verified OCIRepository beside
+  # this file, so the release this cluster runs is whichever published version
+  # its reviewed SemVer range resolves to — no branch head, no raw commit, and
+  # no per-release edit here. chartRef carries no namespace, so helm-controller
+  # (started with --no-cross-namespace-refs=true) can only ever resolve it
+  # inside this site's own namespace.
+  chartRef:
+    kind: OCIRepository
+    name: naranjo-online-chart
   install:
     remediation:
       retries: 0
@@ -28,8 +29,28 @@ spec:
     remediation:
       retries: 0
       strategy: rollback
+  # The platform's own fail-closed release gate, deliberately retained through
+  # the move to tag-driven chart sync. These two scalars are the pair the
+  # release-state policy classifies and the only pair promote-image.sh
+  # advances under review: readiness shut over the all-zeros digest is the
+  # `initial` state the release Rego rejects, and a reviewed digest with
+  # readiness open is the `promoted` state it accepts. Neither reconciles
+  # while spec.suspend above is true. The pair leaves this file only after
+  # this site's publisher embeds the built image digest into the published
+  # chart (ADR 0016, transition step 1), and then only by a reviewed PR that
+  # moves the same denial into the chart (transition step 4).
+  #
+  # `tag` is the human half of the same identity (ADR 0016: the version tag IS
+  # the release) and is written by the SAME promotion transaction, from the
+  # same pair the registry was proved to bind. It makes the rendered workload
+  # reference read `repository:tag@digest`, so `kubectl describe pod` names the
+  # release instead of only its content address. It never replaces the digest:
+  # only the digest resolves, only the digest is signed and attested, and the
+  # release-state classifier refuses any half-advanced tag/digest/readiness
+  # combination.
   values:
     deploymentReady: true
     image:
       repository: ghcr.io/snaraj/naranjo-online
+      tag: v0.1.9
       digest: sha256:3e36de5e72f2721dee4b0dd1f815ea4bbc961ef9b3bf78b7b452039699c10767

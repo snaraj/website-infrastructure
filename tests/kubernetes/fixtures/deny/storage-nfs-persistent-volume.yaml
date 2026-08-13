@@ -1,0 +1,18 @@
+# proves: SR-2
+# rego-message: which is not an enumerated local means
+# SR-2. A network filesystem source makes the volume's bytes reachable from
+# wherever that server is reachable. Every other field is deliberately valid, so
+# the denial is attributable to the source alone.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-nfs-source
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  nfs:
+    server: storage.invalid
+    path: /export/media

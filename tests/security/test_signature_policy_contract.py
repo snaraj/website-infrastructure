@@ -6,14 +6,222 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .support import load_script
+from .support import load_script, required_tool
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFTEST = shutil.which("conftest")
 MODULE = load_script("validate_signature_policy.py")
 REPOSITORY_MODULE = load_script(
     "validate_repository.py", module_name="signature_validate_repository"
 )
+
+
+def write_chart_sources(root, *, graduated=False):
+    """Copy the reviewed per-site chart sources and graduation policy.
+
+    ``graduated`` writes the ``yes`` gates so a test can prove that the
+    SemVer-range/graduation binding is genuinely two-sided rather than a
+    constant that happens to pass.
+    """
+
+    gate = "yes" if graduated else "no"
+    root.joinpath("release-policy.env").write_text(
+        "NARANJO_ONLINE_PRODUCTION_GRADUATED={}\n"
+        "LIDERSEA_COM_PRODUCTION_GRADUATED={}\n".format(gate, gate),
+        encoding="utf-8",
+    )
+    for slug in MODULE.CHART_REPOSITORIES:
+        destination = root / "kubernetes" / "websites" / slug / "source.yaml"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            REPO_ROOT.joinpath("kubernetes", "websites", slug, "source.yaml")
+            .read_bytes()
+        )
+    return root
+
+
+class ChartSourceContractTests(unittest.TestCase):
+    """Pin the reconcile-time half of each site's release identity tuple.
+
+    These tests exercise the committed OCIRepository contract and the
+    validator that enforces it. They do NOT observe a Flux controller: no
+    source-controller runs here, no registry is contacted, and no signature is
+    actually verified. What they prove is that the desired state this
+    repository publishes cannot silently stop demanding a cosign signature
+    from exactly one site's tag-triggered publisher.
+    """
+
+    def canonical(self, slug="naranjo-online"):
+        return MODULE.expected_chart_source_body(slug)
+
+    def test_committed_chart_sources_match_their_closed_contract(self):
+        for slug in MODULE.CHART_REPOSITORIES:
+            with self.subTest(slug=slug):
+                text = REPO_ROOT.joinpath(
+                    "kubernetes", "websites", slug, "source.yaml"
+                ).read_text(encoding="utf-8")
+                self.assertEqual(MODULE.chart_source_errors(text, slug), [])
+
+    def test_every_site_tuple_binds_only_its_own_publisher(self):
+        subjects = {
+            slug: MODULE.chart_source_certificate_subject(slug)
+            for slug in MODULE.CHART_REPOSITORIES
+        }
+        self.assertEqual(len(set(subjects.values())), len(subjects))
+        for slug, subject in subjects.items():
+            with self.subTest(slug=slug):
+                self.assertTrue(subject.startswith("^https://github\\.com/snaraj/"))
+                self.assertTrue(subject.endswith("@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                self.assertIn("/.github/workflows/".replace(".", "\\."), subject)
+                for other in subjects:
+                    if other != slug:
+                        self.assertNotIn(
+                            other.replace("-", "."), subject.replace("\\", "")
+                        )
+
+    def test_cross_site_substitution_is_rejected_in_both_directions(self):
+        for slug in MODULE.CHART_REPOSITORIES:
+            for other in MODULE.CHART_REPOSITORIES:
+                if other == slug:
+                    continue
+                with self.subTest(slug=slug, other=other):
+                    self.assertTrue(
+                        MODULE.chart_source_errors(self.canonical(other), slug)
+                    )
+
+    def test_weakened_chart_verification_is_rejected(self):
+        canonical = self.canonical()
+        other_subject = MODULE.chart_source_certificate_subject("lidersea-com")
+        mutations = {
+            "verification block removed": canonical.replace(
+                "  verify:\n"
+                "    matchOIDCIdentity:\n"
+                "      - issuer: {}\n"
+                "        subject: {}\n"
+                "    provider: cosign\n".format(
+                    MODULE.CHART_OIDC_ISSUER_PATTERN,
+                    MODULE.chart_source_certificate_subject("naranjo-online"),
+                ),
+                "",
+            ),
+            "provider swapped": canonical.replace(
+                "    provider: cosign\n", "    provider: notation\n"
+            ),
+            "sibling site subject": canonical.replace(
+                MODULE.chart_source_certificate_subject("naranjo-online"),
+                other_subject,
+            ),
+            "wrong workflow path": canonical.replace(
+                "release-publisher\\.yml", "publish\\.yml"
+            ),
+            "wrong issuer": canonical.replace(
+                MODULE.CHART_OIDC_ISSUER_PATTERN,
+                "^https://accounts\\.example\\.invalid$",
+            ),
+            "branch ref accepted": canonical.replace(
+                "@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$", "@refs/heads/main$"
+            ),
+            "subject unanchored": canonical.replace(
+                "subject: ^https://github", "subject: https://github"
+            ),
+            "semver range widened": canonical.replace(
+                'semver: ">=0.1.9 <1.0.0"', 'semver: ">=0.0.0 <2.0.0"'
+            ),
+            "pinned to a mutable tag": canonical.replace(
+                '    semver: ">=0.1.9 <1.0.0"\n', "    tag: latest\n"
+            ),
+            "registry path swapped": canonical.replace(
+                "oci://ghcr.io/snaraj/charts/naranjo-online",
+                "oci://ghcr.io/snaraj/charts/lidersea-com",
+            ),
+            "registry credential added": canonical.replace(
+                "  timeout: 60s\n", "  secretRef:\n    name: ghcr-pull\n  timeout: 60s\n"
+            ),
+            "layer selector widened": canonical.replace(
+                "    mediaType: " + MODULE.CHART_LAYER_MEDIA_TYPE + "\n", ""
+            ),
+        }
+        for label, candidate in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(candidate, canonical, "mutation changed nothing")
+                self.assertTrue(
+                    MODULE.chart_source_errors(candidate, "naranjo-online"),
+                    "mutation was accepted: " + label,
+                )
+
+    def test_leading_comment_block_is_the_only_tolerated_prose(self):
+        canonical = self.canonical()
+        self.assertEqual(
+            MODULE.chart_source_errors(
+                "# rationale line one\n# rationale line two\n" + canonical,
+                "naranjo-online",
+            ),
+            [],
+        )
+        # A comment INSIDE the body could hide a commented-out control or
+        # visually detach a field from its section, so it is not tolerated.
+        self.assertTrue(
+            MODULE.chart_source_errors(
+                canonical.replace(
+                    "  verify:\n", "  # verification below\n  verify:\n"
+                ),
+                "naranjo-online",
+            )
+        )
+
+    def test_semver_range_is_bound_to_the_tracked_graduation_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = write_chart_sources(Path(directory).resolve())
+            self.assertEqual(
+                REPOSITORY_MODULE.chart_source_contract_errors(root), []
+            )
+            for slug in MODULE.CHART_REPOSITORIES:
+                lower, upper = MODULE.chart_source_semver_bounds(slug)
+                with self.subTest(slug=slug):
+                    self.assertLess(lower, upper)
+                    self.assertEqual(
+                        upper,
+                        (1, 0, 0),
+                        "an ungraduated site must not admit major 1 or later",
+                    )
+            missing = root / "kubernetes/websites/naranjo-online/source.yaml"
+            missing.unlink()
+            self.assertIn(
+                "naranjo-online chart source is missing or symbolic",
+                REPOSITORY_MODULE.chart_source_contract_errors(root),
+            )
+
+    def test_ungrammatical_semver_range_has_no_parse(self):
+        for candidate in (
+            ">=0.1.9",
+            ">0.1.9 <1.0.0",
+            ">=0.1.9 <=1.0.0",
+            ">=0.1.9 <1.2.0",
+            ">=0.1.9-rc1 <1.0.0",
+            ">=1.0.0 <1.0.0",
+            "*",
+            "",
+        ):
+            with self.subTest(candidate=candidate):
+                saved = MODULE.CHART_SEMVER_RANGES["naranjo-online"]
+                MODULE.CHART_SEMVER_RANGES["naranjo-online"] = candidate
+                try:
+                    with self.assertRaises(ValueError):
+                        MODULE.chart_source_semver_bounds("naranjo-online")
+                finally:
+                    MODULE.CHART_SEMVER_RANGES["naranjo-online"] = saved
+
+    def test_renderer_and_repository_validator_both_run_the_contract(self):
+        renderer = REPO_ROOT.joinpath("scripts", "render-manifests.sh").read_text(
+            encoding="utf-8"
+        )
+        repository_validator = REPO_ROOT.joinpath(
+            "scripts", "validate_repository.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('validate_signature_policy.py" chart-source', renderer)
+        self.assertIn("chart_source_errors", repository_validator)
+        self.assertIn("chart_source_contract_errors(root)", repository_validator)
 
 
 class SignaturePolicyContractTests(unittest.TestCase):
@@ -394,6 +602,10 @@ class SignaturePolicyContractTests(unittest.TestCase):
                 destination = root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(REPO_ROOT.joinpath(relative).read_bytes())
+            # The chart sources and the graduation policy are part of the same
+            # pass: the image-admission identity and the chart-reconcile
+            # identity are two ends of one tuple and are validated together.
+            write_chart_sources(root)
             policy_root.joinpath("kustomization.yaml").write_text(
                 REPO_ROOT.joinpath(
                     "policies", "kyverno", "kustomization.yaml"
@@ -445,7 +657,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                 REPOSITORY_MODULE.check_kubernetes(root),
             )
 
-    @unittest.skipUnless(shutil.which("conftest"), "conftest is required")
+    @unittest.skipUnless(CONFTEST, "conftest is required")
     def test_render_policy_rejects_each_nested_bypass(self):
         """OPA object equality is the post-Kustomize counterpart to source grammar."""
 
@@ -475,7 +687,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                         )
                         accepted = subprocess.run(
                             [
-                                shutil.which("conftest"),
+                                required_tool(CONFTEST, "conftest"),
                                 "test",
                                 "--policy",
                                 str(REPO_ROOT / "policies/conftest"),
@@ -497,7 +709,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                     )
                     result = subprocess.run(
                         [
-                            shutil.which("conftest"),
+                            required_tool(CONFTEST, "conftest"),
                             "test",
                             "--policy",
                             str(REPO_ROOT / "policies/conftest"),

@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Validate the two Kyverno signature policies against closed source contracts."""
+"""Validate the closed signature/identity contracts of reviewed desired state.
+
+Two families live here because they answer the same question at two different
+moments of one release:
+
+* the Kyverno ``require-signed-<site>`` policies decide, at admission time,
+  whether the *image* a Pod names was signed by that site's publisher;
+* the per-site OCIRepository chart sources decide, at reconcile time, whether
+  the *chart* Flux is about to resolve was signed by the same publisher.
+
+Both bind the identical certificate identity tuple — one site repository, one
+workflow file, tag refs only, the GitHub Actions OIDC issuer — so a chart and
+an image can never be accepted from different authorities, and the two site
+tuples can never couple (AGENTS.md safety invariant 14).
+"""
 
 import argparse
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -48,6 +63,36 @@ POLICY_KUSTOMIZATION_INVENTORIES = {
     "staging": EXPECTED_STAGING_POLICY_KUSTOMIZATION,
     "promoted": EXPECTED_PROMOTED_POLICY_KUSTOMIZATION,
 }
+# The published chart repository each site's release publisher pushes to. It is
+# part of the site's identity tuple exactly like its image repository is; the
+# platform never renames or shares these paths.
+CHART_REPOSITORIES = {
+    "naranjo-online": "oci://ghcr.io/snaraj/charts/naranjo-online",
+    "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
+}
+# Reviewed SemVer window per site. The LOWER bound is a ratchet: it is the
+# oldest release the cluster may resolve to, so a deleted or re-pointed newer
+# tag cannot roll a site backwards without a reviewed PR raising it. The UPPER
+# bound is the production-graduation gate of ADR 0014 expressed as a Flux
+# policy: while release-policy.env records `no` for a site, its range must
+# exclude major 1 and above, which validate_repository.py re-checks against the
+# tracked gate so the two can never disagree silently.
+CHART_SEMVER_RANGES = {
+    "naranjo-online": ">=0.1.9 <1.0.0",
+    "lidersea-com": ">=0.1.9 <1.0.0",
+}
+# Helm charts pushed with `helm push` carry exactly this layer media type.
+# Pinning it means a non-chart layer smuggled into the same artifact is not
+# what source-controller extracts.
+CHART_LAYER_MEDIA_TYPE = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+CHART_OIDC_ISSUER_PATTERN = r"^https://token\.actions\.githubusercontent\.com$"
+# Stable vMAJOR.MINOR.PATCH tag refs only. A branch ref, a prerelease ref, a
+# moved `latest`, or a workflow_dispatch identity cannot match this subject.
+CHART_TAG_REF_PATTERN = r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+CHART_SEMVER_RANGE_RE = re.compile(
+    r">=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) "
+    r"<(0|[1-9][0-9]*)\.0\.0\Z"
+)
 EXPECTED_ADMISSION_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -215,6 +260,113 @@ spec:
         subject=subject,
         description=description,
     )
+
+
+def chart_source_certificate_subject(slug):
+    """Return the exact cosign subject pattern for one site's chart publisher.
+
+    Anchored at both ends and built only from that site's own repository and
+    workflow file, so a chart signed by the sibling site, by another workflow
+    in the same repository, or by a branch-ref run of the right workflow is not
+    a match. This is the same tuple ``expected_policy_body`` binds for images.
+    """
+
+    if slug not in SIGNATURE_CONTRACTS:
+        raise ValueError("site is outside the closed signature allowlist")
+    domain = SIGNATURE_REPOSITORIES[slug].replace(".", r"\.")
+    workflow = SIGNATURE_CONTRACTS[slug].replace(".", r"\.")
+    return (
+        r"^https://github\.com/snaraj/"
+        + domain
+        + r"/\.github/workflows/"
+        + workflow
+        + CHART_TAG_REF_PATTERN
+    )
+
+
+def chart_source_semver_bounds(slug):
+    """Return (lower, upper) SemVer tuples for one site's reviewed range.
+
+    The range grammar is deliberately tiny: one inclusive lower bound and one
+    exclusive major-boundary upper bound. Anything else — an unbounded range, a
+    caret/tilde shorthand, a prerelease qualifier, a second clause — has no
+    parse here and is therefore rejected before the graduation-gate comparison
+    in ``validate_repository.py`` can be reasoned about at all.
+    """
+
+    if slug not in CHART_SEMVER_RANGES:
+        raise ValueError("site is outside the closed chart-source allowlist")
+    match = CHART_SEMVER_RANGE_RE.fullmatch(CHART_SEMVER_RANGES[slug])
+    if match is None:
+        raise ValueError("chart SemVer range is outside the closed grammar")
+    lower = tuple(int(part) for part in match.groups()[:3])
+    upper = (int(match.group(4)), 0, 0)
+    if lower >= upper:
+        raise ValueError("chart SemVer range is empty")
+    return lower, upper
+
+
+def expected_chart_source_body(slug):
+    """Return the one normalized OCIRepository source form for a site."""
+
+    if slug not in CHART_REPOSITORIES:
+        raise ValueError("site is outside the closed chart-source allowlist")
+    # Raise before rendering if the committed range is ungrammatical, so a
+    # malformed constant can never be baked into an "expected" document.
+    chart_source_semver_bounds(slug)
+    return """apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: {slug}-chart
+  namespace: {slug}
+spec:
+  interval: 10m0s
+  layerSelector:
+    mediaType: {media_type}
+    operation: copy
+  ref:
+    semver: "{semver}"
+  timeout: 60s
+  url: {url}
+  verify:
+    matchOIDCIdentity:
+      - issuer: {issuer}
+        subject: {subject}
+    provider: cosign
+""".format(
+        slug=slug,
+        media_type=CHART_LAYER_MEDIA_TYPE,
+        semver=CHART_SEMVER_RANGES[slug],
+        url=CHART_REPOSITORIES[slug],
+        issuer=CHART_OIDC_ISSUER_PATTERN,
+        subject=chart_source_certificate_subject(slug),
+    )
+
+
+def chart_source_errors(text, slug):
+    """Reject any chart source outside one site's exact closed contract.
+
+    Whole-document equality (after the leading comment block) is the point: a
+    missing ``verify`` block, a widened SemVer range, a swapped registry path,
+    the sibling site's subject, an added ``secretRef``/``serviceAccountName``/
+    ``proxySecretRef``, a ``ref.tag``/``ref.digest`` override, or ``insecure``
+    all change the body and are all denied by the same comparison, with no
+    per-field allowlist to keep in sync.
+    """
+
+    errors = _canonical_text_errors(text, "chart source")
+    if slug not in CHART_REPOSITORIES:
+        errors.append("chart source site is outside the closed allowlist")
+        return errors
+    if errors:
+        return errors
+    if _policy_body(text) != expected_chart_source_body(slug):
+        errors.append(
+            "chart source does not match the pinned {} OCIRepository contract".format(
+                slug
+            )
+        )
+    return errors
 
 
 def _policy_body(text):
@@ -407,6 +559,11 @@ def main(argv=None):
     flux_system_kustomization.add_argument("--file", type=Path, required=True)
     flux_sync = subparsers.add_parser("flux-sync")
     flux_sync.add_argument("--file", type=Path, required=True)
+    chart_source = subparsers.add_parser("chart-source")
+    chart_source.add_argument("--file", type=Path, required=True)
+    chart_source.add_argument(
+        "--site", choices=sorted(CHART_REPOSITORIES), required=True
+    )
     args = parser.parse_args(argv)
     try:
         text = _read_bounded(args.file)
@@ -428,13 +585,22 @@ def main(argv=None):
         errors = reconciliation_kustomization_errors(text)
     elif args.command == "flux-system-kustomization":
         errors = flux_system_kustomization_errors(text)
+    elif args.command == "chart-source":
+        errors = chart_source_errors(text, args.site)
     else:
         errors = flux_sync_errors(text)
     if errors:
         for error in errors:
             print("ERROR " + error, file=sys.stderr)
         return 1
-    print("PASS closed Kyverno image-signature policy contract")
+    if args.command == "chart-source":
+        # Do not claim the image-admission contract for the reconcile-time
+        # chart contract: the two bind the same identity tuple at different
+        # moments and an operator reading a transcript must be able to tell
+        # which one actually ran.
+        print("PASS closed cosign-verified chart source contract")
+    else:
+        print("PASS closed Kyverno image-signature policy contract")
     return 0
 
 

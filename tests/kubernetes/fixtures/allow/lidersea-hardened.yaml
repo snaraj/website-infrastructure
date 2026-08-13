@@ -43,7 +43,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: cloudflared-to-lidersea-com
+  name: ingress-to-lidersea-com
   namespace: lidersea-com
 spec:
   podSelector:
@@ -59,6 +59,7 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: lidersea-com-tunnel
       ports:
         - port: 8080
           protocol: TCP
@@ -88,6 +89,9 @@ kind: Pod
 metadata:
   name: cloudflared-volume-allowed
   namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: lidersea-com-tunnel
 spec:
   automountServiceAccountToken: false
   serviceAccountName: cloudflared
@@ -111,7 +115,7 @@ spec:
   volumes:
     - name: tunnel-token
       secret:
-        secretName: pi-websites-tunnel-token
+        secretName: lidersea-com-tunnel-token
         defaultMode: 288
         items:
           - key: token

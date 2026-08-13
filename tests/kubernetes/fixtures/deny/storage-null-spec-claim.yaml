@@ -1,0 +1,10 @@
+# proves: SR-0
+# rego-message: has no usable spec mapping and cannot be evaluated
+# Degenerate shape, claim side. Multi-rule by construction: SR-11 also fires,
+# because a claim with no readable spec names no enumerated class.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-null-spec-claim
+  namespace: naranjo-online
+spec:

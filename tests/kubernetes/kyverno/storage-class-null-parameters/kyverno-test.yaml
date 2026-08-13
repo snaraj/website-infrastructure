@@ -1,0 +1,20 @@
+# SR-10, degenerate direction, in isolation. `parameters:` and `mountOptions:`
+# are DECLARED with null values. Rego's count() raises a type error on null and
+# an erroring expression is undefined, so the CI mirror admitted this class while
+# admission denied it; CEL denies by erroring, which is a denial only because the
+# webhook is failurePolicy: Fail. It needs its own resource set for the same
+# reason the parameters fixture does: it carries the enumerated class name.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: storage-class-null-parameter-boundary
+policies:
+  - ../../../../policies/kyverno/disallow-undiscovered-storage.yaml
+resources:
+  - ../../fixtures/deny/storage-class-null-parameters.yaml
+results:
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [local-pie-ssd]
+    kind: StorageClass
+    result: fail

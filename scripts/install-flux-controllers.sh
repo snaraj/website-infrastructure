@@ -18,13 +18,16 @@
 #   NetworkPolicy-enforcing CNI is a namespace-wide deny-all. Applying that
 #   together with the three controller Deployments isolates the controllers at
 #   the instant they are created: no DNS, no API server, no leader election, no
-#   cache sync, so they can never reach 1/1 and the install deadlocks. The apply
+#   cache sync, so they can never become ready and the install deadlocks. The apply
 #   is therefore ORDERED — the namespace, CRDs, RBAC and Services first, then
 #   the startup egress allows (default-deny, DNS, the intra-namespace artifact
 #   fetch, and the API server bound to the very endpoint this run targets), and
-#   only then the Deployments. Public HTTPS stays shut until the controllers are
-#   observed healthy and idle; --open-public-egress is that separate step and it
-#   refuses to run while any controller is not 1/1.
+#   an ephemeral, digest-pinned Pod using source-controller's labels and Service
+#   Account proves DNS plus an authenticated request through
+#   kubernetes.default.svc, is deleted and absence-proven, and only then are the
+#   Deployments created. Public HTTPS stays shut until every positive desired
+#   replica is current, updated, available and ready with none unavailable;
+#   --open-public-egress is that separate step.
 #
 #   BINDING. Nothing here runs against "whatever is on PATH" or "whatever the
 #   ambient kubeconfig points at". kustomize and kubectl are checked against the
@@ -32,7 +35,8 @@
 #   earlier-on-PATH shim cannot impersonate it); the render must come from a Git
 #   checkout at an ASSERTED commit with no uncommitted modification to any
 #   install input; BOTH rendered artifacts -- the controller bundle and the
-#   egress overlay -- must hash to the sha256s the reviewer signed off; and
+#   controller, egress and canary renders must hash to the sha256s the reviewer
+#   signed off; and
 #   every single API operation carries an explicit --kubeconfig/--context/
 #   --server whose context is proven to resolve to exactly that server first.
 #   Binding only the controller render was not enough: the egress bundle is the
@@ -41,8 +45,8 @@
 #   controller digest exactly.
 #
 #   TRANSACTION. `kubectl apply -f` is not atomic: a failure part-way leaves an
-#   applied prefix, and 13 of this bundle's objects are CLUSTER-SCOPED (8 CRDs,
-#   3 ClusterRoles, 2 ClusterRoleBindings) which no `delete namespace` can
+#   applied prefix, and 12 of this bundle's objects are non-namespaced (8 CRDs,
+#   3 ClusterRoles, 1 ClusterRoleBinding) which no `delete namespace` can
 #   remove. --apply therefore installs onto a FRESH cluster only. That is the
 #   scope in which the transaction is honest: every object it touches it
 #   created, so undoing it is a delete, and the ledger of what to delete is
@@ -50,7 +54,7 @@
 #   An apply over an EXISTING install would instead rewrite objects as
 #   `configured` -- a mutation with no recorded prestate, which no ledger of
 #   creations can undo and which would make the rollback report "the cluster is
-#   unchanged" after rewriting 22 objects. Rather than claim a restore this
+#   unchanged" after rewriting 21 objects. Rather than claim a restore this
 #   script cannot perform, the existing-install path is refused for --apply and
 #   stays available read-only through --plan. A signal (INT/TERM/HUP) takes the
 #   same rollback path a failed phase takes, because a Ctrl-C between phases
@@ -64,15 +68,18 @@
 # fresh cluster (flux-system absent) and a reconcile of an existing one. See the
 # gate below and docs/runbooks/flux-install.md. Nothing mutates until --apply.
 #
-#   --render  render, verify, and print both render sha256s; no cluster contact
+#   --render  render, verify, and print all three render sha256s; no cluster contact
 #   --plan    the same, plus the read-only pre-apply gate; no mutation
 #   --apply   the same checks, then the ordered, ledger-backed apply (fresh only)
-#   --open-public-egress  the deferred public-HTTPS allow, once 3/3 are 1/1 and
-#                         the namespace still reconciles nothing
+#   --open-public-egress  the deferred public-HTTPS allow, once every controller
+#                         replica is current/updated/available/ready and the
+#                         namespace still reconciles nothing
 #
 # --plan, --apply and --open-public-egress ALL require every binding:
 #   --kubeconfig PATH --context NAME --server https://ADDRESS:6443
-#   --expect-render-sha256 HEX --expect-egress-sha256 HEX --expect-commit HEX
+#   --cni-provider calico --api-endpoint ADDRESS [--api-endpoint ADDRESS ...]
+#   --expect-render-sha256 HEX --expect-egress-sha256 HEX
+#   --expect-canary-sha256 HEX --expect-commit HEX
 #
 # See docs/runbooks/flux-install.md for the surrounding ceremony.
 set -euo pipefail
@@ -92,23 +99,25 @@ INSTALL_TARGET='kubernetes/flux-system/controllers'
 # the controllers need in order to start at all, and the public-HTTPS allow that
 # stays shut until they are observed healthy.
 EGRESS_TARGET='kubernetes/flux-system/egress'
+CANARY_TARGET='kubernetes/flux-system/canary'
 VERSIONS_FILE="${REPO_ROOT}/versions.env"
 INSTALL_NAMESPACE='flux-system'
-# The reviewed inventory: 1 Namespace, 8 CRDs, 3 ClusterRoles,
-# 2 ClusterRoleBindings, 3 NetworkPolicies, 1 ResourceQuota, 3 ServiceAccounts,
+# The reviewed inventory after the least-privilege RBAC patches: 1 Namespace,
+# 8 CRDs, 3 ClusterRoles, 1 ClusterRoleBinding, 3 NetworkPolicies,
+# 1 ResourceQuota, 3 ServiceAccounts,
 # 1 Service, 3 Deployments. A render of a different size is not the reviewed
 # install no matter what its digest says.
-EXPECTED_OBJECTS=25
+EXPECTED_OBJECTS=24
 # The inventory splits by scope, which is what the fresh-cluster dry run below
-# turns on: 14 cluster-scoped objects (the Namespace, 8 CRDs, 3 ClusterRoles,
-# 2 ClusterRoleBindings) plus 11 objects that live IN flux-system (1
+# turns on: 13 cluster-scoped objects (the Namespace, 8 CRDs, 3 ClusterRoles,
+# 1 ClusterRoleBinding) plus 11 objects that live IN flux-system (1
 # ResourceQuota, 3 ServiceAccounts, 1 Service, 3 Deployments, 3 NetworkPolicies).
-EXPECTED_CLUSTER_SCOPED=14
+EXPECTED_CLUSTER_SCOPED=13
 EXPECTED_NAMESPACED=11
 # ... and it splits again by apply phase: the 3 controller Deployments are held
-# back until their egress allows exist, so 22 objects go first.
+# back until their egress allows and canary proof exist, so 21 objects go first.
 EXPECTED_WORKLOADS=3
-EXPECTED_PREREQUISITES=22
+EXPECTED_PREREQUISITES=21
 # The egress overlay: 5 policies, of which 4 must be in force before any
 # controller Pod is created and 1 (public HTTPS) is deliberately deferred.
 EXPECTED_EGRESS_POLICIES=5
@@ -136,20 +145,24 @@ FLUX_CRDS=(
   ocirepositories.source.toolkit.fluxcd.io
 )
 FLUX_CLUSTER_ROLES=(crd-controller-flux-system flux-edit-flux-system flux-view-flux-system)
-FLUX_CLUSTER_ROLE_BINDINGS=(cluster-reconciler-flux-system crd-controller-flux-system)
+FLUX_CLUSTER_ROLE_BINDINGS=(crd-controller-flux-system)
 CONTROLLER_DEPLOYMENTS=(source-controller kustomize-controller helm-controller)
-# The generated export labels every one of its 25 objects with both of these.
+# The least-privilege render labels every one of its 24 objects with both of these.
 # They are this install's ownership marker: an object that already exists and
 # carries them is a previous run of THIS install; one that exists without them
 # belongs to something else and is never adopted, reconfigured, or deleted.
 OWNERSHIP_PART_OF='"app.kubernetes.io/part-of":"flux"'
 OWNERSHIP_INSTANCE='"app.kubernetes.io/instance":"flux-system"'
 # RFC 5737 TEST-NET-1: the committed API-server destination, which can never
-# match a real endpoint. The real address is never committed; it is derived at
-# apply time from the --server this run is explicitly bound to, which is also
-# what makes the allow and the target provably the same cluster.
+# match a real endpoint. The real endpoint SET is never committed and is not
+# inferred from the operator's kubeconfig. Repeated --api-endpoint inputs bind
+# the selected Calico post-DNAT destinations, and the in-Pod Service canary is
+# the proof that those destinations actually reach this cluster's API.
 APISERVER_SENTINEL_CIDR='192.0.2.0/32'
 APISERVER_PORT=6443
+SUPPORTED_CNI_PROVIDER='calico'
+MAX_API_ENDPOINTS=16
+CANARY_NAME='flux-api-reachability-canary'
 
 # Recognized dry-run report lines. kubectl prints "<kind>/<name> <verb>" per
 # object, optionally suffixed " (dry run)" (client) or " (server dry run)"
@@ -190,19 +203,22 @@ usage() {
     'Usage: scripts/install-flux-controllers.sh MODE [binding options]' \
     '' \
     'Modes:' \
-    '  --render  render + verify + print both render sha256s; contacts no cluster' \
+    '  --render  render + verify + print all three render sha256s; contacts no cluster' \
     '  --plan    the same, plus the read-only pre-apply gate; no mutation' \
     '  --apply   the same checks, then the ordered, ledger-backed apply (fresh only)' \
-    '  --open-public-egress  the deferred public-HTTPS allow, once 3/3 are 1/1' \
+    '  --open-public-egress  the deferred public-HTTPS allow, once every desired replica is ready' \
     '' \
     'Binding options -- ALL are required by --plan, --apply, and' \
     '--open-public-egress alike, and all are optional for --render, which' \
-    'asserts whichever of the two digests it is given:' \
+    'asserts whichever of the three digests it is given:' \
     '  --kubeconfig PATH   the protected kubeconfig; never the ambient default' \
     '  --context NAME      the reviewed context; proven to resolve to --server' \
-    '  --server URL        https://ADDRESS:6443 -- also the API-server allow' \
+    '  --server URL        https://ADDRESS:6443 for operator API calls only' \
+    '  --cni-provider NAME must be calico; binds the selected post-DNAT contract' \
+    '  --api-endpoint IP   actual API backend; repeat for an HA endpoint set' \
     '  --expect-render-sha256 HEX   the reviewed controller render digest' \
     '  --expect-egress-sha256 HEX   the reviewed egress overlay render digest' \
+    '  --expect-canary-sha256 HEX   the reviewed ephemeral Pod render digest' \
     '  --expect-commit HEX          the reviewed commit this must run from'
 }
 
@@ -212,8 +228,10 @@ KUBE_CONTEXT=''
 KUBE_SERVER=''
 EXPECT_RENDER_SHA256=''
 EXPECT_EGRESS_SHA256=''
+EXPECT_CANARY_SHA256=''
 EXPECT_COMMIT=''
-APISERVER_ADDRESS=''
+CNI_PROVIDER=''
+API_ENDPOINTS=()
 
 require_value() {
   # "$1" is the option name, "$2" the count of remaining arguments.
@@ -242,6 +260,16 @@ while (($#)); do
       KUBE_SERVER="$2"
       shift 2
       ;;
+    --cni-provider)
+      require_value "$1" "$#"
+      CNI_PROVIDER="$2"
+      shift 2
+      ;;
+    --api-endpoint)
+      require_value "$1" "$#"
+      API_ENDPOINTS+=("$2")
+      shift 2
+      ;;
     --expect-render-sha256)
       require_value "$1" "$#"
       EXPECT_RENDER_SHA256="$2"
@@ -250,6 +278,11 @@ while (($#)); do
     --expect-egress-sha256)
       require_value "$1" "$#"
       EXPECT_EGRESS_SHA256="$2"
+      shift 2
+      ;;
+    --expect-canary-sha256)
+      require_value "$1" "$#"
+      EXPECT_CANARY_SHA256="$2"
       shift 2
       ;;
     --expect-commit)
@@ -280,22 +313,61 @@ if [[ "$needs_cluster" == 'yes' ]]; then
   [[ -n "$KUBECONFIG_PATH" ]] || die '--kubeconfig is required; the install never uses the ambient default kubeconfig'
   [[ -n "$KUBE_CONTEXT" ]] || die '--context is required; the install never uses the ambient current context'
   [[ -n "$KUBE_SERVER" ]] || die '--server is required; the install never uses the context default server'
+  [[ -n "$CNI_PROVIDER" ]] || die '--cni-provider is required; the API destination semantics must name the selected CNI'
+  [[ "$CNI_PROVIDER" == "$SUPPORTED_CNI_PROVIDER" ]] || \
+    die "--cni-provider ${CNI_PROVIDER} has no reviewed API-destination contract; only ${SUPPORTED_CNI_PROVIDER} is supported"
+  ((${#API_ENDPOINTS[@]} > 0)) || die '--api-endpoint is required; the API backend set is never inferred from the operator kubeconfig'
+  ((${#API_ENDPOINTS[@]} <= MAX_API_ENDPOINTS)) || \
+    die "the API backend set has ${#API_ENDPOINTS[@]} entries; the reviewed maximum is ${MAX_API_ENDPOINTS}"
   [[ -n "$EXPECT_RENDER_SHA256" ]] || die '--expect-render-sha256 is required; an unasserted render digest binds nothing'
   # The egress overlay is the security half of what this script applies, and
   # --open-public-egress applies nothing else. A digest that covered only the
   # controller bundle left those bytes unbound: a commit could reproduce the
   # reviewed controller digest exactly while widening an allow.
   [[ -n "$EXPECT_EGRESS_SHA256" ]] || die '--expect-egress-sha256 is required; the egress bytes this applies would otherwise be unasserted'
+  [[ -n "$EXPECT_CANARY_SHA256" ]] || die '--expect-canary-sha256 is required; the pre-controller executable probe would otherwise be unreviewed'
   # ... and a digest binds OUTPUT, not the program that produced it. The commit
   # is what binds this script, its constants, and its guards to the reviewed
   # ones.
   [[ -n "$EXPECT_COMMIT" ]] || die '--expect-commit is required; a render digest binds the bytes rendered, not the installer that rendered them'
 fi
 
+normalize_ipv4() {
+  local candidate="$1"
+  local -a octets=()
+  local octet=''
+  local value=0
+  IFS='.' read -r -a octets <<<"$candidate"
+  ((${#octets[@]} == 4)) || return 1
+  local -a normalized_octets=()
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+    value=$((10#$octet))
+    ((value <= 255)) || return 1
+    normalized_octets+=("$value")
+  done
+  ((normalized_octets[0] > 0 && normalized_octets[0] < 224 \
+     && normalized_octets[0] != 127)) || return 1
+  printf '%s.%s.%s.%s' "${normalized_octets[@]}"
+}
+
+if [[ "$needs_cluster" == 'yes' ]]; then
+  normalized_endpoints=()
+  for endpoint in "${API_ENDPOINTS[@]}"; do
+    canonical_endpoint=''
+    canonical_endpoint="$(normalize_ipv4 "$endpoint")" || \
+      die "--api-endpoint ${endpoint} is not one canonical unicast IPv4 address"
+    normalized_endpoints+=("$canonical_endpoint")
+  done
+  mapfile -t API_ENDPOINTS < <(printf '%s\n' "${normalized_endpoints[@]}" | LC_ALL=C sort -u)
+  ((${#API_ENDPOINTS[@]} == ${#normalized_endpoints[@]})) || \
+    die '--api-endpoint values must be unique; duplicate backends do not define a set'
+fi
+
 # --- Tool identity -----------------------------------------------------------
 #
 # Codex demonstrated the gap this closes: a fake `kubectl` earlier on PATH
-# produced 25 accepted dry-run lines, an accepted apply, and a clean exit --
+# produced a full accepted dry-run inventory, an accepted apply, and a clean exit --
 # "Flux is installed and inert" -- with no cluster involved at all. `command -v`
 # proves a name resolves to something; it proves nothing about what that
 # something is. The pins in versions.env are the repository's answer to "which
@@ -379,7 +451,7 @@ if [[ -n "$EXPECT_COMMIT" && "$source_commit" != "$EXPECT_COMMIT" ]]; then
 fi
 dirty_inputs=''
 dirty_inputs="$("$GIT_BIN" -C "$REPO_ROOT" status --porcelain -- \
-  "$INSTALL_TARGET" "$EGRESS_TARGET" versions.env scripts/install-flux-controllers.sh)"
+  "$INSTALL_TARGET" "$EGRESS_TARGET" "$CANARY_TARGET" versions.env scripts/install-flux-controllers.sh)"
 if [[ -n "$dirty_inputs" ]]; then
   printf '%s\n' "$dirty_inputs" >&2
   die 'the install inputs carry uncommitted modifications; the render would not be the reviewed bytes'
@@ -389,6 +461,8 @@ fi
   die "missing install root: ${INSTALL_TARGET}"
 [[ -f "${REPO_ROOT}/${EGRESS_TARGET}/kustomization.yaml" ]] || \
   die "missing egress overlay root: ${EGRESS_TARGET}"
+[[ -f "${REPO_ROOT}/${CANARY_TARGET}/kustomization.yaml" ]] || \
+  die "missing API canary root: ${CANARY_TARGET}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/flux-controllers.XXXXXX")"
 cleanup() {
@@ -400,7 +474,7 @@ trap cleanup EXIT
 
 # An INTERRUPT is not a clean stop. A Ctrl-C, a terminal hangup, or a `kill`
 # during the apply leaves everything the completed phases created -- including
-# all 14 cluster-scoped objects, which no `delete namespace` can remove -- with
+# the Namespace and all 12 non-namespaced RBAC/CRD objects -- with
 # nothing to remove them and no list of what to remove by hand. That is exactly
 # the residue the ledger exists to prevent, so the signal runs the SAME rollback
 # path a failed phase runs. Two hazards it must survive: arriving before any
@@ -408,6 +482,7 @@ trap cleanup EXIT
 # is the whole job), and arriving twice (the second must not restart a rollback
 # that is already in flight).
 TRANSACTION_OPEN='no'
+TRANSACTION_COMMITTED='no'
 INTERRUPT_HANDLED='no'
 # A stable duplicate of the real stderr. Bash defers a trap until the running
 # foreground command finishes, and the applies run through the kube() SHELL
@@ -430,6 +505,8 @@ on_signal() {
     warn "interrupted by SIG${signal}; an in-flight apply may already have created objects"
     if [[ "$TRANSACTION_OPEN" == 'yes' ]]; then
       rollback || true
+    elif [[ "$TRANSACTION_COMMITTED" == 'yes' ]]; then
+      warn 'rollback: the mutation was already committed; no transaction remains open'
     else
       warn 'rollback: the interrupt arrived before anything was applied; the cluster is unchanged'
     fi
@@ -571,9 +648,9 @@ prerequisite_count="$(count_objects "$prerequisites")"
   die 'the phase-3 bundle is not exactly the controller Deployments'
 
 # The 11 objects that live INSIDE flux-system. The ownership probe used to stop
-# at the 14 cluster-scoped ones, which made the script's own claim -- that an
+# at the cluster-scoped ones, which made the script's own claim -- that an
 # object under foreign ownership stops the install before anything is applied --
-# true of 14 of the 25 objects it applies. Derived from the render rather than
+# false of every namespaced object it applies. Derived from the render rather than
 # hand-listed, and then counted, so an export that adds or renames one is a hard
 # failure instead of a silently narrower probe.
 FLUX_NAMESPACED_OBJECTS=()
@@ -615,6 +692,37 @@ if [[ -n "$EXPECT_EGRESS_SHA256" && "$egress_digest" != "$EXPECT_EGRESS_SHA256" 
 fi
 note "egress overlay sha256 ${egress_digest} (${egress_count} policies, API-server destination unresolved)"
 
+# The canary is a third reviewed artifact, not shell-generated YAML. It carries
+# the same selector and ServiceAccount as source-controller and runs exactly one
+# immutable kubectl command against the in-cluster Service DNS identity.
+canary_rendered="${work}/api-canary.yaml"
+"$KUSTOMIZE_BIN" build "${REPO_ROOT}/${CANARY_TARGET}" >"$canary_rendered"
+[[ -s "$canary_rendered" ]] || die 'API canary render produced no bytes'
+[[ "$(count_objects "$canary_rendered")" -eq 1 ]] || \
+  die 'API canary render must contain exactly one object'
+for fragment in \
+  'kind: Pod' \
+  "  name: ${CANARY_NAME}" \
+  '  namespace: flux-system' \
+  '    app: source-controller' \
+  '    app.kubernetes.io/part-of: flux' \
+  '  serviceAccountName: source-controller' \
+  '          value: kubernetes.default.svc' \
+  '        - --raw=/api'; do
+  [[ "$(grep -cF -- "$fragment" "$canary_rendered" || true)" -eq 1 ]] || \
+    die "API canary render does not carry the reviewed boundary exactly once: ${fragment}"
+done
+canary_image="$(pin_value FLUX_API_CANARY_IMAGE)"
+[[ "$canary_image" =~ ^registry\.k8s\.io/kubectl:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || \
+  die 'FLUX_API_CANARY_IMAGE must be one tagged, digest-pinned official kubectl image'
+[[ "$(grep -cF -- "      image: ${canary_image}" "$canary_rendered" || true)" -eq 1 ]] || \
+  die 'API canary image does not exactly match the versions.env identity'
+canary_digest="$(digest_of "$canary_rendered")"
+if [[ -n "$EXPECT_CANARY_SHA256" && "$canary_digest" != "$EXPECT_CANARY_SHA256" ]]; then
+  die "API canary sha256 ${canary_digest} is not the reviewed ${EXPECT_CANARY_SHA256}; the executable in-Pod proof is not the reviewed one"
+fi
+note "API canary sha256 ${canary_digest} (one ephemeral Pod)"
+
 if [[ "$MODE" == '--render' ]]; then
   note 'RENDER only; no cluster was contacted and nothing was mutated'
   exit 0
@@ -624,14 +732,13 @@ fi
 #
 # The ambient default kubeconfig, context, and server are never used. Naming all
 # three and proving the named context resolves to the named server is what makes
-# "the cluster I meant" a checked fact rather than an assumption -- and the
-# server address is then the same address the API-server egress allow is bound
-# to, so the policy and the target cannot disagree.
+# "the cluster I meant" a checked fact rather than an assumption. That operator
+# endpoint is deliberately NOT reused as workload policy evidence: the selected
+# CNI's post-DNAT backends are separate, explicit --api-endpoint inputs.
 
 [[ -f "$KUBECONFIG_PATH" ]] || die 'the --kubeconfig path is not a regular file'
 [[ "$KUBE_SERVER" =~ ^https://([0-9]{1,3}(\.[0-9]{1,3}){3}):([0-9]+)$ ]] || \
   die '--server must be https://<IPv4 address>:<port>; a NetworkPolicy selects destinations by address and can express nothing else'
-APISERVER_ADDRESS="${BASH_REMATCH[1]}"
 server_port="${BASH_REMATCH[3]}"
 [[ "$server_port" == "$APISERVER_PORT" ]] || \
   die "--server names port ${server_port} but the reviewed API-server egress allow names ${APISERVER_PORT}; the controllers would be denied the endpoint this run targets"
@@ -651,38 +758,93 @@ kube() {
     --server "$KUBE_SERVER" "$@"
 }
 
-# --- The egress bundle, bound to this run's API server -----------------------
+# The endpoint-set rule below is valid only for the selected Calico dataplane.
+# Bind that assumption to the cluster before any mutation. The succeeding
+# in-Pod canary later proves the dataplane behavior, rather than treating this
+# identity probe as reachability evidence.
+cni_probe_error="${work}/cni-probe.err"
+cni_identity=''
+if ! cni_identity="$(kube -n kube-system get daemonset calico-node \
+    -o jsonpath='{.metadata.name}{"|"}{.metadata.labels.k8s-app}{"|"}{.spec.selector.matchLabels.k8s-app}' \
+    2>"$cni_probe_error")"; then
+  cat -- "$cni_probe_error" >&2
+  die 'could not prove the selected Calico CNI identity; no API destination semantics may be assumed'
+fi
+[[ ! -s "$cni_probe_error" ]] || {
+  cat -- "$cni_probe_error" >&2
+  die 'the selected-CNI identity probe produced unexpected diagnostic output'
+}
+[[ "$cni_identity" == 'calico-node|calico-node|calico-node' ]] || \
+  die "the selected-CNI identity is '${cni_identity}', not the reviewed Calico daemonset/selector contract"
+
+# --- The egress bundle, bound to the Calico post-DNAT API endpoint set -------
 #
-# The substitution lands only in the 0700 work directory: the address is host
-# inventory, it never enters the checkout, and the file is removed by the exit
-# trap. Nothing below ever prints this file. The replacement is index-based
-# rather than a regex substitution so the sentinel is matched literally.
+# Calico enforces workload egress after kube-proxy DNAT, so the standard
+# Kubernetes NetworkPolicy must name every API backend /32 on 6443 even though
+# the Pod calls the kubernetes Service on 443. The private set lands only in the
+# 0700 work directory and is never printed.
+
+endpoint_cidrs="${work}/api-endpoint-cidrs.txt"
+: >"$endpoint_cidrs"
+for endpoint in "${API_ENDPOINTS[@]}"; do
+  printf '%s/32\n' "$endpoint" >>"$endpoint_cidrs"
+done
 
 egress_bound="${work}/egress-bound.yaml"
-apiserver_cidr="${APISERVER_ADDRESS}/32"
-awk -v sentinel="$APISERVER_SENTINEL_CIDR" -v replacement="$apiserver_cidr" '
-  {
-    out = ""
-    rest = $0
-    while ((pos = index(rest, sentinel)) > 0) {
-      out = out substr(rest, 1, pos - 1) replacement
-      rest = substr(rest, pos + length(sentinel))
+awk -v sentinel="$APISERVER_SENTINEL_CIDR" -v endpoints="$endpoint_cidrs" '
+  $0 == "        - ipBlock:" {
+    header = $0
+    if ((getline following) > 0 && following == "            cidr: " sentinel) {
+      while ((getline cidr < endpoints) > 0) {
+        print header
+        print "            cidr: " cidr
+      }
+      close(endpoints)
+      replaced++
+      next
     }
-    print out rest
+    print header
+    print following
+    next
   }
-' "$egress_rendered" >"$egress_bound"
+  { print }
+  END { if (replaced != 1) { exit 42 } }
+' "$egress_rendered" >"$egress_bound" || \
+  die 'the reviewed API-server sentinel block could not be expanded exactly once'
 [[ "$(grep -cF -- "$APISERVER_SENTINEL_CIDR" "$egress_bound" || true)" -eq 0 ]] || \
   die 'the API-server sentinel survived substitution; the applied policy would grant nothing'
-[[ "$(grep -cF -- "$apiserver_cidr" "$egress_bound" || true)" -eq 1 ]] || \
-  die 'the substituted API-server destination does not appear exactly once'
-# The digest above binds the bytes as reviewed; this binds the bytes as APPLIED.
-# Between the two sits one awk substitution, and the only thing it is allowed to
-# have done is change the one sentinel line. Anything else -- a rewritten rule,
-# a dropped exclusion, an added port -- shows up here as a second differing line
-# even though the reviewed digest still matched.
-substitution_delta="$(diff -- "$egress_rendered" "$egress_bound" | grep -c '^[<>]' || true)"
-[[ "$substitution_delta" -eq 2 ]] || \
-  die "the API-server substitution changed ${substitution_delta} line(s) of the reviewed egress render; exactly one line may differ"
+for endpoint in "${API_ENDPOINTS[@]}"; do
+  [[ "$(grep -cF -- "            cidr: ${endpoint}/32" "$egress_bound" || true)" -eq 1 ]] || \
+    die 'the bound API endpoint set is not an exact one-to-one expansion of the private input'
+done
+
+# Reconstruct the reviewed sentinel form from the private expansion and demand
+# byte identity. This is stronger than counting diff lines and remains exact
+# when an HA cluster supplies more than one backend.
+egress_roundtrip="${work}/egress-roundtrip.yaml"
+awk -v sentinel="$APISERVER_SENTINEL_CIDR" -v endpoints="$endpoint_cidrs" '
+  BEGIN { while ((getline cidr < endpoints) > 0) { selected[cidr] = 1 } close(endpoints) }
+  $0 == "        - ipBlock:" {
+    header = $0
+    if ((getline following) <= 0) { print header; next }
+    cidr = following
+    sub(/^            cidr: /, "", cidr)
+    if (cidr in selected) {
+      if (!collapsed) {
+        print header
+        print "            cidr: " sentinel
+        collapsed = 1
+      }
+      next
+    }
+    print header
+    print following
+    next
+  }
+  { print }
+' "$egress_bound" >"$egress_roundtrip"
+cmp -s -- "$egress_rendered" "$egress_roundtrip" || \
+  die 'the API endpoint-set substitution changed bytes outside the one reviewed sentinel block'
 
 startup_egress="${work}/phase-2-startup-egress.yaml"
 public_egress="${work}/phase-4-public-egress.yaml"
@@ -711,65 +873,17 @@ if ! kube apply -f "$egress_bound" --dry-run=client --validate=strict \
   die 'client-side strict validation failed on the egress overlay'
 fi
 
-if [[ "$MODE" == '--open-public-egress' ]]; then
-  # The deferred step. It exists as a mode rather than a runbook paste so that
-  # "only after the controllers are healthy and idle" is a check, not an
-  # instruction. Each word of that claim is now one of the three probes below;
-  # before this round only the first existed, and "idle" was asserted in the
-  # message while nothing measured it.
-
-  # HEALTHY.
-  for deployment in "${CONTROLLER_DEPLOYMENTS[@]}"; do
-    readiness=''
-    readiness="$(kube -n "$INSTALL_NAMESPACE" get deployment "$deployment" \
-      -o jsonpath='{.status.readyReplicas}/{.status.replicas}' 2>/dev/null)" || \
-      die "could not read Deployment ${deployment}; the controllers are not installed"
-    [[ "$readiness" == '1/1' ]] || \
-      die "Deployment ${deployment} reports ${readiness}, not 1/1; public egress stays shut until every controller is healthy and idle"
-  done
-
-  # IDLE. Public HTTPS is the one flow that lets a controller reach the outside
-  # world, so it must not be opened while anything could already be reconciling.
-  # A Flux custom resource anywhere in the cluster means the controllers are not
-  # idle, whatever their Deployment status says.
-  for crd_name in "${FLUX_CRDS[@]}"; do
-    live_custom_resources=''
-    live_custom_resources="$(kube get "$crd_name" --all-namespaces -o name 2>/dev/null \
-      | grep -c '.' || true)"
-    [[ "$live_custom_resources" -eq 0 ]] || \
-      die "the cluster carries ${live_custom_resources} ${crd_name} object(s); the controllers are reconciling, not idle, and public egress stays shut"
-  done
-
-  # THE CLOSURE THIS EXTENDS. Existence by name proved only that four objects
-  # with the right names were there -- it could not tell the reviewed API-server
-  # /32 from one widened to a whole subnet. Re-applying the same reviewed bytes
-  # as a server dry run answers the shape question with the API server's own
-  # comparison: every startup policy must come back `unchanged`. A live policy
-  # that drifted from the reviewed render reports `configured`, and this refuses.
-  for policy in "${STARTUP_EGRESS_POLICIES[@]}"; do
-    kube -n "$INSTALL_NAMESPACE" get networkpolicy "$policy" -o name >/dev/null 2>&1 || \
-      die "the startup egress policy ${policy} is not in the cluster; the namespace closure is not in the state this step extends"
-  done
-  startup_shape="${work}/startup-shape.txt"
-  if ! kube apply -f "$startup_egress" --dry-run=server >"$startup_shape" 2>&1; then
-    cat -- "$startup_shape" >&2
-    die 'could not compare the live startup egress policies with the reviewed render'
-  fi
-  live_unchanged="$(grep -cE '^networkpolicy\.networking\.k8s\.io/[a-z0-9-]+ unchanged( \((server )?dry run\))?$' \
-    "$startup_shape" || true)"
-  live_lines="$(grep -cE '.' "$startup_shape" || true)"
-  if [[ "$live_unchanged" -ne "$EXPECTED_STARTUP_POLICIES" || "$live_lines" -ne "$EXPECTED_STARTUP_POLICIES" ]]; then
-    cat -- "$startup_shape" >&2
-    die "the live startup egress policies are not the reviewed shape (${live_unchanged} of ${EXPECTED_STARTUP_POLICIES} unchanged across ${live_lines} line(s)); public egress stays shut over a closure nobody reviewed"
-  fi
-
-  kube apply -f "$public_egress" >"${work}/apply-public.txt" 2>&1 || {
-    cat -- "${work}/apply-public.txt" >&2
-    die 'the public-HTTPS allow failed to apply'
-  }
-  note 'public HTTPS allowed; the flux-system closure is now complete'
-  exit 0
+canary_client_dry_run="${work}/canary-dry-run-client.txt"
+if ! kube apply -f "$canary_rendered" --dry-run=client --validate=strict \
+    >"$canary_client_dry_run" 2>&1; then
+  cat -- "$canary_client_dry_run" >&2
+  die 'client-side strict validation failed on the API canary'
 fi
+[[ "$(grep -cE "^pod/${CANARY_NAME} created( \(dry run\))?$" "$canary_client_dry_run" || true)" -eq 1 \
+   && "$(grep -cE '.' "$canary_client_dry_run" || true)" -eq 1 ]] || {
+  cat -- "$canary_client_dry_run" >&2
+  die 'client validation did not report exactly the reviewed API canary Pod'
+}
 
 # --- Fail-closed pre-apply gate ---------------------------------------------
 #
@@ -784,7 +898,7 @@ fi
 
 # (1) The bytes are valid to apply at all, independent of any namespace.
 # Client-side strict validation rejects unknown/duplicated fields and needs no
-# flux-system to exist, so it validates all 25 objects even on a fresh cluster.
+# flux-system to exist, so it validates all 24 objects even on a fresh cluster.
 client_dry_run="${work}/dry-run-client.txt"
 if ! kube apply -f "$rendered" --dry-run=client --validate=strict \
     >"$client_dry_run" 2>&1; then
@@ -803,7 +917,7 @@ client_objects="$(grep -cE "$INVENTORY_MUTATION_LINE" "$client_dry_run" || true)
 ns_state="${work}/namespace-state.txt"
 if kube get namespace "$INSTALL_NAMESPACE" -o name >"$ns_state" 2>&1; then
   cluster_state='existing'
-elif grep -q 'not found' "$ns_state"; then
+elif grep -Eq '^Error from server \(NotFound\): (namespaces "flux-system"|namespace/flux-system) not found$' "$ns_state"; then
   cluster_state='fresh'
 else
   cat -- "$ns_state" >&2
@@ -849,7 +963,7 @@ probe_labels() {
     printf '%s' "$labels"
     return 0
   fi
-  if grep -q 'NotFound\|not found' "$probe_err"; then
+  if grep -Eq '^Error from server \(NotFound\): .+ not found$' "$probe_err"; then
     printf 'ABSENT'
     return 0
   fi
@@ -873,9 +987,27 @@ assert_not_foreign() {
     die "${kind} ${name} already exists and is not owned by this install; refusing to adopt, reconfigure, or roll back a foreign object"
 }
 
+canary_prestate="$(probe_labels pod "$CANARY_NAME" namespaced)"
+[[ "$canary_prestate" == 'ABSENT' ]] || \
+  die "Pod ${CANARY_NAME} already exists; the ephemeral proof is absent-only and never adopts or deletes pre-existing state"
+
 if [[ "$cluster_state" == 'fresh' ]]; then
-  fluxcd_crds="$(kube get customresourcedefinition -o name 2>/dev/null \
-    | grep -c '\.fluxcd\.io$' || true)"
+  crd_inventory="${work}/crd-inventory.txt"
+  crd_inventory_error="${work}/crd-inventory.err"
+  if ! kube get customresourcedefinition -o name >"$crd_inventory" 2>"$crd_inventory_error"; then
+    cat -- "$crd_inventory_error" >&2
+    die 'could not prove the fresh cluster has no Flux CRD; an API/RBAC failure is not absence'
+  fi
+  [[ ! -s "$crd_inventory_error" ]] || {
+    cat -- "$crd_inventory_error" >&2
+    die 'the CRD absence probe produced unexpected diagnostic output'
+  }
+  while IFS= read -r crd_entry; do
+    [[ -n "$crd_entry" ]] || continue
+    [[ "$crd_entry" =~ ^customresourcedefinition\.apiextensions\.k8s\.io/[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]] || \
+      die 'the CRD absence probe returned malformed output; absence was not proven'
+  done <"$crd_inventory"
+  fluxcd_crds="$(grep -c '\.fluxcd\.io$' "$crd_inventory" || true)"
   [[ "$fluxcd_crds" -eq 0 ]] || \
     die "flux-system is absent but ${fluxcd_crds} fluxcd CRD(s) already exist"
   # The 11 namespaced objects need no probe on this path and cannot get one: a
@@ -941,7 +1073,7 @@ fi
 
 if [[ "$MODE" == '--plan' ]]; then
   note 'PLAN only; no mutation attempted'
-  note "apply order would be: ${EXPECTED_PREREQUISITES} prerequisites, then ${EXPECTED_STARTUP_POLICIES} startup egress allows, then ${EXPECTED_WORKLOADS} controller Deployments"
+  note "apply order would be: ${EXPECTED_PREREQUISITES} prerequisites, ${EXPECTED_STARTUP_POLICIES} startup egress allows, one create/prove/delete API canary, then ${EXPECTED_WORKLOADS} controller Deployments"
   exit 0
 fi
 
@@ -1039,8 +1171,8 @@ harvest_ledger() {
 # Roll back exactly what this attempt created, newest first, and then PROVE the
 # absence rather than trusting the delete's exit status. `kubectl delete
 # namespace flux-system` -- the runbook's old whole-install undo -- cannot touch
-# the 13 cluster-scoped objects, so the ledger is the only thing that makes the
-# undo complete.
+# the 12 non-namespaced RBAC/CRD objects, so the ledger is the only thing that
+# makes the undo complete.
 rollback() {
   local -a created=()
   local entry=''
@@ -1104,6 +1236,182 @@ apply_phase() {
   fi
 }
 
+# Create one absent-only object under the same response-loss-safe ledger used
+# by the install. The manifest enters the ledger before the request: if the API
+# server persists it but the response is lost, rollback rediscovers it live.
+create_exact_object() {
+  local label="$1"
+  local manifest="$2"
+  local expected_entry="$3"
+  local failure_prefix="${4:-${label} create failed}"
+  local output=''
+  output="${work}/apply-$(basename -- "$manifest" .yaml).txt"
+  local rc=0
+  APPLIED_MANIFESTS+=("$manifest")
+  kube create -f "$manifest" >"$output" 2>&1 || rc=$?
+  if ((rc != 0)); then
+    cat -- "$output" >&2
+    transaction_failed "${failure_prefix} (kubectl exit ${rc}); the response may have been lost after persistence"
+  fi
+  if [[ "$(grep -cE '.' "$output" || true)" -ne 1 ]] || \
+      ! grep -Fxq -- "${expected_entry} created" "$output"; then
+    cat -- "$output" >&2
+    transaction_failed "${label} create did not report exactly ${expected_entry} created"
+  fi
+}
+
+prove_api_path_then_remove_canary() {
+  local canary_entry="pod/${CANARY_NAME}"
+  local wait_output="${work}/canary-wait.txt"
+  local phase_error="${work}/canary-phase.err"
+  local delete_output="${work}/canary-delete.txt"
+  local delete_rc=0
+  local phase=''
+  local after=''
+
+  note 'phase api-canary: proving DNS, TLS, Service routing, ServiceAccount authentication and API discovery'
+  create_exact_object 'API canary' "$canary_rendered" "$canary_entry" \
+    'the in-Pod Kubernetes Service/API canary did not succeed; API canary create failed'
+  if ! kube -n "$INSTALL_NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
+      "$canary_entry" --timeout=60s >"$wait_output" 2>&1; then
+    cat -- "$wait_output" >&2
+    transaction_failed 'the in-Pod Kubernetes Service/API canary did not succeed; no controller Deployment was created'
+  fi
+  if ! phase="$(kube -n "$INSTALL_NAMESPACE" get "$canary_entry" \
+      -o jsonpath='{.status.phase}' 2>"$phase_error")"; then
+    cat -- "$phase_error" >&2
+    transaction_failed 'the API canary completed but its exact terminal state could not be proven'
+  fi
+  [[ ! -s "$phase_error" && "$phase" == 'Succeeded' ]] || {
+    cat -- "$phase_error" >&2
+    transaction_failed "the API canary terminal phase is '${phase}', not Succeeded"
+  }
+
+  kube -n "$INSTALL_NAMESPACE" delete "$canary_entry" --wait=true \
+    >"$delete_output" 2>&1 || delete_rc=$?
+  after="$(probe_labels pod "$CANARY_NAME" namespaced)"
+  if [[ "$after" != 'ABSENT' ]]; then
+    cat -- "$delete_output" >&2
+    transaction_failed 'the API canary could not be proven absent; controller creation remains blocked'
+  fi
+  if ((delete_rc != 0)); then
+    warn 'API canary delete response was lost, but the independent absence probe proved cleanup'
+  fi
+  note 'phase api-canary: authenticated in-cluster API path proved; ephemeral Pod is absent'
+}
+
+deployment_is_fully_ready() {
+  local deployment="$1"
+  local status_error="${work}/readiness-${deployment}.err"
+  local status=''
+  local generation='' desired='' observed='' current='' updated=''
+  local available='' ready='' unavailable='' marker='' extra=''
+  if ! status="$(kube -n "$INSTALL_NAMESPACE" get deployment "$deployment" \
+      -o jsonpath='{.metadata.generation}{"|"}{.spec.replicas}{"|"}{.status.observedGeneration}{"|"}{.status.replicas}{"|"}{.status.updatedReplicas}{"|"}{.status.availableReplicas}{"|"}{.status.readyReplicas}{"|"}{.status.unavailableReplicas}{"|END"}' \
+      2>"$status_error")"; then
+    cat -- "$status_error" >&2
+    die "could not read Deployment ${deployment}; the controllers are not installed"
+  fi
+  [[ ! -s "$status_error" ]] || {
+    cat -- "$status_error" >&2
+    die "Deployment ${deployment} readiness probe produced unexpected diagnostic output"
+  }
+  IFS='|' read -r generation desired observed current updated available ready unavailable marker extra <<<"$status"
+  [[ -z "$extra" && "$marker" == 'END' ]] || \
+    die "Deployment ${deployment} returned malformed readiness output; public egress stays shut"
+  for value in "$generation" "$desired" "$observed" "$current" "$updated" "$available" "$ready"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || \
+      die "Deployment ${deployment} returned malformed readiness output; public egress stays shut"
+  done
+  [[ -z "$unavailable" || "$unavailable" =~ ^[0-9]+$ ]] || \
+    die "Deployment ${deployment} returned malformed unavailable-replica state; public egress stays shut"
+  unavailable="${unavailable:-0}"
+  [[ "$desired" -gt 0 && "$generation" -eq "$observed" \
+     && "$current" -eq "$desired" && "$updated" -eq "$desired" \
+     && "$available" -eq "$desired" && "$ready" -eq "$desired" \
+     && "$unavailable" -eq 0 ]] || \
+    die "Deployment ${deployment} is not fully current (${status}); public egress stays shut until every positive desired replica is observed, current, updated, available and ready with none unavailable"
+}
+
+if [[ "$MODE" == '--open-public-egress' ]]; then
+  [[ "$cluster_state" == 'existing' ]] || \
+    die 'flux-system is absent; public egress cannot be opened before the controller install exists'
+
+  # HEALTHY: replica count is capacity, not a security constant. Accept N/N for
+  # any positive N only when the controller has observed the current generation
+  # and every desired replica is current, updated, available and ready.
+  for deployment in "${CONTROLLER_DEPLOYMENTS[@]}"; do
+    deployment_is_fully_ready "$deployment"
+  done
+
+  # IDLE: preserve kubectl's status separately from its bytes. An API, TLS,
+  # timeout or RBAC failure is never converted into a zero-resource result.
+  for crd_name in "${FLUX_CRDS[@]}"; do
+    idle_key="${crd_name//./_}"
+    idle_output="${work}/idle-${idle_key}.txt"
+    idle_error="${work}/idle-${idle_key}.err"
+    if ! kube get "$crd_name" --all-namespaces -o name >"$idle_output" 2>"$idle_error"; then
+      cat -- "$idle_error" >&2
+      die "could not prove ${crd_name} is empty; API/RBAC/timeout failure keeps public egress shut"
+    fi
+    [[ ! -s "$idle_error" ]] || {
+      cat -- "$idle_error" >&2
+      die "the ${crd_name} idle probe produced unexpected diagnostic output; public egress stays shut"
+    }
+    live_custom_resources=0
+    while IFS= read -r resource_line; do
+      [[ -n "$resource_line" ]] || continue
+      resource_type="${resource_line%%/*}"
+      resource_name="${resource_line#*/}"
+      [[ "$resource_type" == "$crd_name" && "$resource_name" != "$resource_line" \
+         && "$resource_name" =~ ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$ ]] || \
+        die "the ${crd_name} idle probe returned malformed output; public egress stays shut"
+      ((live_custom_resources += 1))
+    done <"$idle_output"
+    [[ "$live_custom_resources" -eq 0 ]] || \
+      die "the cluster carries ${live_custom_resources} ${crd_name} object(s); the controllers are reconciling, not idle, and public egress stays shut"
+  done
+
+  # Compare the live startup closure with the exact private endpoint-set render.
+  for policy in "${STARTUP_EGRESS_POLICIES[@]}"; do
+    kube -n "$INSTALL_NAMESPACE" get networkpolicy "$policy" -o name >/dev/null 2>&1 || \
+      die "the startup egress policy ${policy} is not in the cluster; the namespace closure is not in the state this step extends"
+  done
+  startup_shape="${work}/startup-shape.txt"
+  if ! kube apply -f "$startup_egress" --dry-run=server >"$startup_shape" 2>&1; then
+    cat -- "$startup_shape" >&2
+    die 'could not compare the live startup egress policies with the reviewed render'
+  fi
+  live_unchanged="$(grep -cE '^networkpolicy\.networking\.k8s\.io/[a-z0-9-]+ unchanged( \((server )?dry run\))?$' "$startup_shape" || true)"
+  live_lines="$(grep -cE '.' "$startup_shape" || true)"
+  if [[ "$live_unchanged" -ne "$EXPECTED_STARTUP_POLICIES" || "$live_lines" -ne "$EXPECTED_STARTUP_POLICIES" ]]; then
+    cat -- "$startup_shape" >&2
+    die "the live startup egress policies are not the reviewed shape (${live_unchanged} of ${EXPECTED_STARTUP_POLICIES} unchanged across ${live_lines} line(s)); public egress stays shut over a closure nobody reviewed"
+  fi
+
+  public_prestate="$(probe_labels networkpolicy "$PUBLIC_EGRESS_POLICY" namespaced)"
+  [[ "$public_prestate" == 'ABSENT' ]] || \
+    die "NetworkPolicy ${PUBLIC_EGRESS_POLICY} already exists; this absent-only transaction never adopts, reconciles, or deletes pre-existing state"
+
+  TRANSACTION_OPEN='yes'
+  create_exact_object 'public-HTTPS NetworkPolicy' "$public_egress" \
+    "networkpolicy.networking.k8s.io/${PUBLIC_EGRESS_POLICY}"
+  public_poststate="${work}/public-poststate.txt"
+  if ! kube apply -f "$public_egress" --dry-run=server >"$public_poststate" 2>&1; then
+    cat -- "$public_poststate" >&2
+    transaction_failed 'the public-HTTPS policy was created but its exact poststate could not be proven'
+  fi
+  [[ "$(grep -cE '.' "$public_poststate" || true)" -eq 1 \
+     && "$(grep -cE "^networkpolicy\.networking\.k8s\.io/${PUBLIC_EGRESS_POLICY} unchanged( \((server )?dry run\))?$" "$public_poststate" || true)" -eq 1 ]] || {
+    cat -- "$public_poststate" >&2
+    transaction_failed 'the public-HTTPS policy poststate differs from the exact reviewed object'
+  }
+  TRANSACTION_COMMITTED='yes'
+  TRANSACTION_OPEN='no'
+  note 'public HTTPS allowed; the absent-only transaction committed the exact reviewed policy'
+  exit 0
+fi
+
 # From here an interrupt has something to undo, and every function the rollback
 # path needs is defined. Set as late as possible and as one statement, so a
 # signal can never call into a half-built transaction.
@@ -1116,10 +1424,15 @@ apply_phase prerequisites "$prerequisites" "$EXPECTED_PREREQUISITES"
 #     namespace denies by default and permits exactly DNS, the intra-namespace
 #     artifact fetch, and the API server.
 apply_phase startup-egress "$startup_egress" "$EXPECTED_STARTUP_POLICIES"
+# 2b — prove the selected-CNI Service/API path from the controller boundary,
+#      then remove and absence-prove the canary before any controller exists.
+prove_api_path_then_remove_canary
 # 3 — only now the controllers, which come up into a namespace where the flows
 #     they need to elect a leader and sync a cache already exist.
 apply_phase workloads "$workloads" "$EXPECTED_WORKLOADS"
+TRANSACTION_COMMITTED='yes'
+TRANSACTION_OPEN='no'
 
 note 'applied; Flux is installed and inert'
 note 'the controllers start with DNS, the intra-namespace artifact fetch, and the API server allowed; public HTTPS is still denied'
-note 'verify 3/3 controllers 1/1 and no Flux custom resource, then run --open-public-egress (docs/runbooks/flux-install.md)'
+note 'verify every positive desired controller replica is current/updated/available/ready with none unavailable and no Flux custom resource, then run --open-public-egress (docs/runbooks/flux-install.md)'

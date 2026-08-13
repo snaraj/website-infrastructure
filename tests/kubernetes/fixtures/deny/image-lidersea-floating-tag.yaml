@@ -1,0 +1,30 @@
+# A floating alias on the lidersea publisher, in the lidersea namespace.
+# The naranjo twin of this fixture cannot exercise this rule: each site's
+# canonical-repository rule matches only its own namespace.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-lidersea-floating-tag
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-lidersea-floating-tag
+      image: ghcr.io/snaraj/lidersea-com:latest@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

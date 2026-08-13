@@ -15,6 +15,15 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[1]
 ZERO_DIGEST = "sha256:" + ("0" * 64)
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+# The human half of the release identity (ADR 0016: the version tag IS the
+# release). It travels WITH the digest, never instead of it: the digest stays
+# the only thing that resolves, and the two are written together by one
+# promotion transaction that has proved the registry maps this exact tag to
+# this exact digest. ``v0.0.0`` is the tag's fail-closed sentinel, the exact
+# counterpart of the all-zero digest, so the classifier below reads one
+# three-field state rather than a pair plus an unchecked decoration.
+ZERO_TAG = "v0.0.0"
+RELEASE_TAG_RE = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 KEY_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 # Canonical manifests contain relative chart/reconciliation paths beginning
 # with ``./``.  Keep the scalar grammar deliberately narrow, but permit that
@@ -24,6 +33,10 @@ SCALAR_RE = re.compile(r"[A-Za-z0-9./][A-Za-z0-9_./:@+-]*\Z")
 TOKEN_REVISION_RE = re.compile(
     r"(?:not-configured|UNRESOLVED|rev-[a-z0-9][a-z0-9._-]{0,62})\Z"
 )
+# One public connector per website (ADR 0015), each with its OWN rotation
+# revision so one Tunnel rotates without disturbing the other. The order is the
+# canonical order of the release values block.
+PUBLIC_CONNECTOR_SITES = ("naranjo-online", "lidersea-com")
 MAX_RELEASE_YAML_BYTES = 65536
 
 RELEASE_CONTRACTS = {
@@ -33,8 +46,12 @@ RELEASE_CONTRACTS = {
         "namespace": "naranjo-online",
         "repository": "ghcr.io/snaraj/naranjo-online",
         "readiness": "suspended-until-lock-build-signature-and-digest",
-        "chart": "./chart",
-        "source": "naranjo-online-source",
+        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        # so this identity has no in-repository chart path and no Git chart
+        # source; ``chart_ref`` is the OCIRepository beside its release.
+        "chart": None,
+        "source": None,
+        "chart_ref": "naranjo-online-chart",
         "parent_path": "./kubernetes/websites/naranjo-online",
         "parent_service_account": "naranjo-online-reconciler",
         "parent_dependencies": (
@@ -49,8 +66,12 @@ RELEASE_CONTRACTS = {
         "namespace": "lidersea-com",
         "repository": "ghcr.io/snaraj/lidersea-com",
         "readiness": "suspended-until-capacity-lock-build-signature-and-digest",
-        "chart": "./chart",
-        "source": "lidersea-com-source",
+        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        # so this identity has no in-repository chart path and no Git chart
+        # source; ``chart_ref`` is the OCIRepository beside its release.
+        "chart": None,
+        "source": None,
+        "chart_ref": "lidersea-com-chart",
         "parent_path": "./kubernetes/websites/lidersea-com",
         "parent_service_account": "lidersea-com-reconciler",
         "parent_dependencies": (
@@ -65,8 +86,12 @@ RELEASE_CONTRACTS = {
         "namespace": "cloudflare-public",
         "repository": None,
         "readiness": "suspended-until-sops-token-and-cloudflare-plan",
+        # The connector chart is this repository's own, so it keeps the
+        # anonymous Git chart source; it has no published release identity of
+        # its own and therefore no OCI chart reference.
         "chart": "./kubernetes/platform/cloudflare-public/chart",
         "source": "cloudflare-public-source",
+        "chart_ref": None,
         "parent_path": "./kubernetes/platform/cloudflare-public/release",
         "parent_service_account": "platform-services-reconciler",
         "parent_dependencies": (
@@ -397,16 +422,36 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
                 "    mode: enabled",
             ]
         )
+    # Two mutually exclusive chart bindings, one per release family. A site
+    # release must reference its own signature-verified OCIRepository and must
+    # NOT carry an inline ``chart:`` block; the connector release must keep the
+    # in-repository Git chart and must NOT carry a ``chartRef``. Because this
+    # allowlist is exhaustive and ordered, either substitution — including one
+    # site pointing at the other site's chart source — is rejected here before
+    # any downstream policy sees it.
+    if contract["chart_ref"] is not None:
+        common.extend(
+            [
+                "  chartRef:",
+                "    kind: OCIRepository",
+                "    name: {}".format(contract["chart_ref"]),
+            ]
+        )
+    else:
+        common.extend(
+            [
+                "  chart:",
+                "    spec:",
+                "      chart: {}".format(contract["chart"]),
+                "      reconcileStrategy: Revision",
+                "      sourceRef:",
+                "        kind: GitRepository",
+                "        name: {}".format(contract["source"]),
+                "      interval: 10m0s",
+            ]
+        )
     common.extend(
         [
-            "  chart:",
-            "    spec:",
-            "      chart: {}".format(contract["chart"]),
-            "      reconcileStrategy: Revision",
-            "      sourceRef:",
-            "        kind: GitRepository",
-            "        name: {}".format(contract["source"]),
-            "      interval: 10m0s",
             "  install:",
             "    remediation:",
             "      retries: 0",
@@ -424,18 +469,25 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
                 re.compile(r"    deploymentReady: (?:true|false)\Z"),
                 "    image:",
                 "      repository: {}".format(contract["repository"]),
+                # Ordered exactly: tag then digest, the same order the
+                # reference renders them in. The allowlist is exhaustive, so a
+                # release that omits either line, states them twice, or swaps
+                # in a floating alias is rejected before any value is read.
+                re.compile(r"      tag: " + RELEASE_TAG_RE.pattern),
                 re.compile(r"      digest: sha256:[0-9a-f]{64}\Z"),
             ]
         )
     else:
-        common.extend(
-            [
-                "    tunnel:",
-                re.compile(
-                    r"      tokenRevision: " + TOKEN_REVISION_RE.pattern
-                ),
-            ]
-        )
+        common.append("    connectors:")
+        for site in PUBLIC_CONNECTOR_SITES:
+            common.extend(
+                [
+                    "      {}:".format(site),
+                    re.compile(
+                        r"        tokenRevision: " + TOKEN_REVISION_RE.pattern
+                    ),
+                ]
+            )
     return common
 
 
@@ -519,14 +571,20 @@ def load_helm_release(name: str, root: Path = ROOT) -> HelmReleaseState:
         digest = values.get(("image", "digest"))
         if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
             raise CanonicalYamlError("release image digest is not canonical")
+        tag = values.get(("image", "tag"))
+        if not isinstance(tag, str) or not RELEASE_TAG_RE.fullmatch(tag):
+            raise CanonicalYamlError("release image tag is not canonical")
         _bool_scalar(str(values.get(("deploymentReady",), "")))
     else:
-        token_revision = values.get(("tunnel", "tokenRevision"))
-        if (
-            not isinstance(token_revision, str)
-            or TOKEN_REVISION_RE.fullmatch(token_revision) is None
-        ):
-            raise CanonicalYamlError("tunnel token revision is not canonical")
+        # Every connector carries its own canonical revision; a missing or
+        # malformed revision on EITHER connector fails closed.
+        for site in PUBLIC_CONNECTOR_SITES:
+            token_revision = values.get(("connectors", site, "tokenRevision"))
+            if (
+                not isinstance(token_revision, str)
+                or TOKEN_REVISION_RE.fullmatch(token_revision) is None
+            ):
+                raise CanonicalYamlError("tunnel token revision is not canonical")
     return HelmReleaseState(suspended, values, values_text)
 
 
@@ -550,22 +608,37 @@ def site_phase(
     name: str,
     root: Path = ROOT,
     expected_digest: str | None = None,
+    expected_tag: str | None = None,
 ) -> str:
-    """Return initial/promoted only when both reconciliation layers are suspended."""
+    """Return initial/promoted only when both reconciliation layers are suspended.
+
+    The phase is read from THREE fields, not two. Readiness and the digest were
+    always the pair; the release tag joins them because it is now part of what
+    the workload reference states, and a tag that advanced while the digest did
+    not (or the reverse) would put a release name on bytes that never carried
+    it. Every half-advanced combination lands in the same fail-closed refusal
+    the mixed readiness/digest state already produced.
+    """
 
     release = load_helm_release(name, root)
     if not release.suspended or not load_parent_suspension(name, root):
         raise CanonicalYamlError("both reconciliation layers must be suspended")
     readiness = _bool_scalar(str(release.values[("deploymentReady",)]))
     digest = str(release.values[("image", "digest")])
+    tag = str(release.values[("image", "tag")])
     if expected_digest is not None:
         if not DIGEST_RE.fullmatch(expected_digest) or digest != expected_digest:
             raise CanonicalYamlError("release digest does not match the expected digest")
-    if not readiness and digest == ZERO_DIGEST:
+    if expected_tag is not None:
+        if not RELEASE_TAG_RE.fullmatch(expected_tag) or tag != expected_tag:
+            raise CanonicalYamlError("release tag does not match the expected tag")
+    if not readiness and digest == ZERO_DIGEST and tag == ZERO_TAG:
         return "initial"
-    if readiness and digest != ZERO_DIGEST:
+    if readiness and digest != ZERO_DIGEST and tag != ZERO_TAG:
         return "promoted"
-    raise CanonicalYamlError("release readiness and digest form an unsafe mixed state")
+    raise CanonicalYamlError(
+        "release readiness, tag and digest form an unsafe mixed state"
+    )
 
 
 def all_helm_releases_suspended(root: Path = ROOT) -> bool:
@@ -588,6 +661,10 @@ def main(argv: list[str] | None = None) -> int:
         "--expect-digest",
         help="require the exact authoritative image digest while reading the phase",
     )
+    phase.add_argument(
+        "--expect-tag",
+        help="require the exact authoritative release tag while reading the phase",
+    )
     suspended = subparsers.add_parser("all-helm-suspended")
     suspended.set_defaults(command="all-helm-suspended")
     emit = subparsers.add_parser("emit-values")
@@ -597,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = args.root.resolve()
         if args.command == "site-phase":
-            print(site_phase(args.site, root, args.expect_digest))
+            print(site_phase(args.site, root, args.expect_digest, args.expect_tag))
         elif args.command == "all-helm-suspended":
             if not all_helm_releases_suspended(root):
                 return 1

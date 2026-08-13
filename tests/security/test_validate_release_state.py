@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE = load_script("validate_release_state.py")
 
 NONZERO_DIGEST = "sha256:" + ("a" * 64)
+NONZERO_TAG = "v1.2.3"
 SITE_DOMAINS = {
     "naranjo-online": "naranjo.online",
     "lidersea-com": "lidersea.com",
@@ -43,6 +44,7 @@ def website_release_text(
     suspended=True,
     ready=False,
     digest=MODULE.ZERO_DIGEST,
+    tag=MODULE.ZERO_TAG,
     repository=None,
     extra_values="",
 ):
@@ -65,14 +67,9 @@ def website_release_text(
         "  serviceAccountName: helm-reconciler\n"
         "  driftDetection:\n"
         "    mode: enabled\n"
-        "  chart:\n"
-        "    spec:\n"
-        "      chart: ./chart\n"
-        "      reconcileStrategy: Revision\n"
-        "      sourceRef:\n"
-        "        kind: GitRepository\n"
-        "        name: {name}-source\n"
-        "      interval: 10m0s\n"
+        "  chartRef:\n"
+        "    kind: OCIRepository\n"
+        "    name: {name}-chart\n"
         "  install:\n"
         "    remediation:\n"
         "      retries: 0\n"
@@ -85,6 +82,7 @@ def website_release_text(
         "    deploymentReady: {ready}\n"
         "    image:\n"
         "      repository: {repository}\n"
+        "      tag: {tag}\n"
         "      digest: {digest}\n"
         "{extra_values}"
     ).format(
@@ -94,6 +92,7 @@ def website_release_text(
         suspended=str(suspended).lower(),
         ready=str(ready).lower(),
         repository=repository,
+        tag=tag,
         digest=digest,
         extra_values=extra_values,
     )
@@ -133,11 +132,13 @@ def cloudflare_release_text(*, suspended=True, token_revision="not-configured"):
         "      retries: 0\n"
         "      strategy: rollback\n"
         "  values:\n"
-        "    tunnel:\n"
-        "      tokenRevision: {token_revision}\n"
+        "    connectors:\n"
+        + "".join(
+            "      {}:\n        tokenRevision: {}\n".format(site, token_revision)
+            for site in MODULE.PUBLIC_CONNECTOR_SITES
+        )
     ).format(
         suspended=str(suspended).lower(),
-        token_revision=token_revision,
     )
 
 
@@ -236,6 +237,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                     "naranjo-online",
                     ready=True,
                     digest=NONZERO_DIGEST,
+                    tag=NONZERO_TAG,
                 ),
             )
             self.assertEqual(MODULE.site_phase("naranjo-online", root), "promoted")
@@ -253,18 +255,52 @@ class StrictReleaseStateTests(unittest.TestCase):
                     root,
                     "sha256:" + ("b" * 64),
                 )
+            # The expected-tag guard is the tag's exact counterpart: a caller
+            # that names the release it verified must find that release here.
+            self.assertEqual(
+                MODULE.site_phase("naranjo-online", root, None, NONZERO_TAG),
+                "promoted",
+            )
+            for wrong_tag in ("v9.9.9", "latest", "0.1.9", MODULE.ZERO_TAG):
+                with self.subTest(expected_tag=wrong_tag):
+                    with self.assertRaises(MODULE.CanonicalYamlError):
+                        MODULE.site_phase("naranjo-online", root, None, wrong_tag)
 
-            for ready, digest in (
-                (False, NONZERO_DIGEST),
-                (True, MODULE.ZERO_DIGEST),
+            # Every half-advanced combination of the three-field identity is
+            # an unsafe mixed state, including the two that move the release
+            # NAME and the release BYTES apart.
+            for ready, digest, tag in (
+                (False, NONZERO_DIGEST, NONZERO_TAG),
+                (True, MODULE.ZERO_DIGEST, MODULE.ZERO_TAG),
+                (True, NONZERO_DIGEST, MODULE.ZERO_TAG),
+                (True, MODULE.ZERO_DIGEST, NONZERO_TAG),
+                (False, MODULE.ZERO_DIGEST, NONZERO_TAG),
+                (False, NONZERO_DIGEST, MODULE.ZERO_TAG),
             ):
-                with self.subTest(ready=ready, digest=digest):
+                with self.subTest(ready=ready, digest=digest, tag=tag):
                     write_lf(
                         release_path(root, "naranjo-online"),
                         website_release_text(
                             "naranjo-online",
                             ready=ready,
                             digest=digest,
+                            tag=tag,
+                        ),
+                    )
+                    with self.assertRaises(MODULE.CanonicalYamlError):
+                        MODULE.site_phase("naranjo-online", root)
+
+            # A tag outside the release grammar is refused by the closed line
+            # allowlist before any value is interpreted.
+            for bad_tag in ("latest", "0.1.9", "v0.1", "vmain", "v01.2.3"):
+                with self.subTest(bad_tag=bad_tag):
+                    write_lf(
+                        release_path(root, "naranjo-online"),
+                        website_release_text(
+                            "naranjo-online",
+                            ready=True,
+                            digest=NONZERO_DIGEST,
+                            tag=bad_tag,
                         ),
                     )
                     with self.assertRaises(MODULE.CanonicalYamlError):
@@ -434,22 +470,45 @@ class StrictReleaseStateTests(unittest.TestCase):
                     b"  serviceAccountName: default\n",
                     1,
                 ),
-                # Cross-site chart paths are structurally identical now
-                # (./chart); the equivalent modern bypass is pointing one
-                # site's release at the OTHER site's Flux source.
-                "cross-site-source": canonical.replace(
-                    b"        name: naranjo-online-source\n",
-                    b"        name: lidersea-com-source\n",
+                # Since site charts arrive as published OCI artifacts, the
+                # cross-site bypass is pointing one site's release at the
+                # OTHER site's signature-verified chart source — the two
+                # identity tuples must never couple.
+                "cross-site-chart-source": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: lidersea-com-chart\n",
                     1,
                 ),
-                "source-kind": canonical.replace(
-                    b"        kind: GitRepository\n",
-                    b"        kind: OCIRepository\n",
+                "chart-source-kind": canonical.replace(
+                    b"    kind: OCIRepository\n",
+                    b"    kind: HelmChart\n",
                     1,
                 ),
-                "source-name": canonical.replace(
-                    b"        name: naranjo-online-source\n",
-                    b"        name: cloudflare-public-source\n",
+                "chart-source-name": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: cloudflare-public-source\n",
+                    1,
+                ),
+                # An explicit chartRef namespace is the only field that could
+                # reach another tenant's chart artifact at all.
+                "chart-source-namespace": canonical.replace(
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: naranjo-online-chart\n    namespace: lidersea-com\n",
+                    1,
+                ),
+                # Reintroducing a Git-tracked inline chart beside the published
+                # source would restore branch-head deployment.
+                "inline-chart-reintroduced": canonical.replace(
+                    b"  chartRef:\n    kind: OCIRepository\n"
+                    b"    name: naranjo-online-chart\n",
+                    b"  chart:\n"
+                    b"    spec:\n"
+                    b"      chart: ./chart\n"
+                    b"      reconcileStrategy: Revision\n"
+                    b"      sourceRef:\n"
+                    b"        kind: GitRepository\n"
+                    b"        name: naranjo-online-source\n"
+                    b"      interval: 10m0s\n",
                     1,
                 ),
                 "values-from": canonical.replace(
@@ -458,13 +517,6 @@ class StrictReleaseStateTests(unittest.TestCase):
                     b"    - kind: ConfigMap\n"
                     b"      name: mutable-overrides\n"
                     b"  values:\n",
-                    1,
-                ),
-                "chart-values-files": canonical.replace(
-                    b"      sourceRef:\n",
-                    b"      valuesFiles:\n"
-                    b"        - values-production.yaml\n"
-                    b"      sourceRef:\n",
                     1,
                 ),
                 "post-renderer": canonical.replace(
@@ -632,10 +684,11 @@ class StrictReleaseStateTests(unittest.TestCase):
                         cloudflare_release_text(token_revision=token),
                     )
                     state = MODULE.load_helm_release("cloudflare-public", root)
-                    self.assertEqual(
-                        state.values[("tunnel", "tokenRevision")],
-                        token,
-                    )
+                    for site in MODULE.PUBLIC_CONNECTOR_SITES:
+                        self.assertEqual(
+                            state.values[("connectors", site, "tokenRevision")],
+                            token,
+                        )
 
     def test_reader_rejects_non_regular_and_oversized_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -717,8 +770,9 @@ class StrictReleaseStateTests(unittest.TestCase):
                 "deploymentReady: false\n"
                 "image:\n"
                 "  repository: ghcr.io/snaraj/naranjo-online\n"
+                "  tag: {}\n"
                 "  digest: {}\n"
-            ).format(MODULE.ZERO_DIGEST)
+            ).format(MODULE.ZERO_TAG, MODULE.ZERO_DIGEST)
             state = MODULE.load_helm_release("naranjo-online", root)
             self.assertEqual(state.values_text, expected)
 

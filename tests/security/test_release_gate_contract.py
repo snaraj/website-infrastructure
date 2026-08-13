@@ -36,13 +36,42 @@ KUSTOMIZATION_NAMES = (
 )
 SOURCE_IDENTITIES = (
     ("flux-system", "flux-system"),
-    ("naranjo-online", "naranjo-online-source"),
-    ("lidersea-com", "lidersea-com-source"),
     ("cloudflare-public", "cloudflare-public-source"),
 )
+# Each site's chart is a published, cosign-verified OCI artifact selected by a
+# SemVer range; only the connector still resolves a chart from Git.
+CHART_ISSUER = r"^https://token\.actions\.githubusercontent\.com$"
+
+
+def chart_subject(domain):
+    escaped = domain.replace(".", r"\.")
+    return (
+        r"^https://github\.com/snaraj/"
+        + escaped
+        + r"/\.github/workflows/release-publisher\.yml"
+        r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+    )
+
+
+OCI_CHART_SOURCES = {
+    ("naranjo-online", "naranjo-online-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
+        "subject": chart_subject("naranjo.online"),
+        "tag": "v0.1.9",
+        "digest": "sha256:" + "a" * 64,
+    },
+    ("lidersea-com", "lidersea-com-chart"): {
+        "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
+        "subject": chart_subject("lidersea.com"),
+        "tag": "v0.1.9",
+        "digest": "sha256:" + "b" * 64,
+    },
+}
+# None marks the tag-driven chartRef releases; the connector keeps its Git
+# chart source and is therefore the only release with a HelmChart object.
 RELEASE_SOURCES = {
-    ("naranjo-online", "naranjo-online"): "naranjo-online-source",
-    ("lidersea-com", "lidersea-com"): "lidersea-com-source",
+    ("naranjo-online", "naranjo-online"): None,
+    ("lidersea-com", "lidersea-com"): None,
     ("cloudflare-public", "cloudflare-public"): "cloudflare-public-source",
 }
 POLICY_NAMES = (
@@ -56,17 +85,23 @@ POLICY_NAMES = (
     "require-signed-naranjo-online",
     "require-signed-lidersea-com",
 )
+# Mirrors ``expected_network_policies`` in the validator, reconciled to a
+# read-only capture of the cluster on 2026-08-12. The two site namespaces carry
+# NO namespace-wide default-deny live (AUDIT NP7) and the cloudflare-public one
+# is named ``default-deny-all``, not what the committed prerequisites manifest
+# calls it.
 NETWORK_POLICY_IDENTITIES = (
-    ("cloudflare-public", "default-deny"),
+    ("cloudflare-public", "default-deny-all"),
     ("cloudflare-public", "cloudflared-dns"),
     ("cloudflare-public", "cloudflared-edge"),
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
-    ("naranjo-online", "default-deny"),
-    ("naranjo-online", "cloudflared-to-naranjo-online"),
-    ("lidersea-com", "default-deny"),
-    ("lidersea-com", "cloudflared-to-lidersea-com"),
+    ("naranjo-online", "ingress-to-naranjo-online"),
+    ("lidersea-com", "ingress-to-lidersea-com"),
 )
+# The one identity that must carry a NAMESPACE-WIDE podSelector, because a
+# default is only a default if it selects every Pod.
+NAMESPACE_WIDE_DEFAULT_DENY = ("cloudflare-public", "default-deny-all")
 
 
 def function_body(script, name, next_name):
@@ -183,27 +218,142 @@ class ReleaseGateContractTests(unittest.TestCase):
             "buckets.json",
             "externalartifacts.json",
             "helmrepositories.json",
-            "ocirepositories.json",
         ):
             self._write(filename, {"items": []})
+
+        chart_sources = []
+        for (namespace, name), contract in OCI_CHART_SOURCES.items():
+            spec = {
+                "interval": "10m0s",
+                "layerSelector": {
+                    "mediaType": (
+                        "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+                    ),
+                    "operation": "copy",
+                },
+                "ref": {"semver": ">=0.1.9 <1.0.0"},
+                "timeout": "60s",
+                "url": contract["url"],
+                "verify": {
+                    "matchOIDCIdentity": [
+                        {
+                            "issuer": CHART_ISSUER,
+                            "subject": contract["subject"],
+                        }
+                    ],
+                    "provider": "cosign",
+                },
+            }
+            chart_sources.append(
+                {
+                    "apiVersion": "source.toolkit.fluxcd.io/v1",
+                    "kind": "OCIRepository",
+                    "metadata": {
+                        "namespace": namespace,
+                        "name": name,
+                        "generation": 2,
+                    },
+                    "spec": spec,
+                    "status": {
+                        "conditions": [ready_condition()],
+                        "observedGeneration": 2,
+                        "artifact": {
+                            "revision": "{}@{}".format(
+                                contract["tag"], contract["digest"]
+                            ),
+                            "digest": contract["digest"],
+                        },
+                    },
+                }
+            )
+            self._write(
+                "desired-flux-ocirepository-{}-{}.json".format(namespace, name),
+                {
+                    "apiVersion": "source.toolkit.fluxcd.io/v1",
+                    "kind": "OCIRepository",
+                    "metadata": {"namespace": namespace, "name": name},
+                    "spec": spec,
+                },
+            )
+        self._write("ocirepositories.json", {"items": chart_sources})
 
         releases = []
         charts = []
         for (namespace, name), source_name in RELEASE_SOURCES.items():
-            revision = "0.1.0+{}".format(name.replace("-", ""))
-            chart_name = "{}-{}".format(name, name)
-            chart_spec = {
-                "chart": "./reviewed/" + name,
-                "interval": "10m0s",
-                "reconcileStrategy": "Revision",
-                "sourceRef": {"kind": "GitRepository", "name": source_name},
-            }
-            release_spec = {
-                "chart": {"spec": chart_spec},
-                "interval": "10m0s",
-                "releaseName": name,
-                "serviceAccountName": "helm-reconciler",
-            }
+            if source_name is None:
+                contract = OCI_CHART_SOURCES[(namespace, namespace + "-chart")]
+                revision = contract["tag"]
+                release_spec = {
+                    "chartRef": {
+                        "kind": "OCIRepository",
+                        "name": namespace + "-chart",
+                    },
+                    "interval": "10m0s",
+                    "releaseName": name,
+                    "serviceAccountName": "helm-reconciler",
+                }
+                release_status = {
+                    "conditions": [ready_condition()],
+                    "observedGeneration": 3,
+                    "lastAttemptedGeneration": 3,
+                    "lastAttemptedRevision": revision,
+                    "history": [
+                        {
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "deployed",
+                            "chartVersion": revision,
+                        }
+                    ],
+                }
+            else:
+                revision = "0.1.0+{}".format(name.replace("-", ""))
+                chart_name = "{}-{}".format(name, name)
+                chart_spec = {
+                    "chart": "./reviewed/" + name,
+                    "interval": "10m0s",
+                    "reconcileStrategy": "Revision",
+                    "sourceRef": {"kind": "GitRepository", "name": source_name},
+                }
+                release_spec = {
+                    "chart": {"spec": chart_spec},
+                    "interval": "10m0s",
+                    "releaseName": name,
+                    "serviceAccountName": "helm-reconciler",
+                }
+                release_status = {
+                    "conditions": [ready_condition()],
+                    "observedGeneration": 3,
+                    "lastAttemptedGeneration": 3,
+                    "lastAttemptedRevision": revision,
+                    "helmChart": "{}/{}".format(namespace, chart_name),
+                    "history": [
+                        {
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "deployed",
+                            "chartVersion": revision,
+                        }
+                    ],
+                }
+                charts.append(
+                    {
+                        "metadata": {
+                            "namespace": namespace,
+                            "name": chart_name,
+                            "generation": 4,
+                        },
+                        "spec": {
+                            **chart_spec,
+                        },
+                        "status": {
+                            "conditions": [ready_condition()],
+                            "observedGeneration": 4,
+                            "observedSourceArtifactRevision": GIT_REVISION,
+                            "artifact": {"revision": revision},
+                        },
+                    }
+                )
             releases.append(
                 {
                     "apiVersion": "helm.toolkit.fluxcd.io/v2",
@@ -214,21 +364,7 @@ class ReleaseGateContractTests(unittest.TestCase):
                         "generation": 3,
                     },
                     "spec": release_spec,
-                    "status": {
-                        "conditions": [ready_condition()],
-                        "observedGeneration": 3,
-                        "lastAttemptedGeneration": 3,
-                        "lastAttemptedRevision": revision,
-                        "helmChart": "{}/{}".format(namespace, chart_name),
-                        "history": [
-                            {
-                                "name": name,
-                                "namespace": namespace,
-                                "status": "deployed",
-                                "chartVersion": revision,
-                            }
-                        ],
-                    },
+                    "status": release_status,
                 }
             )
             self._write(
@@ -239,24 +375,6 @@ class ReleaseGateContractTests(unittest.TestCase):
                     "metadata": {"namespace": namespace, "name": name},
                     "spec": release_spec,
                 },
-            )
-            charts.append(
-                {
-                    "metadata": {
-                        "namespace": namespace,
-                        "name": chart_name,
-                        "generation": 4,
-                    },
-                    "spec": {
-                        **chart_spec,
-                    },
-                    "status": {
-                        "conditions": [ready_condition()],
-                        "observedGeneration": 4,
-                        "observedSourceArtifactRevision": GIT_REVISION,
-                        "artifact": {"revision": revision},
-                    },
-                }
             )
         self._write("helmreleases.json", {"items": releases})
         self._write("helmcharts.json", {"items": charts})
@@ -280,12 +398,15 @@ class ReleaseGateContractTests(unittest.TestCase):
 
         network_policies = []
         for namespace, name in NETWORK_POLICY_IDENTITIES:
+            selector = {"matchLabels": {"contract": name}}
+            if (namespace, name) == NAMESPACE_WIDE_DEFAULT_DENY:
+                selector = {}
             policy = {
                 "apiVersion": "networking.k8s.io/v1",
                 "kind": "NetworkPolicy",
                 "metadata": {"namespace": namespace, "name": name},
                 "spec": {
-                    "podSelector": {"matchLabels": {"contract": name}},
+                    "podSelector": selector,
                     "policyTypes": ["Ingress", "Egress"],
                 },
             }
@@ -690,6 +811,8 @@ class ReleaseGateContractTests(unittest.TestCase):
         fixtures = (
             ("kustomizations.json", "flux-system", "rogue-kustomization"),
             ("gitrepositories.json", "default", "rogue-source"),
+            ("ocirepositories.json", "default", "rogue-chart-source"),
+            ("ocirepositories.json", "naranjo-online", "second-chart-source"),
             ("helmreleases.json", "default", "rogue-release"),
             ("helmcharts.json", "default", "rogue-chart"),
         )
@@ -718,7 +841,6 @@ class ReleaseGateContractTests(unittest.TestCase):
             "buckets.json",
             "externalartifacts.json",
             "helmrepositories.json",
-            "ocirepositories.json",
         )
         for filename in fixtures:
             with self.subTest(filename=filename):
@@ -754,9 +876,13 @@ class ReleaseGateContractTests(unittest.TestCase):
             ),
             (
                 "helmreleases.json",
-                lambda item: item["spec"]["chart"]["spec"].update(
-                    {"chart": "./unreviewed"}
+                lambda item: item["spec"]["chartRef"].update(
+                    {"name": "unreviewed-chart"}
                 ),
+            ),
+            (
+                "ocirepositories.json",
+                lambda item: item["spec"]["ref"].update({"semver": ">=0.0.0"}),
             ),
             (
                 "helmcharts.json",
@@ -784,6 +910,74 @@ class ReleaseGateContractTests(unittest.TestCase):
         self._write("policies.json", value)
         self._assert_rejected()
 
+    def _repoint_network_policy(self, namespace, name, **spec_changes):
+        """Change one policy in BOTH the live evidence and its desired file.
+
+        Changing only the live copy is what made the first version of these
+        three tests vacuous: the pre-existing spec-equality check rejected the
+        evidence for a mismatch against desired state, so all three passed with
+        the namespace-wide default-deny check DELETED. Moving both copies
+        together keeps every older check satisfied and leaves the new one as
+        the only thing that can fire.
+        """
+
+        live = self._read("networkpolicies.json")
+        for policy in live["items"]:
+            if (
+                policy["metadata"]["namespace"] == namespace
+                and policy["metadata"]["name"] == name
+            ):
+                policy["spec"].update(spec_changes)
+                desired = dict(policy)
+        self._write("networkpolicies.json", live)
+        self._write(
+            "desired-networkpolicy-{}-{}.json".format(namespace, name), desired
+        )
+
+    def test_scoped_default_deny_where_a_namespace_wide_one_is_required_fails_closed(self):
+        """A podSelector-scoped deny is not a default-deny.
+
+        The exact live shape of AUDIT NP7: a policy that looks like a
+        default-deny, is named like one, denies both directions — and selects
+        only some Pods, so anything else scheduled into the namespace is
+        unrestricted. Narrowing the surviving cloudflare-public one the same way
+        must fail rather than be accepted as equivalent.
+        """
+
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY,
+            podSelector={"matchLabels": {"app": "anything"}},
+        )
+        self._assert_rejected()
+
+    def test_ingress_only_default_deny_fails_closed(self):
+        """The other half of NP7: Ingress-only leaves egress wide open."""
+
+        self._repoint_network_policy(
+            *NAMESPACE_WIDE_DEFAULT_DENY, policyTypes=["Ingress"]
+        )
+        self._assert_rejected()
+
+    def test_a_closed_divergence_makes_its_own_declaration_fail(self):
+        """The declaration is a ratchet, not a permanent exemption.
+
+        The day a site namespace gains the namespace-wide default-deny it is
+        supposed to have, the recorded divergence becomes a lie, and a stale
+        justification has to fail exactly like a missing check — otherwise the
+        exemption outlives the gap and quietly re-permits its removal.
+
+        Widening the site's OWN policy rather than adding a second one, so the
+        inventory count is untouched and only the ratchet can object.
+        """
+
+        self._repoint_network_policy(
+            "naranjo-online",
+            "ingress-to-naranjo-online",
+            podSelector={},
+            policyTypes=["Ingress", "Egress"],
+        )
+        self._assert_rejected()
+
     def test_missing_kustomization_observed_generation_fails_closed(self):
         value = self._read("kustomizations.json")
         value["items"][0]["status"].pop("observedGeneration")
@@ -803,6 +997,112 @@ class ReleaseGateContractTests(unittest.TestCase):
         )
         self._write("gitrepositories.json", value)
         self._assert_rejected()
+
+    def test_unverified_or_misattributed_chart_source_fails_closed(self):
+        """Every way a live chart source could stop proving its publisher.
+
+        This exercises the captured-evidence validator, not a running Flux
+        controller: it proves the successor gate refuses evidence in which a
+        site's chart could have come from an unsigned artifact or from the
+        wrong signing identity.
+        """
+
+        other_subject = chart_subject("lidersea.com")
+        mutations = {
+            "verification removed": lambda item: item["spec"].pop("verify"),
+            "provider downgraded": lambda item: item["spec"]["verify"].update(
+                {"provider": "notation"}
+            ),
+            "keyless identity dropped": lambda item: item["spec"]["verify"].update(
+                {"matchOIDCIdentity": []}
+            ),
+            "second identity widened": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ].append({"issuer": CHART_ISSUER, "subject": other_subject}),
+            "sibling site subject": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update({"subject": other_subject}),
+            "foreign issuer": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update({"issuer": "^https://accounts\\.example\\.invalid$"}),
+            "branch ref subject": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update(
+                {
+                    "subject": (
+                        r"^https://github\.com/snaraj/naranjo\.online/"
+                        r"\.github/workflows/release-publisher\.yml"
+                        r"@refs/heads/main$"
+                    )
+                }
+            ),
+            "registry credential": lambda item: item["spec"].update(
+                {"secretRef": {"name": "ghcr-pull"}}
+            ),
+            "service account pull": lambda item: item["spec"].update(
+                {"serviceAccountName": "puller"}
+            ),
+            "plaintext registry": lambda item: item["spec"].update({"insecure": True}),
+            "registry path swap": lambda item: item["spec"].update(
+                {"url": "oci://ghcr.io/snaraj/charts/lidersea-com"}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("ocirepositories.json")
+                mutate(value["items"][0])
+                self._write("ocirepositories.json", value)
+                self._assert_rejected()
+
+    def test_chart_artifact_without_tag_and_digest_fails_closed(self):
+        mutations = {
+            "tag only": lambda artifact: artifact.update({"revision": "v0.1.9"}),
+            "digest only": lambda artifact: artifact.update(
+                {"revision": artifact["digest"]}
+            ),
+            "unstable tag": lambda artifact: artifact.update(
+                {"revision": "latest@" + artifact["digest"]}
+            ),
+            "digest disagrees with revision": lambda artifact: artifact.update(
+                {"revision": "v0.1.9@sha256:" + "c" * 64}
+            ),
+            "all-zero digest": lambda artifact: artifact.update(
+                {
+                    "revision": "v0.1.9@sha256:" + "0" * 64,
+                    "digest": "sha256:" + "0" * 64,
+                }
+            ),
+            "artifact absent": lambda artifact: artifact.clear(),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("ocirepositories.json")
+                mutate(value["items"][0]["status"]["artifact"])
+                self._write("ocirepositories.json", value)
+                self._assert_rejected()
+
+    def test_site_release_not_bound_to_its_own_chart_source_fails_closed(self):
+        mutations = {
+            "cross-site chart source": lambda item: item["spec"]["chartRef"].update(
+                {"name": "lidersea-com-chart"}
+            ),
+            "helm chart reintroduced": lambda item: item["status"].update(
+                {"helmChart": "naranjo-online/naranjo-online-naranjo-online"}
+            ),
+            "deployed version is not the resolved one": lambda item: (
+                item["status"].update({"lastAttemptedRevision": "v0.1.8"}),
+                item["status"]["history"][0].update({"chartVersion": "v0.1.8"}),
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(mutation=label):
+                self._write_valid_evidence()
+                value = self._read("helmreleases.json")
+                mutate(value["items"][0])
+                self._write("helmreleases.json", value)
+                self._assert_rejected()
 
     def test_missing_helmrelease_observed_generation_fails_closed(self):
         value = self._read("helmreleases.json")

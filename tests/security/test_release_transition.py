@@ -153,12 +153,29 @@ class ReleaseTransitionTests(unittest.TestCase):
         self.set_suspended(release, False)
         self.set_suspended(parent, False)
 
-    def configure_cloudflare_revision(self):
-        self.replace_once(
-            "kubernetes/platform/cloudflare-public/release/release.yaml",
-            "      tokenRevision: not-configured\n",
-            "      tokenRevision: rev-reviewed-test\n",
+    def configure_cloudflare_revision(self, *, sites=None):
+        """Resolve each named connector's own revision (default: all of them).
+
+        Every website's connector owns its revision, so the staged/active
+        fixtures must resolve both. Passing a subset builds the half-configured
+        state the classifier refuses.
+        """
+
+        if sites is None:
+            sites = TRANSITION.STATE.PUBLIC_CONNECTOR_SITES
+        path = self.root / (
+            "kubernetes/platform/cloudflare-public/release/release.yaml"
         )
+        text = path.read_text(encoding="utf-8")
+        for site in sites:
+            before = "      {}:\n        tokenRevision: not-configured\n".format(site)
+            self.assertEqual(text.count(before), 1, site)
+            text = text.replace(
+                before,
+                "      {}:\n        tokenRevision: rev-reviewed-test\n".format(site),
+            )
+        with path.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
 
     def write_cloudflare_secret(self, *, listed=True, recipient=None):
         if recipient is None:
@@ -322,6 +339,19 @@ class ReleaseTransitionTests(unittest.TestCase):
         )
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
+
+    def test_half_configured_connector_revisions_are_rejected(self):
+        """One connector staged while the other still carries a sentinel is
+        not a safe intermediate: each Tunnel's revision is its own, so a mixed
+        pair means a rotation or staging step was left half done."""
+
+        for site in TRANSITION.STATE.PUBLIC_CONNECTOR_SITES:
+            with self.subTest(configured=site):
+                self.setUp()
+                self.configure_cloudflare_revision(sites=(site,))
+                self.write_cloudflare_secret()
+                with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+                    TRANSITION.classify(self.root)
 
     def test_configured_revision_without_encrypted_secret_is_rejected(self):
         self.configure_cloudflare_revision()

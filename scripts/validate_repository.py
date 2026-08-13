@@ -18,11 +18,18 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from validate_image_release import repository_errors as image_release_errors
+from validate_image_release import (
+    SITE_CONTRACTS as IMAGE_RELEASE_SITE_CONTRACTS,
+    read_policy as read_release_policy,
+    repository_errors as image_release_errors,
+)
 from validate_release_state import (
     CanonicalYamlError,
+    PUBLIC_CONNECTOR_SITES,
     RELEASE_CONTRACTS,
+    RELEASE_TAG_RE,
     ZERO_DIGEST,
+    ZERO_TAG,
     _parse_simple_mapping,
     canonical_scalar,
     load_helm_release,
@@ -43,7 +50,10 @@ from validate_release_transition import (
     tunnel_secret_errors,
 )
 from validate_signature_policy import (
+    CHART_REPOSITORIES,
     admission_kustomization_errors,
+    chart_source_errors,
+    chart_source_semver_bounds,
     flux_sync_errors,
     flux_system_kustomization_errors,
     reconciliation_kustomization_errors,
@@ -171,7 +181,7 @@ SITE_RELEASE_CONTRACTS = (
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "0e6c9c7f1dac58f9a5be61108c4dca106fff07ebd9b02cbebd7dec5508b689b5"
+    "4ad6b3fcfc80b1cfa12418215f5747d05aced7e5846467930fc7206750692ea6"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -1081,10 +1091,15 @@ def flux_components_errors(root):
     if not versions_path.is_file():
         return ["versions.env is missing for generated Flux validation"]
     versions_text = read(versions_path)
-    values = dict(
-        match.groups()
+    # ``read`` returns text, so these are str keys and str values. The two
+    # groups are named explicitly rather than splatted from ``match.groups()``:
+    # that call is typed as a variable-length tuple, which reads as an
+    # arbitrary-arity pair to a static checker and invites a bytes/str
+    # confusion warning on a mapping that is unambiguously str-keyed here.
+    values = {
+        match.group(1): match.group(2)
         for match in re.finditer(r"(?m)^([A-Z0-9_]+)=([^\s#]+)$", versions_text)
-    )
+    }
     required_keys = (
         "FLUX_VERSION",
         "FLUX_SOURCE_CONTROLLER_IMAGE",
@@ -1125,7 +1140,8 @@ FLUX_EGRESS_POLICIES = (
     "flux-controllers-public-https",
     "flux-controllers-kube-apiserver",
 )
-FLUX_CONTROL_PLANE_SENTINEL = "sentinel-until-reviewed-control-plane-endpoint"
+FLUX_CONTROL_PLANE_SENTINEL = "sentinel-until-private-calico-api-endpoint-set"
+FLUX_API_CANARY_NAME = "flux-api-reachability-canary"
 
 
 def flux_egress_contract_errors(root):
@@ -1195,6 +1211,45 @@ def flux_egress_contract_errors(root):
     elif not active_kustomization_resource(read(egress_index), "network-policies.yaml"):
         errors.append("Flux egress resource is not reachable from its root")
 
+    # The executable API-path proof is a separately rendered, one-Pod target.
+    # Keeping it outside the bootstrap root makes it impossible for ordinary
+    # GitOps reconciliation to create the probe, while the installer can still
+    # bind and create its exact reviewed bytes immediately before controllers.
+    canary_root = root / "kubernetes/flux-system/canary"
+    canary_index = canary_root / "kustomization.yaml"
+    canary_pod = canary_root / "pod.yaml"
+    if not canary_index.is_file() or not canary_pod.is_file():
+        errors.append("Flux API-path canary root or Pod is missing")
+    else:
+        if not active_kustomization_resource(read(canary_index), "pod.yaml"):
+            errors.append("Flux API-path canary Pod is not reachable from its own root")
+        canary_text = read(canary_pod)
+        versions_path = root / "versions.env"
+        versions_text = read(versions_path) if versions_path.is_file() else ""
+        image = re.search(r"(?m)^FLUX_API_CANARY_IMAGE=(\S+)$", versions_text)
+        required_canary_fragments = (
+            "kind: Pod",
+            "name: " + FLUX_API_CANARY_NAME,
+            "namespace: flux-system",
+            "app: source-controller",
+            "app.kubernetes.io/part-of: flux",
+            "serviceAccountName: source-controller",
+            "value: kubernetes.default.svc",
+            "- --raw=/api",
+            "automountServiceAccountToken: true",
+            "readOnlyRootFilesystem: true",
+            "allowPrivilegeEscalation: false",
+        )
+        for fragment in required_canary_fragments:
+            if fragment not in canary_text:
+                errors.append("Flux API-path canary is missing: " + fragment)
+        if not image:
+            errors.append("versions.env is missing FLUX_API_CANARY_IMAGE")
+        elif "image: " + image.group(1) not in canary_text:
+            errors.append("Flux API-path canary image does not match versions.env")
+        if re.search(r"(?m)^\s*(hostNetwork|hostPID|hostIPC):\s*true\s*$", canary_text):
+            errors.append("Flux API-path canary must not enter a host namespace")
+
     # The egress overlay is deliberately NOT a resource of
     # kubernetes/flux-system: that root also carries gotk-sync.yaml, whose
     # Kustomization is unsuspended, so applying it would start live
@@ -1208,10 +1263,16 @@ def flux_egress_contract_errors(root):
         renderer_text = read(renderer)
         if not re.search(r"(?m)^\s*kubernetes/flux-system/egress\s*$", renderer_text):
             errors.append("flux-system egress overlay is not a rendered target")
+        if not re.search(r"(?m)^\s*kubernetes/flux-system/canary\s*$", renderer_text):
+            errors.append("flux-system API-path canary is not a rendered target")
     root_index = root / "kubernetes/flux-system/kustomization.yaml"
     if root_index.is_file() and active_kustomization_resource(read(root_index), "egress"):
         errors.append(
             "flux-system egress must not be reachable from the unsuspended bootstrap root"
+        )
+    if root_index.is_file() and active_kustomization_resource(read(root_index), "canary"):
+        errors.append(
+            "flux-system API-path canary must not be reachable from the bootstrap root"
         )
     return errors
 
@@ -1236,25 +1297,36 @@ FLUX_INSTALLER_REFUSALS = (
     "--kubeconfig is required",
     "--context is required",
     "--server is required",
+    "--cni-provider is required",
+    "--api-endpoint is required",
     "--expect-render-sha256 is required",
     "--expect-egress-sha256 is required",
+    "--expect-canary-sha256 is required",
     "--expect-commit is required",
+    "no reviewed API-destination contract",
+    "could not prove the selected Calico CNI identity",
     "the installer and its guards are not the reviewed ones",
     "the egress bytes this would apply are not the reviewed ones",
+    "the API endpoint-set substitution changed bytes outside",
+    "the in-Pod Kubernetes Service/API canary did not succeed",
     "matches no versions.env kubectl digest pin",
     "the install inputs carry uncommitted modifications",
     "is not owned by this install",
     "ROLLBACK INCOMPLETE",
     "the ordering that prevents the egress deadlock is broken",
     "--apply installs only onto a fresh cluster",
+    "API/RBAC/timeout failure keeps public egress shut",
     "the controllers are reconciling, not idle",
     "the live startup egress policies are not the reviewed shape",
+    "this absent-only transaction never adopts",
+    "poststate differs from the exact reviewed object",
 )
 FLUX_INSTALLER_PIN_KEYS = (
     "KUSTOMIZE_VERSION",
     "KUBERNETES_VERSION",
     "KUBECTL_LINUX_AMD64_SHA256",
     "KUBECTL_ARM64_SHA256",
+    "FLUX_API_CANARY_IMAGE",
 )
 
 
@@ -1269,17 +1341,37 @@ def cluster_scoped_flux_objects(root):
     export = root / "kubernetes/flux-system/controllers/gotk-components.yaml"
     if not export.is_file():
         return []
+    controllers = export.parent
+    deleted = set()
+    index = controllers / "kustomization.yaml"
+    if index.is_file():
+        for relative in re.findall(r"(?m)^\s*path:\s*(\S+)\s*$", read(index)):
+            candidate = Path(relative)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                continue
+            patch = controllers / candidate
+            if not patch.is_file():
+                continue
+            patch_text = read(patch)
+            if not re.search(r"(?m)^\$patch:\s*delete\s*$", patch_text):
+                continue
+            kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", patch_text)
+            name = re.search(r"(?m)^  name:\s*(\S+)\s*$", patch_text)
+            if kind and name:
+                deleted.add((kind.group(1), name.group(1)))
+
     names = []
     for document in re.split(r"(?m)^---\s*$", read(export)):
         kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
         name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
         if not kind or not name:
             continue
+        identity = (kind.group(1), name.group(1))
         if kind.group(1) in {
             "CustomResourceDefinition",
             "ClusterRole",
             "ClusterRoleBinding",
-        }:
+        } and identity not in deleted:
             names.append(name.group(1))
     return names
 
@@ -1343,6 +1435,10 @@ def flux_install_ceremony_errors(root):
     for fragment in (
         "--open-public-egress",
         "--expect-render-sha256",
+        "--expect-egress-sha256",
+        "--expect-canary-sha256",
+        "--cni-provider",
+        "--api-endpoint",
         "`kubectl delete namespace flux-system` is **not sufficient**",
     ):
         if fragment not in prose:
@@ -1352,6 +1448,231 @@ def flux_install_ceremony_errors(root):
             errors.append(
                 "the Flux install runbook's removal omits the cluster-scoped object " + name
             )
+    return errors
+
+
+# The three ServiceAccounts the reviewed component set actually creates. The
+# generated export binds seven, four of which name accounts that do not exist;
+# a dangling subject grants nothing today and everything the day its controller
+# is installed, so the subject list is pinned to what exists.
+FLUX_CONTROLLER_ACCOUNTS = ("source-controller", "kustomize-controller", "helm-controller")
+
+# The narrowing patches, each paired with the object it rewrites. The mapping is
+# the contract: a patch file that exists but is not wired into the install root
+# leaves the generated export untouched while the repository reads as hardened,
+# which is the same failure as having no patch at all.
+FLUX_RBAC_PATCHES = {
+    "cluster-reconciler.yaml": ("ClusterRoleBinding", "cluster-reconciler-flux-system"),
+    "crd-controller-role.yaml": ("ClusterRole", "crd-controller-flux-system"),
+    "crd-controller-binding.yaml": ("ClusterRoleBinding", "crd-controller-flux-system"),
+}
+
+# Authorization this repository writes itself, as opposed to the generated
+# export. Wildcards are refused here because every rule in these files is
+# derived from an enumerated desired state; a wildcard would mean the derivation
+# was abandoned.
+FLUX_AUTHORED_RBAC_FILES = (
+    "kubernetes/flux-system/access.yaml",
+    "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+)
+
+# Controller-identity Roles that carry the authority the deleted cluster-admin
+# binding used to supply. Absence of any one of them is a reconciliation that
+# cannot start, so they are required by name rather than inferred.
+FLUX_CONTROLLER_ROLE_NAMESPACES = {
+    "flux-controller-runtime": ("flux-system",),
+    "flux-controller-decryption": ("flux-system",),
+    "flux-controller-impersonation": (
+        "flux-system", "cloudflare-public", "naranjo-online", "lidersea-com",
+    ),
+}
+
+RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
+
+
+def _yaml_documents(text):
+    """Split a multi-document manifest the way the other checks here do."""
+
+    return re.split(r"(?m)^---\s*$", text)
+
+
+def _rbac_rule_blocks(document):
+    """Return the text of each `rules:` entry in one RBAC document.
+
+    The RBAC files this repository authors use one canonical shape — a
+    top-level ``rules:`` sequence whose entries are two-space-indented ``- ``
+    items — so the rules can be sliced textually without a YAML parser, which
+    the fast gate deliberately cannot depend on.
+    """
+
+    match = re.search(r"(?ms)^rules:\s*$\n(?P<body>(?:[ \t].*\n?|\n)*)", document)
+    if match is None:
+        return []
+    body = match.group("body")
+    # The item indent is DERIVED from the first entry rather than assumed. An
+    # assumed range (the original "no more than four spaces") is the same
+    # vacuity class as matching only one list style: re-indenting a rule by two
+    # columns is valid YAML that changes nothing about what it grants, and it
+    # would have slipped every check built on top of this helper.
+    lead = re.search(r"(?m)^(?P<indent>\s*)-\s", body)
+    if lead is None:
+        return []
+    indent = lead.group("indent")
+    item = re.compile(r"^{}-\s".format(re.escape(indent)))
+    blocks = []
+    current = []
+    for line in body.splitlines():
+        if item.match(line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _rbac_rule_list(block, field):
+    """Return one RBAC rule field's members, in either YAML sequence style.
+
+    The reviewed manifests write short lists inline (``verbs: [get, list]``) and
+    long ones as indented sequences, and the generated export writes everything
+    as indented sequences. A check that understood only one of the two would be
+    decorative on half the files it runs over.
+    """
+
+    inline = re.search(
+        r"(?m)^\s*{}:\s*\[([^\]]*)\]\s*$".format(re.escape(field)), block
+    )
+    if inline is not None:
+        return [item.strip().strip("'\"") for item in inline.group(1).split(",") if item.strip()]
+    nested = re.search(
+        r"(?ms)^(?P<indent>\s*){}:\s*$\n(?P<body>(?:(?P=indent)\s*-\s.*\n?)*)".format(
+            re.escape(field)
+        ),
+        block,
+    )
+    if nested is None:
+        return []
+    return [
+        item.strip().strip("'\"")
+        for item in re.findall(r"(?m)^\s*-\s+(\S+)\s*$", nested.group("body"))
+    ]
+
+
+def flux_rbac_contract_errors(root):
+    """Require the narrowed Flux controller authorization (AUDIT S12).
+
+    The generated export binds ``cluster-admin`` to the kustomize- and
+    helm-controller accounts and shares a wildcard ClusterRole across seven
+    named subjects. This function pins the three properties that replace it:
+    the narrowing patches exist AND are applied by the install root, the
+    authorization this repository authors contains no wildcard and no
+    cluster-admin reference, and the controller-identity Roles that carry the
+    replacement authority are present with the shape that keeps them narrow.
+    """
+
+    errors = []
+    controllers = root / "kubernetes/flux-system/controllers"
+    index_path = controllers / "kustomization.yaml"
+    index_text = read(index_path) if index_path.is_file() else ""
+    if not index_text:
+        errors.append("Flux controller install root is missing")
+
+    for name, (kind, target) in sorted(FLUX_RBAC_PATCHES.items()):
+        patch_path = controllers / "patches" / name
+        if not patch_path.is_file():
+            errors.append("Flux RBAC narrowing patch is missing: " + name)
+            continue
+        patch_text = read(patch_path)
+        if not re.search(r"(?m)^kind:\s*{}\s*$".format(kind), patch_text):
+            errors.append("Flux RBAC patch {} must target kind {}".format(name, kind))
+        if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(target)), patch_text):
+            errors.append("Flux RBAC patch {} must name {}".format(name, target))
+        if "patches/" + name not in index_text:
+            errors.append("Flux controller install root does not apply patches/" + name)
+
+    # The cluster-admin binding is deleted rather than repointed: `roleRef` is
+    # immutable, so a repoint would be unappliable on the live cluster that
+    # already carries the broad binding.
+    deletion = controllers / "patches/cluster-reconciler.yaml"
+    if deletion.is_file() and not re.search(r"(?m)^\$patch:\s*delete\s*$", read(deletion)):
+        errors.append("cluster-admin binding patch must delete the binding, not repoint it")
+
+    # The subject list, pinned exactly. A regenerated export reintroduces four
+    # subjects for controllers this install does not run.
+    binding_patch = controllers / "patches/crd-controller-binding.yaml"
+    if binding_patch.is_file():
+        subjects = re.findall(
+            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", read(binding_patch)
+        )
+        if tuple(sorted(subjects)) != tuple(sorted(FLUX_CONTROLLER_ACCOUNTS)):
+            errors.append(
+                "crd-controller subjects must be exactly the installed controllers: "
+                + ", ".join(sorted(FLUX_CONTROLLER_ACCOUNTS))
+            )
+
+    for relative in FLUX_AUTHORED_RBAC_FILES:
+        path = root / relative
+        if not path.is_file():
+            errors.append("authored Flux RBAC file is missing: " + relative)
+            continue
+        text = read(path)
+        if re.search(r"(?m)^\s*(?:-\s+)?['\"]?\*['\"]?\s*$", text) or re.search(
+            r"(?m)^\s*(?:apiGroups|resources|verbs):\s*\[[^\]]*\*", text
+        ):
+            errors.append("wildcard RBAC rule in " + relative)
+        # Prose may name the role it removes; a manifest field may not name it
+        # at all.
+        if re.search(r"(?m)^\s*name:\s*cluster-admin\s*$", text):
+            errors.append("cluster-admin binding in " + relative)
+        if re.search(r"(?m)^\s*-\s*serviceaccounts/token\s*$", text):
+            errors.append("serviceaccounts/token creation must not be granted: " + relative)
+
+    access_path = root / "kubernetes/flux-system/access.yaml"
+    if not access_path.is_file():
+        return errors
+    documents = _yaml_documents(read(access_path))
+    seen_roles = set()
+    for document in documents:
+        if not re.search(r"(?m)^kind:\s*Role\s*$", document):
+            continue
+        name_match = re.search(r"(?m)^\s*name:\s*(\S+)\s*$", document)
+        namespace_match = re.search(r"(?m)^\s*namespace:\s*(\S+)\s*$", document)
+        if name_match is None or namespace_match is None:
+            continue
+        name, namespace = name_match.group(1), namespace_match.group(1)
+        seen_roles.add((name, namespace))
+        for block in _rbac_rule_blocks(document):
+            # Impersonation without `resourceNames` is impersonation of every
+            # account in the namespace, which re-opens the escalation path the
+            # deleted binding used to hold open.
+            if "impersonate" in block and "resourceNames" not in block:
+                errors.append(
+                    "unrestricted impersonate grant in access.yaml Role {}/{}".format(
+                        namespace, name
+                    )
+                )
+            # A controller that can write Secrets in flux-system can rewrite
+            # the SOPS key it decrypts with.
+            if namespace == "flux-system" and "secrets" in _rbac_rule_list(block, "resources"):
+                granted = _rbac_rule_list(block, "verbs")
+                for verb in RBAC_WRITE_VERBS:
+                    if verb in granted:
+                        errors.append(
+                            "flux-system Secret grant must be read-only: {}/{} grants {}".format(
+                                namespace, name, verb
+                            )
+                        )
+    for name, namespaces in sorted(FLUX_CONTROLLER_ROLE_NAMESPACES.items()):
+        for namespace in namespaces:
+            if (name, namespace) not in seen_roles:
+                errors.append(
+                    "controller-identity Role missing from access.yaml: {}/{}".format(
+                        namespace, name
+                    )
+                )
     return errors
 
 
@@ -1374,7 +1695,29 @@ def check_kubernetes(root):
         rel = relative(path, root)
         for label, pattern in forbidden.items():
             if pattern.search(text):
+                # This one executable pre-controller proof must authenticate
+                # as the exact source-controller identity whose API path it
+                # tests. The exception is identity- and purpose-bound here;
+                # flux_egress_contract_errors below independently pins its
+                # separate root, image, labels, ServiceAccount, command, and
+                # restricted security context. Every other authored token mount
+                # remains forbidden.
+                if label == "ServiceAccount token mount" and (
+                    rel == "kubernetes/flux-system/canary/pod.yaml"
+                    and text.count("automountServiceAccountToken: true") == 1
+                    and "kind: Pod" in text
+                    and "name: " + FLUX_API_CANARY_NAME in text
+                    and "namespace: flux-system" in text
+                    and "serviceAccountName: source-controller" in text
+                    and "- --raw=/api" in text
+                ):
+                    continue
                 errors.append("{} in {}".format(label, rel))
+        # The generated Flux export is excluded from this file set, so this is a
+        # ban on every hand-written manifest: nothing this repository authors
+        # may bind the built-in cluster-admin role to anything.
+        if re.search(r"(?m)^\s*name:\s*cluster-admin\s*$", text):
+            errors.append("cluster-admin binding in " + rel)
         for match in re.finditer(r"(?m)^[ \t]*image:[ \t]*([^\s#]+)", text):
             image = match.group(1).strip("'\"")
             if not DIGEST_IMAGE.match(image):
@@ -1433,7 +1776,7 @@ def check_kubernetes(root):
                 )]
                 if len(matches) != 1:
                     errors.append("exact ingress+egress default-deny missing for " + namespace)
-        # The per-site ingress policies (cloudflared-to-<site>) ship inside
+        # The per-site ingress policies (ingress-to-<site>) ship inside
         # the standalone site charts and arrive through the remote sources;
         # the platform keeps requiring its own egress side toward each site.
         required_network_templates = {
@@ -1450,6 +1793,7 @@ def check_kubernetes(root):
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
         errors.extend(flux_egress_contract_errors(root))
         errors.extend(flux_install_ceremony_errors(root))
+        errors.extend(flux_rbac_contract_errors(root))
     errors.extend(signature_policy_source_errors(root))
     return errors
 
@@ -1525,6 +1869,54 @@ def _git_visible_cloudflare_paths(root):
         entry for entry in visible
         if entry.startswith("infrastructure/cloudflare/")
     }, []
+
+
+def chart_source_contract_errors(root):
+    """Bind each site's published chart source to its closed identity tuple.
+
+    Two independent failures are reported separately on purpose:
+
+    * the OCIRepository body itself must equal the exact reviewed contract —
+      registry path, SemVer range, layer media type, and this site's (and only
+      this site's) keyless publisher subject and issuer;
+    * the SemVer range's exclusive upper bound must still honor the tracked
+      production-graduation gate in ``release-policy.env`` (ADR 0014). While a
+      site's gate reads ``no``, a range that could resolve major 1 or later
+      would let Flux deploy a production release the owner has not graduated,
+      so the range and the gate can never drift apart silently.
+    """
+
+    errors = []
+    policy = read_release_policy(root)
+    if policy is None:
+        # image_release_errors already reports the malformed policy file; here
+        # the missing gate simply means the range cannot be cleared.
+        policy = {}
+    for slug in sorted(CHART_REPOSITORIES):
+        source = root / "kubernetes" / "websites" / slug / "source.yaml"
+        if source.is_symlink() or not source.is_file():
+            errors.append("{} chart source is missing or symbolic".format(slug))
+            continue
+        try:
+            text = read(source)
+        except (OSError, UnicodeError):
+            errors.append("{} chart source is unavailable".format(slug))
+            continue
+        if chart_source_errors(text, slug):
+            errors.append("{} chart source is non-canonical".format(slug))
+        try:
+            _, upper = chart_source_semver_bounds(slug)
+        except ValueError:
+            errors.append("{} chart SemVer range is outside the closed grammar".format(slug))
+            continue
+        gate = IMAGE_RELEASE_SITE_CONTRACTS[slug]["gate"]
+        if policy.get(gate) != "yes" and upper[0] > 1:
+            errors.append(
+                "{} chart SemVer range admits an ungraduated production major".format(
+                    slug
+                )
+            )
+    return errors
 
 
 def signature_policy_source_errors(root, allowed_inventories=None):
@@ -1639,6 +2031,10 @@ def signature_policy_source_errors(root, allowed_inventories=None):
         UnicodeError,
     ):
         errors.append("Flux admission reconciliation is non-canonical")
+    # The image-admission policies above and the chart sources below are the
+    # two ends of one identity tuple; validating them in the same pass means a
+    # change that re-points one and forgets the other cannot pass either mode.
+    errors.extend(chart_source_contract_errors(root))
     return errors
 
 
@@ -1693,6 +2089,21 @@ def site_release_override_errors(domain, release_state):
             "{} HelmRelease override must contain one nonzero image digest".format(
                 domain
             )
+        )
+    # The release NAME is checked beside the release BYTES. A production
+    # override that advanced the digest while leaving the sentinel tag would
+    # otherwise ship a workload reference reading `repo:v0.0.0@sha256:<real>`
+    # — legible, and wrong, which is worse than illegible.
+    release_tag = release_state.values.get(("image", "tag"))
+    if release_tag == ZERO_TAG:
+        errors.append(
+            "{} HelmRelease override must contain one nonzero release tag".format(
+                domain
+            )
+        )
+    elif not isinstance(release_tag, str) or not RELEASE_TAG_RE.fullmatch(release_tag):
+        errors.append(
+            "{} HelmRelease override release tag is not canonical".format(domain)
         )
     if release_state.values.get(("deploymentReady",)) != "true":
         errors.append("{} HelmRelease override is not deploymentReady".format(domain))
@@ -1890,8 +2301,13 @@ def check_release(root):
         public_release = load_helm_release("cloudflare-public", root)
         if public_release.suspended:
             errors.append("HelmRelease remains suspended: cloudflare-public")
-        token_revision = public_release.values.get(("tunnel", "tokenRevision"))
-        if token_revision in {None, "not-configured", "UNRESOLVED"}:
+        # Every website's connector must carry its own resolved revision; an
+        # unresolved revision on either one keeps the release unresolved.
+        if any(
+            public_release.values.get(("connectors", site, "tokenRevision"))
+            in {None, "not-configured", "UNRESOLVED"}
+            for site in PUBLIC_CONNECTOR_SITES
+        ):
             errors.append("public tunnel tokenRevision is unresolved")
         if load_parent_suspension("cloudflare-public", root):
             errors.append("parent Kustomization remains suspended: platform-services")

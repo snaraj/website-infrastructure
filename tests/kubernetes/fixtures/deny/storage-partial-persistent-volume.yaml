@@ -1,0 +1,8 @@
+# proves: SR-1
+# rego-message: must declare exactly one volume source
+# Fail-closed structure. A truncated object with no metadata and no spec at all.
+# Nothing here can be read as a means, and the policy must therefore deny it —
+# an unparseable object that defaults to allowed is worse than the deny-by-kind
+# this policy replaced.
+apiVersion: v1
+kind: PersistentVolume

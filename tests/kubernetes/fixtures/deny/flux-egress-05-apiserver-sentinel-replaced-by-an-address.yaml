@@ -17,7 +17,7 @@ metadata:
   name: flux-controllers-kube-apiserver
   namespace: flux-system
   annotations:
-    platform.snaraj.dev/readiness: sentinel-until-reviewed-control-plane-endpoint
+    platform.snaraj.dev/readiness: sentinel-until-private-calico-api-endpoint-set
 spec:
   podSelector:
     matchLabels:

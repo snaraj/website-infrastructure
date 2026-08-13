@@ -1,0 +1,43 @@
+# The identity-root binding, proven in the failing direction on both the
+# Deployment and the generated ReplicaSet.
+#
+# These resources carry the SAME exact identities as the canonical positive
+# controls in the objective-two battery (a resource identity may appear only
+# once per Test manifest), so the pairing is the point: same reviewed names,
+# relocated instance labels, opposite results. Without this manifest the
+# binding would be asserted only structurally, and a structural assertion
+# cannot show that admission actually refuses the object.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: connector-identity-root-fail-closed
+policies:
+  - ../../../../policies/kyverno/require-release-readiness.yaml
+resources:
+  - ../../fixtures/deny/connector-identity-root-lidersea-deployment.yaml
+  - ../../fixtures/deny/connector-identity-root-naranjo-deployment.yaml
+  - ../../fixtures/deny/connector-inventory-invented-deployment.yaml
+  - ../../fixtures/kyverno-admission/connector-identity-replicaset-deny.yaml
+results:
+  # An allowlisted connector Deployment name wearing the other site's instance
+  # labels and token — the exact cross-site credential substitution — in both
+  # directions.
+  - policy: require-release-readiness
+    rule: require-connector-identity-tuple
+    resources: [lidersea-com-tunnel, naranjo-online-tunnel]
+    kind: Deployment
+    result: fail
+  # A third connector invented inside the namespace: internally consistent,
+  # outside the reviewed inventory, refused by the same rule.
+  - policy: require-release-readiness
+    rule: require-connector-identity-tuple
+    resources: [third-site-tunnel]
+    kind: Deployment
+    result: fail
+  # The generated ReplicaSet path: an allowlisted owner may not mint Pods that
+  # wear the other site's instance, in either direction.
+  - policy: require-release-readiness
+    rule: require-replicaset-owned-by-exact-deployment
+    resources: [lidersea-com-tunnel-9a1e, naranjo-online-tunnel-4c7b]
+    kind: ReplicaSet
+    result: fail

@@ -214,9 +214,21 @@ class ImageReleaseVersionTests(unittest.TestCase):
         self.assertIn(
             "vMAJOR.MINOR.PATCH sha256:<digest>", runbook
         )
-        self.assertIn(
-            "Kubernetes still receives only the digest", " ".join(runbook.split())
-        )
+        # The runbook's digest-authority sentence, restated for the reference
+        # that now carries both halves. ADR 0016 made the version tag the
+        # release identity; the digest remaining the only thing that RESOLVES
+        # is the property this pin exists to hold, so it is pinned as that
+        # claim rather than as the older wording it replaced.
+        flattened = " ".join(runbook.split())
+        for fragment in (
+            "Kubernetes still resolves only the digest",
+            "cosign and admission still address only the digest",
+            "repository:vMAJOR.MINOR.PATCH@sha256:<hex>",
+            "advances the release tag and the digest TOGETHER",
+            "Never let a tag become the thing that RESOLVES",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, flattened)
 
     def test_promotion_rebinds_tag_through_candidate_only_review_patch(self):
         promotion = (REPO_ROOT / "scripts/promote-image.sh").read_text(encoding="utf-8")
@@ -234,6 +246,7 @@ class ImageReleaseVersionTests(unittest.TestCase):
             '--initial-phase "${initial_phase}"',
             promotion,
         )
+        self.assertIn('--tag "${release_tag}"', promotion)
         self.assertIn("scripts/create_release_patch.py", promotion)
         self.assertIn('git -C "${repo_root}" apply --check -- "${review_patch}"', promotion)
         self.assertIn("The worktree is unchanged", promotion)

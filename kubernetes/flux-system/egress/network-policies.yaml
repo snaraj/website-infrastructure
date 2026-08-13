@@ -106,23 +106,23 @@ spec:
         - port: 443
           protocol: TCP
 ---
-# The Kubernetes API server, with a fail-closed sentinel destination.
+# The Kubernetes API server, with a fail-closed endpoint-set sentinel.
 #
 # Every controller needs the API server for leader election, watches, and
-# applies. Its endpoint is the control-plane node's own address: real host
-# inventory, which safety invariant 12 keeps out of this public index forever.
-# The reviewed shape — these Pods, this port, one exact /32 — is committed; the
-# address is not, and `192.0.2.0/32` is RFC 5737 TEST-NET-1, which can never
-# match a real endpoint. The operator substitutes the true address at apply
-# time from private custody (docs/runbooks/flux-install.md); it is never
-# committed, and `make release-check` refuses this sentinel.
+# applies. The selected Calico dataplane enforces workload egress after
+# kube-proxy DNAT, so the applied rule names every actual API backend /32 on
+# port 6443 even though the Pod calls the Kubernetes Service on port 443. That
+# endpoint set is private host inventory and may grow for future HA. The
+# committed template carries exactly one RFC 5737 sentinel that cannot match a
+# real endpoint; the installer expands only this block from repeated private
+# --api-endpoint inputs, then proves the Service path from an ephemeral Pod.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: flux-controllers-kube-apiserver
   namespace: flux-system
   annotations:
-    platform.snaraj.dev/readiness: sentinel-until-reviewed-control-plane-endpoint
+    platform.snaraj.dev/readiness: sentinel-until-private-calico-api-endpoint-set
 spec:
   podSelector:
     matchLabels:
