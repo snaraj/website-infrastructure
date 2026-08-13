@@ -51,12 +51,28 @@ SKILL_LOCAL_FORBIDDEN_IDENTITY = {
 }
 # The shared list applies to every skill; an exemption is per-skill, explicit,
 # and load-bearing. The only one: that skill's own NAME contains the
-# repository name, so this literal cannot be enforced against it. A stale
-# exemption fails exactly like a missing check — the test below asserts each
-# exempted literal is genuinely present, so an obsolete one goes red.
+# repository name, so this literal cannot be enforced against it. Each
+# exemption carries the EXACT occurrence count it licenses, because "present
+# somewhere" would license the literal in PROSE too — an exemption must be no
+# wider than the collision forcing it. Both licensed occurrences are
+# structural: the frontmatter name, and the invocation token in the agent
+# interface. A stale or outgrown exemption fails like a missing check.
 IDENTITY_EXEMPTIONS = {
-    "build-website-infrastructure": ("website-infrastructure",),
+    "build-website-infrastructure": (("website-infrastructure", 2),),
 }
+# Prose that must NEVER trip a shape. Each string was a real false positive
+# of a wider earlier pattern. These are the guard's boundary: if one goes
+# red, narrow the SHAPE — deleting the string is how a guard dies.
+BENIGN_PROSE = (
+    "pin 3 rule NAMES structurally against the rendered inventory",
+    "pipeline 2 runs after pipeline 1",
+    "pins 4 things, pinned 2 ways, pinning 1 setting",
+    "pipe 3 documents, pick 2 of them",
+    "defaced acceded decade beaded",
+    "scanned ~10945256 bytes in 1.35s",
+    "the badge colours #0075ca and #d73a4a",
+    "sections 1-3 and rows 10-20",
+)
 # Shapes, not literals. The repository privacy validator is NOT a second net
 # here: it covers emails, addresses, UUIDs, 32-hex and Windows paths only, so
 # commits, short commits, POSIX and home-relative workstation paths, and
@@ -73,13 +89,21 @@ FORBIDDEN_IDENTITY_SHAPES = {
     "short commit": re.compile(
         r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,39}\b"
     ),
-    # A single-board-host alias: the family name followed by a unit number,
-    # in any of its spellings. A shape, so this file never has to name the
-    # host it is protecting.
-    "host alias": re.compile(r"(?i)\bpi[a-z]*[-_ ]?[0-9]+\b"),
+    # A single-board-host alias: the family name, at most two more letters,
+    # an optional separator, and a unit number. A shape, so this file never
+    # has to name the host it protects. The bounds are load-bearing: an
+    # unbounded [a-z]* with a space separator matched this document's own
+    # vocabulary ("pin 3 rule names", "pipeline 2"), and a guard that fires
+    # on ordinary prose while naming nothing gets weakened rather than
+    # diagnosed. BENIGN_PROSE below pins that boundary. Known residual: the
+    # hyphenated "pin-3" is genuinely alias-shaped and still matches — write
+    # "pin 3" in prose; do not widen the separator class to escape it.
+    "host alias": re.compile(r"(?i)\bpi[a-z]{0,2}[-_]?[0-9]{1,3}\b"),
     "windows workstation path": re.compile(r"(?i)[A-Z]:[\\/](?:Users|dev)[\\/]"),
     # No trailing slash required: the leaf is usually the operator's name,
-    # which is exactly the part that must not ship.
+    # which is exactly the part that must not ship. Known benign match:
+    # a CI runner's home ("/home/runner/work"). If a skill needs to describe
+    # it, write "the runner's home" or "$HOME" — the shape stays as it is.
     "posix workstation path": re.compile(
         r"(?<![A-Za-z0-9_.-])/(?:Users|home)/[A-Za-z0-9._-]+"
     ),
@@ -178,19 +202,39 @@ class SkillStructureTests(unittest.TestCase):
             # line wrap split across two lines, which raw text cannot see.
             combined = raw + "\n" + " ".join(raw.split())
             exempt = IDENTITY_EXEMPTIONS.get(skill.name, ())
-            for value in exempt:
-                with self.subTest(skill=skill.name, stale_exemption=value):
-                    self.assertIn(value.lower(), combined.lower())
+            licensed = tuple(value for value, _ in exempt)
+            for position, (value, occurrences) in enumerate(exempt):
+                # The value is deliberately NOT a subTest parameter: a subTest
+                # label is echoed into logs and evidence tables, and a guard
+                # must not publish what it protects.
+                with self.subTest(skill=skill.name, exemption=position):
+                    self.assertEqual(raw.lower().count(value.lower()), occurrences)
             forbidden = (
-                *(v for v in FORBIDDEN_IDENTITY if v not in exempt),
+                *(v for v in FORBIDDEN_IDENTITY if v not in licensed),
                 *SKILL_LOCAL_FORBIDDEN_IDENTITY.get(skill.name, ()),
             )
-            for value in forbidden:
-                with self.subTest(skill=skill.name, value=value):
+            for position, value in enumerate(forbidden):
+                # Indexed, not named, for the same reason as the exemptions
+                # above: this list holds the values a public artefact must
+                # never carry, and a failure label is a public artefact.
+                with self.subTest(skill=skill.name, forbidden=position):
                     self.assertNotIn(value.lower(), combined.lower())
             for label, shape in FORBIDDEN_IDENTITY_SHAPES.items():
                 with self.subTest(skill=skill.name, shape=label):
                     self.assertNotRegex(combined, shape)
+
+    def test_identity_shapes_do_not_match_ordinary_prose(self):
+        """The false-positive boundary of every shape, pinned.
+
+        A shape that fires on ordinary prose still fails closed, but its
+        message names nothing by design, so the next author's cheapest move
+        is to weaken the shape rather than diagnose it. That is how a guard
+        dies. These rows make the boundary explicit and regression-proof.
+        """
+        for text in BENIGN_PROSE:
+            for label, shape in FORBIDDEN_IDENTITY_SHAPES.items():
+                with self.subTest(prose=text, shape=label):
+                    self.assertNotRegex(text, shape)
 
     def test_all_references_are_linked_and_documents_stay_focused(self):
         for skill in governed_skills():
