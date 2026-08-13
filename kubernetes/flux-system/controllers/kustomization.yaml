@@ -25,3 +25,26 @@ patches:
       name: helm-controller
       namespace: flux-system
     path: patches/helm-controller.yaml
+  # Authorization narrowing (AUDIT S12). The first patch deletes the generated
+  # cluster-admin binding outright; the second replaces the shared controller
+  # ClusterRole with the enumerated authority the three installed controllers
+  # exercise under their own identity; the third pins the subject list to the
+  # ServiceAccounts this install actually creates.
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+      name: cluster-reconciler-flux-system
+    path: patches/cluster-reconciler.yaml
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRole
+      name: crd-controller-flux-system
+    path: patches/crd-controller-role.yaml
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+      name: crd-controller-flux-system
+    path: patches/crd-controller-binding.yaml

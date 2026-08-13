@@ -1,0 +1,125 @@
+# Negative control for the narrowed Flux controller authorization (AUDIT S12).
+# Every document below is a way the removed cluster-admin binding could come
+# back — by name, by wildcard, by unrestricted impersonation, by token minting,
+# by Secret writes in flux-system, or by re-broadening the shared binding's
+# subject list. Each must be rejected; the fixture harness fails if the file as
+# a whole is accepted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-reconciler-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quiet-escalation
+  namespace: naranjo-online
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-runtime
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-impersonation
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flux-cluster-impersonator
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [impersonate]
+    resourceNames: [root-reconciler]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flux-token-minter
+rules:
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-decryption
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: image-automation-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flux-operator-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux-edit-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system

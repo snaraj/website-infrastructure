@@ -1,0 +1,129 @@
+# The generated export grants `resources: ['*'], verbs: ['*']` on six Flux API
+# groups plus cluster-wide Secret reads and `serviceaccounts/token` creation.
+# That last pair is a cluster-admin equivalent by another route: a token minted
+# for any ServiceAccount in any namespace is that account's full authority, and
+# a cluster-wide Secret read is every credential the cluster holds. Removing the
+# `cluster-admin` binding beside this file would have been cosmetic while these
+# rules stood.
+#
+# This patch replaces the rule list with the enumerated authority the three
+# installed controllers actually exercise under their OWN identity. Everything a
+# reconciliation applies is applied by an impersonated per-tenant ServiceAccount
+# (../../access.yaml), never by these accounts, so no application kind appears
+# here at all.
+#
+# Removed on purpose, each with the evidence that it is unused:
+#
+#   * notification.toolkit.fluxcd.io, image.toolkit.fluxcd.io, and
+#     source.extensions.fluxcd.io — the reviewed component set is
+#     source-controller, kustomize-controller, helm-controller, so those CRDs
+#     are never installed and no object of those groups can exist.
+#   * secrets (cluster-wide read) — replaced by a flux-system-only read in
+#     ../../access.yaml. Every source in this repository is anonymous by
+#     invariant (no Git credential, no registry credential, keyless signature
+#     verification), so the only Secret any controller reads under its own
+#     identity is the SOPS age key in flux-system.
+#   * serviceaccounts/token (create) — Flux uses it for cloud-provider workload
+#     identity. This cluster authenticates to no provider, and the verb is a
+#     cluster-wide privilege-escalation primitive.
+#   * configmaps write and configmaps/status, and coordination.k8s.io leases —
+#     both are controller-local: leader election and any controller-owned
+#     ConfigMap live in flux-system. Namespaced equivalents are bound in
+#     ../../access.yaml.
+#
+# The rule list is REPLACED, not merged, so regenerating gotk-components.yaml
+# with a newer Flux CLI cannot silently re-broaden it; a Flux release that needs
+# a new permission fails visibly at reconcile time and is added here under
+# review.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-flux-system
+rules:
+  # Source objects. The controllers watch them cluster-wide because their
+  # informer caches are cluster-scoped: a namespaced grant cannot satisfy a
+  # cluster-wide list/watch, and the controllers exit rather than degrade.
+  # Creation is not granted — sources are created by the impersonated
+  # reconcilers from Git, never by a controller.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets
+      - externalartifacts
+      - gitrepositories
+      - helmrepositories
+      - ocirepositories
+    verbs: [get, list, watch, update, patch]
+  # The one exception: helm-controller creates and deletes the HelmChart it
+  # derives from a HelmRelease whose chart comes from a Git source, under its
+  # own identity. The cloudflare-public release is exactly that shape.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets/status
+      - externalartifacts/status
+      - gitrepositories/status
+      - helmcharts/status
+      - helmrepositories/status
+      - ocirepositories/status
+    verbs: [get, patch, update]
+  # Finalizer subresource access is only consulted when the API server runs the
+  # OwnerReferencesPermissionEnforcement admission plugin. It is granted because
+  # a missing grant there produces a stuck, hard-to-diagnose deletion rather
+  # than a clear denial, and it authorizes nothing else.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets/finalizers
+      - externalartifacts/finalizers
+      - gitrepositories/finalizers
+      - helmcharts/finalizers
+      - helmrepositories/finalizers
+      - ocirepositories/finalizers
+    verbs: [update]
+  # kustomize-controller owns Kustomization status and finalizers. It never
+  # creates or deletes one: the root Kustomization applies the five children
+  # while impersonating root-reconciler, whose namespaced Role carries those
+  # verbs.
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/status]
+    verbs: [get, patch, update]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/finalizers]
+    verbs: [update]
+  # helm-controller owns HelmRelease status and finalizers on the same terms.
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases/status]
+    verbs: [get, patch, update]
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases/finalizers]
+    verbs: [update]
+  # Read-only, non-credential cluster metadata. Namespace reads back the
+  # health-check and pruning paths; ConfigMap reads back `postBuild.substituteFrom`
+  # and Helm `valuesFrom` in any tenant namespace; ServiceAccount reads let a
+  # controller resolve the account it is about to impersonate. None of the three
+  # carries a credential in this cluster: every ServiceAccount here has
+  # `automountServiceAccountToken: false` and no bound Secret.
+  - apiGroups: [""]
+    resources: [namespaces, serviceaccounts, configmaps]
+    verbs: [get, list, watch]
+  # Event reporting is cluster-scoped because an Event is written in the
+  # namespace of the object it describes, and the reconcilers describe objects
+  # in flux-system and in every tenant namespace. `create` and `patch` on Events
+  # authorize no read of cluster state and confer no authority over any other
+  # resource; losing it would degrade reporting silently, which is the failure
+  # mode this whole change exists to prevent.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  # Non-resource URLs can only be granted by a ClusterRole. This is the API
+  # server liveness ping the controllers use to distinguish an unreachable
+  # control plane from a failing reconciliation.
+  - nonResourceURLs: [/livez/ping]
+    verbs: [head]

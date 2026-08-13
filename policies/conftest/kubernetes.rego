@@ -1209,3 +1209,110 @@ deny contains msg if {
   object.get(object.get(input.metadata, "labels", {}), key, "") != "v1.36"
   msg := sprintf("Namespace %s must pin Pod Security %s to v1.36", [input.metadata.name, mode])
 }
+
+# ---------------------------------------------------------------------------
+# Flux controller authorization (AUDIT S12)
+# ---------------------------------------------------------------------------
+#
+# The narrowing lives in Kustomize patches over a generated export, so the
+# static checks in scripts/validate_repository.py can only prove the patches
+# exist and are wired in. These rules run over the RENDERED output and prove
+# the patches actually took effect: what the cluster would receive carries no
+# cluster-admin binding, no wildcard rule bound to a Flux account, and no
+# impersonation grant that is not restricted to named accounts.
+
+# The two generated ClusterRoles that legitimately keep wildcards aggregate into
+# the built-in admin/edit/view roles for human operators. They are harmless
+# because nothing binds them, which is asserted below rather than assumed.
+flux_aggregation_roles := {"flux-edit-flux-system", "flux-view-flux-system"}
+
+# Namespaces whose Roles are part of the Flux authorization surface.
+flux_rbac_namespaces := {"flux-system", "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"}
+
+rbac_binding_kinds := {"RoleBinding", "ClusterRoleBinding"}
+
+deny contains msg if {
+  input.kind in rbac_binding_kinds
+  object.get(object.get(input, "roleRef", {}), "name", "") == "cluster-admin"
+  msg := sprintf("%s %s must not bind cluster-admin", [input.kind, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  input.metadata.name == "cluster-reconciler-flux-system"
+  msg := "the cluster-admin reconciler binding must be deleted, not rendered"
+}
+
+deny contains msg if {
+  input.kind in rbac_binding_kinds
+  object.get(object.get(input, "roleRef", {}), "name", "") in flux_aggregation_roles
+  msg := sprintf("%s %s must not bind a wildcard aggregation role", [input.kind, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  not input.metadata.name in flux_aggregation_roles
+  some rule in object.get(input, "rules", [])
+  some field in {"apiGroups", "resources", "verbs"}
+  "*" in object.get(rule, field, [])
+  msg := sprintf("ClusterRole %s must not grant a wildcard %s", [input.metadata.name, field])
+}
+
+deny contains msg if {
+  input.kind == "Role"
+  input.metadata.namespace in flux_rbac_namespaces
+  some rule in object.get(input, "rules", [])
+  some field in {"apiGroups", "resources", "verbs"}
+  "*" in object.get(rule, field, [])
+  msg := sprintf("Role %s/%s must not grant a wildcard %s", [input.metadata.namespace, input.metadata.name, field])
+}
+
+# Impersonation is the mechanism that replaced cluster-admin, so it is the one
+# verb whose scope must always be an explicit list of accounts.
+deny contains msg if {
+  input.kind in {"Role", "ClusterRole"}
+  some rule in object.get(input, "rules", [])
+  "impersonate" in object.get(rule, "verbs", [])
+  count(object.get(rule, "resourceNames", [])) == 0
+  msg := sprintf("%s %s must restrict impersonate to named accounts", [input.kind, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  some rule in object.get(input, "rules", [])
+  "impersonate" in object.get(rule, "verbs", [])
+  msg := sprintf("ClusterRole %s must not grant impersonate at cluster scope", [input.metadata.name])
+}
+
+# Token minting is escalation to any account in the cluster; this platform
+# authenticates to no cloud provider and needs it nowhere.
+deny contains msg if {
+  input.kind in {"Role", "ClusterRole"}
+  some rule in object.get(input, "rules", [])
+  "serviceaccounts/token" in object.get(rule, "resources", [])
+  msg := sprintf("%s %s must not grant ServiceAccount token creation", [input.kind, input.metadata.name])
+}
+
+# The controllers read the SOPS age key in flux-system and write no Secret
+# anywhere; a write verb there would let a controller replace the key it
+# decrypts with.
+deny contains msg if {
+  input.kind == "Role"
+  input.metadata.namespace == "flux-system"
+  some rule in object.get(input, "rules", [])
+  "secrets" in object.get(rule, "resources", [])
+  some verb in object.get(rule, "verbs", [])
+  verb in {"create", "update", "patch", "delete", "deletecollection"}
+  msg := sprintf("Role flux-system/%s must not write Secrets", [input.metadata.name])
+}
+
+# The shared controller ClusterRoleBinding must name the ServiceAccounts this
+# install creates and nothing else: a subject for an uninstalled controller
+# activates silently the day that controller arrives.
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  input.metadata.name == "crd-controller-flux-system"
+  subjects := {sprintf("%s/%s", [subject.namespace, subject.name]) | some subject in object.get(input, "subjects", [])}
+  subjects != {"flux-system/source-controller", "flux-system/kustomize-controller", "flux-system/helm-controller"}
+  msg := "crd-controller-flux-system must bind exactly the three installed controllers"
+}
