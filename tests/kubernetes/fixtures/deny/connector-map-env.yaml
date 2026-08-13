@@ -1,0 +1,49 @@
+# A MAP-shaped `env` whose values are otherwise perfectly valid: the correct
+# own-site Secret, the correct key, nothing else wrong. Rego's `every entry in`
+# iterates a map's VALUES, so without the explicit non-list refusal the walk
+# succeeds, every value checks out, and the Pod is ADMITTED — measured, and it
+# is the reason that refusal exists rather than a normalisation to `[]`, which
+# would skip the same walk.
+#
+# ENGINE ASYMMETRY, stated rather than papered over: Kyverno's CEL `.all()`
+# iterates a map's KEYS and reports this shape as a pass, so it is asserted in
+# Conftest only. That is the safe way round. This shape cannot reach admission
+# at all — the API server refuses to decode a map where `[]EnvVar` is required
+# — so the engine that CAN see it is the static gate on the rendered desired
+# state, which is exactly where it is refused. The sibling string-shaped `env`
+# errors in CEL and IS refused by both.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: connector-map-env
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env:
+        TUNNEL_TOKEN:
+          valueFrom:
+            secretKeyRef:
+              name: naranjo-online-tunnel-token
+              key: token
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
