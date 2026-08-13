@@ -140,8 +140,10 @@ launcher.
    resources. This is the provider-side readback proof; do not treat the
    configured literals alone as evidence.
 4. Run the fixed SslStream client for only the selected zone with
-   `-Mode Postchange`. Compare its runtime record and script SHA-256 byte-for-
-   byte with that zone's pre-change receipt. Require TLS 1.0 and 1.1
+   `-Mode Postchange`. Require the `PowerShell`, `Framework`, `OS`, and
+   `ScriptSha256` runtime fields to equal that zone's pre-change receipt
+   exactly; the `Mode` field must be the expected `Prechange` → `Postchange`
+   difference. Require TLS 1.0 and 1.1
    `rejected`, TLS 1.2 and 1.3 `accepted` with the exact negotiated values,
    direct HTTPS 200, both HTTP requests redirected in one edge response to the
    exact HTTPS path/query, and the same canonical body length/SHA-256. Require
@@ -187,8 +189,9 @@ break-glass exception performed by the owner for this one zone only:
    anything else, stop and obtain a new rollback review.
 2. In the selected zone only, restore Always Use HTTPS first when reachability
    or a redirect loop is the symptom, then restore Minimum TLS Version. Change
-   no other control. Record the dashboard audit event; never use a direct API
-   command or expose a token to the shell.
+   no other control. Record the break-glass action and the separately read-back
+   setting values; never use a direct API command or expose a token to the
+   shell.
 3. Reread both settings with the independent read-only audit and require the
    captured values. Rerun the SslStream client in `Prechange` mode and the
    external probe in report-only mode. All four protocols must again negotiate,

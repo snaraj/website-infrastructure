@@ -284,6 +284,8 @@ class CloudflareEdgeHardeningContractTests(unittest.TestCase):
             "Minimum TLS Version before Always Use HTTPS",
             "fresh normal plan",
             "must refresh remote state and exit with no changes",
+            "`PowerShell`, `Framework`, `OS`, and\n   `ScriptSha256` runtime fields",
+            "expected `Prechange` → `Postchange`\n   difference",
             "TLS 1.0 and 1.1\n   `rejected`",
             "TLS 1.2 and 1.3 `accepted`",
             "same canonical body length/SHA-256",
