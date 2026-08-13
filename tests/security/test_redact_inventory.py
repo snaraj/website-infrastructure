@@ -174,6 +174,38 @@ class RedactionTests(unittest.TestCase):
                 self.assertNotIn(origin, output)
         self.assertEqual(output.count("[REDACTED_KEY_ORIGIN]"), len(origins))
 
+    def test_key_origin_pattern_accepts_no_more_than_the_descriptor_grammar(self):
+        """A clock cannot see a widening that stays linear. This can.
+
+        A key origin is a fingerprint followed by zero or more `/`-separated
+        derivation indices. Loosening the separator — `/+`, `/*` or `/?` in
+        place of `/` — widens what the pattern accepts, and some of those edits
+        do it WITHOUT any backtracking blow-up, so the adversarial-input test
+        below is blind to them by construction. Reaching for a bigger pump
+        would never have helped: the observable is the accepted language, not
+        the running time.
+
+        Each string here is outside the descriptor grammar, so the redactor
+        must leave it alone, and each is accepted by a different loosening:
+
+        - `[deadbeef//0]`   — an empty path segment: accepted by `/+` and `/*`
+        - `[deadbeef0]`     — no separator at all:   accepted by `/?` and `/*`
+
+        Together they cover every separator loosening. They are deliberately
+        NOT sensitive values: an empty or missing segment is not a derivation
+        path, so nothing is published by leaving them intact — what is pinned
+        is the pattern's narrowness, with an out-of-grammar string as witness.
+        """
+
+        outside_grammar = ("[deadbeef//0]", "[deadbeef0]", "[deadbeef/0//1]")
+        output = self.redact(
+            "\n".join("descriptor={}".format(value) for value in outside_grammar) + "\n"
+        )
+        for value in outside_grammar:
+            with self.subTest(value=value):
+                self.assertIn(value, output)
+        self.assertNotIn("[REDACTED_KEY_ORIGIN]", output)
+
     def test_redactor_finishes_on_adversarial_key_origin_input(self):
         """Discovery output is host-shaped, untrusted, and can be pumped.
 
@@ -184,14 +216,23 @@ class RedactionTests(unittest.TestCase):
         rather than any single match, so it stays meaningful for whatever the
         pattern table grows into.
 
-        The last two lines are separator-only and digit-only runs, and they are
-        here because a matrix row taught the lesson: the pumped element must be
-        the one whose repetitions the edit lets the engine split. A long
-        SEPARATOR run is what catches a quantified separator ("/+" instead of
-        "/"), and a long unbroken DIGIT run is what catches an optional
-        separator ("/?" instead of "/") — both plausible widenings, both
-        exponential, and neither reachable from a stream of "/0h" groups where
-        every element is already pinned to one position.
+        The last two lines are a separator-only and a digit-only run, because
+        the pumped element must be the one whose repetitions the edit lets the
+        engine SPLIT — a stream of `/0h` groups pins every element to one
+        position and hides that class entirely. Stated exactly, because the
+        first version of this comment was wrong in a way the next author would
+        have inherited:
+
+        - the DIGIT run catches an optional or starred separator (`/?`, `/*`)
+          and a nested digit repetition, each of which lets one run of digits
+          be partitioned across outer iterations;
+        - the SEPARATOR run catches a quantified separator ONLY when the digit
+          part is also optional (`(?:/+[0-9h']*)*`), which is what lets a run
+          of slashes be partitioned. Quantifying the separator ALONE
+          (`(?:/+[0-9]+[h']?)*`) keeps the decomposition unique — every
+          iteration must still consume a digit — so it never blows up, and no
+          ceiling here or anywhere can catch it. The narrowness test above is
+          what catches that one.
         """
 
         pumps = (
