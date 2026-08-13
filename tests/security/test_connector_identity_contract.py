@@ -702,6 +702,33 @@ class SiteIngressPolicyNameTests(unittest.TestCase):
             "engines derive, for both sites, in order",
         )
 
+    DEGENERATE_ENV_FIXTURE = FIXTURES / "deny" / "connector-map-env.yaml"
+
+    def test_the_degenerate_env_shape_is_still_exercised(self):
+        """The killer for the non-list ``env`` refusal, pinned by inventory.
+
+        Deleting a deny fixture reddens nothing on its own — the runner is a
+        glob — so the one fixture that distinguishes the refusal from its
+        absence is pinned here. It was written because the refusal SURVIVED
+        this round's first mutation matrix: with a map-shaped ``env`` whose
+        values are otherwise valid, Rego's ``every entry in`` walks the map's
+        values, every value checks out, and the Pod is admitted.
+        """
+
+        text = self.DEGENERATE_ENV_FIXTURE.read_text(encoding="utf-8")
+        self.assertIn(
+            "      env:\n        TUNNEL_TOKEN:\n",
+            text,
+            "the fixture must keep a MAP-shaped env; as a list it stops "
+            "distinguishing the non-list refusal from its removal",
+        )
+        self.assertIn(
+            "              name: naranjo-online-tunnel-token",
+            text,
+            "the map's values must stay individually VALID, or the fixture is "
+            "refused for the wrong reason and the refusal goes untested",
+        )
+
     def test_the_superseded_name_is_still_exercised_as_a_denial(self):
         """A rename that merely ADDED the new name would pass without this."""
 
