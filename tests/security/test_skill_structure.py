@@ -708,6 +708,25 @@ class SkillStructureTests(unittest.TestCase):
                 "skill resource is a symlink", skill_layout_findings(skill)
             )
 
+            linked.unlink()
+            outside_directory = root / "outside-resources"
+            outside_directory.mkdir()
+            (outside_directory / "guide.md").write_text(
+                FORBIDDEN_IDENTITY[0], encoding="utf-8"
+            )
+            linked_directory = skill / "scripts"
+            linked_directory.symlink_to(outside_directory, target_is_directory=True)
+            self.assertIn(
+                "skill resource is a symlink", skill_layout_findings(skill)
+            )
+
+            linked_skill = root / "linked-tool"
+            linked_skill.symlink_to(skill, target_is_directory=True)
+            self.assertEqual(
+                skill_layout_findings(linked_skill),
+                ("skill root is a symlink",),
+            )
+
     def test_identity_shapes_do_not_match_ordinary_prose(self):
         """The false-positive boundary of every shape, pinned.
 
