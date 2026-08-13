@@ -153,6 +153,22 @@ def skill_files(skill):
     return tuple(sorted(path for path in skill.rglob("*") if path.is_file()))
 
 
+def skill_file_area(skill, path):
+    """Classify a file by its TOP-LEVEL skill area.
+
+    A nested directory whose name happens to be ``assets`` does not turn text
+    below ``scripts/``, ``agents/``, or ``references/`` into an opaque asset.
+    Layout and privacy use this same classifier so those two boundaries cannot
+    disagree about which contract governs a file.
+    """
+    relative = path.relative_to(skill)
+    if relative.as_posix() == "SKILL.md":
+        return "entry"
+    if len(relative.parts) >= 2 and relative.parts[0] in KNOWN_AREAS:
+        return relative.parts[0]
+    return None
+
+
 def skill_layout_findings(skill):
     """Return fixed-label findings for the portable skill anatomy.
 
@@ -168,15 +184,11 @@ def skill_layout_findings(skill):
     asset_bytes = 0
     for path in skill_files(skill):
         relative = path.relative_to(skill)
-        relative_text = relative.as_posix()
         data = path.read_bytes()
-        if relative_text == "SKILL.md":
-            area = "entry"
-        elif len(relative.parts) < 2 or relative.parts[0] not in KNOWN_AREAS:
+        area = skill_file_area(skill, path)
+        if area is None:
             findings.append("file outside a recognized skill area")
             continue
-        else:
-            area = relative.parts[0]
 
         if area == "assets":
             asset_bytes += len(data)
@@ -203,7 +215,7 @@ def searchable_skill_text(skill):
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in skill_files(skill)
-        if "assets" not in path.relative_to(skill).parts
+        if skill_file_area(skill, path) in ({"entry"} | TEXT_AREAS)
     )
 
 
@@ -323,7 +335,13 @@ def frontmatter_findings(text, expected_name):
 
 
 def _markdown_without_code_or_comments(markdown):
-    """Remove fenced/inline code and HTML comments before link parsing."""
+    """Remove fenced, indented and inline code plus HTML comments.
+
+    This is deliberately a strict link-evidence projection, not a Markdown
+    renderer: a link used to prove that a resource is discoverable must appear
+    in ordinary prose. Four-space/tab-indented blocks and code spans are inert
+    even when they contain syntactically convincing link text.
+    """
     markdown = re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL)
     visible_lines = []
     fence_character = None
@@ -345,26 +363,42 @@ def _markdown_without_code_or_comments(markdown):
             fence_length = len(fence.group(1))
             visible_lines.append("")
             continue
-        output = []
-        position = 0
-        while position < len(line):
-            if line[position] != "`":
-                output.append(line[position])
-                position += 1
-                continue
-            end_ticks = position
-            while end_ticks < len(line) and line[end_ticks] == "`":
-                end_ticks += 1
-            ticks = line[position:end_ticks]
-            closing = line.find(ticks, end_ticks)
-            if closing < 0:
-                output.append(line[position])
-                position += 1
-                continue
-            output.append(" " * (closing + len(ticks) - position))
-            position = closing + len(ticks)
-        visible_lines.append("".join(output))
-    return "\n".join(visible_lines)
+        if line.startswith("\t") or line.startswith("    "):
+            visible_lines.append("")
+            continue
+        visible_lines.append(line)
+
+    visible = "\n".join(visible_lines)
+    output = list(visible)
+    position = 0
+    while position < len(visible):
+        if visible[position] != "`":
+            position += 1
+            continue
+        end_ticks = position
+        while end_ticks < len(visible) and visible[end_ticks] == "`":
+            end_ticks += 1
+        ticks = visible[position:end_ticks]
+        closing = visible.find(ticks, end_ticks)
+        if closing < 0:
+            position = end_ticks
+            continue
+        end = closing + len(ticks)
+        for index in range(position, end):
+            if output[index] != "\n":
+                output[index] = " "
+        position = end
+    return "".join(output)
+
+
+def _is_backslash_escaped(text, position):
+    """Whether the character at position has an odd backslash prefix."""
+    backslashes = 0
+    position -= 1
+    while position >= 0 and text[position] == "\\":
+        backslashes += 1
+        position -= 1
+    return backslashes % 2 == 1
 
 
 def _normalized_link_target(value):
@@ -382,7 +416,8 @@ def markdown_link_targets(markdown):
         r"(?<!!)\[[^\]\n]*\]\(\s*(<[^>\n]+>|(?:\\.|[^\s)\n])+)"
     )
     for match in inline.finditer(visible):
-        targets.add(_normalized_link_target(match.group(1)))
+        if not _is_backslash_escaped(visible, match.start()):
+            targets.add(_normalized_link_target(match.group(1)))
 
     definitions = {}
     definition = re.compile(
@@ -394,12 +429,16 @@ def markdown_link_targets(markdown):
     uses_visible = definition.sub("", visible)
     reference_use = re.compile(r"(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]")
     for match in reference_use.finditer(uses_visible):
+        if _is_backslash_escaped(uses_visible, match.start()):
+            continue
         label = match.group(2) or match.group(1)
         normalized_label = " ".join(label.split()).casefold()
         if normalized_label in definitions:
             targets.add(definitions[normalized_label])
     shortcut_use = re.compile(r"(?<!!)\[([^\]\n]+)\](?![\[(])")
     for match in shortcut_use.finditer(uses_visible):
+        if _is_backslash_escaped(uses_visible, match.start()):
+            continue
         normalized_label = " ".join(match.group(1).split()).casefold()
         if normalized_label in definitions:
             targets.add(definitions[normalized_label])
@@ -569,6 +608,25 @@ class SkillStructureTests(unittest.TestCase):
             self.assertTrue(skill_identity_findings(skill))
             script.write_text("print('portable')\n", encoding="utf-8")
 
+            # Only the TOP-LEVEL assets tree is opaque. A nested directory
+            # called assets inside any text area remains searchable text.
+            for area, suffix in (
+                ("scripts", "check.py"),
+                ("agents", "openai.yaml"),
+                ("references", "guide.md"),
+            ):
+                nested = skill / area / "nested" / "assets" / suffix
+                nested.parent.mkdir(parents=True, exist_ok=True)
+                nested.write_text(FORBIDDEN_IDENTITY[0], encoding="utf-8")
+                with self.subTest(nested_assets_area=area):
+                    self.assertTrue(skill_identity_findings(skill))
+                nested.unlink()
+
+            # Conversely, top-level assets are deliberately opaque bytes even
+            # when their byte stream happens to decode as identity-shaped text.
+            asset.write_bytes(FORBIDDEN_IDENTITY[0].encode("utf-8"))
+            self.assertEqual(skill_identity_findings(skill), ())
+
             # Text areas remain strict UTF-8 and assets remain bounded.
             asset.write_bytes(b"\x00" * (MAX_ASSET_BYTES + 1))
             self.assertIn(
@@ -644,7 +702,11 @@ class SkillStructureTests(unittest.TestCase):
         for markdown in (
             "See references/guide.md.",
             "See `references/guide.md`.",
+            "`code starts\n[Guide](references/guide.md)\nand ends here`",
             "```text\nreferences/guide.md\n```",
+            "    [Guide](references/guide.md)",
+            "\t[Guide](references/guide.md)",
+            "\\[Guide](references/guide.md)",
             "<!-- [Guide](references/guide.md) -->",
             "![Guide](references/guide.md)",
             "[Guide]: references/guide.md",
