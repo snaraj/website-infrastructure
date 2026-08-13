@@ -31,6 +31,19 @@ Quantities are parsed to integers in their base unit — millicores for CPU,
 bytes for memory — because comparing "1" against "1000m" as strings is exactly
 the kind of quiet wrongness this file exists to prevent. Standard library only:
 this repository stays dependency-free.
+
+DECLARED LIMIT — LimitRange IS NOT MODELLED. This reasons about the NAMESPACE
+total under a ResourceQuota. A LimitRange additionally bounds each individual
+container, and the live connector namespace carries one with `max` of 1 CPU and
+512Mi. A workload can therefore satisfy every check here and still be refused
+in-cluster, per container, and the synthetic database case below is exactly
+that shape: its 1500m/3Gi container fits the namespace budget it is given and
+would be rejected by the live LimitRange. That is not a contradiction — the two
+constraints are independent, and this file states one of them. It is named here
+so nobody reads a pass as "this will schedule". Extending the model to the
+per-container bound is worth doing and is tracked separately; doing it silently
+by tightening these numbers would make the rule look like a per-container check
+without being one.
 """
 
 from __future__ import annotations

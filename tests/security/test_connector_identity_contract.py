@@ -743,7 +743,36 @@ class SiteIngressPolicyNameTests(unittest.TestCase):
             "      envFrom:",
             "            name: lidersea-com-tunnel-token",
         ),
+        # The first round's fixtures, pinned on the same terms. They were left
+        # out when the corpus was introduced because the round's attention was
+        # on the shapes that had just survived a matrix — which is how a
+        # redundancy is lost quietly. Nothing here is a coverage hole: the
+        # compound attack is still killed by the init and ephemeral fixtures
+        # above. It is the SINGLE-arm proofs that were deletable, and an arm
+        # proven only in combination is an arm that can be weakened alone.
+        "env-token-cross-swap-naranjo.yaml": (
+            "    app.kubernetes.io/instance: naranjo-online-tunnel",
+            "              name: lidersea-com-tunnel-token",
+        ),
+        "env-token-cross-swap-lidersea.yaml": (
+            "    app.kubernetes.io/instance: lidersea-com-tunnel",
+            "              name: naranjo-online-tunnel-token",
+        ),
+        "env-token-superseded-shared.yaml": (
+            "              name: pi-websites-tunnel-token",
+            "              key: token",
+        ),
+        "env-token-optional-secret.yaml": (
+            "              name: naranjo-online-tunnel-token",
+            "              optional: true",
+        ),
+        "connector-null-env.yaml": (
+            "      env: null",
+            "    app.kubernetes.io/instance: naranjo-online-tunnel",
+        ),
     }
+    # The site-ingress deny fixture needs no entry here: SiteIngressPolicyNameTests
+    # reads it directly, so deleting it turns that class red on its own.
 
     def test_the_token_binding_deny_corpus_is_complete(self):
         """Every shape whose absence let a guard survive a full matrix."""

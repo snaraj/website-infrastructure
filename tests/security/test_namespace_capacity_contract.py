@@ -271,23 +271,31 @@ class CapacityRuleIsNotAnEqualityCheck(unittest.TestCase):
 class TheCommittedConnectorReleaseFits(unittest.TestCase):
     """The production configuration, rendered, against the committed quota."""
 
-    def test_the_committed_quota_is_the_one_the_cluster_runs(self):
-        """Reconciled to a read-only capture on 2026-08-12.
+    # The dimensions this model reasons about. Stated separately from the rest
+    # of the committed quota because the claim below is narrower than "the
+    # committed quota equals the live one" — which is NOT true, and a check
+    # that asserted it under that name would be asserting something false.
+    MODELLED_DIMENSIONS = ("pods", "limits.cpu", "limits.memory")
 
-        If the committed quota drifts from the cluster's, this check is
-        measuring a budget nobody enforces.
+    def test_the_modelled_dimensions_match_the_cluster(self):
+        """The narrow, true claim — not the broad, false one.
+
+        Reconciled to a read-only capture on 2026-08-12: for the three
+        dimensions this model bounds, the committed quota and the live one
+        agree, so the budget measured here is a budget that is enforced.
+
+        WHAT THIS DELIBERATELY DOES NOT CLAIM. The committed ResourceQuota and
+        the live one are NOT identical — live additionally caps `configmaps`
+        and `services`, and the live LimitRange carries `min` and `max` per
+        container that the committed one does not. Those are real divergences
+        and they are recorded rather than asserted away; see the declared limit
+        in the capacity model about LimitRange.
         """
 
+        committed = committed_quota(CONNECTOR_NAMESPACE)
         self.assertEqual(
-            committed_quota(CONNECTOR_NAMESPACE),
-            {
-                "limits.cpu": "2",
-                "limits.memory": "1Gi",
-                "pods": "6",
-                "requests.cpu": "500m",
-                "requests.memory": "512Mi",
-                "secrets": "8",
-            },
+            {key: committed.get(key) for key in self.MODELLED_DIMENSIONS},
+            {"pods": "6", "limits.cpu": "2", "limits.memory": "1Gi"},
         )
 
     @unittest.skipUnless(HELM, "helm is required")
