@@ -254,11 +254,14 @@ the presence of its comment.
     `tests/kubernetes/fixtures/deny/pod-volume-undiscovered-source.yaml` kills
     the source arm and `pod-volume-multiple-sources.yaml` kills the arity arm —
     one object per file, each rejected by its arm alone, each declaring the
-    message that arm emits. `scripts/test-policy-fixtures.sh` requires the
-    declared message, and proves that requirement against a message no rule emits
-    before it runs the corpus. Pods are deliberately NOT in the engine-parity
-    corpus: the Kyverno half is namespace-scoped while this half is repo-wide, so
-    they are not a parity surface and are not claimed as one.
+    message that arm emits. Two independent runners reach them:
+    `scripts/test-policy-fixtures.sh` rejects each file (which alone is a kill,
+    because each fixture is rejected by ONE arm), and
+    `scripts/test-storage-engine-parity.sh` runs them as a **Conftest-only**
+    corpus that additionally requires the declared message, so a red names the
+    arm instead of only the file. Pods are deliberately NOT a parity surface —
+    the Kyverno half is namespace-scoped by design while this half is repo-wide,
+    so that corpus consults one engine and says so.
   - At **admission**, the Kyverno rules that bound Pod volumes are scoped to the
     tenant namespaces (`naranjo-online`, `lidersea-com`, `cloudflare-public`) and
     are exact allowlists there. A Pod created directly in another namespace is

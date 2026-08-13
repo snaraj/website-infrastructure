@@ -35,9 +35,22 @@
 #      because its fixture also fails SR-1 and SR-7 and the runners only assert
 #      that the FILE is rejected.
 #
-# SCOPE. Storage kinds only. The Kyverno policy's Pod rules are deliberately
-# namespace-scoped while the Conftest mirror's pod-volume rules are repo-wide, so
-# Pods are not a parity surface and are not claimed as one.
+# SCOPE. Two corpora, and only the first is a PARITY corpus:
+#
+#   storage-*.yaml     both engines, verdicts compared against each other and
+#                      against the fixture's directory;
+#   pod-volume-*.yaml  the Conftest mirror ONLY, for check 5 above.
+#
+# Pods are deliberately NOT a parity surface and are not claimed as one: the
+# Kyverno policy's Pod rules are namespace-scoped by design while the Conftest
+# mirror's pod-volume rules are repo-wide, so the two engines are SUPPOSED to
+# disagree there and comparing them would be a false gate. What the pod corpus
+# needs is the other half of this file — per-message attribution — because the
+# pod-volume subtraction model has two arms that were separately neutralizable
+# with every committed gate green, and the only fixture touching them held twenty
+# objects under a file-level assertion. `scripts/test-policy-fixtures.sh` still
+# rejects those fixtures at file level; this adds the attribution that says WHICH
+# arm rejected them, which is what makes each arm individually killable.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -50,6 +63,11 @@ kyverno_policy="${repo_root}/policies/kyverno/disallow-undiscovered-storage.yaml
 # and the required degenerate shapes, so neither the corpus nor this number can
 # be trimmed quietly.
 minimum_deny_objects=30
+
+# The pod-volume attribution corpus has one fixture per arm of the subtraction
+# model, and an arm with no fixture is an arm with no killer, so it has a floor
+# too. Pinned again in the test battery, by NAME as well as by count.
+minimum_pod_objects=2
 
 for tool in conftest kyverno; do
   command -v "${tool}" >/dev/null 2>&1 || { printf '%s is required\n' "${tool}" >&2; exit 2; }
@@ -79,8 +97,14 @@ report_divergence() {
   divergence_reasons="${divergence_reasons}$5"$'\n'
 }
 
+# check_object <fixture> <expected> [engines]
+#   engines = both          storage: attribution + BOTH engines compared
+#           = conftest-only pod volumes: attribution + the Conftest verdict only,
+#                                        because the Kyverno half is deliberately
+#                                        namespace-scoped there (see SCOPE).
 check_object() {
-  local fixture="$1" expected="$2" name conftest_verdict conftest_output kyverno_output kyverno_verdict
+  local fixture="$1" expected="$2" engines="${3:-both}"
+  local name conftest_verdict conftest_output kyverno_output kyverno_verdict='n/a'
   local pass fail error skip expected_message
   name="$(basename -- "${fixture}")"
 
@@ -111,6 +135,15 @@ check_object() {
         "${reason_attribution}: ${expected_message}"
       return
     fi
+  fi
+
+  if [[ "${engines}" == 'conftest-only' ]]; then
+    checked=$((checked + 1))
+    if [[ "${conftest_verdict}" != "${expected}" ]]; then
+      report_divergence "${name}" "${expected}" "${conftest_verdict}" "${kyverno_verdict}" \
+        "${reason_conftest}"
+    fi
+    return
   fi
 
   # kyverno apply exits non-zero whenever a resource fails a rule, which is the
@@ -231,6 +264,15 @@ for fixture in "${repo_root}"/tests/kubernetes/fixtures/allow/storage-*.yaml; do
   check_object "${fixture}" 'allow'
 done
 
+# The pod-volume corpus, Conftest only — see SCOPE. Each fixture is rejected by
+# ONE arm of the subtraction model and declares that arm's message, so neutering
+# either arm fails here by name instead of hiding behind another rule's denial.
+pod_objects=0
+for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/pod-volume-*.yaml; do
+  pod_objects=$((pod_objects + 1))
+  check_object "${fixture}" 'deny' 'conftest-only'
+done
+
 if (( deny_objects < minimum_deny_objects )); then
   printf 'storage parity corpus shrank: %d deny fixtures, floor is %d\n' \
     "${deny_objects}" "${minimum_deny_objects}" >&2
@@ -240,9 +282,14 @@ if (( allow_objects < 1 )); then
   printf 'storage parity corpus carries no admissible shape, so "deny" proves nothing\n' >&2
   exit 1
 fi
-if (( checked != deny_objects + allow_objects )); then
+if (( pod_objects < minimum_pod_objects )); then
+  printf 'pod-volume attribution corpus shrank: %d fixtures, floor is %d — an arm without a fixture has no killer\n' \
+    "${pod_objects}" "${minimum_pod_objects}" >&2
+  exit 1
+fi
+if (( checked != deny_objects + allow_objects + pod_objects )); then
   printf 'storage parity harness compared %d of %d objects\n' \
-    "${checked}" "$((deny_objects + allow_objects))" >&2
+    "${checked}" "$((deny_objects + allow_objects + pod_objects))" >&2
   exit 1
 fi
 if (( failures > 0 )); then
@@ -250,5 +297,5 @@ if (( failures > 0 )); then
   exit 1
 fi
 
-printf 'PASS storage engine parity: %d deny + %d allow object(s), both engines agreed with the expected verdict on every one\n' \
-  "${deny_objects}" "${allow_objects}"
+printf 'PASS storage engine parity: %d deny + %d allow object(s), both engines agreed with the expected verdict on every one; %d pod-volume object(s) attributed to their arm in the Conftest mirror\n' \
+  "${deny_objects}" "${allow_objects}" "${pod_objects}"

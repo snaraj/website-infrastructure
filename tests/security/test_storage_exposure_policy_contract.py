@@ -105,10 +105,15 @@ EXPECTED_ADMITTED_POD_VOLUME_SOURCES = frozenset(
 # So each arm gets a single-object deny fixture that ONLY it rejects, and each
 # fixture declares the message fragment its arm emits. The mapping is held here,
 # outside both the fixture and the runner, so neither the fixture nor its
-# attribution can be dropped quietly. Pods are deliberately NOT part of the
-# engine-parity corpus — the Kyverno half of this policy is namespace-scoped
-# while the Conftest mirror is repo-wide — so ``scripts/test-policy-fixtures.sh``
-# is the runner that enforces these.
+# attribution can be dropped quietly.
+#
+# Two runners reach them, deliberately: ``scripts/test-policy-fixtures.sh``
+# rejects each file (which alone kills either arm, since each fixture is
+# rejected by ONE arm), and ``scripts/test-storage-engine-parity.sh`` runs them
+# as a Conftest-only corpus that additionally requires the declared message, so
+# a red names the arm. Pods are NOT a parity surface — the Kyverno half of this
+# policy is namespace-scoped by design while the Conftest mirror is repo-wide —
+# so that corpus consults one engine and says so.
 POD_VOLUME_ARM_FIXTURES = {
     "pod-volume-undiscovered-source": "uses undiscovered storage source",
     "pod-volume-multiple-sources": "must declare exactly one volume source, found",
@@ -947,12 +952,13 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
 
     This class is the outside anchor for the correction: the two fixtures, the
     message each one attributes its denial to, the one-object-per-file rule that
-    keeps the attribution honest, and the runner mechanism plus self-test that
-    turn the declaration into a check.
+    keeps the attribution honest, and the wiring that turns the declaration into
+    a check on every run.
     """
 
     def setUp(self) -> None:
         self.rego = read(CONFTEST_POLICY)
+        self.harness = REPO_ROOT / "scripts" / "test-storage-engine-parity.sh"
         self.runner = REPO_ROOT / "scripts" / "test-policy-fixtures.sh"
 
     def test_each_pod_volume_arm_has_a_single_object_deny_fixture(self) -> None:
@@ -1004,71 +1010,67 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
 
         self.assertEqual(len(set(POD_VOLUME_ARM_FIXTURES.values())), 2)
 
-    def test_the_fixture_runner_attributes_denials_and_proves_it_every_run(self) -> None:
-        """The runner mechanism, and the mutant that would otherwise survive it.
+    def test_the_file_level_runner_still_reaches_the_pod_corpus(self) -> None:
+        """The second, independent killer, and the reason it is enough on its own.
 
-        ``scripts/test-policy-fixtures.sh`` asserted only that a FILE was
-        rejected, which is why neutering a pod arm was invisible. It now requires
-        the declared message — and, because a grep replaced by a constant that
-        never fires would leave it printing the same PASS lines forever, it
-        exercises that grep against a message no rule emits before it runs the
-        corpus. Both layers are pinned: this test keeps the self-test from being
-        deleted, the self-test keeps the grep honest.
+        Each fixture above is rejected by ONE arm, so plain file-level rejection
+        already fails when that arm is neutered — no attribution needed to go
+        red, only to say which arm. This pins that the file-level runner keeps
+        globbing the directory the fixtures live in, so the two killers stay
+        independent rather than both routing through the same mechanism.
         """
 
         runner = read(self.runner)
         self.assertIn(
-            "sed -n 's/^# rego-message: //p'",
+            "tests/kubernetes/fixtures/deny/*.yaml",
             runner,
-            "the fixture runner no longer reads the message a deny fixture attributes itself to",
+            "the fixture runner no longer scans the directory the pod fixtures live in",
         )
         self.assertIn(
-            'grep -Fq -- "${expected_message}"',
+            "deny fixture unexpectedly passed",
             runner,
-            "the fixture runner no longer requires the claimed denial in the Conftest output",
+            "the fixture runner no longer fails when a deny fixture is admitted",
         )
-        self.assertIn("expected_message_override", runner)
+
+    def test_the_pod_corpus_rides_the_self_tested_attribution_harness(self) -> None:
+        """Where the pod attribution lives, and why it lives there.
+
+        ``scripts/test-policy-fixtures.sh`` still rejects these fixtures at FILE
+        level, which alone kills either arm — but it cannot say WHICH arm, and
+        PR #91 is rewriting that runner wholesale with a stronger per-document
+        mechanism. Putting a second, weaker attribution mechanism in the same
+        file would have collided with it for no gain, so the pod corpus rides the
+        ``# rego-message:`` machinery in the parity harness instead: one code
+        path, already self-tested against a message no rule emits.
+
+        The Kyverno half is deliberately NOT consulted for Pods — the policy's
+        Pod rules are namespace-scoped by design while the Conftest mirror is
+        repo-wide, so comparing the two engines there would be a false gate. That
+        is why the corpus is declared ``conftest-only`` rather than quietly
+        excluded, and why the floor is pinned on both sides.
+        """
+
+        harness = read(self.harness)
         self.assertIn(
-            "SELF-TEST FAILED",
-            runner,
-            "the fixture runner no longer proves its own attribution check",
-        )
-        # The self-test must RUN the real path, and its failure must ABORT.
-        # Replacing the invocation with a hard-coded result satisfied every other
-        # pin here and left the runner green — the self-test's own missing
-        # killer, measured this round.
-        self.assertIn(
-            'expect_rejection "${self_test_probe}" >/dev/null 2>&1 || self_test_rc=$?',
-            runner,
-            "the fixture runner's self-test no longer exercises the real attribution path",
-        )
-        self.assertEqual(
-            self_test_failures_abort(runner),
-            [],
-            "a self-test failure in the fixture runner no longer aborts the run",
+            "fixtures/deny/pod-volume-*.yaml",
+            harness,
+            "the parity harness no longer runs the pod-volume attribution corpus",
         )
         self.assertIn(
-            "self_test_rc != 2",
-            runner,
-            "the fixture runner's self-test no longer requires the attribution check to be "
-            "what refused the probe",
+            "check_object \"${fixture}\" 'deny' 'conftest-only'",
+            harness,
+            "the pod-volume corpus no longer goes through the attributed check path",
         )
-        # Return code 1 means the probe was not rejected AT ALL, which is a
-        # weakened rule rather than a broken attribution check. The two are
-        # separately reported so a red never has to be diagnosed by guesswork.
         self.assertIn(
-            "self_test_rc == 1",
-            runner,
-            "the fixture runner's self-test no longer distinguishes a weakened rule from "
-            "a broken attribution check",
+            "minimum_pod_objects={}".format(len(POD_VOLUME_ARM_FIXTURES)),
+            harness,
+            "the harness's pod-corpus floor no longer matches the arms pinned here",
         )
-        # The self-test probe must be one of the fixtures pinned above, so the
-        # probe cannot be pointed at a file that stops existing.
-        probe = require(
-            re.search(r"(?m)^self_test_probe=.*/deny/(\S+)\.yaml\"$", runner),
-            "a self-test probe under tests/kubernetes/fixtures/deny/ in the fixture runner",
+        self.assertIn(
+            "checked != deny_objects + allow_objects + pod_objects",
+            harness,
+            "the harness no longer proves it reached every object it counted",
         )
-        self.assertIn(probe.group(1), POD_VOLUME_ARM_FIXTURES)
 
 
 class DocumentedCountsMatchTheArtifacts(unittest.TestCase):
