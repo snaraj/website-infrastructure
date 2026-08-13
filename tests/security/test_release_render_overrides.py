@@ -991,28 +991,53 @@ class PromotedRenderStateTests(unittest.TestCase):
         self.assertIn("static artifact(s) passed", completed.stdout)
 
     def test_scaffold_render_that_downgrades_a_signature_policy_fails_closed(self):
-        """A Kustomize transform cannot bypass the source-file Enforce pin."""
+        """A post-validation render mutation cannot bypass the release gate.
+
+        The signature-policy Kustomization itself has an exact source-inventory
+        guard. Mutating that input would be refused before rendering and could
+        make this test pass for the wrong reason. Instead the disposable
+        renderer corrupts only its already source-validated artifact, after the
+        general Conftest pass and immediately before scaffold release proof.
+        The exact release-policy denial below is therefore the only satisfying
+        result.
+        """
 
         root = self.checkout()
         demote(root)
-        kustomization = root / "policies" / "kyverno" / "kustomization.yaml"
-        kustomization.write_text(
-            kustomization.read_text(encoding="utf-8")
-            + textwrap.dedent(
-                """\
-                patches:
-                  - target:
-                      group: kyverno.io
-                      version: v1
-                      kind: ClusterPolicy
-                      name: require-signed-naranjo-online
-                    patch: |-
-                      - op: replace
-                        path: /spec/validationFailureAction
-                        value: Audit
-                """
+        script = root / "scripts" / "render-manifests.sh"
+        source = script.read_text(encoding="utf-8")
+        marker = (
+            "if [[ \"$MODE\" == '--scaffold' ]]; then\n"
+            "  # These are negative controls, not readiness evidence. They "
+            "prove the checked-in\n"
+        )
+        self.assertEqual(source.count(marker), 1)
+        mutation = textwrap.dedent(
+            """\
+            mutated="${ARTIFACT_ROOT}/policies-kyverno.yaml.mutated"
+            awk '
+              $0 == "  name: require-signed-naranjo-online" { target = 1 }
+              target && !changed && $0 == "  validationFailureAction: Enforce" {
+                sub(/Enforce$/, "Audit")
+                changed = 1
+              }
+              { print }
+              END { if (changed != 1) exit 1 }
+            ' "${ARTIFACT_ROOT}/policies-kyverno.yaml" >"$mutated"
+            mv -- "$mutated" "${ARTIFACT_ROOT}/policies-kyverno.yaml"
+            """
+        )
+        script.write_text(
+            source.replace(marker, mutation + marker, 1), encoding="utf-8"
+        )
+        self.assertEqual(
+            (root / "policies" / "kyverno" / "kustomization.yaml").read_text(
+                encoding="utf-8"
             ),
-            encoding="utf-8",
+            (REPO_ROOT / "policies" / "kyverno" / "kustomization.yaml").read_text(
+                encoding="utf-8"
+            ),
+            "the mutation must not trip the earlier source-inventory guard",
         )
         self.assertEqual(selected_mode(root), "scaffold")
         completed = render(root, "scaffold")
