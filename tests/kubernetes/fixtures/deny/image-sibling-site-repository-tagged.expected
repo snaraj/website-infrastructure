@@ -1,0 +1,3 @@
+# Current-main's ImageReferenceGrammarTests pins this exact Conftest denial set:
+# the other site's valid digest violates naranjo's publisher binding only.
+container image-sibling-site-repository-tagged must use the canonical image repository for namespace naranjo-online

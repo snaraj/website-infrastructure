@@ -42,6 +42,7 @@ from .support import required_tool
 BASH = shutil.which("bash")
 BASH_REQUIRED = "bash is required to exercise the installer"
 KUSTOMIZE = shutil.which("kustomize")
+CONFTEST = shutil.which("conftest")
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_ROOT = ROOT / "kubernetes" / "platform" / "admission-install"
@@ -920,6 +921,18 @@ class AdmissionNetworkShapeTests(unittest.TestCase):
         self.assertIn(name, self.documents, "the reviewed network contract lost " + name)
         return self.documents[name]
 
+    def _fixture_document(self, relative, name):
+        matches = []
+        for document in re.split(r"(?m)^---\s*$", read(ROOT / relative)):
+            if re.search(r"(?m)^  name: " + re.escape(name) + r"\s*$", document):
+                matches.append(document)
+        self.assertEqual(
+            len(matches),
+            1,
+            "{} must contain exactly one {} document".format(relative, name),
+        )
+        return matches[0]
+
     @staticmethod
     def _values(document, field):
         # `- port: 443` and `  protocol: TCP` are both list-item bodies, so the
@@ -961,6 +974,101 @@ class AdmissionNetworkShapeTests(unittest.TestCase):
         self.assertNotIn("except:", document)
         self.assertEqual(self._values(document, "port"), ["65535"])
         self.assertEqual(self._values(document, "protocol"), ["TCP"])
+
+    def test_positive_controls_cover_ha_endpoint_and_service_vip_dataplanes(self):
+        endpoint = self._fixture_document(
+            "tests/kubernetes/fixtures/allow/admission-install-network.yaml",
+            "kyverno-kube-apiserver",
+        )
+        webhook = self._fixture_document(
+            "tests/kubernetes/fixtures/allow/admission-install-network.yaml",
+            "kyverno-admission-webhook",
+        )
+        service_vip = self._fixture_document(
+            "tests/kubernetes/fixtures/allow/admission-install-network-service-vip.yaml",
+            "kyverno-kube-apiserver",
+        )
+        self.assertEqual(
+            self._values(webhook, "cidr"),
+            ["203.0.113.10/32", "203.0.113.11/32"],
+        )
+        self.assertEqual(self._values(webhook, "port"), ["9443"])
+        self.assertEqual(
+            self._values(endpoint, "cidr"),
+            ["203.0.113.20/32", "203.0.113.21/32"],
+        )
+        self.assertEqual(self._values(endpoint, "port"), ["6443"])
+        self.assertEqual(self._values(service_vip, "cidr"), ["192.0.2.30/32"])
+        self.assertEqual(self._values(service_vip, "port"), ["443"])
+
+    def test_broadened_selected_cni_peer_mutations_are_pinned_per_document(self):
+        fixture = read(
+            ROOT / "tests/kubernetes/fixtures/deny/admission-install-network-bypasses.yaml"
+        )
+        expected = read(
+            ROOT
+            / "tests/kubernetes/fixtures/deny/admission-install-network-bypasses.expected"
+        )
+        message = (
+            "NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact "
+            "reviewed admission flow"
+        )
+        self.assertEqual(fixture.count("cidr: 192.0.2.0/24"), 1)
+        self.assertEqual(fixture.count("cidr: 203.0.113.0/24"), 1)
+        # One existing extra-port mutant plus the two new /24 mutants. The deny
+        # runner compares duplicate messages too, so losing either document is
+        # observable rather than hidden by the other failures in the file.
+        self.assertEqual(expected.splitlines().count(message), 3)
+
+    @unittest.skipUnless(CONFTEST, "conftest is required")
+    def test_selected_cni_and_ha_positive_controls_pass_conftest(self):
+        completed = subprocess.run(
+            [
+                required_tool(CONFTEST, "conftest is required"),
+                "test",
+                "--no-color",
+                "--policy",
+                str(ROOT / "policies/conftest"),
+                str(
+                    ROOT
+                    / "tests/kubernetes/fixtures/allow/admission-install-network.yaml"
+                ),
+                str(
+                    ROOT
+                    / "tests/kubernetes/fixtures/allow/admission-install-network-service-vip.yaml"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    @unittest.skipUnless(CONFTEST, "conftest is required")
+    def test_each_broadened_selected_cni_peer_is_denied_by_conftest(self):
+        completed = subprocess.run(
+            [
+                required_tool(CONFTEST, "conftest is required"),
+                "test",
+                "--no-color",
+                "--policy",
+                str(ROOT / "policies/conftest"),
+                str(
+                    ROOT
+                    / "tests/kubernetes/fixtures/deny/admission-install-network-bypasses.yaml"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(completed.returncode, 0, "broadened peers unexpectedly passed")
+        message = (
+            "NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact "
+            "reviewed admission flow"
+        )
+        self.assertEqual(output.count(message), 3, output)
 
     def test_the_public_https_egress_excludes_every_reviewed_range(self):
         document = self._document("kyverno-public-https")

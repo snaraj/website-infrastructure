@@ -1,0 +1,4 @@
+# Current-main's ImageReferenceGrammarTests pins both independent arms for this
+# registry-smuggling shape; neither overlapping denial may hide the other.
+container image-tag-smuggling-a-registry image must use an approved registry and full digest
+container image-tag-smuggling-a-registry must use the canonical image repository for namespace naranjo-online

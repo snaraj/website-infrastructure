@@ -1,11 +1,11 @@
 # Positive control for the admission namespace's network contract.
 #
 # These are the exact four reviewed flows plus the default deny, with the
-# API-server destination already substituted the way the installer substitutes
-# it at apply time (a routable /32 rather than the committed RFC 5737 sentinel).
-# If a future rule is written so narrowly that it can only accept the literal
-# sentinel, or so broadly that it stops distinguishing these shapes, this
-# fixture is what notices.
+# webhook and API paths already substituted as a future HA endpoint-observing
+# dataplane sees them: every control-plane source and every API endpoint is an
+# individual /32, with TCP 9443 and 6443 respectively. If a future rule is
+# written so narrowly that it can only accept the literal sentinel, or so
+# broadly that it stops distinguishing these shapes, this fixture notices.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -32,6 +32,8 @@ spec:
     - from:
         - ipBlock:
             cidr: 203.0.113.10/32
+        - ipBlock:
+            cidr: 203.0.113.11/32
       ports:
         - port: 9443
           protocol: TCP
@@ -75,7 +77,9 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 203.0.113.10/32
+            cidr: 203.0.113.20/32
+        - ipBlock:
+            cidr: 203.0.113.21/32
       ports:
         - port: 6443
           protocol: TCP

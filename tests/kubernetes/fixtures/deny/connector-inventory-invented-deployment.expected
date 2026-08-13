@@ -3,3 +3,4 @@
 # disappears is a weakened rule, a message that appears is an unreviewed
 # denial. File-level rejection alone hides both.
 Deployment cloudflare-public/third-site-tunnel is outside the reviewed connector inventory
+Deployment cloudflare-public/third-site-tunnel may take its Tunnel token only from the Secret derived from its own app.kubernetes.io/instance, through env.valueFrom.secretKeyRef and never through envFrom

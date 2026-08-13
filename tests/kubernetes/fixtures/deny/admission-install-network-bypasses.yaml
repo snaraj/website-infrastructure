@@ -14,6 +14,8 @@
 #    namespace's Pod network.
 # 5. A default-deny that only denies ingress: egress is unrestricted for every
 #    Pod in the namespace, and the four allows below become decorative.
+# 6. A Service-VIP dataplane widened from one /32 to a subnet on TCP 443.
+# 7. An endpoint dataplane carrying one reviewed /32 plus a broadened /24.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -103,3 +105,43 @@ spec:
   podSelector: {}
   policyTypes:
     - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-kube-apiserver
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+      ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-kube-apiserver
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.20/32
+        - ipBlock:
+            cidr: 203.0.113.0/24
+      ports:
+        - port: 6443
+          protocol: TCP

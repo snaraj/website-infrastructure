@@ -2,4 +2,4 @@
 # scripts/test-policy-fixtures.sh compares this whole set: a message that
 # disappears is a weakened rule, a message that appears is an unreviewed
 # denial. File-level rejection alone hides both.
-NetworkPolicy naranjo-online/cloudflared-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
+NetworkPolicy naranjo-online/ingress-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract

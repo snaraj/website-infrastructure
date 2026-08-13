@@ -6,4 +6,6 @@ NetworkPolicy kyverno/default-deny must isolate every Pod for ingress and egress
 NetworkPolicy kyverno/kyverno-admission-webhook widens its exact reviewed admission flow
 NetworkPolicy kyverno/kyverno-debug-shell is outside the exact admission webhook, DNS, API-server, and signature-verification allowlist
 NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact reviewed admission flow
+NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact reviewed admission flow
+NetworkPolicy kyverno/kyverno-kube-apiserver widens its exact reviewed admission flow
 NetworkPolicy kyverno/kyverno-public-https widens its exact reviewed admission flow

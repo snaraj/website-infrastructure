@@ -26,7 +26,7 @@ GitRepository lidersea-com/lidersea-com-source is forbidden; site charts arrive 
 GitRepository lidersea-com/lidersea-com-source is outside the exact source identity allowlist
 Ingress unexpected-hostname is forbidden; Cloudflare Tunnel routes directly to ClusterIP Services
 NetworkPolicy lidersea-com/endport-widening widens the exact cloudflare-public TCP 8080 ingress contract
-NetworkPolicy naranjo-online/cloudflared-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
+NetworkPolicy naranjo-online/ingress-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
 NetworkPolicy lidersea-com/widened-ingress must not grant site egress
 NetworkPolicy lidersea-com/widened-ingress widens the exact cloudflare-public TCP 8080 ingress contract
 PersistentVolumeClaim invented-media must name an enumerated storageClassName

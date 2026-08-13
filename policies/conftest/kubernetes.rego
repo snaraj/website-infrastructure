@@ -446,10 +446,13 @@ valid_public_tunnel_policy if {
 # reviewed flows; a fifth policy, or one of these four in a wider shape, is a
 # path nobody reviewed into or out of the controller that judges every write.
 #
-# The API-server destinations are `/32` and nothing more specific is asserted:
-# safety invariant 12 keeps the real address out of this index, so the committed
-# bytes carry RFC 5737 TEST-NET-1 and the installer substitutes the bound
-# kubeconfig's server at apply time. The SHAPE is what CI can prove.
+# The committed API paths are exact fail-closed sentinels. At apply time the
+# installer substitutes a private, live-cross-checked contract rather than the
+# operator kubeconfig target: every control-plane webhook source plus either the
+# kubernetes.default Service VIP/TCP 443 or the complete API endpoint set/TCP
+# 6443, according to the selected CNI dataplane. CI proves both the sentinel and
+# the closed family of possible runtime SHAPES; private addresses stay out of
+# this index.
 admission_policy_names := {
   "kyverno-admission-webhook",
   "kyverno-dns",
@@ -472,7 +475,58 @@ admission_single_egress_rule := rule if {
   rule := egress[0]
 }
 
-# The API server calls the webhook. Ingress only, one /32 source, one port.
+valid_admission_runtime_peer(peer) if {
+  object.keys(peer) == {"ipBlock"}
+  ip_block := object.get(peer, "ipBlock", {})
+  object.keys(ip_block) == {"cidr"}
+  cidr := object.get(ip_block, "cidr", "")
+  endswith(cidr, "/32")
+  cidr != "192.0.2.10/32"
+  cidr != "192.0.2.20/32"
+}
+
+valid_admission_runtime_peers(peers) if {
+  count(peers) >= 1
+  every peer in peers {
+    valid_admission_runtime_peer(peer)
+  }
+  cidrs := {peer.ipBlock.cidr | some peer in peers}
+  count(cidrs) == count(peers)
+}
+
+valid_admission_webhook_peers(peers) if {
+  peers == [{"ipBlock": {"cidr": "192.0.2.10/32"}}]
+}
+
+valid_admission_webhook_peers(peers) if {
+  valid_admission_runtime_peers(peers)
+}
+
+valid_admission_api_rule(rule) if {
+  object.get(rule, "to", []) == [{"ipBlock": {"cidr": "192.0.2.20/32"}}]
+  object.get(rule, "ports", []) == [{"port": 65535, "protocol": "TCP"}]
+}
+
+# Service-VIP dataplanes observe the one kubernetes.default Service address on
+# its declared HTTPS port before kube-proxy translation.
+valid_admission_api_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  valid_admission_runtime_peers(peers)
+  object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
+}
+
+# Endpoint dataplanes observe every API backend after translation. The private
+# contract proves this peer set is complete, sorted, and duplicate-free against
+# live Endpoints; this mirror pins one-or-more unique /32 peers and only 6443.
+valid_admission_api_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  valid_admission_runtime_peers(peers)
+  object.get(rule, "ports", []) == [{"port": 6443, "protocol": "TCP"}]
+}
+
+# Every API server may call the webhook. The committed sentinel is one exact
+# peer; substituted runtime bytes may carry one or more unique /32 HA sources.
 valid_admission_policy if {
   input.metadata.name == "kyverno-admission-webhook"
   admission_pod_selector
@@ -481,11 +535,8 @@ valid_admission_policy if {
   ingress := object.get(input.spec, "ingress", [])
   count(ingress) == 1
   peers := object.get(ingress[0], "from", [])
-  count(peers) == 1
-  object.keys(peers[0]) == {"ipBlock"}
-  endswith(object.get(peers[0].ipBlock, "cidr", ""), "/32")
-  not "except" in object.keys(peers[0].ipBlock)
-  {port | some port in object.get(ingress[0], "ports", [])} == {{"port": 9443, "protocol": "TCP"}}
+  valid_admission_webhook_peers(peers)
+  object.get(ingress[0], "ports", []) == [{"port": 9443, "protocol": "TCP"}]
 }
 
 # Cluster DNS: the same exact kube-dns peer the tunnel egress uses.
@@ -494,17 +545,11 @@ valid_admission_policy if {
   valid_public_dns_rule(admission_single_egress_rule)
 }
 
-# The API server: one /32 destination, TCP 6443, nothing else.
+# Pods' in-cluster API path: the exact fail-closed sentinel or one selected-CNI
+# runtime shape (one Service VIP/443 or one-or-more API endpoints/6443).
 valid_admission_policy if {
   input.metadata.name == "kyverno-kube-apiserver"
-  peers := object.get(admission_single_egress_rule, "to", [])
-  count(peers) == 1
-  object.keys(peers[0]) == {"ipBlock"}
-  endswith(object.get(peers[0].ipBlock, "cidr", ""), "/32")
-  not "except" in object.keys(peers[0].ipBlock)
-  {port | some port in object.get(admission_single_egress_rule, "ports", [])} == {
-    {"port": 6443, "protocol": "TCP"},
-  }
+  valid_admission_api_rule(admission_single_egress_rule)
 }
 
 # Signature verification: public addresses only, TCP 443 only. Keyless

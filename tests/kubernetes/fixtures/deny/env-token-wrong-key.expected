@@ -1,0 +1,3 @@
+# Current-main's TOKEN_BINDING_DENY_CORPUS pins this file to a non-token key in
+# the right Secret. Its sole attribution is the positive env binding.
+Pod cloudflare-public/connector-wrong-token-key may take its Tunnel token only from the Secret derived from its own app.kubernetes.io/instance, through env.valueFrom.secretKeyRef and never through envFrom
