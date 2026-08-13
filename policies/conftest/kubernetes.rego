@@ -258,10 +258,27 @@ valid_site_chart_verification(namespace) if {
   identities[0] == site_chart_identities[namespace]
 }
 
+# The one name a site's ingress policy may carry. Reconciled to the cluster on
+# 2026-08-12: the live objects are `ingress-to-<namespace>` and both site
+# charts render that name, while this contract alone still demanded the
+# superseded `cloudflared-to-` prefix — so every render of the real desired
+# state was refused by a check that was modelling a shape nothing deploys.
+#
+# Kept as an exact literal rather than a configurable value on purpose. The
+# Kyverno mirror cannot read a repository-side constant, so a values-derived
+# prefix would exist on this side only and the two engines would silently
+# diverge — the exact failure this reconciliation is fixing. Accepting BOTH
+# prefixes was rejected outright: it would weaken an exact-name match into an
+# alternation, and an alternation is what lets a superseded identity survive.
+# The literal is also the provider-NEUTRAL one (delivery-lane requirement 7):
+# `cloudflared-` named the provider, which the site repositories removed on
+# 2026-08-10 and their own neutrality test now forbids re-adding.
+site_ingress_policy_name(namespace) := sprintf("ingress-to-%s", [namespace])
+
 valid_site_ingress_policy if {
   namespace := input.metadata.namespace
   namespace in site_namespaces
-  input.metadata.name == sprintf("cloudflared-to-%s", [namespace])
+  input.metadata.name == site_ingress_policy_name(namespace)
 
   selector_labels := object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {})
   selector_labels == {
@@ -467,6 +484,78 @@ connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
 public_connector_deployment if {
   input.kind == "Deployment"
   object.get(input.metadata, "namespace", "") == "cloudflare-public"
+}
+
+public_connector_workload if {
+  is_workload
+  object.get(object.get(input, "metadata", {}), "namespace", "") == "cloudflare-public"
+}
+
+# The OTHER token-delivery surface, and the one the cluster actually runs.
+# Captured live 2026-08-12: both connector Pods mount ZERO volumes and receive
+# the Tunnel credential as `env: TUNNEL_TOKEN` with
+# `valueFrom.secretKeyRef`. The volume rule above therefore governs a shape
+# that is not deployed — and because it is written as "every volume must be
+# the own-instance tunnel-token volume", a Pod with no volumes at all
+# satisfies it vacuously. So the cross-site substitution closed on the volume
+# surface was still wide open on the surface in production: a connector Pod
+# naming the OTHER site's Secret in a secretKeyRef passed every gate.
+#
+# This binds that surface by the SAME derivation as the volume rule — the
+# Secret name must equal the connector's own app.kubernetes.io/instance plus
+# `-token`, and that instance is itself rooted in the Deployment name by
+# connector_identity_rooted_in_name — so neither engine can be satisfied by a
+# self-consistent relabelling.
+#
+# `envFrom` is refused outright rather than pattern-matched: a `secretRef`
+# there injects EVERY key of the named Secret with no key selector to bind, so
+# an allowlist would have to reason about the Secret's contents, which
+# admission cannot see. The deployed connectors declare no envFrom at all, so
+# refusing it costs nothing and closes the second door into the same credential.
+connector_secret_env_binding_is_own_instance if {
+  connector_instance in connector_deployments
+  every container in containers {
+    valid_connector_container_env(container)
+  }
+}
+
+# Written as a POSITIVE proof that the denial NEGATES, never as a rule that
+# hunts for a violation. A missing, null, scalar or map-shaped `env`, a
+# non-object container, or a non-list `containers` makes this proof UNDEFINED
+# and `not` then fires the denial. A mismatch-hunting rule would instead go
+# undefined itself on exactly those degenerate shapes — under OPA's default
+# non-strict mode a builtin type error silently drops the deny body — and fail
+# OPEN where the Kyverno mirror errors and denies.
+valid_connector_container_env(container) if {
+  is_object(container)
+  not "envFrom" in object.keys(container)
+  env := object.get(container, "env", [])
+  is_array(env)
+  every entry in env {
+    valid_connector_env_entry(entry)
+  }
+}
+
+# An env entry that reads no Secret at all is none of this rule's business.
+valid_connector_env_entry(entry) if {
+  is_object(entry)
+  value_from := object.get(entry, "valueFrom", {})
+  is_object(value_from)
+  not "secretKeyRef" in object.keys(value_from)
+}
+
+# An env entry that DOES read a Secret must read exactly this connector's own
+# token key. Compared by whole-object equality so an added `optional: true`
+# — which would let the Pod start with no credential at all, silently — is a
+# denial rather than an accepted extra field.
+valid_connector_env_entry(entry) if {
+  is_object(entry)
+  value_from := object.get(entry, "valueFrom", {})
+  is_object(value_from)
+  object.get(value_from, "secretKeyRef", {}) == {
+    "name": sprintf("%s-token", [connector_instance]),
+    "key": "token",
+  }
 }
 
 # The connector identity tuple is ROOTED IN THE DEPLOYMENT NAME, never in a
@@ -1390,6 +1479,19 @@ deny contains msg if {
   public_connector_deployment
   not connector_identity_rooted_in_name
   msg := sprintf("Deployment cloudflare-public/%s must state its own name as app.kubernetes.io/instance in its metadata labels, selector, and pod template; the connector identity tuple is rooted in the Deployment name", [object.get(input.metadata, "name", "")])
+}
+
+# The deployed token-delivery surface (env/secretKeyRef), bound to the same
+# own-instance derivation the mounted-volume surface already uses. Scoped to
+# every workload in cloudflare-public, not only to those that declare a
+# secretKeyRef: a workload there that claims no reviewed connector identity
+# has no legitimate way to name a connector's Secret at all, and requiring the
+# identity first is what keeps the derivation from being satisfied by an
+# absent label.
+deny contains msg if {
+  public_connector_workload
+  not connector_secret_env_binding_is_own_instance
+  msg := sprintf("%s cloudflare-public/%s may take its Tunnel token only from the Secret derived from its own app.kubernetes.io/instance, through env.valueFrom.secretKeyRef and never through envFrom", [input.kind, object.get(input.metadata, "name", "")])
 }
 
 deny contains msg if {

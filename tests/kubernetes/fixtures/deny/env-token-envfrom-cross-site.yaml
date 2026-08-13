@@ -1,0 +1,37 @@
+# The second door into the same credential. `envFrom.secretRef` injects
+# EVERY key of the named Secret with no key selector to bind, so a
+# per-key allowlist would have to reason about the Secret's contents,
+# which admission cannot see. Refused outright; the deployed connectors
+# declare no envFrom at all.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: connector-with-envfrom-cross-site
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true
+      envFrom:
+        - secretRef:
+            name: lidersea-com-tunnel-token

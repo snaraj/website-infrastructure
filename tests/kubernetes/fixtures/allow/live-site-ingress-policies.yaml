@@ -1,0 +1,63 @@
+# Positive control for the site-ingress policy identity, taken from the objects
+# that are actually admitted. Both documents below are the exact shape captured
+# read-only from the cluster on 2026-08-12 and the exact shape both site charts
+# render at their current heads: name `ingress-to-<namespace>`, peer pinned to
+# the shared connector name AND this site's own connector instance, TCP 8080.
+#
+# Until this reconciliation the contract demanded `cloudflared-to-<namespace>`
+# and nothing in the repository could see that no such object exists anywhere:
+# the fixtures agreed with the contract, the contract agreed with the fixtures,
+# and both disagreed with the cluster. Feeding the real names in is what keeps
+# that from silently recurring.
+#
+# The two sites differ in policyTypes exactly as they do live — lidersea also
+# denies egress, naranjo does not yet — so this control cannot be satisfied by
+# a rule that quietly normalises one site into the other.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-naranjo-online
+  namespace: naranjo-online
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: naranjo-online
+      app.kubernetes.io/instance: naranjo-online
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: naranjo-online-tunnel
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingress-to-lidersea-com
+  namespace: lidersea-com
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: lidersea-com
+      app.kubernetes.io/instance: lidersea-com
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflare-public
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/instance: lidersea-com-tunnel
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress: []

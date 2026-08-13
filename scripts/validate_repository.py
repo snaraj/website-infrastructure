@@ -1432,7 +1432,7 @@ def check_kubernetes(root):
                 )]
                 if len(matches) != 1:
                     errors.append("exact ingress+egress default-deny missing for " + namespace)
-        # The per-site ingress policies (cloudflared-to-<site>) ship inside
+        # The per-site ingress policies (ingress-to-<site>) ship inside
         # the standalone site charts and arrive through the remote sources;
         # the platform keeps requiring its own egress side toward each site.
         required_network_templates = {

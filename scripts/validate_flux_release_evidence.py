@@ -403,9 +403,9 @@ expected_network_policies = {
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
     ("naranjo-online", "default-deny"),
-    ("naranjo-online", "cloudflared-to-naranjo-online"),
+    ("naranjo-online", "ingress-to-naranjo-online"),
     ("lidersea-com", "default-deny"),
-    ("lidersea-com", "cloudflared-to-lidersea-com"),
+    ("lidersea-com", "ingress-to-lidersea-com"),
 }
 tenant_namespaces = {identity[0] for identity in expected_network_policies}
 tenant_network_policies = [
