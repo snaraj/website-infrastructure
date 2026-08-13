@@ -12,7 +12,8 @@ from .support import load_script
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PHASE_ROOT = REPO_ROOT / "infrastructure" / "cloudflare" / "phases"
+CLOUDFLARE_ROOT = REPO_ROOT / "infrastructure" / "cloudflare"
+PHASE_ROOT = CLOUDFLARE_ROOT / "phases"
 FIXTURE_ROOT = (
     REPO_ROOT / "infrastructure" / "cloudflare" / "tests" / "fixtures"
 )
@@ -61,6 +62,15 @@ ALL_SETTING_VALUES = {
     "ssl": "full",
 }
 
+SETTING_RESOURCE_SUFFIXES = {
+    "always_use_https": "always_use_https",
+    "min_tls_version": "min_tls_version",
+    "tls_1_3": "tls_1_3",
+    "0rtt": "zero_rtt",
+    "http3": "http3",
+    "ssl": "ssl",
+}
+
 
 def setting_owners(source):
     """Extract resource-name/setting-id pairs from one closed site root."""
@@ -77,6 +87,7 @@ class CloudflareEdgeHardeningContractTests(unittest.TestCase):
 
     def test_each_setting_has_one_existing_owner_per_site_and_no_second_root(self):
         repository_counts = {setting: 0 for setting in ALL_SETTING_VALUES}
+        expected_repository_owners = []
         for phase, identity in SITES.items():
             source = (PHASE_ROOT / phase / "main.tf").read_text(encoding="utf-8")
             owners = setting_owners(source)
@@ -86,6 +97,17 @@ class CloudflareEdgeHardeningContractTests(unittest.TestCase):
             self.assertEqual(len(observed), len(set(observed)))
             for setting in ALL_SETTING_VALUES:
                 repository_counts[setting] += observed.count(setting)
+                expected_repository_owners.append(
+                    (
+                        (PHASE_ROOT / phase / "main.tf")
+                        .relative_to(REPO_ROOT)
+                        .as_posix(),
+                        "{}_{}".format(
+                            identity["slug"], SETTING_RESOURCE_SUFFIXES[setting]
+                        ),
+                        setting,
+                    )
+                )
 
             for setting_key, setting_id in (
                 ("always_use_https", "always_use_https"),
@@ -108,6 +130,38 @@ class CloudflareEdgeHardeningContractTests(unittest.TestCase):
         self.assertEqual(
             repository_counts,
             {setting: len(SITES) for setting in ALL_SETTING_VALUES},
+        )
+
+        # Scan every Terraform source under the Cloudflare root, not just the
+        # two expected main.tf files. The separate header inventory makes a
+        # dynamic/missing setting_id fail instead of disappearing from the
+        # parsed owner list.
+        repository_headers = []
+        repository_owners = []
+        for terraform_source in sorted(CLOUDFLARE_ROOT.rglob("*.tf")):
+            source = terraform_source.read_text(encoding="utf-8")
+            relative = terraform_source.relative_to(REPO_ROOT).as_posix()
+            repository_headers.extend(
+                (relative, resource)
+                for resource in re.findall(
+                    r'(?m)^resource "cloudflare_zone_setting" "([a-z0-9_]+)" \{',
+                    source,
+                )
+            )
+            repository_owners.extend(
+                (relative, resource, setting)
+                for resource, setting in setting_owners(source)
+            )
+
+        self.assertEqual(
+            sorted(repository_owners), sorted(expected_repository_owners)
+        )
+        self.assertEqual(
+            sorted(repository_headers),
+            sorted(
+                (path, resource)
+                for path, resource, _setting in repository_owners
+            ),
         )
 
     def test_existing_roots_encode_ordered_target_and_provider_readback(self):
