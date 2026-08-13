@@ -1,8 +1,9 @@
 """Merge-path GitHub Actions spend-exposure audit (issue #45).
 
 GitHub-side spend is clean today — every job runs on the free
-``ubuntu-24.04`` runner, every action is commit-pinned, no artifact
-retention is configured, and the two scheduled workflows fire weekly —
+``ubuntu-24.04`` runner, every action is commit-pinned, every job has a
+positive timeout, no artifact retention is configured, and the two scheduled
+workflows fire weekly —
 but nothing on the merge path would fail if a larger or macOS runner, an
 unpinned third-party action, artifact retention, or a fast cron
 appeared. This battery pins that exposure surface so the CI unittest
@@ -60,6 +61,8 @@ _USES_LINE = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 _SCHEDULE_LINE = re.compile(r"^\s*schedule:\s*$")
 _CRON_LINE = re.compile(r"^\s*-\s*cron:\s*(.*?)\s*$")
 _JOBS_LINE = re.compile(r"^jobs:\s*$")
+_JOB_LINE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+_TIMEOUT_LINE = re.compile(r"^    timeout-minutes:\s*(.*?)\s*$")
 _ON_LINE = re.compile(r"^on:\s*(.*?)\s*$")
 # The one scalar trigger form that cannot smuggle spend configuration
 # (``on: push``). Anything else after ``on:`` — flow mappings, flow
@@ -143,6 +146,9 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
             )
         crons = []
         schedule_lines = 0
+        jobs = []
+        timeouts = {}
+        in_jobs = False
         for number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -176,7 +182,37 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
                 crons.append(_unquoted(cron.group(1)))
                 continue
             if _JOBS_LINE.match(line) is not None:
+                in_jobs = True
                 continue
+            if in_jobs:
+                job = _JOB_LINE.match(line)
+                if job is not None:
+                    jobs.append(job.group(1))
+                    continue
+                timeout = _TIMEOUT_LINE.match(line)
+                if timeout is not None:
+                    if not jobs:
+                        violations.append(
+                            "timeout-minutes appears before a job at {}:{}".format(
+                                path, number
+                            )
+                        )
+                        continue
+                    raw_timeout = _unquoted(timeout.group(1))
+                    if not re.fullmatch(r"[1-9][0-9]*", raw_timeout):
+                        violations.append(
+                            "timeout-minutes must be one positive literal at "
+                            "{}:{}: {!r}".format(path, number, raw_timeout)
+                        )
+                    elif jobs[-1] in timeouts:
+                        violations.append(
+                            "job has duplicate timeout-minutes at {}:{}".format(
+                                path, number
+                            )
+                        )
+                    else:
+                        timeouts[jobs[-1]] = int(raw_timeout)
+                    continue
             trigger = _ON_LINE.match(line)
             if trigger is not None:
                 value = trigger.group(1)
@@ -194,6 +230,13 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
                 )
         observed_crons[path.name] = tuple(crons)
         observed_schedule_lines[path.name] = schedule_lines
+        missing_timeouts = [job for job in jobs if job not in timeouts]
+        if missing_timeouts:
+            violations.append(
+                "jobs lack explicit positive timeout-minutes in {}: {}".format(
+                    path, ", ".join(missing_timeouts)
+                )
+            )
     if runner_lines == 0 and not violations:
         raise AssertionError(
             "fail closed: the workflow scan matched no runs-on lines and "
@@ -279,8 +322,27 @@ class ActionsZeroSpendDenyPathTests(unittest.TestCase):
             "jobs:\n"
             "  scan:\n"
             "    runs-on: {}\n".format(runs_on)
+            + "    timeout-minutes: 30\n"
             + extra
         )
+
+    def test_missing_zero_expression_and_duplicate_timeouts_are_violations(self):
+        base = self._job()
+        mutations = (
+            base.replace("    timeout-minutes: 30\n", ""),
+            base.replace("timeout-minutes: 30", "timeout-minutes: 0"),
+            base.replace("timeout-minutes: 30", "timeout-minutes: ${{ vars.TIMEOUT }}"),
+            base.replace(
+                "    timeout-minutes: 30\n",
+                "    timeout-minutes: 30\n    timeout-minutes: 40\n",
+            ),
+        )
+        for index, workflow in enumerate(mutations):
+            with self.subTest(timeout_mutation=index):
+                violations = self._audit_synthetic({"bad.yml": workflow}, pins={})
+                self.assertTrue(
+                    any("timeout-minutes" in item for item in violations), violations
+                )
 
     def test_macos_runner_is_a_violation(self):
         violations = self._audit_synthetic(

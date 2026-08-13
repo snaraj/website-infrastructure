@@ -3,12 +3,21 @@
 ## Issue first
 
 Create or claim an issue before substantive work. Record problem, acceptance,
-constraints, owner, and dependencies. Apply:
+constraints, threats, tests/mutations, exclusions, rollout/rollback, owner, and
+dependencies. The repository issue form must require that minimum schema plus
+labels, assignee, milestone, and the linked PR's standalone `Closes #N`. Apply:
 
 - scope labels that describe the actual diff;
 - one umbrella agent-authored label and the acting model/context label;
 - owner assignee;
 - one milestone representing the delivery/release arc.
+
+For release-bearing work, make the issue and PR milestone exactly match the
+proposed `VERSION` as `vX.Y.Z`; do not park a patch release in a generic future
+major or upkeep milestone. The post-merge audit verifies the immutable Release
+before closing a completed milestone and moves every unresolved issue first.
+Audit acceptance evidence before closing or reclassifying stale issues; never
+infer completion from a title, age, or closed milestone alone.
 
 A PR body contains an exact standalone `Closes #N` for a same-repository issue.
 Do not use closing syntax for a record that should remain open or an issue in a
@@ -16,9 +25,14 @@ different repository. The owner merge—not PR creation—closes the issue.
 
 ## Draft and requires-review
 
-All agent PRs open Draft. `requires-review` means author-complete at the current
-head and asks a reviewer to act. Absence means in-flight. A reviewer removes it
-when posting either verdict; after repairs, the author reapplies it. Neither
+All agent PRs open Draft. `requires-review` is PR-head-only: it means the exact
+current head is author-complete and asks an independent reviewer to act.
+Absence means the PR is in flight. A reviewer removes it when posting either
+verdict; after repairs, the author reapplies it only for the complete
+replacement head. Never apply or interpret it on an issue; an issue has no head
+and cannot satisfy a PR receipt or Ready gate. Use an explicit normal comment
+for issue-spec review until a separately approved cross-repository issue-review
+label exists. Treat legacy issue uses as coordinator cleanup residue. Neither
 label state nor a review receipt alone makes a PR Ready.
 
 ## Role separation on a shared account
@@ -54,6 +68,20 @@ or write another author's branch. If base moves, create a fresh branch and
 replacement PR; do not rewrite the published one.
 
 Rulesets are defense in depth. Audit required checks, approvals, signatures,
-linear history, bypass actors, and merge methods, but do not mutate repository
-settings without explicit owner authorization. Document gaps rather than
-claiming repository prose is server enforcement.
+linear history, bypass actors, and merge methods. Require checks to be bound to
+their authoritative app/integration identity with strict current-base testing;
+name-only checks, stale branches, or bypass actors fail the Ready gate. Do not
+mutate repository settings without explicit owner authorization. Document gaps
+rather than claiming repository prose is server enforcement.
+
+Prove the active ruleset condition includes exactly the intended protected ref
+such as `refs/heads/main`, with no exclusion or empty/mis-scoped include. A
+ruleset name or active state that targets no branch protects nothing and hard
+blocks Ready.
+
+Inventory Actions policy, default workflow-token permissions, SHA-pinning
+enforcement, secret scanning, and push protection in the owner-observed Ready
+receipt. Require read-only defaults, no PR-review approval, full-SHA action
+pinning, and signed protected-main commits. Record broader action allowlisting
+and optional secret-pattern/validity scanning honestly when they remain
+owner-applied hardening decisions.

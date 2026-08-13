@@ -16,13 +16,14 @@ every byte of configuration is reviewable in this repository, and nothing —
 literally nothing — is allowed to cost money or leak where the box lives.
 That's this repo.
 
-Every protected-main merge also publishes one immutable patch release of this
-repository's platform source (`vX.Y.Z`). Both an allowed one-commit squash and
-an allowed merge-free multi-commit rebase bind the complete final main SHA to
-one release. That source release is an audit and recovery identity only: it
-never deploys, promotes, or mutates Kubernetes, Flux, Cloudflare, DNS, Tunnel
-state, secrets, or protected custody. Site image and chart releases remain
-owned by the two application repositories.
+Once the repository owner's immutable-release and protected-main readiness
+receipt passes, every protected-main merge publishes one immutable patch
+release of this repository's platform source (`vX.Y.Z`). Both an allowed
+one-commit squash and an allowed merge-free multi-commit rebase bind the
+complete final main SHA to one release. That source release is an audit and
+recovery identity only: it never deploys, promotes, or mutates Kubernetes,
+Flux, Cloudflare, DNS, Tunnel state, secrets, or protected custody. Site image
+and chart releases remain owned by the two application repositories.
 
 ```mermaid
 flowchart LR

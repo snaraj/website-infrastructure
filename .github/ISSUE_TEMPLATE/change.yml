@@ -1,0 +1,65 @@
+name: Governed change
+description: Propose repository work with the evidence required before a pull request.
+title: "[Change] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and invariant
+      description: State the observed problem and the invariant that must remain true.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List measurable success and fail-closed criteria.
+    validations:
+      required: true
+  - type: textarea
+    id: threats
+    attributes:
+      label: Threats and failure modes
+      description: Include concurrency, partial-state, identity, and adversarial cases.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests and mutation plan
+      description: Name focused, full, coverage, security, and hostile mutation evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Scope and exclusions
+      description: Name owned paths, excluded paths, dependencies, and live-authority limits.
+    validations:
+      required: true
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Rollout and rollback
+      description: Describe sequencing, stop conditions, recovery, and post-merge audit.
+    validations:
+      required: true
+  - type: input
+    id: milestone
+    attributes:
+      label: Exact release milestone
+      description: Use the proposed VERSION as vX.Y.Z for release-bearing work.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: checkboxes
+    id: metadata
+    attributes:
+      label: Metadata contract
+      options:
+        - label: Exact scope and agent-provenance labels will be applied.
+          required: true
+        - label: The repository owner will be assigned.
+          required: true
+        - label: 'The pull request will link this issue and contain standalone `Closes #N`.'
+          required: true

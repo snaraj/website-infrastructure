@@ -22,6 +22,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -51,130 +52,11 @@ jobs:
           test "${tag}" = "v${version}"
           printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
             "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
-      - name: Create or verify exact annotated tag
+      - name: Publish or verify exact immutable source release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          ref_json="${RUNNER_TEMP}/platform-ref.json"
-          tag_json="${RUNNER_TEMP}/platform-tag.json"
-          tagger_name='github-actions[bot]'
-          tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
-          tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
-          message="Platform release ${TAG} from ${SOURCE_SHA}"
-          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
-
-          get_json() {
-            local url="$1"
-            local output="$2"
-            curl --silent --show-error --location \
-              --proto '=https' --tlsv1.2 \
-              --output "${output}" --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              "${url}"
-          }
-
-          classify_tag() {
-            local object_status required="$1" status tag_object
-            local -a record_args=()
-            status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
-            if [ "${status}" = 200 ]; then
-              tag_object="$(jq -er '.object.sha' "${ref_json}")"
-              object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
-              test "${object_status}" = 200
-              record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
-            fi
-            python3 -I -B scripts/ci/platform_release_contract.py tag-state \
-              --http-status "${status}" --require "${required}" "${record_args[@]}" \
-              --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
-              --message "${message}" --tagger-name "${tagger_name}" \
-              --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
-          }
-
-          if classify_tag exact >/dev/null 2>&1; then
-            printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
-            exit 0
-          fi
-          classify_tag absent >/dev/null
-
-          tag_object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
-            -f tag="${TAG}" \
-            -f message="${message}" \
-            -f object="${SOURCE_SHA}" \
-            -f type=commit \
-            -f "tagger[name]=${tagger_name}" \
-            -f "tagger[email]=${tagger_email}" \
-            -f "tagger[date]=${tagger_date}" \
-            --jq '.sha')"
-          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
-            printf 'tag ref create did not succeed; checking for an exact concurrent winner\n' >&2
-          fi
-          race_verified=false
-          for attempt in 1 2 3 4 5; do
-            if classify_tag exact >/dev/null 2>&1; then
-              race_verified=true
-              break
-            fi
-            sleep "${attempt}"
-          done
-          test "${race_verified}" = true
-          classify_tag exact >/dev/null
-      - name: Create or verify exact GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          notes="${RUNNER_TEMP}/platform-notes.md"
-          existing="${RUNNER_TEMP}/platform-release.json"
-          {
-            printf '## Platform %s\n\n' "${TAG}"
-            printf "Immutable repository source: \`%s\`\n\n" "${SOURCE_SHA}"
-            printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
-            printf "See \`CHANGELOG.md\` at this tag for the human-readable change record.\n"
-          } > "${notes}"
-          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}"
-
-          classify_release() {
-            local required="$1" status
-            local -a record_args=()
-            status="$(curl --silent --show-error --location \
-              --proto '=https' --tlsv1.2 --output "${existing}" --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              "${api}")"
-            if [ "${status}" = 200 ]; then
-              record_args=(--release-json "${existing}")
-            fi
-            python3 -I -B scripts/ci/platform_release_contract.py release-state \
-              --http-status "${status}" --require "${required}" \
-              "${record_args[@]}" --tag "${TAG}" \
-              --title "Platform ${TAG}" --body "${notes}"
-          }
-
-          if classify_release exact >/dev/null 2>&1; then
-            printf 'verified complete existing GitHub Release %s\n' "${TAG}"
-          else
-            classify_release absent >/dev/null
-            if ! gh release create "${TAG}" --verify-tag \
-              --title "Platform ${TAG}" --notes-file "${notes}"; then
-              printf 'release create did not succeed; checking for an exact concurrent winner\n' >&2
-            fi
-            # Creation and a concurrent 422 winner share this same bounded,
-            # authoritative REST verification path. No local tag ref is used.
-            race_verified=false
-            for attempt in 1 2 3 4 5; do
-              if classify_release exact >/dev/null 2>&1; then
-                race_verified=true
-                break
-              fi
-              sleep "${attempt}"
-            done
-            test "${race_verified}" = true
-            classify_release exact >/dev/null
-          fi
+          bash scripts/ci/publish-platform-release.sh

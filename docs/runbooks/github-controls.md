@@ -57,15 +57,35 @@ substitute for that out-of-band rule and review.
 The platform publisher supports both merge methods enabled for this repository:
 one-commit squash and merge-free multi-commit rebase. Merge commits stay
 disabled. That code cannot prevent an owner from merging a failing or stale PR
-when server-side checks are optional, so the automatic-release policy remains
-Draft and must not become Ready until the repository owner observes and
-configures this exact protected-`main` state:
+when server-side checks are optional, and repository code cannot make a GitHub
+Release immutable. The automatic-release policy must not become Ready until the
+repository owner configures and then observes this exact server state:
 
-- pull request and linear history required, with no bypass actors;
+- GitHub immutable releases enabled before the first affected Release is
+  published; enabling the control later does not retrofit an existing Release;
+- pull request, linear history, and signed commits required, with no bypass
+  actors;
 - strict required checks `dependency-review` and
-  `repository-and-infrastructure`, with the branch current before merge;
-- force pushes and branch deletion disabled; and
-- exactly `squash` and `rebase` enabled as merge methods.
+  `repository-and-infrastructure`, each bound to GitHub Actions integration
+  `15368`, with the branch current before merge;
+- force pushes and branch deletion disabled;
+- exactly `squash` and `rebase` enabled as merge methods, with no update rule
+  that would require a bypass merely to merge an otherwise passing PR;
+- Actions enabled with server-side full-SHA pinning required, default workflow
+  token permissions read-only, and workflow tokens unable to approve pull
+  requests; and
+- secret scanning and push protection enabled.
+
+Read-only observation on 2026-08-13 found immutable releases disabled, no
+required-status-check rule, an update restriction, and an always-on
+repository-role bypass. It also found Actions SHA pinning disabled. The
+authoritative preflight therefore returns `DENY`. Actions currently allow all
+publishers even though every checked-in reference is pinned; selected-action
+allowlisting is a separate owner-applied hardening decision. Secret scanning
+and push protection are enabled, while non-provider-pattern and validity checks
+remain disabled residuals. Those optional residuals are recorded rather than
+misrepresented as enforced. None of this grants an agent permission to change
+settings.
 
 Record only those value-level observations, never actor or ruleset identifiers,
 in an untracked JSON receipt with this closed shape:
@@ -74,31 +94,73 @@ in an untracked JSON receipt with this closed shape:
 {
   "repository": "snaraj/website-infrastructure",
   "branch": "main",
+  "actions_enabled": true,
+  "actions_allowed_actions": "all",
+  "actions_sha_pinning_required": true,
+  "default_workflow_permissions": "read",
+  "actions_can_approve_pull_request_reviews": false,
+  "immutable_releases": true,
   "merge_methods": ["rebase", "squash"],
   "required_status_checks": [
-    "dependency-review",
-    "repository-and-infrastructure"
+    {"context": "dependency-review", "integration_id": 15368},
+    {"context": "repository-and-infrastructure", "integration_id": 15368}
   ],
   "strict_status_checks": true,
   "require_pull_request": true,
   "require_linear_history": true,
+  "require_signed_commits": true,
   "allow_force_pushes": false,
   "allow_deletions": false,
-  "bypass_actors": []
+  "restrict_updates": false,
+  "bypass_actors": [],
+  "secret_scanning": true,
+  "secret_scanning_push_protection": true,
+  "secret_scanning_non_provider_patterns": false,
+  "secret_scanning_validity_checks": false
 }
 ```
 
-Validate the observation without network or write authority:
+After the repository owner has made the settings changes, generate the receipt
+through the authoritative GET-only preflight and revalidate its closed schema
+offline. Keep the value-only file untracked and remove it after recording the
+canonical receipt and its digest on the pull request:
 
 ```bash
+receipt="$(mktemp)"
+trap 'rm -f -- "${receipt}"' EXIT
+python3 -I -B scripts/ci/platform_release_contract.py settings-preflight \
+  --repository snaraj/website-infrastructure > "${receipt}"
 python3 -I -B scripts/ci/platform_release_contract.py settings-receipt \
-  --receipt <owner-observed-settings.json> \
+  --receipt "${receipt}" \
   --repository snaraj/website-infrastructure
+sha256sum "${receipt}"
 ```
 
-Any missing, extra, duplicated, or inverted setting is a failed receipt. The
-receipt confirms the observed server contract only; it is not permission to
-change GitHub settings or merge a pull request.
+The preflight uses `gh api --method GET` only with REST API version
+`2026-03-10`; it exhaustively reads the ruleset inventory plus the repository,
+immutable-release, Actions policy, workflow-token policy, security-analysis,
+and exact active repository-owned `only-me-merge` records.
+An authentication, pagination, schema, missing, extra, duplicated,
+foreign-integration, inverted, update-restricted, or bypass-bearing result emits
+no receipt. A successful receipt is necessary but not sufficient for Ready:
+exact-head CI, current base, resolved findings, and a fresh independent approval
+remain required. The receipt grants no settings-write or merge authority; only
+the coordinator changes Draft/Ready and only the repository owner merges.
+
+The publication transaction rechecks the same immutable-release endpoint before
+creating a tag. It then accepts a GitHub Release only when authoritative REST
+reports `immutable:true`, exact published/non-prerelease metadata, the GitHub
+Actions bot author identity, and an exactly empty asset inventory.
+[GitHub's immutable-release contract](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
+locks the associated tag while the Release exists and prevents reuse after
+deletion. Before that lock exists, this transaction verifies the exact
+annotated-tag object, source, message, tagger, and instant immediately around a
+bounded Release create/re-query; a drifted tag is never accepted or moved.
+GitHub still permits editing an immutable Release's human title and notes, so
+those fields are revalidated but are not an external-artifact identity. This
+platform Release intentionally claims source only and therefore requires zero
+assets. Any future external image/chart/package claim must move its digest and
+identity tuple into one byte-exact manifest asset uploaded before publication.
 
 GitHub Actions uses the per-job ephemeral `GITHUB_TOKEN`. PR jobs remain
 read-only with checkout credential persistence disabled. Only the trusted

@@ -39,6 +39,14 @@ must have independent paths and unique immutable versions. Deduplicate only the
 same SHA/tag. Test two and three rapid merges, out-of-order completion, duplicate
 same-SHA events, stale events, wrong head/base, and event/permission identities.
 
+Give every required audit workflow an explicit concurrency identity whose
+protected-main component is the exact source SHA. PR-number cancellation may
+collapse superseded review runs, but a branch/ref-only key must never let one
+main SHA cancel another; deduplicate only the same SHA. Give every workflow job
+an explicit, reviewed, positive `timeout-minutes` bound. Treat a timeout as a
+failed attempt under the same exact retry and burned/conflicting-state rules,
+not permission to skip verification or allocate a second identity silently.
+
 ## Immutable and partial state
 
 Before creating anything, classify each tag/artifact/release as:
@@ -55,8 +63,46 @@ Never overwrite or reassign an immutable tag. Record a recovery issue and use a
 new patch when safe completion is impossible. Validate permissions and exact
 identity; preserve existing signer/provenance policies.
 
+A GitHub Release is called immutable only when the repository's authoritative
+immutable-release control is enabled before publication and the exact Release
+REST record reports immutable state. Bind that server control into the Ready
+receipt, recheck it before mutation, and reject mutable, draft, prerelease,
+or foreign-author records. Enforce the repository's exact closed asset
+inventory; unexpected or partially verified assets fail closed. Repository
+code and prose cannot substitute for the server control.
+
+Immutable Releases still permit title and notes edits, so treat human notes as
+informational, never as the immutable identity of an external artifact. A
+source-only platform Release that claims no external artifacts may require an
+exactly empty asset inventory. If a Release identifies images, charts, packages,
+or binaries, instead create one deterministic machine-readable manifest under
+mode 0600 containing source SHA, version/tag, exact artifact refs and digests,
+signer/workflow identity, and SBOM/provenance expectations. Checksum its exact
+bytes, upload it to a draft, then publish. Verify exact asset name, count, size,
+digest, content, and no extras; test absent/partial/create-race/retry/burned
+states. Never rely on mutable notes to bind external artifact digests.
+
 Official references:
 
 - <https://docs.github.com/en/actions/concepts/security/github_token>
 - <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run>
 - <https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency>
+
+## Deployable artifact vulnerability and alias contract
+
+For a repository that publishes a deployable image, chart, package, or binary,
+install the scanner at a checksum-verified immutable version. Scan source,
+filesystem dependencies, and configuration in PR CI; scan the final artifact
+by its exact digest before classifying publication complete. Gate reviewed
+HIGH/CRITICAL policy, make every ignore explicit and bounded, and schedule a
+full re-scan (or an equivalently enforced recurring audit). Mutation tests must
+delete/bypass the scan, weaken severity, and retarget the digest. If an artifact
+was already pushed when scanning fails, classify the version burned/conflicting;
+never overwrite, delete, or adopt it.
+
+Treat a registry digest as the immutable trust anchor and a registry tag as a
+verified mutable alias. Never call a registry tag immutable without an
+authoritative registry control. Deploy `tag@digest` only after trusting the
+digest, and run a recurring alias/signature/attestation/chart-digest audit
+against the immutable Release record. Alias drift is a hard stop and recovery
+issue/new patch, never permission to retarget or adopt the tag.

@@ -19,7 +19,19 @@ def receipt(head=HEAD, verdict="APPROVE", reviewer="fresh-context"):
 
 class ReviewReceiptTests(unittest.TestCase):
     def test_accepts_exact_head_signed_normal_comment_shape(self):
-        self.assertIsNone(MODULE.denial(receipt(), HEAD, "author-context"))
+        self.assertIsNone(
+            MODULE.denial(receipt(), HEAD, "author-context", "pull-request")
+        )
+
+    def test_issue_labels_cannot_be_mistaken_for_a_reviewable_pr_head(self):
+        self.assertEqual(
+            MODULE.denial(receipt(), HEAD, "author-context", "issue"),
+            "exact-head review receipts apply only to pull requests",
+        )
+        self.assertEqual(
+            MODULE.denial(receipt(), HEAD, "author-context", ""),
+            "exact-head review receipts apply only to pull requests",
+        )
 
     def test_head_change_and_every_receipt_evasion_fail(self):
         cases = (
@@ -34,4 +46,6 @@ class ReviewReceiptTests(unittest.TestCase):
         )
         for text, author in cases:
             with self.subTest(text=text):
-                self.assertIsNotNone(MODULE.denial(text, HEAD, author))
+                self.assertIsNotNone(
+                    MODULE.denial(text, HEAD, author, "pull-request")
+                )

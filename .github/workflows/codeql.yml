@@ -10,6 +10,13 @@ on:
 
 permissions: {}
 
+# PR-number cancellation collapses superseded analysis for one review. Main,
+# schedule, and manual runs bind the exact source SHA, so two rapid main pushes
+# cannot cancel one another; only a duplicate analysis of the same SHA can.
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.sha || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     runs-on: ubuntu-24.04

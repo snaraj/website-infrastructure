@@ -233,8 +233,11 @@ Delivery-lane requirements, explicit and numbered:
    is the one release identity. Successful main CI publishes an immutable,
    policy-tagger annotated plain `vX.Y.Z` tag and exact zero-asset GitHub
    Release at that SHA. This source release never deploys or promotes platform
-   or site workloads. The tested protected-main settings receipt in the GitHub
-   controls runbook must pass before this release policy is Ready.
+   or site workloads. The authoritative GET-only protected-main settings
+   receipt in the GitHub controls runbook must prove immutable releases,
+   strict current-base required checks bound to GitHub Actions, required signed
+   commits, read-only token defaults, enforced action SHA pinning, and no bypass
+   or update restriction before this release policy is Ready.
 
 ## Adversarial review protocol
 
@@ -256,9 +259,10 @@ is textual workflow evidence. A normal PR comment contains exactly one
 `HEAD: <40-lowercase-hex>` line, exactly one `VERDICT: APPROVE` or
 `VERDICT: REQUEST-CHANGES`, and ends `- <Agent> (adversarial reviewer)`.
 Any head change invalidates it and requires a fresh independent review. Validate
-the shape with `scripts/validate_review_receipt.py`; context independence still
-requires coordinator verification. If the owner merged first, record a
-post-merge audit rather than retroactive approval.
+the shape with `scripts/validate_review_receipt.py --resource-kind pull-request`;
+the validator rejects issue resources, and context independence still requires
+coordinator verification. If the owner merged first, record a post-merge audit
+rather than retroactive approval.
 
 **The review must:**
 
@@ -309,6 +313,9 @@ authority: the owner alone merges.
 - **Issues first.** Substantive work is tracked as a labeled issue before or
   alongside its PR; a standalone exact `Closes #N` targets a same-repository
   issue so only the owner merge closes it.
+  Use the governed issue form: problem/invariant, acceptance, threats, tests and
+  mutations, exclusions, rollout/rollback, labels, owner assignee, exact
+  release milestone, and linked PR are required evidence.
   Feature intake lands as a `features`-labeled issue with the architectural
   constraints stated, even when implementation waits.
 - **Labels.** One taxonomy, identical names/colors/meanings across all
@@ -318,27 +325,30 @@ authority: the owner alone merges.
   all three at once. This repository additionally retains two repo-local
   legacy labels from the separation era (`platform`, `extraction`); the
   shared taxonomy governs new work.
-- **`requires-review` — the review-readiness signal.** The author lane
-  applies `requires-review` the moment a PR or issue is
-  complete-from-author — every commit pushed, body and evidence final —
-  so review attention is productive. Its ABSENCE on an open
-  agent-authored PR or issue means the item is still in flight:
-  reviewers and other lanes must not spend review effort on it. The
-  reviewer removes it when posting the verdict; on REQUEST-CHANGES the
-  author re-applies it once the fix commits are pushed. On an issue it
-  carries the same meaning — complete enough to act on or decide — and
-  whoever then acts on it or records the decision removes the label;
-  opening a PR that claims the issue counts as acting. It is
-  a coordination signal only: never a substitute for draft/ready state,
-  for the APPROVE verdict that flips a PR ready, or for owner merge
-  authority.
+- **`requires-review` — exact-PR-head review signal.** The author lane applies
+  `requires-review` only when a PR's exact head, commits, body, and evidence are
+  complete-from-author. Its absence on an open agent-authored PR means the PR is
+  still in flight; its presence asks an independent reviewer to inspect that
+  exact head. The reviewer removes it when posting either verdict; after
+  REQUEST-CHANGES the author reapplies it only after the replacement head is
+  complete. Never apply or interpret `requires-review` on an issue: an issue has
+  no reviewable head and cannot satisfy a PR receipt or Ready gate. Issue-spec
+  review uses an explicit normal comment until a separately approved,
+  cross-repository issue-review label exists. Existing issue uses of
+  `requires-review` are migration residue for coordinator cleanup, not review
+  readiness. The label is never a substitute for Draft/Ready state, a fresh
+  APPROVE receipt, or owner merge authority.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
   (Claude Opus 5), `opus4.8` (Claude Opus 4.8). The signature must match
   the label (delivery-lane bodies ending `- Fable5` ↔ `fable5`;
-  Codex-lane titles ending " - Codex 5.6 Sol Ultra" ↔ `5.6-sol`), and
-  adversarial-review verdicts carry the same identity as
+  Codex-lane titles ending " - Codex 5.6 Sol Ultra" ↔ `5.6-sol`).
+  The umbrella description is model-neutral: `Authored by an AI agent on the
+  repository owner's behalf`. Treat older model-specific umbrella descriptions
+  as coordinator/server-metadata cleanup across all repositories; keep the
+  per-model label as provenance.
+  Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep
   authorship auditable with no owner relay. When a new model joins, its
@@ -384,9 +394,8 @@ The complete delivery loop, each step gated by the sections around it:
    them.
 2. **Claim the work.** File (or take) the issue; state intent and
    constraints. Label it — including both agent labels — assign the
-   owner, set a milestone. Apply `requires-review` once the issue is
-   complete-from-author — the problem stated, the acceptance criteria
-   final; until it carries that label, the issue is still being drafted.
+   owner, set a milestone. Do not put the PR-head-only `requires-review` label
+   on an issue; request issue-spec review through an explicit normal comment.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
    a branch that is not yours is a branch you never push to. Reserve the next

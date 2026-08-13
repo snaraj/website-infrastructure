@@ -9,11 +9,17 @@ This folder is where we make “prove it first” real: none of these files is p
 standard-library-only policy shared by pull-request CI and the success-only
 main publisher: it binds the exact workflow-run identity and final SHA,
 accepts either one squash commit or one merge-free multi-commit rebase range
-with one endpoint patch, verifies annotated tag and zero-asset Release records
-through authoritative REST state, and validates the value-only protected-main
-settings receipt without deploying or changing repository settings.
+with one endpoint patch, verifies annotated tag and immutable zero-asset
+GitHub-Actions Release records through authoritative REST state, and derives a
+closed value-only protected-main and immutable-release receipt through GET-only
+GitHub queries without deploying or changing repository settings.
+[`ci/publish-platform-release.sh`](./ci/publish-platform-release.sh) is the
+directly executable, transaction-tested tag/Release implementation used by the
+success-only publisher; it rechecks immutable-release state before mutation and
+converges both create races only onto exact REST records.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
-validates the portable exact-head adversarial-review receipt shape, while
+validates the portable exact-PR-head adversarial-review receipt shape and
+rejects issue resources, while
 [`validate_destructive_test_ledger.py`](./validate_destructive_test_ledger.py)
 validates the bounded prestate-to-poststate evidence shape for a separately
 authorized disposable-workload experiment; neither validator authenticates an

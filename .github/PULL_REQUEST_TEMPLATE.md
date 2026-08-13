@@ -21,6 +21,7 @@ Closes #<!-- same-repository issue number -->
 - Platform source release: `vX.Y.Z`
 - `VERSION` is exactly one patch after the protected base: yes/no
 - `CHANGELOG.md` records this exact release: yes/no
+- Immutable-release/protected-main GET receipt passes before Ready: pending/yes
 - Publication is source-only and performs no deployment/promotion: confirm
 
 ## Files owned / files excluded

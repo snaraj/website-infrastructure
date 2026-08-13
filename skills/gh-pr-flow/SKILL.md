@@ -32,7 +32,8 @@ The executable branch/refspec deny rules live in
    collision surfaces. Do not touch a dirty ordinary worktree.
 2. File or claim one issue. State acceptance and constraints; add accurate
    scope labels, author labels, owner assignee, and milestone. Never put secrets
-   or private operational facts in public evidence.
+   or private operational facts in public evidence. For a release-bearing
+   change, use the exact proposed `vX.Y.Z` milestone on both issue and PR.
 3. Create one isolated worktree/branch from the exact protected base. One writer
    owns the branch. No amend, rebase, cherry-pick onto published history, force,
    delete, or cross-branch push.
@@ -48,9 +49,10 @@ The executable branch/refspec deny rules live in
    exact standalone `Closes #N`, baseline, scope/exclusions, evidence, residuals,
    rollback, merge order, and release consequence. Mirror issue labels,
    milestone, owner assignee, and author identity labels.
-8. Add `requires-review` only when the head, body, commits, and evidence are
-   author-complete. Its absence means in-flight; its presence requests review;
-   its removal is never a Ready signal.
+8. Add `requires-review` only to a PR and only when its exact head, body,
+   commits, and evidence are author-complete. Never apply or interpret it on an
+   issue, which has no reviewable head. Its absence means an author PR is
+   in-flight; its presence requests exact-head review; removal is never Ready.
 
 ## Exact-head adversarial review
 
@@ -59,8 +61,9 @@ read-only worktree. It reproduces claims, runs hostile mutations and full gates,
 audits status checks and coverage, and posts one signed normal-comment receipt.
 Any head change invalidates it. See
 [review receipts](references/reviews.md). Use
-`scripts/validate_review_receipt.py` for receipt shape; it cannot prove human or
-context independence, so the coordinator verifies that separately.
+`scripts/validate_review_receipt.py --resource-kind pull-request` for receipt
+shape; it rejects issue resources but cannot prove human or context
+independence, so the coordinator verifies that separately.
 
 On `REQUEST-CHANGES`, the author reproduces findings, adds repairs without
 rewriting history, updates evidence, and re-applies `requires-review`. A fresh
@@ -100,6 +103,9 @@ post-transition verification changes, return to Draft. Never merge.
   review, and freshness contract. Never merge merely because it is automated.
 - Report merge order with collision paths and rebase/version consequences. The
   owner executes merges one at a time and checks post-merge publication.
+- Close a completed release milestone only after the immutable Release succeeds
+  and unresolved issues are moved. Verify acceptance evidence before closing or
+  reclassifying stale issues; never infer completion from a title.
 
 ## Live and destructive evidence boundary
 

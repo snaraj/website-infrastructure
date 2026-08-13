@@ -44,6 +44,15 @@ Record the exact injected fault and expected availability impact. Verify
 readiness/liveness, routing, identity binding, observable RTO, and user-visible
 acceptance after recovery.
 
+Make signal-triggered rollback re-entry safe. The first caught INT, TERM, or HUP
+sets a cleanup guard and defers or ignores further catchable termination signals
+until deterministic rollback and residue recording finish; never restore the
+default signal action while cleanup is still vulnerable. Hostile tests deliver
+repeated and mixed signals during cleanup and prove one rollback, one bounded
+receipt, and no residue. Distinguish uncatchable kill and power loss: persist a
+recovery journal before mutation so the next run can detect and safely finish or
+escalate an interrupted transaction.
+
 ## Ledger
 
 The append-only evidence binds:
@@ -54,7 +63,8 @@ prestate hash -> exact fault -> recovery action -> poststate hash
 
 Include timestamps, desired-state/artifact hashes, target inventory, protected
 exclusions, scenario, expected/observed downtime and RTO, acceptance results,
-rollback status, and residue/orphan scan. A missing field, changed target/hash,
+rollback status, deterministic cleanup receipt, recovery-journal state, and
+residue/orphan scan. A missing field, changed target/hash,
 secret overlap, orphan, failed recovery, or unproven externalized state is a hard
 stop—not permission to broaden deletion.
 

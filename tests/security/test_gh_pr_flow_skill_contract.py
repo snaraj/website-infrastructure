@@ -15,6 +15,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         keys = [line.split(":", 1)[0] for line in match.group(1).splitlines() if ":" in line]
         self.assertEqual(keys, ["name", "description"])
         self.assertLessEqual(len(main.splitlines()), 500)
+        body = main.split("---", 2)[2]
+        for heading in re.findall(r"^## (.+)$", body, re.MULTILINE):
+            with self.subTest(imperative_heading=heading):
+                self.assertNotRegex(heading, r"^When to use", re.IGNORECASE)
         references = sorted((SKILL / "references").glob("*.md"))
         self.assertEqual(
             [path.name for path in references],
@@ -24,9 +28,36 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             with self.subTest(reference=reference.name):
                 self.assertIn(f"references/{reference.name}", main)
                 self.assertLessEqual(len(reference.read_text(encoding="utf-8").splitlines()), 200)
+                self.assertNotRegex(
+                    reference.read_text(encoding="utf-8"),
+                    r"\]\((?:\.\./|references/)[^)]+\.md\)",
+                )
+        files = sorted(
+            path.relative_to(SKILL).as_posix()
+            for path in SKILL.rglob("*")
+            if path.is_file()
+        )
+        self.assertEqual(
+            files,
+            [
+                "SKILL.md",
+                "agents/openai.yaml",
+                "references/destructive-workloads.md",
+                "references/governance.md",
+                "references/releases.md",
+                "references/reviews.md",
+            ],
+        )
         interface = (SKILL / "agents" / "openai.yaml").read_text(encoding="utf-8")
-        self.assertIn('display_name: "GitHub PR Flow"', interface)
-        self.assertIn("$gh-pr-flow", interface)
+        self.assertEqual(
+            interface,
+            'interface:\n'
+            '  display_name: "GitHub PR Flow"\n'
+            '  short_description: "Owner-only merge flow with exact-head review and releases"\n'
+            '  default_prompt: "Use $gh-pr-flow to handle this GitHub change with issue-first metadata, isolated append-only authoring, exact-head adversarial review, an enforced release consequence, and absolute NEVER MERGE authority."\n'
+            'policy:\n'
+            '  allow_implicit_invocation: true\n',
+        )
 
     def test_authority_review_release_and_metadata_controls_are_load_bearing(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -39,24 +70,104 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("Only the coordinator flips Ready", main),
             ("exact standalone `Closes #N`", main),
             ("Dependabot", main),
+            ("Never apply or interpret it on an\n   issue", main),
+            ("--resource-kind pull-request", main),
             ("owner assignee", main),
             ("milestone", main),
+            ("exact proposed `vX.Y.Z` milestone", main),
+            ("never infer completion from a title", main),
             ("repo-specific coverage", main),
+            ("neutral/skipped/canceled", main),
             ("HEAD: 0123456789abcdef0123456789abcdef01234567", reviews),
             ("VERDICT: REQUEST-CHANGES", reviews),
             ("Any new commit invalidates", reviews),
             ("POST-MERGE AUDIT", reviews),
             ("shared account", governance),
+            ("**Author:**", governance),
+            ("**Reviewer:**", governance),
+            ("**Coordinator:**", governance),
+            ("**Owner:**", governance),
+            ("`requires-review` is PR-head-only", governance),
+            ("cannot satisfy a PR receipt or Ready gate", governance),
             ("Infrastructure/tool outages", governance),
+            ("required checks", governance),
+            ("strict", governance),
+            ("bypass actors", governance),
             ("Every merge", releases),
+            ("exactly one patch", releases),
             ("Distinct main SHAs", releases),
             ("two and three rapid merges", releases),
             ("burned/conflicting", releases),
             ("For Helm OCI", releases),
             ("never permits numeric Git/image tags", releases),
+            ("authoritative\nimmutable-release control", releases),
+            ("foreign-author", releases),
+            ("exact source SHA", releases),
+            ("branch/ref-only key", releases),
+            ("positive `timeout-minutes`", releases),
+            ("checksum-verified immutable version", releases),
+            ("HIGH/CRITICAL", releases),
+            ("registry digest", releases),
+            ("verified mutable alias", releases),
+            ("human notes as\ninformational", releases),
+            ("mode 0600", releases),
+            ("deterministic machine-readable manifest", releases),
+            ("exact asset name, count, size", releases),
+            ("Actions policy", governance),
+            ("SHA-pinning", governance),
+            ("signed protected-main commits", governance),
+            ("`refs/heads/main`", governance),
+            ("empty/mis-scoped include", governance),
+            ("problem, acceptance", governance),
+            ("threats, tests/mutations, exclusions, rollout/rollback", governance),
+            ("exactly match the\nproposed `VERSION` as `vX.Y.Z`", governance),
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+
+    def test_issue_form_carries_the_issue_first_minimum_schema(self):
+        form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "change.yml").read_text(
+            encoding="utf-8"
+        )
+        config = (ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml").read_text(
+            encoding="utf-8"
+        )
+        for fragment in (
+            "Problem and invariant",
+            "Acceptance criteria",
+            "Threats and failure modes",
+            "Tests and mutation plan",
+            "Scope and exclusions",
+            "Rollout and rollback",
+            "Exact release milestone",
+            "scope and agent-provenance labels",
+            "repository owner will be assigned",
+            "standalone `Closes #N`",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, form)
+        self.assertEqual(form.count("required: true"), 10)
+        self.assertEqual(config, "blank_issues_enabled: false\n")
+
+    def test_rapid_main_audits_have_distinct_sha_groups_and_job_timeouts(self):
+        codeql = (ROOT / ".github" / "workflows" / "codeql.yml").read_text(
+            encoding="utf-8"
+        )
+        platform = (
+            ROOT / ".github" / "workflows" / "platform-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("github.event.pull_request.number || github.sha || github.run_id", codeql)
+        self.assertNotIn("github.event.pull_request.number || github.ref", codeql)
+        first = "1" * 40
+        second = "2" * 40
+
+        def group(pr_number, sha, run_id):
+            return "codeql-{}".format(pr_number or sha or run_id)
+
+        self.assertNotEqual(group(None, first, 1), group(None, second, 2))
+        self.assertEqual(group(None, first, 1), group(None, first, 2))
+        self.assertEqual(group(49, first, 1), group(49, second, 2))
+        self.assertRegex(platform, r"(?m)^    timeout-minutes: [1-9][0-9]*$")
 
     def test_destructive_contract_never_turns_stateful_or_secret_material_ephemeral(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -72,6 +183,11 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "public HTTPS recovery proof",
             "prestate hash -> exact fault -> recovery action -> poststate hash",
             "grants no live action",
+            "cleanup guard",
+            "repeated and mixed signals",
+            "one rollback, one bounded\nreceipt, and no residue",
+            "uncatchable kill and power loss",
+            "recovery journal",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, destructive)

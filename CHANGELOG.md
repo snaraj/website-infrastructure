@@ -10,10 +10,11 @@ implies deployment or promotion.
 
 ### Added
 
-- The first immutable platform source release unit. Every protected-main merge,
-  including documentation and dependency changes, must carry exactly the next
-  patch from its protected base. Successful main CI publishes an annotated
-  plain `vX.Y.Z` tag and matching GitHub Release at that exact source SHA.
+- The first platform source release unit. After the immutable-release readiness
+  receipt passes, every protected-main merge, including documentation and
+  dependency changes, must carry exactly the next patch from its protected
+  base. Successful main CI then publishes an annotated plain `vX.Y.Z` tag and
+  matching immutable GitHub Release at that exact source SHA.
 - Portable, model-neutral collaboration doctrine for issue-first traceability,
   exact-head adversarial review receipts, owner-only merge authority, release
   consequences, and rigorously classified destructive workload experiments.
@@ -27,6 +28,8 @@ implies deployment or promotion.
   base-to-final-SHA patch contract, so an allowed merge shape cannot suppress a
   release or split one merge intent across tags.
 - Annotated tag type, object, source target, message, policy tagger, and instant
-  are verified through authoritative REST state. GitHub Releases require exact
-  title/body/state and an empty asset inventory; concurrent create races
-  converge only after the exact state is re-queried.
+  are verified through authoritative REST state. A GET-only readiness receipt
+  must prove the server immutable-release and protected-main controls before
+  Ready. GitHub Releases require authoritative `immutable:true`, exact
+  GitHub-Actions author, title/body/state, and an empty asset inventory;
+  concurrent create races converge only after the exact state is re-queried.
