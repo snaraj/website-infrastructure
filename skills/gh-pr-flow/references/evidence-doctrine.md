@@ -86,6 +86,11 @@ emergency — but the gap is real and cheap to close.
 *Correction:* strip comment lines from the sliced body before asserting, or
 parse the source instead of matching substrings.
 
+**A PATH-shaped string is not evidence that a resource is discoverable.** Code,
+comments, malformed Markdown, or an unclosed inert block can pass while no
+clickable link is rendered; a symlink can escape or disappear. *Correction:*
+mutate inert forms, use a bounded rendered-link grammar, and reject every symlink in a portable skill tree.
+
 **A proven predicate whose CALL SITE no test invokes is an unwired patch.**
 The predicate can carry exhaustive coverage while the two lines that WIRE it
 into its caller are deletable with the suite still green — fully tested and

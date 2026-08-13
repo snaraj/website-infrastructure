@@ -149,8 +149,19 @@ def governed_skills(skills_root=SKILLS_ROOT):
 
 
 def skill_files(skill):
-    """Every file below a skill, independent of its content type."""
-    return tuple(sorted(path for path in skill.rglob("*") if path.is_file()))
+    """Every file or symlink below a skill, independent of content type.
+
+    ``Path.is_file()`` follows links and returns false for broken links.  A
+    resource inventory built from it alone would therefore omit the exact
+    escape and disappearance cases this boundary must reject.
+    """
+    return tuple(
+        sorted(
+            path
+            for path in skill.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+    )
 
 
 def skill_file_area(skill, path):
@@ -177,6 +188,9 @@ def skill_layout_findings(skill):
     Unknown top-level areas fail closed instead of silently escaping the
     contract.
     """
+    if skill.is_symlink():
+        return ("skill root is a symlink",)
+
     findings = []
     entry = skill / "SKILL.md"
     if not entry.is_file():
@@ -184,6 +198,9 @@ def skill_layout_findings(skill):
     asset_bytes = 0
     for path in skill_files(skill):
         relative = path.relative_to(skill)
+        if path.is_symlink():
+            findings.append("skill resource is a symlink")
+            continue
         data = path.read_bytes()
         area = skill_file_area(skill, path)
         if area is None:
@@ -215,7 +232,8 @@ def searchable_skill_text(skill):
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in skill_files(skill)
-        if skill_file_area(skill, path) in ({"entry"} | TEXT_AREAS)
+        if not path.is_symlink()
+        and skill_file_area(skill, path) in ({"entry"} | TEXT_AREAS)
     )
 
 
@@ -342,28 +360,45 @@ def _markdown_without_code_or_comments(markdown):
     in ordinary prose. Four-space/tab-indented blocks and code spans are inert
     even when they contain syntactically convincing link text.
     """
-    markdown = re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL)
+    # An unclosed comment hides everything through EOF in GitHub Markdown; it
+    # must not expose inert link-shaped text to this evidence projection.
+    markdown = re.sub(r"<!--.*?(?:-->|$)", "", markdown, flags=re.DOTALL)
     visible_lines = []
     fence_character = None
     fence_length = 0
     for line in markdown.splitlines():
-        fence = re.match(r"^[ ]{0,3}(`{3,}|~{3,})", line)
         if fence_character is not None:
-            if (
-                fence is not None
-                and fence.group(1)[0] == fence_character
-                and len(fence.group(1)) >= fence_length
-            ):
+            closing_fence = re.match(
+                r"^[ ]{0,3}"
+                + re.escape(fence_character)
+                + "{" + str(fence_length) + r",}[ \t]*$",
+                line,
+            )
+            if closing_fence is not None:
                 fence_character = None
                 fence_length = 0
             visible_lines.append("")
             continue
-        if fence is not None:
-            fence_character = fence.group(1)[0]
-            fence_length = len(fence.group(1))
+
+        opening_fence = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening_fence is not None and not (
+            opening_fence.group(1)[0] == "`"
+            and "`" in opening_fence.group(2)
+        ):
+            fence_character = opening_fence.group(1)[0]
+            fence_length = len(opening_fence.group(1))
             visible_lines.append("")
             continue
-        if line.startswith("\t") or line.startswith("    "):
+
+        indentation = 0
+        for character in line:
+            if character == " ":
+                indentation += 1
+            elif character == "\t":
+                indentation += 4 - (indentation % 4)
+            else:
+                break
+        if indentation >= 4:
             visible_lines.append("")
             continue
         visible_lines.append(line)
@@ -413,7 +448,10 @@ def markdown_link_targets(markdown):
     visible = _markdown_without_code_or_comments(markdown)
     targets = set()
     inline = re.compile(
-        r"(?<!!)\[[^\]\n]*\]\(\s*(<[^>\n]+>|(?:\\.|[^\s)\n])+)"
+        r"(?<!!)\[[^\]\n]*\]\(\s*"
+        r"(<[^>\n]+>|(?:\\.|[^\s()\n])+)"
+        r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^\)\n]*\)))?"
+        r"\s*\)"
     )
     for match in inline.finditer(visible):
         if not _is_backslash_escaped(visible, match.start()):
@@ -638,6 +676,38 @@ class SkillStructureTests(unittest.TestCase):
                 "text resource is not UTF-8", skill_layout_findings(skill)
             )
 
+    def test_skill_layout_rejects_live_and_broken_resource_symlinks(self):
+        """A resource cannot escape or disappear from the governed tree."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            skill = root / "portable-tool"
+            references = skill / "references"
+            references.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                "---\nname: portable-tool\n"
+                "description: Portable method\n---\n",
+                encoding="utf-8",
+            )
+            outside = root / "outside.md"
+            outside.write_text(FORBIDDEN_IDENTITY[0], encoding="utf-8")
+            linked = references / "escape.md"
+            try:
+                linked.symlink_to(outside)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest("this host cannot create a symlink: " + str(error))
+
+            self.assertIn(
+                "skill resource is a symlink", skill_layout_findings(skill)
+            )
+            self.assertNotIn(FORBIDDEN_IDENTITY[0], searchable_skill_text(skill))
+
+            outside.unlink()
+            self.assertTrue(linked.is_symlink())
+            self.assertFalse(linked.exists())
+            self.assertIn(
+                "skill resource is a symlink", skill_layout_findings(skill)
+            )
+
     def test_identity_shapes_do_not_match_ordinary_prose(self):
         """The false-positive boundary of every shape, pinned.
 
@@ -704,15 +774,29 @@ class SkillStructureTests(unittest.TestCase):
             "See `references/guide.md`.",
             "`code starts\n[Guide](references/guide.md)\nand ends here`",
             "```text\nreferences/guide.md\n```",
+            "```text\n``` trailing text\n[Guide](references/guide.md)\n```",
             "    [Guide](references/guide.md)",
             "\t[Guide](references/guide.md)",
+            "   \t[Guide](references/guide.md)",
             "\\[Guide](references/guide.md)",
             "<!-- [Guide](references/guide.md) -->",
+            "<!-- unclosed\n[Guide](references/guide.md)",
             "![Guide](references/guide.md)",
+            "[Guide](references/guide.md",
             "[Guide]: references/guide.md",
         ):
             with self.subTest(inert=markdown):
                 self.assertNotIn(target, markdown_link_targets(markdown))
+
+    def test_evidence_doctrine_records_the_resource_discovery_boundary(self):
+        doctrine = collapsed(PR_FLOW / "references" / "evidence-doctrine.md")
+        for fragment in (
+            "A PATH-shaped string is not evidence",
+            "no clickable link is rendered",
+            "reject every symlink in a portable skill tree",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, doctrine)
 
     def test_skill_explicitly_discovers_portable_variants(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
