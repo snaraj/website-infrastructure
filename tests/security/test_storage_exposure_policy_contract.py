@@ -217,6 +217,25 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def self_test_failures_abort(text: str) -> list[str]:
+    """Return the self-test failure messages in ``text`` that do NOT abort.
+
+    A self-test is only a guard while its failure branch stops the run. Turning
+    its ``exit 1`` into a no-op leaves the message in place, the run green, and
+    every text pin around it satisfied — the same "pinned by its own source text
+    is not pinned" defect these self-tests exist to answer, one level up.
+    """
+
+    lines = text.splitlines()
+    toothless: list[str] = []
+    for index, line in enumerate(lines):
+        if "SELF-TEST FAILED" not in line:
+            continue
+        if "exit 1" not in "\n".join(lines[index : index + 6]):
+            toothless.append(line.strip())
+    return toothless
+
+
 def require(match: re.Match[str] | None, expectation: str) -> re.Match[str]:
     """Return ``match``, or fail loudly naming what was expected.
 
@@ -877,6 +896,11 @@ class EngineParityHarnessContract(unittest.TestCase):
             harness,
             "the harness's self-test no longer asserts that attribution is what refused the probe",
         )
+        self.assertEqual(
+            self_test_failures_abort(harness),
+            [],
+            "a self-test failure in the parity harness no longer aborts the run",
+        )
 
     def test_the_corpus_cannot_be_trimmed_below_the_floor(self) -> None:
         """The floor lives here as well as in the harness.
@@ -1008,6 +1032,20 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
             "SELF-TEST FAILED",
             runner,
             "the fixture runner no longer proves its own attribution check",
+        )
+        # The self-test must RUN the real path, and its failure must ABORT.
+        # Replacing the invocation with a hard-coded result satisfied every other
+        # pin here and left the runner green — the self-test's own missing
+        # killer, measured this round.
+        self.assertIn(
+            'expect_rejection "${self_test_probe}" >/dev/null 2>&1 || self_test_rc=$?',
+            runner,
+            "the fixture runner's self-test no longer exercises the real attribution path",
+        )
+        self.assertEqual(
+            self_test_failures_abort(runner),
+            [],
+            "a self-test failure in the fixture runner no longer aborts the run",
         )
         self.assertIn(
             "self_test_rc != 2",
