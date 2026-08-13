@@ -1014,6 +1014,7 @@ class SkillStructureTests(unittest.TestCase):
             "control-plane PKI",
             "StatefulSets, PVs, PVCs, databases, and operators",
             "backup and restore evidence",
+            "Exclude durable state from deletion unless a separately authorized",
             "availability, expected downtime, readiness, and recovery-time "
             "objective",
             "Run one serialized live lane",
