@@ -183,6 +183,15 @@ class RedactionTests(unittest.TestCase):
         consumed. The assertion is a wall-clock ceiling over the whole stream
         rather than any single match, so it stays meaningful for whatever the
         pattern table grows into.
+
+        The last two lines are separator-only and digit-only runs, and they are
+        here because a matrix row taught the lesson: the pumped element must be
+        the one whose repetitions the edit lets the engine split. A long
+        SEPARATOR run is what catches a quantified separator ("/+" instead of
+        "/"), and a long unbroken DIGIT run is what catches an optional
+        separator ("/?" instead of "/") — both plausible widenings, both
+        exponential, and neither reachable from a stream of "/0h" groups where
+        every element is already pinned to one position.
         """
 
         pumps = (
@@ -190,6 +199,8 @@ class RedactionTests(unittest.TestCase):
             "descriptor=[deadbeef" + "/00000000" * 40,
             "descriptor=[deadbeef" + "/0" * 200,
             "descriptor=[deadbeef" + "/0'" * 40 + "/",
+            "descriptor=[deadbeef" + "/" * 60,
+            "descriptor=[deadbeef" + "0" * 40,
         )
         output = self.redact("\n".join(pumps) + "\n", timeout=ADVERSARIAL_SECONDS)
         self.assertEqual(output.count("\n"), len(pumps))
