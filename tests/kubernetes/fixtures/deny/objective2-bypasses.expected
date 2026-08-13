@@ -2,6 +2,12 @@
 # scripts/test-policy-fixtures.sh compares this whole set: a message that
 # disappears is a weakened rule, a message that appears is an unreviewed
 # denial. File-level rejection alone hides both.
+#
+# The `cloudflared-to-naranjo-online` row below covers the EDGE-DRIFT-001
+# document #87 appended to this fixture: the canonical site-ingress policy with
+# a name-only peer, which was the accepted shape before the double-pin and must
+# now be denied. Deriving this list on the branch alone would have left it out,
+# and the runner correctly reported it as an unreviewed denial on the merge.
 ConfigMap lidersea-com/encoded-media-in-data contains a recognized encoded media/archive header
 ConfigMap lidersea-com/media-in-etcd key album.flac looks like a media payload
 ConfigMap lidersea-com/media-in-etcd must not store binary data in etcd
@@ -10,6 +16,7 @@ GitRepository lidersea-com/lidersea-com-source is forbidden; site charts arrive 
 GitRepository lidersea-com/lidersea-com-source is outside the exact source identity allowlist
 Ingress unexpected-hostname is forbidden; Cloudflare Tunnel routes directly to ClusterIP Services
 NetworkPolicy lidersea-com/endport-widening widens the exact cloudflare-public TCP 8080 ingress contract
+NetworkPolicy naranjo-online/cloudflared-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
 NetworkPolicy lidersea-com/widened-ingress must not grant site egress
 NetworkPolicy lidersea-com/widened-ingress widens the exact cloudflare-public TCP 8080 ingress contract
 PersistentVolumeClaim invented-media is forbidden until storage discovery and restore evidence are approved
