@@ -356,7 +356,10 @@ ceremony stops.
 
 The journal is required, and its path must be outside the checkout: it is the
 only record of what this attempt created, and it has to survive the process so
-an apply that dies between phases is still undoable by hand.
+an apply that dies between phases is still undoable by hand. That is enforced,
+not merely asked for — `--apply` refuses a journal path inside the checkout, a
+symlinked path, and a path that already records an earlier attempt, and it
+creates the file under `umask 077`.
 
 If any phase fails, the installer rolls the journal back in reverse order,
 sweeps the webhook configurations Kyverno may already have registered for
@@ -396,6 +399,15 @@ Do not run step 5 until all of these hold:
 4. The owner has authorized the promotion as a separate decision from step 2.
 
 ## Step 5 — promote to stage 2
+
+> **STAGE 2 IS NOT AUTHORIZED.** The blocker table at the top of this document
+> is the gate, not the four conditions in step 4: promotion is blocked on #99,
+> #100 and #102, and #87 and #96 must land first. This step is written down so
+> the procedure is reviewable, not because it is available. `render.lock`
+> carries `stage.enforce.authorized=no` and the installer refuses `--stage
+> enforce --apply` before it binds a tool, so a reader who arrives at this
+> anchor without reading the top of the document is stopped by the script
+> rather than by this paragraph.
 
 ```sh
 ./scripts/install-kyverno-admission.sh --stage enforce --plan

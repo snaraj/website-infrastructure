@@ -51,7 +51,12 @@ patches:
         value: Ignore
   # Per-rule actions. Kyverno prefers the rule's own `validate.failureAction`
   # over the deprecated spec-level field, so the patch above alone would leave
-  # every rule enforcing. These are enumerated per policy and per rule index.
+  # every rule enforcing. These are enumerated per policy and per rule, and
+  # every op is preceded by a `test` op binding that rule's INDEX to its NAME:
+  # RFC 6902 addresses by position, a position is not an identity, and a rule
+  # inserted ahead of another silently re-points every op below it. With the
+  # binding, a rename, a reorder or an insertion fails the RENDER by name
+  # instead of shipping an enforcing rule into the fail-open stage.
   - target:
       group: kyverno.io
       version: v1

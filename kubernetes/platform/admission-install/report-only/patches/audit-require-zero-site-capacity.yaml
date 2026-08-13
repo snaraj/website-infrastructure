@@ -1,11 +1,26 @@
 # Stage 1 report-only downgrade for policies/kyverno/require-zero-site-capacity.yaml.
 #
-# One op per rule, by index, deliberately not a wildcard: adding a rule to the
-# committed policy without adding its op here would ship a rule that still
-# ENFORCES during the fail-open stage. tests/security/
-# test_kyverno_install_contract.py counts the committed rules and requires
-# exactly this many ops at exactly these indices, so the omission fails the
-# suite instead of the cluster.
+# ONE PAIR PER RULE, AND EVERY PAIR IS BOUND TO ITS RULE'S NAME.
+#
+# RFC 6902 addresses list elements by POSITION, and a position is not an
+# identity. #87 added a rule to require-release-readiness at index 0, every
+# later rule shifted down one, and this overlay — which named indices 0,1,2 —
+# went on downgrading three rules that were no longer the three it was written
+# for while the fourth kept `failureAction: Enforce` into the FAIL-OPEN stage.
+# The merge was textually clean and semantically broken, and nothing in either
+# change was wrong on its own.
+#
+# The `test` op is what turns a position back into an identity: kustomize
+# evaluates it and FAILS THE RENDER — `testing value /spec/rules/N/name failed`
+# — the moment a rule is renamed, reordered, or inserted ahead of this one. It
+# is deliberately not a wildcard: adding a rule to a committed policy is an
+# admission-semantics decision that has to be reviewed for stage 1, not
+# absorbed silently. `test_every_committed_rule_has_a_report_only_downgrade`
+# asserts the NAMES here equal the policy's declared rule names, in order and
+# in number, so an added rule fails the suite as well as the render.
+- op: test
+  path: /spec/rules/0/name
+  value: require-capacity-not-ready-quota
 - op: replace
   path: /spec/rules/0/validate/failureAction
   value: Audit

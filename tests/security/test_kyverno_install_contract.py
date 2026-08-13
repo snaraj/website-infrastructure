@@ -204,10 +204,110 @@ NEEDS_KUSTOMIZE = "kustomize is not installed"
 # the enforcing value disappears from the difference list instead of failing it.
 # The counts are what make a disappearance loud.
 STAGE_DIFFERENCE_COUNTS = {
-    "failureAction": 30,
+    "failureAction": 31,
     "failurePolicy": 10,
     "validationFailureAction": 8,
 }
+
+# The reviewed rule inventory: every rule name each committed policy declares,
+# in declaration order.
+#
+# Two mechanisms make this load-bearing rather than decorative. (1) `kyverno
+# test` reports a row referencing a VANISHED rule as Pass/Excluded — including
+# rows whose declared result is `fail` — so renaming a rule out of existence
+# leaves a fully green policy suite while the rule stops running. Only a
+# structural pin binding names to a reviewed list catches it. (2) The
+# report-only downgrade ops address rules by POSITION, and a position is not an
+# identity: this list is what the ops' own `test` bindings are checked against,
+# so an inserted or reordered rule is a named failure here as well as a render
+# failure there.
+#
+# Base-coupled by construction: it describes the committed policy set, so a pull
+# request that adds, renames, or reorders a rule updates it, and that update is
+# the review of the stage-1 semantics the change implies.
+REVIEWED_RULE_NAMES = {
+    "disallow-public-services": (
+        "disallow-public-service",
+        "disallow-ingress",
+        "disallow-gateway-api",
+    ),
+    "disallow-tenant-media-payloads": (
+        "reject-configmap-binary-data",
+        "bound-configmap-control-data",
+        "bound-secret-control-data",
+    ),
+    "disallow-undiscovered-storage": (
+        "disallow-persistent-storage-resources",
+        "disallow-stateful-claim-templates",
+        "allow-only-site-scratch-volumes",
+        "allow-only-tunnel-token-volume",
+        "disallow-legacy-service-account-token-secrets",
+        "disallow-disk-pressure-toleration",
+        "disallow-wildcard-toleration",
+    ),
+    "require-approved-images": (
+        "require-approved-digest",
+        "require-canonical-naranjo-image",
+        "require-canonical-lidersea-image",
+        "require-canonical-cloudflared-image",
+    ),
+    "require-exact-tenant-networking": (
+        "exact-default-deny",
+        "exact-site-ingress-and-no-egress",
+        "exact-tunnel-cross-namespace-egress",
+    ),
+    "require-release-readiness": (
+        "require-connector-identity-tuple",
+        "require-replicaset-owned-by-exact-deployment",
+        "require-site-deployment-readiness",
+        "require-tunnel-token-revision",
+    ),
+    "require-restricted-workloads": (
+        "require-restricted-tenant-namespace",
+        "require-restricted-pod",
+        "require-secure-containers",
+        "disallow-host-ports",
+        "require-approved-service-account",
+        "require-container-resources",
+    ),
+    "require-signed-lidersea-com": (
+        "verify-lidersea-com-signature",
+        "verify-lidersea-com-provenance",
+    ),
+    "require-signed-naranjo-online": (
+        "verify-naranjo-online-signature",
+        "verify-naranjo-online-provenance",
+    ),
+    "require-zero-site-capacity": ("require-capacity-not-ready-quota",),
+}
+
+
+def rule_names(policy):
+    """The rule names a committed policy declares, in declaration order."""
+
+    return re.findall(r"(?m)^    - name: (\S+)$", read(POLICIES / (policy + ".yaml")))
+
+
+# The kinds whose objects live OUTSIDE a namespace, reviewed here as a literal
+# so the row set of the scope regression cannot silently shrink with the
+# artifact it tests: a check whose inputs are derived from the file under test
+# disables itself the moment that file is edited.
+REVIEWED_CLUSTER_SCOPED_KINDS = (
+    "CustomResourceDefinition",
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "ValidatingWebhookConfiguration",
+    "MutatingWebhookConfiguration",
+    "ClusterPolicy",
+    "PriorityClass",
+    "Namespace",
+)
+# Of those, the two no install phase ever applies: webhook registration is the
+# controller's act, so no attempt of this installer can have journaled one.
+NEVER_JOURNALED_KINDS = (
+    "ValidatingWebhookConfiguration",
+    "MutatingWebhookConfiguration",
+)
 
 
 class ParseGuardTests(unittest.TestCase):
@@ -293,13 +393,31 @@ class StagedRolloutTests(unittest.TestCase):
     def test_every_committed_rule_has_a_report_only_downgrade(self):
         """The regression this exists for: a rule added to a committed policy
         without a matching downgrade op still ENFORCES during the fail-open
-        stage, which is exactly the state stage 1 exists to make impossible."""
+        stage, which is exactly the state stage 1 exists to make impossible.
+
+        Counting ops was not enough, and #87 proved it. A downgrade op names a
+        rule by POSITION, and #87 inserted a rule at index 0 of
+        require-release-readiness: the three existing ops kept applying, to
+        three DIFFERENT rules, and the fourth rule reached the fail-open stage
+        carrying `failureAction: Enforce`. Both changes were correct alone and
+        the merge was textually clean.
+
+        So the assertion is by NAME in both directions: every op is preceded by
+        a `test` op binding its index to the rule name it was written for, and
+        the ordered list of bound names must equal the policy's declared rule
+        names exactly — same names, same order, same COUNT. A rule added by
+        anyone breaks here, loudly, instead of shipping enforcing.
+        """
 
         for name in CORE_POLICIES:
             policy = read(POLICIES / (name + ".yaml"))
-            rules = re.findall(r"(?m)^    - name: \S+$", policy)
+            declared = rule_names(name)
             enforcing = re.findall(r"(?m)^        failureAction: \S+$", policy)
             patch = read(REPORT_ONLY / "patches" / ("audit-" + name + ".yaml"))
+            bound = re.findall(
+                r"(?m)^- op: test\n  path: /spec/rules/(\d+)/name\n  value: (\S+)$",
+                patch,
+            )
             indices = re.findall(
                 r"(?m)^  path: /spec/rules/(\d+)/validate/failureAction$", patch
             )
@@ -307,15 +425,89 @@ class StagedRolloutTests(unittest.TestCase):
             with self.subTest(policy=name):
                 self.assertEqual(
                     len(enforcing),
-                    len(rules),
+                    len(declared),
                     "every rule in a core policy declares its own failureAction",
                 )
                 self.assertEqual(
+                    [bound_name for _, bound_name in bound],
+                    declared,
+                    "every downgrade op is bound to the rule NAME it was "
+                    "written for, and the bound names are the policy's rules "
+                    "in order — a rule added, renamed or reordered fails here",
+                )
+                self.assertEqual(
+                    [index for index, _ in bound],
                     indices,
-                    [str(index) for index in range(len(rules))],
+                    "each name binding sits at the index its replace op patches",
+                )
+                self.assertEqual(
+                    indices,
+                    [str(index) for index in range(len(declared))],
                     "one downgrade op per rule, at consecutive indices",
                 )
-                self.assertEqual(set(actions), {"Audit"})
+                self.assertEqual(
+                    set(actions),
+                    {"Audit", *declared},
+                    "the only values in the patch are the bound rule names and Audit",
+                )
+
+    def test_every_reviewed_policy_declares_the_reviewed_rules(self):
+        """Renaming a rule out of existence is invisible to `kyverno test`.
+
+        Every Test row referencing a vanished rule reports Pass/Excluded —
+        INCLUDING rows whose declared result is `fail` — so a one-word rename
+        leaves the whole policy suite green while the rule stops running at
+        admission. Nothing in a policy test can catch it; only binding the
+        declared names to a reviewed list can, and that list has to cover all
+        ten policies rather than the ones a sibling change happened to touch.
+        """
+
+        self.assertEqual(
+            sorted(REVIEWED_RULE_NAMES),
+            sorted(CORE_POLICIES + SIGNATURE_POLICIES),
+            "the reviewed rule inventory covers every reviewed policy",
+        )
+        for name in CORE_POLICIES + SIGNATURE_POLICIES:
+            with self.subTest(policy=name):
+                self.assertEqual(
+                    rule_names(name),
+                    list(REVIEWED_RULE_NAMES[name]),
+                    "the policy's declared rule names are the reviewed ones, "
+                    "in order; a rename or a reorder is a coverage change",
+                )
+
+    def test_no_reviewed_policy_stops_after_the_first_matching_rule(self):
+        """`spec.applyRules: One` is the third one-word neutering axis.
+
+        Kyverno stops processing a policy after the FIRST rule that matches and
+        produces a result, so one line on the seven-rule storage policy leaves
+        six rules never evaluated at admission — with `kyverno test` green, the
+        structural battery green, and `make check-fast` green, because a rule
+        that never runs produces no failed row. `admission: true` and the
+        userInfo narrowing are pinned above; this is the axis they left open,
+        and it is pinned across all ten policies rather than the two a sibling
+        change already covers.
+
+        Absent is the default (`All`), so absent-or-exactly-`All` is the
+        contract: pinning only the value would miss the field being ADDED to a
+        policy that does not carry the line today.
+        """
+
+        for name in CORE_POLICIES + SIGNATURE_POLICIES:
+            policy = read(POLICIES / (name + ".yaml"))
+            declared = re.findall(r"(?m)^  applyRules:\s*(\S+)\s*$", policy)
+            with self.subTest(policy=name):
+                self.assertNotRegex(
+                    policy,
+                    r"(?m)^\s+applyRules:\s*One\s*$",
+                    "applyRules: One stops every rule after the first that "
+                    "matches; the reviewed policies evaluate every rule",
+                )
+                self.assertIn(
+                    declared,
+                    ([], ["All"]),
+                    "applyRules is absent (the All default) or exactly All",
+                )
 
     def test_every_reviewed_policy_actually_runs_at_admission(self):
         """`spec.admission: false` is one word per policy and stops every rule
@@ -787,6 +979,47 @@ class RenderLockTests(unittest.TestCase):
     """The lock is the installer's expectation; a stale one is a gate that
     stopped describing the thing it gates."""
 
+    def test_the_installer_classifies_scope_by_kind_and_only_by_kind(self):
+        """Scope must be a property of the KIND, never of the journal's
+        namespace field.
+
+        `kubectl` IGNORES `--namespace` for a root-scoped resource — `kubectl -n
+        kyverno delete ClusterRole cluster-admin` issues the CLUSTER-SCOPED
+        request and returns 0 — so a validator that reads "this line has a
+        namespace, therefore it is bounded to the install namespace" accepts a
+        cluster-scoped kind carrying a namespace and then deletes it
+        cluster-wide. This pins the reviewed kind list the derivation uses, as a
+        literal: a check whose own input list is read out of the file under test
+        shrinks silently when that file is edited.
+        """
+
+        installer = read(INSTALLER)
+        declared = capture(
+            r"(?m)^CLUSTER_SCOPED_KINDS='([^']+)'$",
+            installer,
+            "the installer's cluster-scoped kind list",
+        ).split("|")
+        self.assertEqual(
+            declared,
+            list(REVIEWED_CLUSTER_SCOPED_KINDS),
+            "the reviewed cluster-scoped kinds and the installer's own list "
+            "have diverged; the scope regression rows would stop covering the "
+            "difference",
+        )
+        # Both the validator and the delete must dispatch on that list, or they
+        # can disagree — and kubectl resolves a disagreement in the dangerous
+        # direction.
+        self.assertEqual(
+            len(
+                re.findall(
+                    r'\[\[ "\$kind" =~ \^\(\$\{CLUSTER_SCOPED_KINDS\}\)\$ \]\]', installer
+                )
+            ),
+            3,
+            "the journal writer, the journal validator and the rollback delete "
+            "all derive scope from the same kind list",
+        )
+
     def test_the_inventory_names_are_the_cluster_scoped_objects(self):
         names = lock_value("inventory.cluster-scoped.names").split(",")
         self.assertEqual(len(names), int(lock_value("inventory.cluster-scoped")))
@@ -1026,6 +1259,23 @@ class RunbookTests(unittest.TestCase):
         self.assertIn("--stage enforce", self.text)
         self.assertIn("PolicyReport", self.text)
 
+    def test_the_promotion_step_points_back_at_the_blocker_table(self):
+        """A reader arriving at `#step-5-promote-to-stage-2` by anchor sees the
+        gate list and no reason to believe the promotion is blocked — the four
+        conditions in step 4 all read as things an operator could satisfy. The
+        section carries the refusal itself, before its own first command."""
+
+        heading = first_index(
+            self.text.splitlines(), "## Step 5 — promote to stage 2", "the promotion step"
+        )
+        section = "\n".join(self.text.splitlines()[heading:])
+        command = section.index("./scripts/install-kyverno-admission.sh")
+        preamble = section[:command]
+        self.assertIn("NOT AUTHORIZED", preamble)
+        for issue in ("#99", "#100", "#102"):
+            with self.subTest(issue=issue):
+                self.assertIn(issue, preamble)
+
     def test_no_reboot_is_authorised_here(self):
         self.assertIn("reboot", self.text)
 
@@ -1107,6 +1357,10 @@ case "$args" in
     echo 'Error from server (NotFound): namespaces "kyverno" not found' >&2; exit 1 ;;
   *"get ClusterPolicy "*)
     if [[ "$scenario" == policy-present ]]; then printf 'clusterpolicy.kyverno.io/alpha\n'; exit 0; fi
+    # A DENIED read is not an absent object. This scenario is the one the
+    # absence probe used to record as "nothing exists".
+    if [[ "$scenario" == probe-unreadable ]]; then
+      echo 'Error from server (Forbidden): clusterpolicies.kyverno.io is forbidden' >&2; exit 1; fi
     echo 'Error from server (NotFound)' >&2; exit 1 ;;
   *"get deployment -l app.kubernetes.io/part-of=kyverno"*)
     case "$scenario" in
@@ -1164,9 +1418,17 @@ case "$args" in
     printf 'applied\n'; exit 0 ;;
   *"delete "*) printf 'deleted\n'; exit 0 ;;
   *"get validatingwebhookconfiguration"*|*"get mutatingwebhookconfiguration"*)
+    # The deletes above SUCCEED in this scenario and only the READ fails, which
+    # is the sharp form of the defect: the sweep did everything it was asked to
+    # and the proof still cannot observe the result. Discarding this status was
+    # what turned an unobservable cluster into a "clean" one.
+    if [[ "$scenario" == webhook-read-forbidden ]]; then
+      echo 'Error from server (Forbidden): validatingwebhookconfigurations is forbidden' >&2; exit 1; fi
     if [[ "$scenario" == residue ]]; then printf 'validatingwebhookconfiguration.admissionregistration.k8s.io/kyverno-resource-validating-webhook-cfg\n'; fi
     exit 0 ;;
   *"get customresourcedefinition"*)
+    if [[ "$scenario" == crd-read-forbidden ]]; then
+      echo 'Error from server (Forbidden): customresourcedefinitions is forbidden' >&2; exit 1; fi
     if [[ "$scenario" == residue-crd ]]; then
       printf 'customresourcedefinition.apiextensions.k8s.io/clusterpolicies.kyverno.io\n'; fi
     exit 0 ;;
@@ -2005,6 +2267,158 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertEqual(self._deletes(), [])
         journal.unlink()
 
+    def test_rollback_refuses_every_cluster_scoped_kind_that_carries_a_namespace(self):
+        """The bypass the namespace-string check left open, closed per kind.
+
+        `validate_journal` used to branch on whether the namespace FIELD was
+        empty: empty meant "cluster-scoped, prove it is in the reviewed
+        inventory", non-empty meant "namespaced, prove it is in `kyverno`". A
+        cluster-scoped kind written WITH a namespace therefore took the second
+        branch and was accepted on the strength of the namespace alone — and
+        `kubectl` IGNORES `--namespace` for a root-scoped resource, so the
+        delete went out on the cluster-scoped path and returned 0. Verified
+        against the pinned kubectl v1.36.3 driving a logging stub API server:
+        `-n kyverno delete clusterrole cluster-admin` issues
+        `DELETE /apis/rbac.authorization.k8s.io/v1/clusterroles/cluster-admin`,
+        with no namespace segment at all.
+
+        The delete COUNT is the assertion, not the exit code: a refusal that
+        arrives after a valid prefix has already been deleted is not a refusal.
+        """
+
+        for kind in REVIEWED_CLUSTER_SCOPED_KINDS:
+            journal = self.base / "scoped.journal"
+            journal.write_text(
+                "{}|{}|{}\n".format(kind, "kyverno", "cluster-admin"), encoding="utf-8"
+            )
+            completed = self._run("--rollback", "--journal", str(journal))
+            with self.subTest(kind=kind):
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(
+                    self._deletes(),
+                    [],
+                    "a journal naming a cluster-scoped kind must be refused "
+                    "before ANY delete, including the runtime webhook sweep",
+                )
+                self.assertIn(
+                    "refusing the entire rollback without deleting anything",
+                    completed.stderr,
+                )
+                if kind not in NEVER_JOURNALED_KINDS:
+                    self.assertIn("scope follows the KIND", completed.stderr)
+            journal.unlink()
+
+    def test_rollback_refuses_a_namespaced_kind_that_carries_no_namespace(self):
+        # The same binding in the other direction: a namespaced kind written
+        # without a namespace would otherwise take the cluster-scoped branch and
+        # be measured against an inventory it can never be in.
+        journal = self.base / "unscoped.journal"
+        journal.write_text("ConfigMap||kyverno\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("with no namespace", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_kind_no_phase_of_this_install_applies(self):
+        # The journal writer classifies every document through the phase table,
+        # so a kind absent from it is a kind no attempt of this installer wrote.
+        journal = self.base / "unphased.journal"
+        journal.write_text("Pod|kyverno|kyverno-admission-controller\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("which no phase of this install applies", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_whose_kind_is_not_a_kind(self):
+        # Shipped with the journal work and unpinned: without it, arbitrary text
+        # reaches `kubectl delete` as its type argument.
+        journal = self.base / "kind-shape.journal"
+        journal.write_text("Config-Map|kyverno|kyverno\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("names no kind", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_a_journal_whose_name_is_a_flag(self):
+        """Unpinned until now, and the only thing standing between a journal
+        line and `kubectl -n kyverno delete ConfigMap --all`: the name shape is
+        what stops a FLAG being parsed as an object name."""
+
+        journal = self.base / "name-shape.journal"
+        journal.write_text("ConfigMap|kyverno|--all\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("names no object", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        journal.unlink()
+
+    def test_rollback_refuses_an_empty_journal_instead_of_disarming_admission(self):
+        """An empty journal is not a completed rollback.
+
+        Without the refusal the whole file validates vacuously, the runtime
+        webhook sweep still runs — silently removing the configurations that
+        make admission work — and the run reports `rollback complete`. The zero
+        delete count is the assertion: the sweep must not have happened.
+        """
+
+        journal = self.base / "empty.journal"
+        journal.write_text("\n\n", encoding="utf-8")
+        completed = self._run("--rollback", "--journal", str(journal))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("journal records no object", completed.stderr)
+        self.assertEqual(self._deletes(), [])
+        self.assertNotIn("rollback complete", completed.stdout)
+        journal.unlink()
+
+    def test_an_apply_refuses_a_journal_that_already_records_an_attempt(self):
+        # `--apply` truncates the journal it is given. Truncating one that
+        # already holds an earlier attempt's identities destroys the only record
+        # of what that attempt created, at the moment it is most needed.
+        journal = self.base / "occupied.journal"
+        journal.write_text("Namespace||kyverno\n", encoding="utf-8")
+        completed = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(journal)
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("journal already records an attempt", completed.stderr)
+        self.assertEqual(
+            journal.read_text(encoding="utf-8"),
+            "Namespace||kyverno\n",
+            "the earlier attempt's record must survive the refusal",
+        )
+        journal.unlink()
+
+    def test_an_apply_refuses_a_journal_inside_the_checkout(self):
+        # The runbook required this and nothing enforced it. A record inside the
+        # working tree does not survive a checkout or a clean, and it makes the
+        # repository the author of a privileged delete program.
+        journal = self.repo / "inside.journal"
+        completed = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(journal)
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("journal path is inside the checkout", completed.stderr)
+        self.assertFalse(journal.exists(), "the refusal must not create the file")
+
+    def test_the_journal_is_created_unreadable_to_others(self):
+        # The record of what a privileged apply touched is also the delete
+        # program the next --rollback runs. Created under umask 077 so it is not
+        # world-readable and not writable by anything but its owner.
+        journal = self.base / "mode.journal"
+        completed = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(journal)
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertEqual(
+            journal.stat().st_mode & 0o777,
+            0o600,
+            "the transaction record is created private, not world-readable",
+        )
+        journal.unlink()
+
     def test_a_plan_never_writes_the_operators_journal(self):
         # A mode that mutates nothing on the cluster must not truncate the
         # record of an earlier attempt either.
@@ -2173,6 +2587,79 @@ class InstallerGuardTests(unittest.TestCase):
         completed = self._run("--break-glass", KYVERNO_STUB_SCENARIO="residue")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("break-glass did NOT clear admission", completed.stderr)
+
+    def test_break_glass_refuses_when_it_cannot_READ_the_webhook_configurations(self):
+        """An unreadable cluster is not a clean cluster.
+
+        The residue proof discarded kubectl's exit status twice — `2>/dev/null`
+        dropped the message and `|| true` dropped the status — so a FAILED read
+        produced an empty stream, `grep -c` printed 0, and the proof concluded
+        "clean". Break-glass then exited 0 announcing that the API server no
+        longer calls admission, while fail-closed webhooks were still
+        registered. It matters most here of all, because break-glass exists to
+        be trusted while the cluster is already refusing writes.
+
+        In this scenario the DELETES succeed and only the READ fails, which is
+        the sharp form: the sweep did everything it was asked to and the proof
+        still cannot observe the result.
+        """
+
+        completed = self._run(
+            "--break-glass", KYVERNO_STUB_SCENARIO="webhook-read-forbidden"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("cannot prove", completed.stderr)
+        self.assertIn("admission is NOT proven clear", completed.stderr)
+        self.assertNotIn(
+            "the API server no longer calls admission",
+            completed.stdout,
+            "an unproven sweep must not be announced as a completed one",
+        )
+
+    def test_rollback_refuses_when_it_cannot_READ_the_webhook_configurations(self):
+        journal = self.base / "unreadable-webhooks.journal"
+        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        completed = self._run(
+            "--rollback",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SCENARIO="webhook-read-forbidden",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("cannot prove", completed.stderr)
+        self.assertNotIn("rollback complete", completed.stdout)
+        journal.unlink()
+
+    def test_rollback_refuses_when_it_cannot_READ_the_custom_resource_definitions(self):
+        journal = self.base / "unreadable-crds.journal"
+        journal.write_text("ClusterPolicy||alpha\n", encoding="utf-8")
+        completed = self._run(
+            "--rollback",
+            "--journal",
+            str(journal),
+            KYVERNO_STUB_SCENARIO="crd-read-forbidden",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("cannot prove CRD residue", completed.stderr)
+        self.assertIn("NOT proven complete", completed.stderr)
+        self.assertNotIn("residue probe clean", completed.stdout)
+        journal.unlink()
+
+    def test_an_unreadable_absence_probe_stops_the_install(self):
+        """The same class on the APPLY path, which is the more dangerous half.
+
+        `probe_absence` discarded the read's status too, so a DENIED answer for
+        a reviewed cluster-scoped object was recorded as "it does not exist" and
+        the transaction proceeded to create objects over state it had never
+        observed. Only an explicit not-found is absence now.
+        """
+
+        completed = self._run(
+            "--stage", "report-only", "--plan", KYVERNO_STUB_SCENARIO="probe-unreadable"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("could not determine whether", completed.stderr)
+        self.assertNotIn("pre-apply absence probe clean", completed.stdout)
 
     # --- the promotion gate reads the authoritative field --------------------
 

@@ -205,6 +205,20 @@ case "$MODE" in
     # destroyed. Both are refusals, not warnings.
     [[ ! -L "$JOURNAL" ]] || die "journal path is a symlink and will not be written through: ${JOURNAL}"
     [[ ! -s "$JOURNAL" ]] || die "journal already records an attempt: ${JOURNAL}"
+    # The runbook requires the record to live OUTSIDE the checkout, and a
+    # requirement that only a document states is a requirement nobody enforces.
+    # A journal inside the working tree survives no `git clean`, can be replaced
+    # by a checkout of another ref between the apply and the rollback, and turns
+    # the repository into the author of a privileged delete program. Compared as
+    # PHYSICAL paths for the same reason the tool guard is: REPO_ROOT is already
+    # symlink-resolved and a caller-supplied path rarely is.
+    journal_directory="$(cd -- "$(dirname -- "$JOURNAL")" 2>/dev/null && pwd -P)" || \
+      die "journal directory does not exist: $(dirname -- "$JOURNAL")"
+    case "${journal_directory}/" in
+      "${REPO_ROOT}"/*)
+        die "journal path is inside the checkout: ${JOURNAL}; the transaction record must outlive any working-tree operation (see docs/runbooks/kyverno-install.md)"
+        ;;
+    esac
     ;;&
   *)
     case "$STAGE" in
@@ -542,6 +556,21 @@ phase_kinds() {
   printf '%s' "${PHASE_KINDS[$phase]}"
 }
 
+# Every kind this transaction is able to journal, DERIVED from the phase table
+# rather than restated beside it. The journal writer classifies each rendered
+# document through PHASE_KINDS and refuses anything it cannot place, so a kind
+# absent from that table is a kind no attempt of this installer ever recorded —
+# and a journal line naming one can only have been authored by something else.
+# Deriving it is what keeps the writer and the rollback reader from drifting
+# apart the way a second hard-coded list would.
+journalable_kinds() {
+  local phase='' pattern=''
+  for phase in "${PHASE_NAMES[@]}"; do
+    pattern="${pattern}${pattern:+|}${PHASE_KINDS[$phase]}"
+  done
+  printf '%s' "$pattern"
+}
+
 # --- pre-apply gate ----------------------------------------------------------
 
 # Nothing this install creates may already exist. The namespace being absent
@@ -565,9 +594,16 @@ probe_absence() {
     [[ "$kind" != 'Namespace' ]] || continue
     grep -qE "^[[:space:]]*name:[[:space:]]+${name}[[:space:]]*$" "$RENDERED" || \
       die "reviewed inventory names ${kind}/${name} but the render does not contain it"
-    if KUBECTL get "$kind" "$name" -o name >/dev/null 2>&1; then
+    # Same class as the residue proof: a read that FAILED is not a read that
+    # returned "absent". Discarding the status here would let a denied or timing
+    # -out API answer be recorded as "nothing exists", and the transaction would
+    # then create objects over state it never actually observed. Only an
+    # explicit not-found is absence; anything else stops the install.
+    if state="$(KUBECTL get "$kind" "$name" -o name 2>&1)"; then
       die "${kind}/${name} already exists; refusing to adopt a foreign object"
     fi
+    [[ "$state" == *'not found'* || "$state" == *'NotFound'* ]] || \
+      die "could not determine whether ${kind}/${name} exists: ${state}"
   done
   note 'pre-apply absence probe clean: nothing this install creates already exists'
 }
@@ -655,9 +691,26 @@ require_report_only_evidence() {
 # The WHOLE journal is validated before the FIRST delete. Validating as we go
 # would delete a valid prefix and only then discover the foreign entry — the
 # rollback would be half-done and the refusal would arrive too late to matter.
+#
+# SCOPE IS A PROPERTY OF THE KIND, NEVER OF THE NAMESPACE FIELD.
+#
+# `kubectl` IGNORES `--namespace` for a root-scoped resource: `kubectl -n
+# kyverno delete ClusterRole cluster-admin` issues the CLUSTER-SCOPED request
+# and returns 0 with a warning. So a validator that concludes "this entry has a
+# namespace, therefore it is bounded to the install namespace" is bypassed by
+# writing a namespace beside a cluster-scoped kind — the entry takes the
+# namespaced branch, the only check applied is `namespace == kyverno`, and the
+# delete then reaches any cluster-scoped object of that kind, anywhere, outside
+# the reviewed inventory entirely. The scope is therefore DERIVED from the kind
+# and the journal is required to AGREE with it in both directions: a
+# cluster-scoped kind must carry no namespace, and every other kind must carry
+# one. `rollback_journal` dispatches on the same derivation, so the check and
+# the delete cannot disagree.
 validate_journal() {
   local journal="$1" line='' kind='' namespace='' name='' rest='' inventory=''
+  local journalable=''
   inventory=",$(lock_value inventory.cluster-scoped.names),"
+  journalable="$(journalable_kinds)"
   local -a lines=()
   mapfile -t lines <"$journal"
   local index=0 entries=0
@@ -671,17 +724,27 @@ validate_journal() {
       die "journal line $((index + 1)) names no kind: ${line}"
     [[ "$name" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || \
       die "journal line $((index + 1)) names no object: ${line}"
-    if [[ -z "$namespace" ]]; then
+    # A kind no phase of this install applies is a kind no attempt of this
+    # installer could have journaled, so it can only have been written by
+    # something else. Derived from the phase table rather than restated, so the
+    # writer and this reader cannot drift apart.
+    [[ "$kind" =~ ^(${journalable})$ ]] || \
+      die "journal line $((index + 1)) names ${kind}, which no phase of this install applies; refusing the entire rollback without deleting anything"
+    if [[ "$kind" =~ ^(${CLUSTER_SCOPED_KINDS})$ ]]; then
+      [[ -z "$namespace" ]] || \
+        die "journal line $((index + 1)) gives cluster-scoped ${kind}/${name} the namespace ${namespace}; scope follows the KIND and kubectl ignores --namespace for a root-scoped object, so this entry would delete cluster-wide; refusing the entire rollback without deleting anything"
       [[ "$inventory" == *",${kind}/${name},"* ]] || \
         die "journal names cluster-scoped ${kind}/${name}, which render.lock's reviewed inventory does not contain; refusing the entire rollback without deleting anything"
     else
+      [[ -n "$namespace" ]] || \
+        die "journal line $((index + 1)) names namespaced ${kind} ${name} with no namespace; refusing the entire rollback without deleting anything"
       [[ "$namespace" == "$INSTALL_NAMESPACE" ]] || \
         die "journal names ${kind} ${namespace}/${name} outside the ${INSTALL_NAMESPACE} namespace; refusing the entire rollback without deleting anything"
     fi
     entries=$((entries + 1))
   done
   ((entries > 0)) || die "journal records no object: ${journal}"
-  note "journal validated: ${entries} identity(ies), every one inside the reviewed inventory"
+  note "journal validated: ${entries} identity(ies), every one inside the reviewed inventory and at the scope its kind declares"
 }
 
 # Remove exactly what an attempt created, in reverse order, and nothing else.
@@ -704,12 +767,16 @@ rollback_journal() {
     line="${entries[index]}"
     [[ -n "$line" ]] || continue
     IFS='|' read -r kind namespace name <<<"$line"
-    if [[ -n "$namespace" ]]; then
-      KUBECTL -n "$namespace" delete "$kind" "$name" --ignore-not-found --wait=false >/dev/null || \
-        die "rollback could not remove ${kind} ${namespace}/${name}"
-    else
+    # Dispatch on the KIND, exactly as validate_journal derived the scope it
+    # accepted. Dispatching on the namespace FIELD instead would let the two
+    # disagree, and `kubectl` resolves that disagreement in the dangerous
+    # direction: it ignores --namespace for a root-scoped object.
+    if [[ "$kind" =~ ^(${CLUSTER_SCOPED_KINDS})$ ]]; then
       KUBECTL delete "$kind" "$name" --ignore-not-found --wait=false >/dev/null || \
         die "rollback could not remove ${kind}/${name}"
+    else
+      KUBECTL -n "$namespace" delete "$kind" "$name" --ignore-not-found --wait=false >/dev/null || \
+        die "rollback could not remove ${kind} ${namespace}/${name}"
     fi
   done
   prove_no_residue
@@ -735,10 +802,22 @@ remove_runtime_webhooks() {
 # path that claims to have removed them — including break-glass, whose whole
 # promise is that the API server has stopped calling admission. A best-effort
 # sweep that reports success without checking is an unproven emergency action.
+#
+# AN UNREADABLE CLUSTER IS NOT A CLEAN CLUSTER. Reading with `2>/dev/null` and
+# `|| true` discards kubectl's exit status twice, so a FAILED read — a denied
+# RBAC rule, an API timeout, a torn-down kubeconfig, which are exactly the
+# conditions break-glass runs under — produced an empty stream, `grep -c`
+# printed 0, and the proof concluded "clean" while fail-closed webhooks stayed
+# registered. The read's own status is captured and a failure REFUSES, with a
+# message that says "not proven" rather than "clean". The namespace probe below
+# has always had this shape; these two now match it.
 prove_no_webhook_residue() {
-  local remedy="$1" kind='' remaining=''
+  local remedy="$1" kind='' remaining='' listing=''
   for kind in validatingwebhookconfiguration mutatingwebhookconfiguration; do
-    remaining="$(KUBECTL get "$kind" -o name 2>/dev/null | grep -c 'kyverno' || true)"
+    if ! listing="$(KUBECTL get "$kind" -o name 2>&1)"; then
+      die "cannot prove ${kind} residue: reading them failed (${listing}); admission is NOT proven clear; ${remedy}"
+    fi
+    remaining="$(printf '%s\n' "$listing" | grep -c 'kyverno' || true)"
     [[ "$remaining" -eq 0 ]] || \
       die "residue: ${remaining} Kyverno ${kind} object(s) remain; ${remedy}"
   done
@@ -746,9 +825,12 @@ prove_no_webhook_residue() {
 
 # A rollback that does not prove the cluster is clean is a hope, not a rollback.
 prove_no_residue() {
-  local remaining=''
+  local remaining='' listing=''
   prove_no_webhook_residue 'run --break-glass'
-  remaining="$(KUBECTL get customresourcedefinition -o name 2>/dev/null | grep -c '\.kyverno\.io$' || true)"
+  if ! listing="$(KUBECTL get customresourcedefinition -o name 2>&1)"; then
+    die "cannot prove CRD residue: reading the custom resource definitions failed (${listing}); the rollback is NOT proven complete"
+  fi
+  remaining="$(printf '%s\n' "$listing" | grep -c '\.kyverno\.io$' || true)"
   [[ "$remaining" -eq 0 ]] || die "residue: ${remaining} kyverno.io CRD(s) remain"
   remaining="$(KUBECTL get namespace kyverno -o name 2>&1 || true)"
   [[ "$remaining" == *'not found'* ]] || die 'residue: the kyverno namespace remains'
