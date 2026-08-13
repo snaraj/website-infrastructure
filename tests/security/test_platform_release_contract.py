@@ -149,7 +149,7 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_deletions": false',
             '"bypass_actors": []',
             "settings-receipt",
-            "must not receive `requires-review` until",
+            "must not become Ready until",
         ):
             if required not in text:
                 raise ValueError(f"GitHub settings contract lost: {required}")
@@ -234,7 +234,7 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_deletions": false',
             '"bypass_actors": []',
             "settings-receipt",
-            "must not receive `requires-review` until",
+            "must not become Ready until",
         )
         for token in tokens:
             with self.subTest(deletion=token), self.assertRaises(ValueError):

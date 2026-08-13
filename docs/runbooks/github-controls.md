@@ -58,8 +58,8 @@ The platform publisher supports both merge methods enabled for this repository:
 one-commit squash and merge-free multi-commit rebase. Merge commits stay
 disabled. That code cannot prevent an owner from merging a failing or stale PR
 when server-side checks are optional, so the automatic-release policy remains
-Draft and must not receive `requires-review` until the repository owner observes
-and configures this exact protected-`main` state:
+Draft and must not become Ready until the repository owner observes and
+configures this exact protected-`main` state:
 
 - pull request and linear history required, with no bypass actors;
 - strict required checks `dependency-review` and
