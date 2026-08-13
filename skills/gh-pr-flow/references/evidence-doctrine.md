@@ -2,13 +2,11 @@
 
 A guard that cannot fail is no guard, and a suite that cannot go red is not
 evidence. This is the catalogue behind that principle: distinct, reproducible
-mechanisms by which a fully green run proves nothing. Each entry is the
+mechanisms by which a fully green run proves nothing, each stated as the
 MECHANISM, why the suite stayed green, and the general correction. Several
-were found only after a reviewer had already approved, and several were found
-inside the fix written to close an earlier finding.
-
-Use it twice — while authoring, before claiming a control works; and while
-reviewing, as the probe list behind the vacuity step.
+were found only after a reviewer had already approved, and several inside the
+fix written to close an earlier finding. Use it while authoring, before
+claiming a control works, and while reviewing, as the vacuity probe list.
 
 ## 1. How a policy or test suite lies about coverage
 
@@ -37,17 +35,18 @@ Never let the policy suite be the only thing that knows a rule exists.
 
 **A short-circuit setting can retire the rule that carries the property.**
 Where an engine can be told to apply only the FIRST matching rule, a later
-rule never runs. If the rule that closes a finding is declared last, one
-token reopens the finding invisibly.
-*Correction:* pin the short-circuit setting structurally AND declare the
-security-critical rule FIRST, so that a short circuit fails closed.
+rule never runs, so one token can reopen a closed finding invisibly.
+*Correction:* pin the short-circuit setting structurally — that is the robust
+half. Declaring the security-critical rule first only changes WHICH rule a
+short circuit retires; it is a sane default, not a guard.
 
-**Disabling enforcement wholesale leaves every structural check green.** One
-policy-level field — an `admission: false`-shaped toggle, an audit-only mode,
-a report-only overlay — stops every rule in the policy running at the point
-that matters, while the rules, the fixtures and the names all still exist.
-*Correction:* assert the enforcement field itself, per policy, and assert the
-enforcement mode of every rule the round claims to enforce.
+**Enforcement can be switched off wholesale, structurally intact.** Two
+different fields do it. One stops the rules RUNNING where it matters (an
+`admission: false`-shaped toggle leaves only background evaluation); the other
+lets them run and suppresses the denial (audit-only and report-only modes).
+Rules, fixtures and names all still exist either way.
+*Correction:* assert both, per policy — the field that decides whether the
+rules run, and the enforcement mode of every rule the round claims to enforce.
 
 **The general correction.** Coverage cannot be inferred from a green run. A
 suite proves BEHAVIOUR on matched objects and says nothing about which objects
@@ -74,15 +73,16 @@ and assert that the refusal actually fires.
 
 **A gate that reads its THRESHOLD from the artifact it verifies is disabled by
 a one-token edit to that artifact.** The comparison turns unequal, and a gate
-that SKIPS on mismatch then prints OK while its load-bearing assertions never
-run.
+that SKIPS on mismatch prints OK while its load-bearing assertions never run.
 *Correction:* derive thresholds from an independent pin, and FAIL rather than
 SKIP when the subject is present but mismatched. A skip on mismatch is a
 self-disabling guard.
 
 **A textual assertion over a function body is satisfied by a COMMENT.** Wiring
 tests that check membership, a count, or an index over a function's source
-pass just as happily when the call is commented out.
+pass just as happily when the call is commented out. The realistic regression
+is DELETION, which these tests DO catch, so this is a hardening rather than an
+emergency — but the gap is real and cheap to close.
 *Correction:* strip comment lines from the sliced body before asserting, or
 parse the source instead of matching substrings.
 
@@ -94,6 +94,14 @@ completely bypassable.
 SITE separately from the thing itself — slice the caller and assert that it
 calls what you wrote.
 
+**A HAND-WRITTEN stub of a tool's output makes the guard unfalsifiable.**
+Invent the shape a command "would" emit and you encode your belief about it
+rather than its behaviour: a guard parsing a fabricated shape can be
+constant-red — incapable of passing on any real input — and still survive a
+full mutation matrix, because every row feeds it the same fiction.
+*Correction:* build every stub from a REAL capture, recorded with the version
+that produced it, and regenerate it when the tool moves.
+
 **Two engines called "one-for-one mirrors" need a DIFFERENTIAL harness.**
 Comparing enumerations, rule identifiers, and comment markers proves the TEXT
 agrees; it never proves the BEHAVIOUR agrees. Accessor semantics diverge on
@@ -101,17 +109,23 @@ degenerate values — a null, a string, or a list where an object was expected
 makes one engine deny and the other fail open and silently not fire — and two
 inputs one token apart are then indistinguishable to the suite.
 *Correction:* feed every deny fixture plus a degenerate-shape corpus to BOTH
-engines and fail on any allow/deny disagreement. Guard each accessor with a
-type check that DENIES on failure. Then mutate the harness itself: a
+engines and fail on any allow/deny disagreement; guard each accessor with a
+type check that DENIES on failure; then mutate the harness itself, because a
 differential test that compares nothing is the next vacuity.
 
 **Scope decided from a FIELD rather than from the KIND is bypassable.** An
 entry that claims to be namespaced can name a cluster-scoped object, and
 tooling that IGNORES the namespace for root-scoped resources then acts
-globally, while the validation reports everything as inside the reviewed
-bound.
+globally, while the validation reports everything as inside the reviewed bound.
 *Correction:* bind scope to KIND, never to the presence or the value of a
 namespace field.
+
+**A check keyed on PART of an identity is satisfied by the wrong object.** Key
+a declared-gap check, an allowlist, or a suppression on a bare NAME and any
+other KIND sharing that name satisfies it: the check passes while the object
+it exists to catch is untouched. Found INSIDE a fix, by re-running the matrix.
+*Correction:* key on the FULL identity — (kind, name), or whatever tuple makes
+two objects distinguishable — anywhere two kinds can collide.
 
 **Patching by INDEX breaks silently when someone adds an item.** A positional
 overlay (items 0, 1, 2) merges textually clean against a parallel change that
@@ -124,8 +138,8 @@ under-match, and assert that the COUNT patched equals the count that exist.
 ## 3. How the fix itself lies
 
 **Your own NEW assertions are the likeliest survivors.** An assertion written
-to close a finding comes from the same mental model that missed it; in round
-after round the survivors are the round's own new rows.
+to close a finding comes from the same mental model that missed it; round
+after round, the survivors are the round's own new rows.
 *Correction:* re-run the mutation matrix on the FIXED tree, and mutate the
 newly written assertions FIRST, before re-running the inherited rows. Never
 carry a matrix result forward across a fix. A fix you cannot kill is not a fix.
@@ -158,11 +172,24 @@ a check that never fires gets shipped.
 *Correction:* say why each true negative stays green, from the property that
 makes it green — not from the observation that it did.
 
-## 4. Keeping the matrix itself honest
+## 4. Keeping the evidence itself honest
 
-A mutation harness must refuse to run against a dirty tree: commit the work
-first, because reverting a mutation reverts uncommitted real work with it;
-assert the target text is present before each edit, so a no-op edit cannot
+**A STAGED command is not a VERIFIED result.** A plan, a preflight, or a brief
+carries expectations, and an expectation quoted back as an outcome is how a
+wrong premise becomes a green report.
+*Correction:* label every unrun command a hypothesis, and never let a staged
+expectation into an evidence table.
+
+**Reproducibility evidence needs a PRISTINE checkout.** Build output or
+scratch left in a reused workspace masks the failure you are testing for and
+pollutes any scan that walks the tree, so a determinism or render claim made
+there proves nothing about a fresh clone.
+*Correction:* check out the exact commit into a clean workspace for any
+determinism or reproducibility evidence.
+
+**A mutation harness must refuse to run against a dirty tree.** Commit the
+work first, because reverting a mutation reverts uncommitted real work with
+it; assert the target text is present before each edit, so a no-op edit cannot
 masquerade as a survivor; and abort if anything is left over afterwards,
 tracked or untracked — reverting tracked files does NOT remove a file a
 mutation CREATED, and the leftover then falsifies every later row.

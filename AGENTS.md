@@ -277,8 +277,10 @@ review attention. That removal is NOT a readiness signal: the draft flag
 is the only readiness signal, so label-off while still draft is the
 normal mid-cycle state. A REQUEST-CHANGES verdict returns the work to
 the same branch owner — fixes land on the same branch and receive a
-delta re-review of the changed scope. The COORDINATOR performs the flip
-from draft to ready — never the branch author, never the reviewer — and
+delta re-review of the changed scope. The COORDINATOR — whoever is
+directing the work, distinct from both the branch author and the
+reviewer; the owner where no such role exists — performs the flip
+from draft to ready, never the branch author and never the reviewer, and
 only once the verdict is APPROVE (or its findings are fixed and
 re-verified), no owner or peer comment is outstanding, and every check
 is green at the exact head; the owner then merges. The evidence comment
@@ -312,8 +314,8 @@ authority: the owner alone merges.
   whoever then acts on it or records the decision removes the label;
   opening a PR that claims the issue counts as acting. It is
   a coordination signal only: never a substitute for draft/ready state,
-  for the APPROVE verdict that flips a PR ready, or for owner merge
-  authority.
+  for the APPROVE verdict and coordinator flip that make a PR ready, or
+  for owner merge authority.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`

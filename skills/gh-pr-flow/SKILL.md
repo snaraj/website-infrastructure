@@ -177,8 +177,23 @@ Read the BODY, not the title and not the colour — verdicts have declared
 "no real problem" from a check title while high-severity alerts sat in
 the summary. And a "false positive" can still be pointing at a real hole:
 drive the code it flags with the inputs it implies before dismissing it.
-An aggregate check-run can also freeze in a failed state for one head;
-report that rather than churning a reviewed branch's history to chase it.
+
+Two aggregate states, two different meanings, and neither is a formality:
+
+- **A RED aggregate means REAL ALERTS.** There is no "aggregation race".
+  That diagnosis has been advanced, relayed unchecked, and then disproved
+  by sweeping every pull-request head in a repository: the failures all
+  landed on the one pull request whose diff produced genuine findings,
+  and the analysis upload preceded the check at every head. Read the
+  summary and the alerts API and fix what is there; never rerun, reopen,
+  or re-push a reviewed branch to make a red aggregate go away.
+- **A `neutral` aggregate saying it "cannot determine the alerts
+  introduced by this pull request" means the change was NEVER FULLY
+  ANALYSED** — a configuration present on the target branch produced no
+  analysis for this head. A missing configuration warns INSIDE a neutral
+  check; it never turns one red. "Zero alerts" from that state is weak
+  evidence: name the analyses that actually ran, and say plainly that the
+  others did not.
 
 ## 11. CI green describes the base it ran against
 

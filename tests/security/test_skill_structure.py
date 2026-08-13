@@ -5,26 +5,41 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILL = ROOT / "skills" / "build-website-infrastructure"
-PR_FLOW = ROOT / "skills" / "gh-pr-flow"
+SKILLS_ROOT = ROOT / "skills"
+SKILL = SKILLS_ROOT / "build-website-infrastructure"
+PR_FLOW = SKILLS_ROOT / "gh-pr-flow"
 # Every committed skill is a portable METHOD, so all of them are held to one
 # structure contract: the official frontmatter shape, bounded documents, every
 # reference linked from SKILL.md, and no trace of THIS repository's identity.
 # A skill that names this repository's sites, owner, hosts, commits, issue
 # numbers, or a workstation path is no longer reusable anywhere else.
-GOVERNED_SKILLS = (SKILL, PR_FLOW)
 FORBIDDEN_IDENTITY = (
-    "naranjo.online",
-    "lidersea.com",
+    # Sites and owner. The bare tokens, not the full domains and handles they
+    # appear in: a substring forbids every spelling built on it.
+    "naranjo",
+    "lidersea",
     "snaraj",
+    "samuel",
+    # Hosts and host aliases.
+    "pie5",
     "pi-admin",
     "pi-websites",
+    # This repository, and the agent labels that only exist in these
+    # repositories — hyphenated and spaced, because a line wrap or a habit
+    # respells them.
+    "website-infrastructure",
+    "fable5",
+    "opus5",
+    "opus4.8",
+    "5.6-sol",
+    "5.6 sol",
+    "sol ultra",
+    "codex",
 )
-# Identity that only one skill is realistically at risk of absorbing: the
-# media-storage vocabulary that produced the first skill, and the repository
-# and agent-label names that the pull-request flow is written from.
+# Identity only one skill is realistically at risk of absorbing: the
+# media-storage vocabulary that produced the first skill.
 SKILL_LOCAL_FORBIDDEN_IDENTITY = {
-    SKILL: (
+    "build-website-infrastructure": (
         "UNRESOLVED_PI_MEDIA_STORAGE",
         "2026-08-08",
         "512 MB",
@@ -32,32 +47,52 @@ SKILL_LOCAL_FORBIDDEN_IDENTITY = {
         "GHCR repository",
         "SOPS identity install",
     ),
-    PR_FLOW: (
-        "website-infrastructure",
-        "fable5",
-        "opus5",
-        "opus4.8",
-        "5.6-sol",
-        "Codex",
-    ),
 }
-# Shapes, not literals: a pinned commit, a bare commit, a workstation path in
-# either platform's spelling, and a cross-reference to an issue or pull request
-# that only exists in this repository.
+# The shared list applies to every skill; an exemption is per-skill, explicit,
+# and load-bearing. The only one: that skill's own NAME contains the
+# repository name, so this literal cannot be enforced against it. A stale
+# exemption fails exactly like a missing check — the test below asserts each
+# exempted literal is genuinely present, so an obsolete one goes red.
+IDENTITY_EXEMPTIONS = {
+    "build-website-infrastructure": ("website-infrastructure",),
+}
+# Shapes, not literals. The repository privacy validator is NOT a second net
+# here: it covers emails, addresses, UUIDs, 32-hex and Windows paths only, so
+# commits, short commits, POSIX and home-relative workstation paths, and
+# item cross-references have to be caught right here or nowhere.
 FORBIDDEN_IDENTITY_SHAPES = {
     # Subsumed by "bare commit" below — every pinned form also matches the
     # bare one — and kept only so the failure message names the likelier
     # mistake. It is not an independent guard; do not read it as one.
     "pinned commit": re.compile(r"@[0-9a-f]{40}\b"),
     "bare commit": re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{40}(?![0-9a-zA-Z])"),
+    # An abbreviated commit. Requiring both a digit and a letter keeps English
+    # words that happen to be hex ("defaced", "acceded") and long decimal
+    # counts out of it, while a real short commit essentially always has both.
+    "short commit": re.compile(
+        r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,39}\b"
+    ),
     "windows workstation path": re.compile(r"(?i)[A-Z]:[\\/](?:Users|dev)[\\/]"),
+    # No trailing slash required: the leaf is usually the operator's name,
+    # which is exactly the part that must not ship.
     "posix workstation path": re.compile(
-        r"(?<![A-Za-z0-9_.-])/(?:Users|home)/[A-Za-z0-9._-]+/"
+        r"(?<![A-Za-z0-9_.-])/(?:Users|home)/[A-Za-z0-9._-]+"
     ),
-    "repository item reference": re.compile(
-        r"(?i)\b(?:pull requests?|prs?|issues?)\s*#[0-9]+"
-    ),
+    "home-relative workstation path": re.compile(r"~/[A-Za-z0-9._-]+"),
+    # Bare, not just the "PR #12" spelling. The negative lookahead keeps hex
+    # colour literals out of it.
+    "repository item reference": re.compile(r"#[0-9]+(?![0-9a-fA-F])"),
 }
+
+
+def governed_skills():
+    """Every skill directory, DISCOVERED — never a hardcoded list.
+
+    A hardcoded tuple would be this repository's own vacuity catalogue turned
+    on the test that ships it: a new skill would fall outside the match and
+    every row would stay green while it opted itself out of the contract.
+    """
+    return tuple(sorted(path for path in SKILLS_ROOT.iterdir() if path.is_dir()))
 
 
 def skill_documents(skill):
@@ -80,8 +115,27 @@ def collapsed(path):
 
 
 class SkillStructureTests(unittest.TestCase):
+    def test_every_committed_skill_is_governed(self):
+        """Discovery covers the whole tree, and the tree is all directories.
+
+        Without this, `skills/` could grow a skill — or a loose document —
+        that no other test in this file ever reads.
+        """
+        discovered = governed_skills()
+        self.assertTrue(discovered)
+        for known in (SKILL, PR_FLOW):
+            self.assertIn(known, discovered)
+        self.assertEqual(
+            sorted(path.name for path in SKILLS_ROOT.iterdir()),
+            sorted(path.name for path in discovered),
+            "a non-directory under skills/ would escape every check below",
+        )
+        for skill in discovered:
+            with self.subTest(skill=skill.name):
+                self.assertTrue((skill / "SKILL.md").is_file())
+
     def test_frontmatter_matches_official_validator_contract(self):
-        for skill in GOVERNED_SKILLS:
+        for skill in governed_skills():
             with self.subTest(skill=skill.name):
                 text = (skill / "SKILL.md").read_text(encoding="utf-8")
                 match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
@@ -113,11 +167,18 @@ class SkillStructureTests(unittest.TestCase):
         self.assertIn("$build-website-infrastructure", interface)
 
     def test_skill_contains_methods_not_this_repository_identity(self):
-        for skill in GOVERNED_SKILLS:
-            combined = skill_documents(skill)
+        for skill in governed_skills():
+            raw = skill_documents(skill)
+            # Both spellings: collapsing whitespace catches an identity that a
+            # line wrap split across two lines, which raw text cannot see.
+            combined = raw + "\n" + " ".join(raw.split())
+            exempt = IDENTITY_EXEMPTIONS.get(skill.name, ())
+            for value in exempt:
+                with self.subTest(skill=skill.name, stale_exemption=value):
+                    self.assertIn(value.lower(), combined.lower())
             forbidden = (
-                *FORBIDDEN_IDENTITY,
-                *SKILL_LOCAL_FORBIDDEN_IDENTITY[skill],
+                *(v for v in FORBIDDEN_IDENTITY if v not in exempt),
+                *SKILL_LOCAL_FORBIDDEN_IDENTITY.get(skill.name, ()),
             )
             for value in forbidden:
                 with self.subTest(skill=skill.name, value=value):
@@ -127,18 +188,23 @@ class SkillStructureTests(unittest.TestCase):
                     self.assertNotRegex(combined, shape)
 
     def test_all_references_are_linked_and_documents_stay_focused(self):
-        for skill in GOVERNED_SKILLS:
-            main = (skill / "SKILL.md").read_text(encoding="utf-8")
-            references = sorted((skill / "references").glob("*.md"))
-            for reference in references:
-                with self.subTest(skill=skill.name, reference=reference.name):
-                    self.assertIn(f"references/{reference.name}", main)
-                    self.assertLessEqual(
-                        len(reference.read_text(encoding="utf-8").splitlines()),
-                        200,
-                    )
+        for skill in governed_skills():
+            entry = skill / "SKILL.md"
+            main = entry.read_text(encoding="utf-8")
             with self.subTest(skill=skill.name):
                 self.assertLessEqual(len(main.splitlines()), 500)
+            # rglob, not glob: a subdirectory or a document outside
+            # references/ would otherwise carry any length, unlinked.
+            for document in sorted(skill.rglob("*.md")):
+                if document == entry:
+                    continue
+                relative = document.relative_to(skill).as_posix()
+                with self.subTest(skill=skill.name, document=relative):
+                    self.assertIn(relative, main)
+                    self.assertLessEqual(
+                        len(document.read_text(encoding="utf-8").splitlines()),
+                        200,
+                    )
 
     def test_skill_explicitly_discovers_portable_variants(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -181,6 +247,9 @@ class SkillStructureTests(unittest.TestCase):
             "code-scanning/alerts",
             "output.summary",
             "EMPTY bodies",
+            "A RED aggregate means REAL ALERTS",
+            "There is no \"aggregation race\"",
+            "NEVER FULLY ANALYSED",
             "merge-cleanliness against the CURRENT target",
             "Predict, capture, diff",
             "a PR comment is publication",
@@ -196,20 +265,26 @@ class SkillStructureTests(unittest.TestCase):
             "A SKIP counts as a pass",
             "RENAMING a rule out of existence",
             "can retire the rule that carries the property",
-            "Disabling enforcement wholesale",
+            "pin the short-circuit setting structurally",
+            "Enforcement can be switched off wholesale",
             "MULTI-DOCUMENT deny fixture",
             "its own SOURCE TEXT",
             "reads its THRESHOLD from the artifact it verifies",
             "satisfied by a COMMENT",
+            "realistic regression is DELETION",
             "whose CALL SITE no test invokes",
+            "HAND-WRITTEN stub",
             "DIFFERENTIAL harness",
             "bind scope to KIND",
+            "keyed on PART of an identity",
             "Patching by INDEX",
             "likeliest survivors",
             "NO killer",
             "BAD MUTANT",
             "NORMALISATION",
             "TRUE NEGATIVES",
+            "A STAGED command is not a VERIFIED result",
+            "needs a PRISTINE checkout",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, doctrine)
@@ -236,7 +311,10 @@ class SkillStructureTests(unittest.TestCase):
         # described the transition without naming who performs it.
         for fragment in (
             "That removal is NOT a readiness signal",
-            "The COORDINATOR performs the flip",
+            "performs the flip from draft to ready",
+            # The role has to be DEFINED where the contract first uses it.
+            "whoever is directing the work",
+            "the APPROVE verdict and coordinator flip that make a PR ready",
             "the owner then merges",
         ):
             with self.subTest(fragment=fragment):
