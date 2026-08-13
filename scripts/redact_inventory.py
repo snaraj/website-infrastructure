@@ -26,7 +26,17 @@ PATTERNS = [
     (re.compile(r"\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b"), "[REDACTED_PRIVATE_KEY]"),
     (re.compile(r"(?i)\b(?:bc1|tb1|bcrt1)[023456789ac-hj-np-z]{11,90}\b"), "[REDACTED_WALLET_ADDRESS]"),
     (re.compile(r"\b[13mn2][1-9A-HJ-NP-Za-km-z]{25,61}\b"), "[REDACTED_WALLET_ADDRESS]"),
-    (re.compile(r"(?i)\[[0-9a-f]{8}(?:/[0-9]+(?:[h']|H)?)*\]"), "[REDACTED_KEY_ORIGIN]"),
+    # The hardened-derivation marker is one character, so it is written as one
+    # character class. It used to be an alternation, "(?:[h']|H)", whose two
+    # branches both matched "h" under (?i) — an ambiguity that, inside the
+    # enclosing repetition, is the textbook shape for catastrophic
+    # backtracking, and static analysis reads it exactly that way. CPython
+    # happens to collapse an alternation of single characters into this same
+    # class before execution, so the two spellings match identically and in
+    # linear time here; the class is nevertheless the correct way to write it,
+    # because a redactor must not be one engine's optimization away from being
+    # stalled by the very inventory it is redacting.
+    (re.compile(r"(?i)\[[0-9a-f]{8}(?:/[0-9]+[h']?)*\]"), "[REDACTED_KEY_ORIGIN]"),
     (re.compile(r"(?im)^(\s*(?:rpcuser|rpcpassword|rpcauth)\s*=\s*)\S+"), r"\1[REDACTED]"),
     (re.compile(r"(?im)^(\s*(?:privatekey|presharedkey)\s*=\s*)[^\r\n]+"), r"\1[REDACTED]"),
     (re.compile(r"(?im)^(\s*(?:controlpassword|hashedcontrolpassword)(?:\s*=\s*|\s+))[^\r\n]+"), r"\1[REDACTED]"),

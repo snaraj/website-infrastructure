@@ -1,0 +1,24 @@
+# proves: SR-5
+# rego-message: uses a local path containing a parent traversal segment
+# SR-5. This path passes the enumerated-root prefix test and still resolves
+# outside it. Prefix matching alone is not a containment proof, which is why the
+# traversal denial is a separate rule rather than a clause of the root rule.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-local-traversal
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /mnt/local-pie-ssd/../../var/lib/etcd
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [storage-node-placeholder]

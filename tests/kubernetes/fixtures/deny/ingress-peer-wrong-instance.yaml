@@ -4,7 +4,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: cloudflared-to-naranjo-online
+  name: ingress-to-naranjo-online
   namespace: naranjo-online
 spec:
   podSelector:

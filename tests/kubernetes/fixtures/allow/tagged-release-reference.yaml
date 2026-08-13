@@ -1,0 +1,31 @@
+# The legible release reference: the published version tag in front of the
+# immutable digest. Kubernetes resolves the digest, an operator reading
+# `kubectl describe pod` reads the release. Both forms are accepted while
+# the site charts are landing this shape; the digest is mandatory in both.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tagged
+  namespace: naranjo-online
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: naranjo-online
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: tagged
+      image: ghcr.io/snaraj/naranjo-online:v0.1.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

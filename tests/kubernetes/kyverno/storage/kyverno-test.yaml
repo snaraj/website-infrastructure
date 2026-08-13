@@ -1,0 +1,241 @@
+# Behavioural half of the storage-exposure contract: one object per fixture file
+# so that every denial is proven on its own and no rule can hide behind another.
+# The structural half — that the policy's match block actually REACHES each of
+# these kinds — lives in tests/security/test_storage_exposure_policy_contract.py,
+# because Kyverno reports a resource that falls outside `match` as a pass, so a
+# narrowed match block would leave every row below green while the gate silently
+# stopped covering anything.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: storage-enumerated-local-means
+policies:
+  - ../../../../policies/kyverno/disallow-undiscovered-storage.yaml
+resources:
+  - ../../fixtures/allow/storage-enumerated-local.yaml
+  - ../../fixtures/deny/storage-nfs-persistent-volume.yaml
+  - ../../fixtures/deny/storage-iscsi-persistent-volume.yaml
+  - ../../fixtures/deny/storage-cloud-csi-persistent-volume.yaml
+  - ../../fixtures/deny/storage-unknown-csi-driver-persistent-volume.yaml
+  - ../../fixtures/deny/storage-hostpath-persistent-volume.yaml
+  - ../../fixtures/deny/storage-local-path-outside-root.yaml
+  - ../../fixtures/deny/storage-local-path-traversal.yaml
+  - ../../fixtures/deny/storage-local-without-node-affinity.yaml
+  - ../../fixtures/deny/storage-two-volume-sources.yaml
+  - ../../fixtures/deny/storage-persistent-volume-without-source.yaml
+  - ../../fixtures/deny/storage-unenumerated-class-persistent-volume.yaml
+  - ../../fixtures/deny/storage-unstructured-persistent-volume.yaml
+  - ../../fixtures/deny/storage-unenumerated-class-name.yaml
+  - ../../fixtures/deny/storage-claim-without-class.yaml
+  - ../../fixtures/deny/storage-claim-with-data-source.yaml
+  - ../../fixtures/deny/storage-csi-driver-object.yaml
+  - ../../fixtures/deny/storage-volume-attributes-class.yaml
+  - ../../fixtures/deny/storage-local-unbounded-node-affinity.yaml
+  - ../../fixtures/deny/storage-node-affinity-null.yaml
+  - ../../fixtures/deny/storage-node-affinity-list.yaml
+  - ../../fixtures/deny/storage-node-affinity-required-scalar.yaml
+  - ../../fixtures/deny/storage-local-source-null.yaml
+  - ../../fixtures/deny/storage-local-source-scalar.yaml
+  - ../../fixtures/deny/storage-local-source-list.yaml
+  - ../../fixtures/deny/storage-csi-source-null.yaml
+  - ../../fixtures/deny/storage-csi-source-scalar.yaml
+  - ../../fixtures/deny/storage-claim-null-data-source.yaml
+  - ../../fixtures/deny/storage-persistent-volume-attributes-class-reference.yaml
+  - ../../fixtures/deny/storage-claim-attributes-class-reference.yaml
+  - ../../fixtures/deny/storage-persistent-volume-mount-options.yaml
+  - ../../fixtures/deny/storage-null-spec-persistent-volume.yaml
+  - ../../fixtures/deny/storage-null-spec-claim.yaml
+results:
+  # The only admissible shape: enumerated class, enumerated provisioner,
+  # enumerated local root, node-pinned volume, enumerated claim.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [local-pie-ssd]
+    kind: StorageClass
+    result: pass
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [local-pie-ssd-media]
+    kind: PersistentVolume
+    result: pass
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [local-pie-ssd-media-claim]
+    kind: PersistentVolumeClaim
+    result: pass
+  # SR-2: network, block, host, and unrecognized volume sources.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-nfs-source]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-iscsi-source]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-hostpath-source]
+    kind: PersistentVolume
+    result: fail
+  # SR-3: csi sources are shape-admitted but driver-enumerated.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-cloud-csi]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-unknown-csi]
+    kind: PersistentVolume
+    result: fail
+  # SR-4/SR-5/SR-6: local containment, traversal, and node pinning.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-outside-root]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-traversal]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-unpinned]
+    kind: PersistentVolume
+    result: fail
+  # SR-1 arity, in both directions, plus the unstructured spec.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-two-sources]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-sourceless]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-unstructured]
+    kind: PersistentVolume
+    result: fail
+  # SR-7: the class name is part of the means.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-unenumerated-class]
+    kind: PersistentVolume
+    result: fail
+  # SR-9: the class inventory is enumerated even when the provisioner is local.
+  # SR-8 and SR-10 live in the two sibling test directories: isolating them
+  # requires a StorageClass named local-pie-ssd, which would collide with the
+  # allow fixture's class in this directory's resource set.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [nas-bulk]
+    kind: StorageClass
+    result: fail
+  # SR-11/SR-12: claim class enumeration and imported contents.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-classless-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-imported-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  # SR-13/SR-14: the driver-installing objects.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [ebs.csi.aws.com]
+    kind: CSIDriver
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-remote-attributes]
+    kind: VolumeAttributesClass
+    result: fail
+  # SR-6, the rule's actual claim: required node affinity that matches every
+  # node is not a pin. Below it, the degenerate shapes that made the Rego
+  # mirror silently skip a rule while these rows stayed green.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-unbounded]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-list]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-node-affinity-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-local-list]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-csi-null]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-csi-scalar]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-data-source-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-spec]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-null-spec-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  # SR-15: the reference, on both the volume and the claim. SR-16: mount
+  # options on a PersistentVolume, where SR-10's rationale equally holds.
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-volume-attributes-reference]
+    kind: PersistentVolume
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-attributes-reference-claim]
+    kind: PersistentVolumeClaim
+    result: fail
+  - policy: disallow-undiscovered-storage
+    rule: disallow-persistent-storage-resources
+    resources: [storage-mount-options]
+    kind: PersistentVolume
+    result: fail

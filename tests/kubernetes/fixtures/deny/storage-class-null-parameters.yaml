@@ -1,0 +1,14 @@
+# proves: SR-10
+# rego-message: must declare no parameters and no mountOptions
+# Degenerate shape. `parameters:` and `mountOptions:` are declared with null
+# values. count() raises a type error on null, and an erroring expression is
+# UNDEFINED, so the rule did not fire and the class was admitted by CI.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-pie-ssd
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+parameters:
+mountOptions:

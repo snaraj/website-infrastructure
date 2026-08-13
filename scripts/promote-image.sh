@@ -164,9 +164,13 @@ require_original_clean_state() {
 # already-promoted site; rollback is meaningful only from promoted state.
 site_phase() {
   local expected_digest="${1:-}"
+  local expected_tag="${2:-}"
   local -a arguments=(site-phase --site "${site}")
   if [[ -n "${expected_digest}" ]]; then
     arguments+=(--expect-digest "${expected_digest}")
+  fi
+  if [[ -n "${expected_tag}" ]]; then
+    arguments+=(--expect-tag "${expected_tag}")
   fi
   python3 -B "${repo_root}/scripts/validate_release_state.py" "${arguments[@]}"
 }
@@ -573,10 +577,15 @@ for state_relative in "${release_state_paths[@]}"; do
   fi
   mkdir -p -- "$(dirname -- "${state_destination}")"
   if [[ "${state_relative}" == "${values_relative}" ]]; then
+    # One transaction advances the release NAME and the release BYTES
+    # together. ${release_tag} is the same tag every oras resolve above proved
+    # maps to ${digest}, so the candidate can never state a version the
+    # registry does not bind to the digest beside it.
     python3 -B "${repo_root}/scripts/create_release_candidate.py" \
       --original "${original_backup}" \
       --output "${state_destination}" \
       --digest "${digest}" \
+      --tag "${release_tag}" \
       --initial-phase "${initial_phase}"
   else
     python3 -B "${repo_root}/scripts/write_review_artifact.py" \
@@ -611,10 +620,11 @@ fi
 }
 candidate_phase="$(
   python3 -B "${repo_root}/scripts/validate_release_state.py" \
-    --root "${candidate_root}" site-phase --site "${site}" --expect-digest "${digest}"
+    --root "${candidate_root}" site-phase --site "${site}" \
+    --expect-digest "${digest}" --expect-tag "${release_tag}"
 )"
 [[ "${candidate_phase}" == 'promoted' ]] || {
-  printf 'candidate release did not produce the exact promoted digest state\n' >&2
+  printf 'candidate release did not produce the exact promoted tag and digest state\n' >&2
   exit 1
 }
 python3 -B "${repo_root}/scripts/validate_release_transition.py" \

@@ -4,7 +4,7 @@ metadata:
   name: require-exact-tenant-networking
   annotations:
     policies.kyverno.io/category: Networking
-    policies.kyverno.io/description: Admit only the exact cloudflared-to-site TCP 8080 cross-namespace flow and no site egress.
+    policies.kyverno.io/description: Admit only the exact ingress-to-site TCP 8080 cross-namespace flow and no site egress.
 spec:
   admission: true
   background: true
@@ -45,7 +45,7 @@ spec:
                 (object.metadata.name == 'default-deny' && object.spec.podSelector.size() == 0 &&
                 (!has(object.spec.ingress) || object.spec.ingress.size() == 0) &&
                 (!has(object.spec.egress) || object.spec.egress.size() == 0)) ||
-                (object.metadata.name == 'cloudflared-to-' + object.metadata.namespace &&
+                (object.metadata.name == 'ingress-to-' + object.metadata.namespace &&
                 has(object.spec.podSelector.matchLabels) &&
                 object.spec.podSelector.matchLabels.size() == 2 &&
                 object.spec.podSelector.matchLabels['app.kubernetes.io/name'] == object.metadata.namespace &&

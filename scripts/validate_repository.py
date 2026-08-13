@@ -27,7 +27,9 @@ from validate_release_state import (
     CanonicalYamlError,
     PUBLIC_CONNECTOR_SITES,
     RELEASE_CONTRACTS,
+    RELEASE_TAG_RE,
     ZERO_DIGEST,
+    ZERO_TAG,
     _parse_simple_mapping,
     canonical_scalar,
     load_helm_release,
@@ -1432,7 +1434,7 @@ def check_kubernetes(root):
                 )]
                 if len(matches) != 1:
                     errors.append("exact ingress+egress default-deny missing for " + namespace)
-        # The per-site ingress policies (cloudflared-to-<site>) ship inside
+        # The per-site ingress policies (ingress-to-<site>) ship inside
         # the standalone site charts and arrive through the remote sources;
         # the platform keeps requiring its own egress side toward each site.
         required_network_templates = {
@@ -1743,6 +1745,21 @@ def site_release_override_errors(domain, release_state):
             "{} HelmRelease override must contain one nonzero image digest".format(
                 domain
             )
+        )
+    # The release NAME is checked beside the release BYTES. A production
+    # override that advanced the digest while leaving the sentinel tag would
+    # otherwise ship a workload reference reading `repo:v0.0.0@sha256:<real>`
+    # — legible, and wrong, which is worse than illegible.
+    release_tag = release_state.values.get(("image", "tag"))
+    if release_tag == ZERO_TAG:
+        errors.append(
+            "{} HelmRelease override must contain one nonzero release tag".format(
+                domain
+            )
+        )
+    elif not isinstance(release_tag, str) or not RELEASE_TAG_RE.fullmatch(release_tag):
+        errors.append(
+            "{} HelmRelease override release tag is not canonical".format(domain)
         )
     if release_state.values.get(("deploymentReady",)) != "true":
         errors.append("{} HelmRelease override is not deploymentReady".format(domain))

@@ -35,6 +35,11 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          # The single analysis-scope decision this repository makes lives in
+          # the config file, in the tree, with its justification and the gates
+          # that still cover the excluded surface. A reviewer sees it in the
+          # diff; a UI dismissal would be invisible to every checkout.
+          config-file: ./.github/codeql/codeql-config.yml
       - name: Analyze
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:

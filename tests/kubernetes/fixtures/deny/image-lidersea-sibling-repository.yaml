@@ -1,0 +1,29 @@
+# The sibling site's image, correctly tagged, in the lidersea namespace.
+# The identity tuple does not soften because a tag is now permitted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: image-lidersea-sibling-repository
+  namespace: lidersea-com
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: lidersea-com
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: image-lidersea-sibling-repository
+      image: ghcr.io/snaraj/naranjo-online:v0.1.9@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        readOnlyRootFilesystem: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

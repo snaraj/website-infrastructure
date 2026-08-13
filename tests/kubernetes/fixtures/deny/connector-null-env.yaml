@@ -1,0 +1,36 @@
+# `env: null` is a STORED null, not an absent key. Rego's object.get
+# returns that null rather than its default and `every entry in null`
+# iterates nothing, so a mismatch-hunting rule would silently stop firing
+# while CEL's has() is true on an explicitly-null field and .all() errors,
+# making Kyverno refuse it. The positive-proof form here refuses it in
+# both engines, which is the only way the two agree on this shape.
+#
+# ONE document per file, deliberately: the fixture runner asserts only that a
+# FILE is rejected, so pairing arms in one file would keep the file "rejected"
+# while an arm that accepts one of them went unnoticed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: connector-null-env
+  namespace: cloudflare-public
+  labels:
+    app.kubernetes.io/name: cloudflare-public
+    app.kubernetes.io/instance: naranjo-online-tunnel
+spec:
+  automountServiceAccountToken: false
+  serviceAccountName: cloudflared
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: cloudflared
+      image: cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf
+      args: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:2000", run]
+      env: null
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {cpu: 500m, memory: 256Mi}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        readOnlyRootFilesystem: true

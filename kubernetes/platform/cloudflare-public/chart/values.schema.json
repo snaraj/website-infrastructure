@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["replicaCount", "image", "tunnel", "connectors", "resources"],
   "properties": {
-    "replicaCount": {"type": "integer", "const": 2},
+    "replicaCount": {"type": "integer", "minimum": 1},
     "image": {
       "type": "object",
       "additionalProperties": false,

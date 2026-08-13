@@ -1,0 +1,19 @@
+# proves: SR-6
+# rego-message: must pin itself to named nodes with a bounded required nodeAffinity
+# Degenerate shape, and the sharpest one: this object and the SR-6 proof fixture
+# differ by ONE YAML TOKEN. Writing `nodeAffinity:` with a null value instead of
+# omitting the key made the Rego arm undefined, so CI reported the whole battery
+# green on a local volume with no node pin at all.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: storage-node-affinity-null
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-pie-ssd
+  local:
+    path: /mnt/local-pie-ssd/media
+  nodeAffinity:

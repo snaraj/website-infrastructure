@@ -17,11 +17,19 @@ metadata:
 spec:
   replicas: {{ $.Values.replicaCount }}
   revisionHistoryLimit: 3
+  {{- /*
+  Reconciled to the cluster on 2026-08-12. On a single node, surge-then-drain
+  cannot place the extra Pod anywhere useful and its headroom has to be paid
+  for out of the same namespace quota that bounds the steady state; taking one
+  connector down and replacing it is what actually completes here. The tunnel
+  drains in seconds and the other website's connector is untouched, which is
+  the same one-at-a-time property ADR 0015 gives rotation.
+  */}}
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "cloudflare-public.name" $ }}

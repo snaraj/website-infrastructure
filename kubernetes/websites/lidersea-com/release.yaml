@@ -39,8 +39,18 @@ spec:
   # this site's publisher embeds the built image digest into the published
   # chart (ADR 0016, transition step 1), and then only by a reviewed PR that
   # moves the same denial into the chart (transition step 4).
+  #
+  # `tag` is the human half of the same identity (ADR 0016: the version tag IS
+  # the release) and is written by the SAME promotion transaction, from the
+  # same pair the registry was proved to bind. It makes the rendered workload
+  # reference read `repository:tag@digest`, so `kubectl describe pod` names the
+  # release instead of only its content address. It never replaces the digest:
+  # only the digest resolves, only the digest is signed and attested, and the
+  # release-state classifier refuses any half-advanced tag/digest/readiness
+  # combination.
   values:
     deploymentReady: true
     image:
       repository: ghcr.io/snaraj/lidersea-com
+      tag: v0.1.9
       digest: sha256:4714041a4ab9acf0a514c6f5b690684f74f78bb6d59effbcfd0db2d97f4ce479

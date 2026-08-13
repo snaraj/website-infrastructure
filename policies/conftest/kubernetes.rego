@@ -21,24 +21,71 @@ gateway_kinds := {
   "ReferenceGrant",
 }
 
-undiscovered_storage_kinds := {
+# The CI mirror of policies/kyverno/disallow-undiscovered-storage.yaml rule
+# `restrict-storage-to-enumerated-local-means`. Storage objects are admitted;
+# storage reachable from outside the cluster by a means the owner has not
+# enumerated is not. These six sets ARE the enumeration and must stay
+# byte-identical to the Kyverno CEL variables of the same meaning;
+# tests/security/test_storage_exposure_policy_contract.py fails if they drift,
+# and fails if either engine stops covering a storage kind the other covers.
+storage_kinds := {
   "PersistentVolume",
   "PersistentVolumeClaim",
   "StorageClass",
   "CSIDriver",
+  "VolumeAttributesClass",
 }
 
-undiscovered_pod_volume_sources := {
-  "persistentVolumeClaim",
-  "ephemeral",
-  "csi",
-  "nfs",
-  "iscsi",
-  "cephfs",
-  "rbd",
-  "fc",
-  "flexVolume",
-  "glusterfs",
+enumerated_storage_classes := {"local-pie-ssd"}
+
+enumerated_storage_provisioners := {"kubernetes.io/no-provisioner"}
+
+# Empty by design: no CSI driver is an enumerated means today.
+enumerated_csi_drivers := set()
+
+enumerated_local_volume_roots := {"/mnt/local-pie-ssd"}
+
+# Empty by design, and for the same reason the driver list is: no
+# VolumeAttributesClass may exist, so no PersistentVolume or claim may reference
+# one. SR-14 gates the OBJECT; SR-15 gates the REFERENCE, exactly as SR-9 gates
+# the StorageClass object and SR-7/SR-11 gate references to it.
+enumerated_volume_attributes_classes := set()
+
+admitted_persistent_volume_sources := {"local", "csi"}
+
+# Every PersistentVolumeSpec field that is not a volume source. Sources are
+# derived by subtraction, so an unrecognized source is a source.
+persistent_volume_non_source_fields := {
+  "accessModes",
+  "capacity",
+  "claimRef",
+  "mountOptions",
+  "nodeAffinity",
+  "persistentVolumeReclaimPolicy",
+  "storageClassName",
+  "volumeAttributesClassName",
+  "volumeMode",
+}
+
+# Pod-level storage is a separate gate from the storage OBJECTS above: admitting
+# a PersistentVolume did not admit mounting one. It used to be a ten-name
+# BLOCKLIST of the network sources upstream had invented by then, which meant an
+# otherwise compliant Pod could mount `azureFile` or `awsElasticBlockStore` and
+# be admitted (measured on wi #96, 2026-08-12, in a non-tenant namespace). It now
+# uses the SAME SUBTRACTION MODEL as the PersistentVolume rules: a Pod volume
+# entry is a name plus exactly one source, the source is whatever is left when
+# the non-source fields are removed, and only sources whose bytes come from the
+# cluster's own API server or the node's ephemeral storage are admitted. Every
+# network filesystem, every cloud disk, every claim/CSI reference, and every
+# source upstream has not invented yet is denied by construction.
+pod_volume_non_source_fields := {"name"}
+
+admitted_pod_volume_sources := {
+  "emptyDir",
+  "configMap",
+  "secret",
+  "projected",
+  "downwardAPI",
 }
 
 etcd_payload_fields := {"data", "binaryData", "stringData"}
@@ -211,10 +258,27 @@ valid_site_chart_verification(namespace) if {
   identities[0] == site_chart_identities[namespace]
 }
 
+# The one name a site's ingress policy may carry. Reconciled to the cluster on
+# 2026-08-12: the live objects are `ingress-to-<namespace>` and both site
+# charts render that name, while this contract alone still demanded the
+# superseded `cloudflared-to-` prefix — so every render of the real desired
+# state was refused by a check that was modelling a shape nothing deploys.
+#
+# Kept as an exact literal rather than a configurable value on purpose. The
+# Kyverno mirror cannot read a repository-side constant, so a values-derived
+# prefix would exist on this side only and the two engines would silently
+# diverge — the exact failure this reconciliation is fixing. Accepting BOTH
+# prefixes was rejected outright: it would weaken an exact-name match into an
+# alternation, and an alternation is what lets a superseded identity survive.
+# The literal is also the provider-NEUTRAL one (delivery-lane requirement 7):
+# `cloudflared-` named the provider, which the site repositories removed on
+# 2026-08-10 and their own neutrality test now forbids re-adding.
+site_ingress_policy_name(namespace) := sprintf("ingress-to-%s", [namespace])
+
 valid_site_ingress_policy if {
   namespace := input.metadata.namespace
   namespace in site_namespaces
-  input.metadata.name == sprintf("cloudflared-to-%s", [namespace])
+  input.metadata.name == site_ingress_policy_name(namespace)
 
   selector_labels := object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {})
   selector_labels == {
@@ -420,6 +484,93 @@ connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
 public_connector_deployment if {
   input.kind == "Deployment"
   object.get(input.metadata, "namespace", "") == "cloudflare-public"
+}
+
+public_connector_workload if {
+  is_workload
+  object.get(object.get(input, "metadata", {}), "namespace", "") == "cloudflare-public"
+}
+
+# The OTHER token-delivery surface, and the one the cluster actually runs.
+# Captured live 2026-08-12: both connector Pods mount ZERO volumes and receive
+# the Tunnel credential as `env: TUNNEL_TOKEN` with
+# `valueFrom.secretKeyRef`. The volume rule above therefore governs a shape
+# that is not deployed — and because it is written as "every volume must be
+# the own-instance tunnel-token volume", a Pod with no volumes at all
+# satisfies it vacuously. So the cross-site substitution closed on the volume
+# surface was still wide open on the surface in production: a connector Pod
+# naming the OTHER site's Secret in a secretKeyRef passed every gate.
+#
+# This binds that surface by the SAME derivation as the volume rule — the
+# Secret name must equal the connector's own app.kubernetes.io/instance plus
+# `-token` — and the instance a DEPLOYMENT may claim is itself rooted in that
+# Deployment's name by connector_identity_rooted_in_name.
+#
+# DECLARED LIMIT, stated because the honest scope is narrower than "no
+# self-consistent relabelling anywhere". That rooting is scoped to
+# `input.kind == "Deployment"`, since a bare Pod has no name to root in — its
+# name is generated — and no selector or template to compare against. So a
+# BARE Pod that moves its instance label and its secretKeyRef together stays
+# internally consistent and is admitted. Three things bound what that buys an
+# attacker, and none of them is this rule: the label that selects the token is
+# the SAME label both site NetworkPolicies select on, so such a Pod is a
+# duplicate of the site it claims rather than a bridge to the other one; the
+# closed connector inventory below still refuses an identity outside the
+# reviewed two; and creating a bare Pod in this namespace is not a right any
+# reviewed principal holds. Closing it properly means requiring a controller
+# ownerReference on Pods here, which would rewrite every connector fixture in
+# the repository and is an admission-semantics addition in its own right —
+# tracked, not smuggled into this change.
+#
+# `envFrom` is refused outright rather than pattern-matched: a `secretRef`
+# there injects EVERY key of the named Secret with no key selector to bind, so
+# an allowlist would have to reason about the Secret's contents, which
+# admission cannot see. The deployed connectors declare no envFrom at all, so
+# refusing it costs nothing and closes the second door into the same credential.
+connector_secret_env_binding_is_own_instance if {
+  connector_instance in connector_deployments
+  every container in containers {
+    valid_connector_container_env(container)
+  }
+}
+
+# Written as a POSITIVE proof that the denial NEGATES, never as a rule that
+# hunts for a violation. A missing, null, scalar or map-shaped `env`, a
+# non-object container, or a non-list `containers` makes this proof UNDEFINED
+# and `not` then fires the denial. A mismatch-hunting rule would instead go
+# undefined itself on exactly those degenerate shapes — under OPA's default
+# non-strict mode a builtin type error silently drops the deny body — and fail
+# OPEN where the Kyverno mirror errors and denies.
+valid_connector_container_env(container) if {
+  is_object(container)
+  not "envFrom" in object.keys(container)
+  env := object.get(container, "env", [])
+  is_array(env)
+  every entry in env {
+    valid_connector_env_entry(entry)
+  }
+}
+
+# An env entry that reads no Secret at all is none of this rule's business.
+valid_connector_env_entry(entry) if {
+  is_object(entry)
+  value_from := object.get(entry, "valueFrom", {})
+  is_object(value_from)
+  not "secretKeyRef" in object.keys(value_from)
+}
+
+# An env entry that DOES read a Secret must read exactly this connector's own
+# token key. Compared by whole-object equality so an added `optional: true`
+# — which would let the Pod start with no credential at all, silently — is a
+# denial rather than an accepted extra field.
+valid_connector_env_entry(entry) if {
+  is_object(entry)
+  value_from := object.get(entry, "valueFrom", {})
+  is_object(value_from)
+  object.get(value_from, "secretKeyRef", {}) == {
+    "name": sprintf("%s-token", [connector_instance]),
+    "key": "token",
+  }
 }
 
 # The connector identity tuple is ROOTED IN THE DEPLOYMENT NAME, never in a
@@ -907,9 +1058,287 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s/%s must use canonical releaseName", [input.metadata.namespace, input.metadata.name])
 }
 
+# A storage object may be structurally unusable — no metadata, a truncated
+# document, a spec that is not a mapping. Reading a name out of it must never be
+# the thing that makes a deny rule undefined, because an undefined deny rule is
+# an allow.
+storage_object_name := name if {
+  name := object.get(object.get(input, "metadata", {}), "name", "")
+  is_string(name)
+  name != ""
+} else := "<unnamed>"
+
+storage_object_spec := spec if {
+  spec := object.get(input, "spec", {})
+  is_object(spec)
+} else := {}
+
+# EVERY sub-structure below is read through this helper instead of a nested
+# object.get, because a NESTED object.get FAILS OPEN. When the inner value is
+# null, a string, or a list, the outer object.get raises a builtin TYPE ERROR;
+# under OPA's default non-strict builtin-error handling the whole expression is
+# UNDEFINED, the deny body fails, and the rule SILENTLY DOES NOT FIRE. Kyverno's
+# CEL raises on those same shapes and the webhook's failurePolicy: Fail turns the
+# error into a denial, so the two engines disagreed on nine degenerate shapes,
+# eight of them fail-open in Rego — and Rego is the only engine that actually
+# runs while Kyverno is uninstalled (wi #96 adversarial review, 2026-08-12).
+# Yielding {} for a degenerate value makes every read below fall back to the
+# empty value its rule already denies on, so "present but unusable" denies for
+# the same reason "absent" does. scripts/test-storage-engine-parity.sh feeds both
+# engines the same corpus and fails on any disagreement.
+storage_sub_object(parent, key) := value if {
+  value := object.get(parent, key, {})
+  is_object(value)
+} else := {}
+
+# Presence, distinguished from an explicit null. object.get cannot tell "absent"
+# from "present but null", and the difference is load bearing: CEL's has() calls
+# an explicitly-null field PRESENT and denies on it, so a Rego arm keyed on
+# non-nullness admits exactly what admission refuses.
+storage_spec_declares(field) if {
+  field in object.keys(storage_object_spec)
+}
+
+empty_collection(value) if {
+  is_object(value)
+  count(value) == 0
+}
+
+empty_collection(value) if {
+  is_array(value)
+  count(value) == 0
+}
+
+# storage_kinds is the mirror's declared surface, so every storage deny arm is
+# gated on membership: dropping a kind from that set stops the mirror covering
+# it, which is a behavioural change the deny fixtures catch, not just a
+# structural one. It is the Rego counterpart of the Kyverno rule's match block.
+is_storage_object if {
+  input.kind in storage_kinds
+}
+
+persistent_volume_sources := {field |
+  some field, _ in storage_object_spec
+  not field in persistent_volume_non_source_fields
+}
+
+# SR-0. A spec that is absent, or present but not a mapping, cannot be reasoned
+# about, so it is denied rather than skipped. Presence is checked explicitly:
+# the CEL arm is `has(object.spec) && type(object.spec) == type({})`, which
+# denies an ABSENT spec too, while object.get(input, "spec", {}) would have
+# returned {} and left this arm silently weaker than the one it mirrors.
 deny contains msg if {
-  input.kind in undiscovered_storage_kinds
-  msg := sprintf("%s %s is forbidden until storage discovery and restore evidence are approved", [input.kind, input.metadata.name])
+  is_storage_object
+  input.kind in {"PersistentVolume", "PersistentVolumeClaim"}
+  not storage_object_has_usable_spec
+  msg := sprintf("%s %s has no usable spec mapping and cannot be evaluated", [input.kind, storage_object_name])
+}
+
+storage_object_has_usable_spec if {
+  "spec" in object.keys(input)
+  is_object(input.spec)
+}
+
+# SR-1. Exactly one volume source; zero (absent/empty/truncated spec) and two
+# (a local decoy beside a remote source) both deny.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  count(persistent_volume_sources) != 1
+  msg := sprintf("PersistentVolume %s must declare exactly one volume source, found %d", [storage_object_name, count(persistent_volume_sources)])
+}
+
+# SR-2. Derived by subtraction, so nfs, iscsi, cephfs, glusterfs, fc, rbd,
+# portworxVolume, flexVolume, azureFile, azureDisk, awsElasticBlockStore,
+# gcePersistentDisk, vsphereVolume, cinder, hostPath and every future source are
+# denied without maintaining a blocklist.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  some source in persistent_volume_sources
+  not source in admitted_persistent_volume_sources
+  msg := sprintf("PersistentVolume %s uses volume source %s, which is not an enumerated local means", [storage_object_name, source])
+}
+
+# SR-3. A csi source reaches wherever its driver reaches. A csi value that is
+# null, a scalar, or a list yields {} here and therefore an empty driver name,
+# which is not enumerated and denies — the shape CEL denies by erroring.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  "csi" in persistent_volume_sources
+  not object.get(storage_sub_object(storage_object_spec, "csi"), "driver", "") in enumerated_csi_drivers
+  msg := sprintf("PersistentVolume %s names a CSI driver outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+# SR-4. A local path outside the enumerated root is a different means. A local
+# value that is null, a scalar, or a list yields {} and therefore an empty path,
+# which is under no enumerated root and denies.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  path := object.get(storage_sub_object(storage_object_spec, "local"), "path", "")
+  not local_path_under_enumerated_root(path)
+  msg := sprintf("PersistentVolume %s uses local path outside the enumerated local root", [storage_object_name])
+}
+
+# SR-5. Prefix matching alone accepts "<root>/../../var/lib/etcd". The is_string
+# guard keeps a non-string path from making contains() error, which would make
+# this arm undefined instead of leaving SR-4 to deny the object.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  path := object.get(storage_sub_object(storage_object_spec, "local"), "path", "")
+  is_string(path)
+  contains(path, "..")
+  msg := sprintf("PersistentVolume %s uses a local path containing a parent traversal segment", [storage_object_name])
+}
+
+# SR-6. Required node affinity that does not BOUND the node set is not a pin:
+# `operator: Exists` on kubernetes.io/hostname is satisfied by every node that
+# ever joins, and `required: {}` asserts nothing at all. Both were admitted while
+# this rule only checked that `required` was present, which is less than its
+# stated purpose (wi #96 review). It now requires at least one node selector
+# term, and requires EVERY term to name the nodes it accepts through an `In`
+# match with a non-empty value list.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  "local" in persistent_volume_sources
+  not local_volume_is_bound_to_named_nodes
+  msg := sprintf("PersistentVolume %s must pin itself to named nodes with a bounded required nodeAffinity", [storage_object_name])
+}
+
+local_volume_is_bound_to_named_nodes if {
+  required := storage_sub_object(storage_sub_object(storage_object_spec, "nodeAffinity"), "required")
+  terms := object.get(required, "nodeSelectorTerms", [])
+  is_array(terms)
+  count(terms) > 0
+  every term in terms {
+    node_selector_term_names_nodes(term)
+  }
+}
+
+node_selector_term_names_nodes(term) if {
+  some matcher in ["matchExpressions", "matchFields"]
+  some expression in object.get(term, matcher, [])
+  object.get(expression, "operator", "") == "In"
+  values := object.get(expression, "values", [])
+  is_array(values)
+  count(values) > 0
+}
+
+# SR-7. The class name is part of the enumerated means.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  not object.get(storage_object_spec, "storageClassName", "") in enumerated_storage_classes
+  msg := sprintf("PersistentVolume %s must declare an enumerated storageClassName", [storage_object_name])
+}
+
+# SR-8. The provisioner IS the means.
+deny contains msg if {
+  is_storage_object
+  input.kind == "StorageClass"
+  not object.get(input, "provisioner", "") in enumerated_storage_provisioners
+  msg := sprintf("StorageClass %s must use an enumerated local provisioner", [storage_object_name])
+}
+
+# SR-9. A second class must not appear beside the reviewed one.
+deny contains msg if {
+  is_storage_object
+  input.kind == "StorageClass"
+  not storage_object_name in enumerated_storage_classes
+  msg := sprintf("StorageClass %s is not an enumerated class identity", [storage_object_name])
+}
+
+# SR-10. parameters/mountOptions is where a server, export, share, endpoint, or
+# bucket would be named; a static local class needs neither. Declared-but-
+# degenerate values (null, a scalar, the wrong collection type) deny too: count()
+# raises a type error on a non-collection, and an erroring expression is
+# UNDEFINED, which would have skipped the rule rather than denying.
+deny contains msg if {
+  is_storage_object
+  input.kind == "StorageClass"
+  some field in {"parameters", "mountOptions"}
+  field in object.keys(input)
+  not empty_collection(input[field])
+  msg := sprintf("StorageClass %s must declare no parameters and no mountOptions", [storage_object_name])
+}
+
+# SR-11. An absent class silently binds through the cluster default class.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolumeClaim"
+  not object.get(storage_object_spec, "storageClassName", "") in enumerated_storage_classes
+  msg := sprintf("PersistentVolumeClaim %s must name an enumerated storageClassName", [storage_object_name])
+}
+
+# SR-12. dataSource/dataSourceRef import bytes the enumeration never described.
+# Keyed on DECLARATION, not on non-nullness: `dataSourceRef:` with a null value
+# is a declared import that CEL's has() denies, and it was admitted here while
+# this arm compared the value against null.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolumeClaim"
+  some field in {"dataSource", "dataSourceRef"}
+  storage_spec_declares(field)
+  msg := sprintf("PersistentVolumeClaim %s must not populate itself from %s", [storage_object_name, field])
+}
+
+# SR-13. Installing a CSI driver installs a new means wholesale.
+deny contains msg if {
+  is_storage_object
+  input.kind == "CSIDriver"
+  not storage_object_name in enumerated_csi_drivers
+  msg := sprintf("CSIDriver %s is outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+# SR-14. VolumeAttributesClass is the newest object that can point storage at a
+# backend, so it is bound to the same driver enumeration.
+deny contains msg if {
+  is_storage_object
+  input.kind == "VolumeAttributesClass"
+  not object.get(input, "driverName", "") in enumerated_csi_drivers
+  msg := sprintf("VolumeAttributesClass %s is outside the enumerated local-provisioner allowlist", [storage_object_name])
+}
+
+# SR-15. A volumeAttributesClassName is a REFERENCE, and a reference to a means
+# is part of the means: storageClassName gets both object treatment (SR-9) and
+# reference treatment (SR-7/SR-11), and this one had neither. The enumeration is
+# empty, so every reference denies today — including one that names a class
+# created out of band before this policy could refuse it.
+deny contains msg if {
+  is_storage_object
+  input.kind in {"PersistentVolume", "PersistentVolumeClaim"}
+  storage_spec_declares("volumeAttributesClassName")
+  not object.get(storage_object_spec, "volumeAttributesClassName", "") in enumerated_volume_attributes_classes
+  msg := sprintf("%s %s references a VolumeAttributesClass outside the enumerated allowlist", [input.kind, storage_object_name])
+}
+
+# SR-16. SR-10's rationale applied where it equally holds: mountOptions is where
+# a remote endpoint is named, and `["addr=storage.invalid", "vers=4.1"]` is an NFS mount
+# by another spelling. A statically provisioned local volume needs none.
+deny contains msg if {
+  is_storage_object
+  input.kind == "PersistentVolume"
+  storage_spec_declares("mountOptions")
+  not empty_collection(object.get(storage_object_spec, "mountOptions", []))
+  msg := sprintf("PersistentVolume %s must declare no mountOptions; that is where a remote endpoint would be named", [storage_object_name])
+}
+
+local_path_under_enumerated_root(path) if {
+  is_string(path)
+  some root in enumerated_local_volume_roots
+  path == root
+}
+
+local_path_under_enumerated_root(path) if {
+  is_string(path)
+  some root in enumerated_local_volume_roots
+  startswith(path, sprintf("%s/", [root]))
 }
 
 deny contains msg if {
@@ -986,10 +1415,28 @@ deny contains msg if {
 deny contains msg if {
   is_workload
   some volume in object.get(pod_spec, "volumes", [])
-  some source in undiscovered_pod_volume_sources
-  object.get(volume, source, null) != null
-  msg := sprintf("volume %s uses undiscovered storage source %s", [volume.name, source])
+  count(pod_volume_sources(volume)) != 1
+  msg := sprintf("volume %s must declare exactly one volume source, found %d", [pod_volume_name(volume), count(pod_volume_sources(volume))])
 }
+
+deny contains msg if {
+  is_workload
+  some volume in object.get(pod_spec, "volumes", [])
+  some source in pod_volume_sources(volume)
+  not source in admitted_pod_volume_sources
+  msg := sprintf("volume %s uses undiscovered storage source %s", [pod_volume_name(volume), source])
+}
+
+pod_volume_sources(volume) := {field |
+  some field, _ in volume
+  not field in pod_volume_non_source_fields
+}
+
+pod_volume_name(volume) := name if {
+  name := object.get(volume, "name", "")
+  is_string(name)
+  name != ""
+} else := "<unnamed>"
 
 deny contains msg if {
   is_workload
@@ -1049,6 +1496,19 @@ deny contains msg if {
   msg := sprintf("Deployment cloudflare-public/%s must state its own name as app.kubernetes.io/instance in its metadata labels, selector, and pod template; the connector identity tuple is rooted in the Deployment name", [object.get(input.metadata, "name", "")])
 }
 
+# The deployed token-delivery surface (env/secretKeyRef), bound to the same
+# own-instance derivation the mounted-volume surface already uses. Scoped to
+# every workload in cloudflare-public, not only to those that declare a
+# secretKeyRef: a workload there that claims no reviewed connector identity
+# has no legitimate way to name a connector's Secret at all, and requiring the
+# identity first is what keeps the derivation from being satisfied by an
+# absent label.
+deny contains msg if {
+  public_connector_workload
+  not connector_secret_env_binding_is_own_instance
+  msg := sprintf("%s cloudflare-public/%s may take its Tunnel token only from the Secret derived from its own app.kubernetes.io/instance, through env.valueFrom.secretKeyRef and never through envFrom", [input.kind, object.get(input.metadata, "name", "")])
+}
+
 deny contains msg if {
   input.kind == "ResourceQuota"
   input.metadata.namespace in site_namespaces
@@ -1094,13 +1554,24 @@ deny contains msg if {
   msg := sprintf("%s %s must run as non-root", [input.kind, input.metadata.name])
 }
 
+# The canonical publisher per tenant namespace, and the exact shape of the
+# reference that names it. A reference may carry the published release tag in
+# front of the digest — `repo:vMAJOR.MINOR.PATCH@sha256:...`, the form the
+# connector, Flux and Kyverno images already use — so an operator reading
+# `kubectl describe pod` sees which release is running. The tag is legibility
+# only and is never what resolves: the `@sha256:` suffix stays MANDATORY and
+# anchored, so safety invariant 6 is untouched and dropping the digest for a
+# bare tag is still denied. The tag shape is closed to the site publishers'
+# own SemVer form, so `:latest`, a branch name, or a second registry host
+# cannot ride in through it. Repository hosts are now dot-escaped, which is
+# strictly narrower than the unescaped literals this replaced.
 deny contains msg if {
   is_workload
   restricted_namespace
   namespace := input.metadata.namespace
   expected_repository := {
-    "naranjo-online": "ghcr.io/snaraj/naranjo-online",
-    "lidersea-com": "ghcr.io/snaraj/lidersea-com",
+    "naranjo-online": "ghcr[.]io/snaraj/naranjo-online(:v[0-9]+[.][0-9]+[.][0-9]+)?",
+    "lidersea-com": "ghcr[.]io/snaraj/lidersea-com(:v[0-9]+[.][0-9]+[.][0-9]+)?",
     "cloudflare-public": "cloudflare/cloudflared:[A-Za-z0-9._-]+",
   }[namespace]
   some container in containers
@@ -1185,10 +1656,18 @@ deny contains msg if {
   msg := sprintf("volume %s must not use hostPath", [volume.name])
 }
 
+# The coarse registry rule that covers every workload, tenant or platform.
+# It is TIGHTER than the `.+` it replaces: the repository path and the optional
+# release tag are each a closed character class, so a reference can no longer
+# smuggle `/`, `@`, or a second `:` between the approved host prefix and the
+# digest. The digest remains mandatory and anchored; the tag remains optional
+# here because the exact per-namespace tag shape is pinned by the canonical
+# repository rule above, and because the digest-only form must stay valid for
+# a rollback pin that names no release.
 deny contains msg if {
   is_workload
   some container in containers
-  not regex.match("^(ghcr\\.io/(snaraj|fluxcd)/|reg\\.kyverno\\.io/kyverno/|cloudflare/cloudflared:).+@sha256:[0-9a-f]{64}$", container.image)
+  not regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|reg[.]kyverno[.]io/kyverno/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", container.image)
   msg := sprintf("container %s image must use an approved registry and full digest", [container.name])
 }
 

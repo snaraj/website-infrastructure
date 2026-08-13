@@ -46,6 +46,11 @@ ZERO_DIGEST = "sha256:" + "0" * 64
 # gate's shape, never a particular site's released artifact, so no real
 # promotion value is duplicated here (safety invariant 14).
 REVIEWED_DIGEST = "sha256:" + "ab" * 32
+# The tag half of the same synthetic identity. `v0.0.0` is the fail-closed
+# sentinel the release policy denies exactly as it denies the all-zero digest;
+# the reviewed value is deliberately not any site's real published release.
+ZERO_TAG = "v0.0.0"
+REVIEWED_TAG = "v9.9.9"
 
 # Loop variables the renderer expands inside an artifact path. Anything else
 # interpolated into an artifact reference fails the ratchet below rather than
@@ -56,6 +61,7 @@ SITES = ("naranjo-online", "lidersea-com")
 # whether a promotion has already merged into the base branch.
 READY_LINE = re.compile(r"^    deploymentReady: (?:true|false)$", re.MULTILINE)
 DIGEST_LINE = re.compile(r"^      digest: sha256:[0-9a-f]{64}$", re.MULTILINE)
+TAG_LINE = re.compile(r"^      tag: v[0-9]+\.[0-9]+\.[0-9]+$", re.MULTILINE)
 ARTIFACT_REFERENCE = re.compile(r"\$\{ARTIFACT_ROOT\}/([A-Za-z0-9._${}-]+\.yaml)")
 INTERPOLATION = re.compile(r"\$\{[^}]*\}")
 # Two Kustomize roots are built outside the declared target list; each is
@@ -83,12 +89,15 @@ def site_release_document(
     suspend=True,
     ready=False,
     digest=ZERO_DIGEST,
+    tag=ZERO_TAG,
     omit_digest=False,
+    omit_tag=False,
     omit_ready=False,
 ):
     """Render one site HelmRelease exactly as Kustomize emits it."""
 
     image = "" if omit_digest else "      digest: {}\n".format(digest)
+    image += "" if omit_tag else "      tag: {}\n".format(tag)
     readiness = (
         ""
         if omit_ready
@@ -248,6 +257,14 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             'not_ready="HelmRelease ${website} is not marked ready"',
             'zero_digest="HelmRelease ${website} still names the all-zero image digest"',
             'uncanonical="HelmRelease ${website} does not name a canonical image digest"',
+            # The release tag is gated exactly like the digest, so its two
+            # arms and the degenerate-shape arm belong to the same closed
+            # vocabulary: a denial outside it is invisible to the phase proof.
+            'sentinel_tag="HelmRelease ${website} still names the sentinel release tag"',
+            'uncanonical_tag="HelmRelease ${website} does not name a canonical release tag"',
+            'malformed_image="HelmRelease ${website} does not state a well-formed image mapping"',
+            'nonstring_digest="HelmRelease ${website} does not state a string image digest"',
+            'nonstring_tag="HelmRelease ${website} does not state a string release tag"',
             # A site root renders that site's chart source as well as its
             # release, so the vocabulary is exhaustive only if it names the
             # chart-source denials too. A correct chart source produces
@@ -259,13 +276,19 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, helper)
-        self.assertIn('required=("$suspended" "$not_ready" "$zero_digest")', helper)
         self.assertIn(
-            'forbidden=("$uncanonical" "$unverified" "$unbound")', helper
+            'required=("$suspended" "$not_ready" "$zero_digest" "$sentinel_tag")',
+            helper,
+        )
+        self.assertIn(
+            'forbidden=("$uncanonical" "$uncanonical_tag" "$malformed_image" '
+            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
+            helper,
         )
         self.assertIn(
             'forbidden=("$not_ready" "$zero_digest" "$uncanonical" '
-            '"$unverified" "$unbound")',
+            '"$sentinel_tag" "$uncanonical_tag" "$malformed_image" '
+            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
             helper,
         )
         self.assertIn('for fragment in "${required[@]}"', helper)
@@ -518,6 +541,7 @@ class SiteReleasePolicyTests(unittest.TestCase):
                 "HelmRelease naranjo-online remains suspended",
                 "HelmRelease naranjo-online is not marked ready",
                 "HelmRelease naranjo-online still names the all-zero image digest",
+                "HelmRelease naranjo-online still names the sentinel release tag",
             },
         )
 
@@ -526,13 +550,16 @@ class SiteReleasePolicyTests(unittest.TestCase):
         so the sole surviving denial is the deliberate suspension."""
 
         self.assertEqual(
-            self.denials(ready=True, digest=REVIEWED_DIGEST),
+            self.denials(ready=True, digest=REVIEWED_DIGEST, tag=REVIEWED_TAG),
             {"HelmRelease naranjo-online remains suspended"},
         )
 
     def test_active_site_is_accepted_outright(self):
         self.assertEqual(
-            self.denials(suspend=False, ready=True, digest=REVIEWED_DIGEST), set()
+            self.denials(
+                suspend=False, ready=True, digest=REVIEWED_DIGEST, tag=REVIEWED_TAG
+            ),
+            set(),
         )
 
     def test_promoted_digest_without_readiness_is_denied(self):
@@ -547,7 +574,12 @@ class SiteReleasePolicyTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(
                     "HelmRelease naranjo-online is not marked ready",
-                    self.denials(suspend=False, digest=REVIEWED_DIGEST, **kwargs),
+                    self.denials(
+                        suspend=False,
+                        digest=REVIEWED_DIGEST,
+                        tag=REVIEWED_TAG,
+                        **kwargs
+                    ),
                 )
 
     def test_ready_site_without_a_canonical_digest_is_denied(self):
@@ -560,8 +592,187 @@ class SiteReleasePolicyTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(
                     "HelmRelease naranjo-online does not name a canonical image digest",
-                    self.denials(suspend=False, ready=True, **kwargs),
+                    self.denials(
+                        suspend=False, ready=True, tag=REVIEWED_TAG, **kwargs
+                    ),
                 )
+
+    def test_ready_site_without_a_canonical_release_tag_is_denied(self):
+        """The tag is legibility, but a LYING tag is worse than no tag.
+
+        A reference that names a release the digest beside it never carried
+        would make `kubectl describe pod` confidently wrong, so every shape
+        that is not one exact SemVer release name is refused here — including
+        a floating alias, the bare unprefixed version, and the digest wearing
+        the tag field's clothes.
+        """
+
+        for label, kwargs in (
+            ("absent", {"omit_tag": True}),
+            ("floating alias", {"tag": "latest"}),
+            ("unprefixed", {"tag": "0.1.9"}),
+            ("branch name", {"tag": "vmain"}),
+            ("partial", {"tag": "v0.1"}),
+            ("leading zero", {"tag": "v0.01.9"}),
+            ("a digest", {"tag": "sha256:" + "ab" * 32}),
+        ):
+            with self.subTest(label=label):
+                self.assertIn(
+                    "HelmRelease naranjo-online does not name a canonical release tag",
+                    self.denials(
+                        suspend=False, ready=True, digest=REVIEWED_DIGEST, **kwargs
+                    ),
+                )
+
+    def test_a_half_advanced_release_identity_is_denied_on_either_half(self):
+        """Tag and digest advance together or the release is refused.
+
+        Each subtest advances exactly ONE half of the pair; the other keeps its
+        fail-closed sentinel. Both directions must still be denied, so a
+        promotion that renamed the release without changing the bytes — or
+        changed the bytes without renaming the release — can never render as an
+        acceptable active site.
+        """
+
+        for label, kwargs, expected in (
+            (
+                "tag advanced, digest sentinel",
+                {"tag": REVIEWED_TAG},
+                "HelmRelease naranjo-online still names the all-zero image digest",
+            ),
+            (
+                "digest advanced, tag sentinel",
+                {"digest": REVIEWED_DIGEST},
+                "HelmRelease naranjo-online still names the sentinel release tag",
+            ),
+        ):
+            with self.subTest(label=label):
+                self.assertIn(
+                    expected, self.denials(suspend=False, ready=True, **kwargs)
+                )
+
+    def test_a_non_string_leaf_is_denied_not_skipped(self):
+        """The LEAF half of the same fail-open class, and the harder half.
+
+        The container shapes below (`spec`/`values`/`image`) were closed by the
+        `is_object` guards. The leaves were not, and a guarded accessor is the
+        wrong instrument for them: making `site_image_digest` UNDEFINED on a
+        non-string does not hand the denial to `not`, because in Rego
+        `not <undefined rule>` succeeds while `not <builtin>(<undefined rule>)`
+        does not — and every consumer passes the accessor to a builtin. That
+        construction silently turned six DENIED digest shapes into admitted
+        ones, which is a reversal wearing the shape of a fix.
+
+        The type check therefore lives in its own arm, over a total accessor.
+        Every shape below must produce its own denial; a corpus that stops at
+        the container levels never reaches this rule at all.
+        """
+
+        digest = "sha256:" + "ab" * 32
+        for label, value in (
+            ("null", "null"),
+            ("boolean", "true"),
+            ("number", "5"),
+            ("list", "[]"),
+            ("map", "{}"),
+        ):
+            for field, expected in (
+                ("digest", "does not state a string image digest"),
+                ("tag", "does not state a string release tag"),
+            ):
+                other = (
+                    "      tag: v1.2.3\n"
+                    if field == "digest"
+                    else "      digest: {}\n".format(digest)
+                )
+                document = textwrap.dedent(
+                    """\
+                    apiVersion: helm.toolkit.fluxcd.io/v2
+                    kind: HelmRelease
+                    metadata:
+                      name: naranjo-online
+                      namespace: naranjo-online
+                    spec:
+                      suspend: false
+                      values:
+                        deploymentReady: true
+                        image:
+                          repository: ghcr.io/snaraj/naranjo-online
+                    """
+                ) + other + "      {}: {}\n".format(field, value)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "release.yaml"
+                    path.write_text(document, encoding="utf-8")
+                    with self.subTest(field=field, shape=label):
+                        # EXACTLY the type denial, not merely "a denial fired".
+                        # Without the `is_string` precondition on the pattern
+                        # arms the same object also trips the canonical-shape
+                        # rule, because `regex.match` ERRORS on a non-string
+                        # and an errored builtin under `not` fires. That is a
+                        # superset — safe, but it means the refusal is riding
+                        # on builtin-error semantics again, which is the exact
+                        # fragility that produced this bug. Asserting the exact
+                        # set keeps the two rules' responsibilities separate
+                        # and makes the precondition load bearing.
+                        self.assertEqual(
+                            release_policy_denials(path),
+                            {"HelmRelease naranjo-online " + expected},
+                        )
+
+    def test_a_well_formed_release_produces_no_leaf_type_denial(self):
+        """The true negative the arms above must not cost.
+
+        A type arm that fires on a correct release would be worse than the
+        fail-open it replaced, so the accepted shape is asserted explicitly
+        rather than assumed from the other rows being green.
+        """
+
+        self.assertEqual(
+            self.denials(
+                suspend=False,
+                ready=True,
+                digest=REVIEWED_DIGEST,
+                tag=REVIEWED_TAG,
+            ),
+            set(),
+        )
+
+    def test_a_degenerate_image_mapping_is_denied_not_skipped(self):
+        """Rego's nested object.get fails OPEN on a non-object receiver.
+
+        A null, scalar, or list `image` makes the accessor raise a builtin type
+        error; under OPA's default non-strict mode the enclosing deny body goes
+        undefined and the rule silently does not fire. Each shape below must
+        produce a denial of its own instead.
+        """
+
+        for label, block in (
+            ("null image", "  values:\n    deploymentReady: true\n    image:\n"),
+            ("scalar image", "  values:\n    deploymentReady: true\n    image: nope\n"),
+            ("list image", "  values:\n    deploymentReady: true\n    image:\n      - a\n"),
+            ("null values", "  values:\n"),
+            ("scalar values", "  values: nope\n"),
+        ):
+            document = textwrap.dedent(
+                """\
+                apiVersion: helm.toolkit.fluxcd.io/v2
+                kind: HelmRelease
+                metadata:
+                  name: naranjo-online
+                  namespace: naranjo-online
+                spec:
+                  suspend: false
+                """
+            ) + block
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "release.yaml"
+                path.write_text(document, encoding="utf-8")
+                with self.subTest(label=label):
+                    self.assertIn(
+                        "HelmRelease naranjo-online does not state a "
+                        "well-formed image mapping",
+                        release_policy_denials(path),
+                    )
 
     def test_both_sites_are_covered_by_the_same_closed_rules(self):
         for site in SITES:
@@ -612,7 +823,7 @@ def disposable_checkout(destination):
     return destination
 
 
-def _rewrite_release(root, site, ready, digest):
+def _rewrite_release(root, site, ready, digest, tag):
     """Set one site's release state without assuming its current state.
 
     The tracked file is ``initial`` today and ``staged`` the moment that
@@ -631,25 +842,33 @@ def _rewrite_release(root, site, ready, digest):
     rewritten, digest_count = DIGEST_LINE.subn(
         "      digest: {}".format(digest), rewritten
     )
-    if (readiness_count, digest_count) != (1, 1):
+    # The release identity is one three-field state, so a fixture that moved
+    # readiness and the digest without the tag would synthesise exactly the
+    # half-advanced combination the classifier refuses.
+    rewritten, tag_count = TAG_LINE.subn("      tag: {}".format(tag), rewritten)
+    if (readiness_count, digest_count, tag_count) != (1, 1, 1):
         raise AssertionError(
-            "release fixture for {} exposed {} readiness and {} digest "
+            "release fixture for {} exposed {} readiness, {} digest and {} tag "
             "line(s); expected exactly one of each".format(
-                site, readiness_count, digest_count
+                site, readiness_count, digest_count, tag_count
             )
         )
     expected_readiness = "    deploymentReady: {}\n".format(
         "true" if ready else "false"
     )
-    if expected_readiness not in rewritten or digest not in rewritten:
+    if (
+        expected_readiness not in rewritten
+        or digest not in rewritten
+        or "      tag: {}\n".format(tag) not in rewritten
+    ):
         raise AssertionError("release rewrite for {} did not take effect".format(site))
     path.write_text(rewritten, encoding="utf-8")
 
 
-def promote(root, site=SITES[0], digest=REVIEWED_DIGEST):
+def promote(root, site=SITES[0], digest=REVIEWED_DIGEST, tag=REVIEWED_TAG):
     """Leave one site in the ``staged`` phase, whatever it started in."""
 
-    _rewrite_release(root, site, True, digest)
+    _rewrite_release(root, site, True, digest, tag)
 
 
 def demote(root, sites=SITES):
@@ -660,7 +879,7 @@ def demote(root, sites=SITES):
     """
 
     for site in sites:
-        _rewrite_release(root, site, False, ZERO_DIGEST)
+        _rewrite_release(root, site, False, ZERO_DIGEST, ZERO_TAG)
 
 
 def render(root, mode):
