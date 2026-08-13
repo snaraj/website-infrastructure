@@ -7,15 +7,24 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "redact_inventory.py"
 
+# A redactor that can be stalled by the inventory it is redacting fails open in
+# practice: the discovery pipeline hangs and the operator's escape hatch is to
+# read the unredacted capture. This ceiling sits three orders of magnitude above
+# a healthy run — microseconds of matching plus interpreter start-up — so it
+# cannot flake on a loaded machine, while a pattern that has acquired a
+# catastrophic-backtracking shape does not finish at all.
+ADVERSARIAL_SECONDS = 15
+
 
 class RedactionTests(unittest.TestCase):
-    def redact(self, value):
+    def redact(self, value, timeout=None):
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
             input=value,
             text=True,
             capture_output=True,
             check=True,
+            timeout=timeout,
         )
         return result.stdout
 
@@ -138,6 +147,104 @@ class RedactionTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, output)
+
+    def test_every_hardened_derivation_marker_spelling_stays_redacted(self):
+        """Pin the language the key-origin character class must accept.
+
+        A descriptor's key origin marks a hardened derivation step with `h`,
+        `H`, or `'`, and the path may be absent entirely. The pattern spells
+        that marker as one case-insensitive character class, so this fixes what
+        the class has to cover: a later edit cannot narrow the redaction to one
+        spelling and quietly publish the others.
+        """
+
+        origins = (
+            "[deadbeef/84h/0h/0h]",
+            "[DEADBEEF/84H/0H/0H]",
+            "[deadbeef/84'/0'/0']",
+            "[deadbeef/84h/0'/0H]",
+            "[deadbeef/0/1/2]",
+            "[deadbeef]",
+        )
+        output = self.redact(
+            "\n".join("descriptor={}".format(origin) for origin in origins) + "\n"
+        )
+        for origin in origins:
+            with self.subTest(origin=origin):
+                self.assertNotIn(origin, output)
+        self.assertEqual(output.count("[REDACTED_KEY_ORIGIN]"), len(origins))
+
+    def test_key_origin_pattern_accepts_no_more_than_the_descriptor_grammar(self):
+        """A clock cannot see a widening that stays linear. This can.
+
+        A key origin is a fingerprint followed by zero or more `/`-separated
+        derivation indices. Loosening the separator — `/+`, `/*` or `/?` in
+        place of `/` — widens what the pattern accepts, and some of those edits
+        do it WITHOUT any backtracking blow-up, so the adversarial-input test
+        below is blind to them by construction. Reaching for a bigger pump
+        would never have helped: the observable is the accepted language, not
+        the running time.
+
+        Each string here is outside the descriptor grammar, so the redactor
+        must leave it alone, and each is accepted by a different loosening:
+
+        - `[deadbeef//0]`   — an empty path segment: accepted by `/+` and `/*`
+        - `[deadbeef0]`     — no separator at all:   accepted by `/?` and `/*`
+
+        Together they cover every separator loosening. They are deliberately
+        NOT sensitive values: an empty or missing segment is not a derivation
+        path, so nothing is published by leaving them intact — what is pinned
+        is the pattern's narrowness, with an out-of-grammar string as witness.
+        """
+
+        outside_grammar = ("[deadbeef//0]", "[deadbeef0]", "[deadbeef/0//1]")
+        output = self.redact(
+            "\n".join("descriptor={}".format(value) for value in outside_grammar) + "\n"
+        )
+        for value in outside_grammar:
+            with self.subTest(value=value):
+                self.assertIn(value, output)
+        self.assertNotIn("[REDACTED_KEY_ORIGIN]", output)
+
+    def test_redactor_finishes_on_adversarial_key_origin_input(self):
+        """Discovery output is host-shaped, untrusted, and can be pumped.
+
+        Each line pumps one repetition axis of the key-origin pattern and then
+        denies it the closing bracket, which is the input shape that forces a
+        backtracking engine to explore every way of partitioning what it already
+        consumed. The assertion is a wall-clock ceiling over the whole stream
+        rather than any single match, so it stays meaningful for whatever the
+        pattern table grows into.
+
+        The last two lines are a separator-only and a digit-only run, because
+        the pumped element must be the one whose repetitions the edit lets the
+        engine SPLIT — a stream of `/0h` groups pins every element to one
+        position and hides that class entirely. Stated exactly, because the
+        first version of this comment was wrong in a way the next author would
+        have inherited:
+
+        - the DIGIT run catches an optional or starred separator (`/?`, `/*`)
+          and a nested digit repetition, each of which lets one run of digits
+          be partitioned across outer iterations;
+        - the SEPARATOR run catches a quantified separator ONLY when the digit
+          part is also optional (`(?:/+[0-9h']*)*`), which is what lets a run
+          of slashes be partitioned. Quantifying the separator ALONE
+          (`(?:/+[0-9]+[h']?)*`) keeps the decomposition unique — every
+          iteration must still consume a digit — so it never blows up, and no
+          ceiling here or anywhere can catch it. The narrowness test above is
+          what catches that one.
+        """
+
+        pumps = (
+            "descriptor=[deadbeef" + "/0h" * 40,
+            "descriptor=[deadbeef" + "/00000000" * 40,
+            "descriptor=[deadbeef" + "/0" * 200,
+            "descriptor=[deadbeef" + "/0'" * 40 + "/",
+            "descriptor=[deadbeef" + "/" * 60,
+            "descriptor=[deadbeef" + "0" * 40,
+        )
+        output = self.redact("\n".join(pumps) + "\n", timeout=ADVERSARIAL_SECONDS)
+        self.assertEqual(output.count("\n"), len(pumps))
 
 
 if __name__ == "__main__":

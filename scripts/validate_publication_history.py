@@ -92,7 +92,15 @@ STRUCTURAL_SECRET_EXAMPLE_SHA256 = (
     "9338ed72189de69f2949db74f34cacd5147dc8a60487826933adb1ac8e3366f1"
 )
 
-SECRET_PATTERNS = {
+# The KEYS of this table are published diagnostic labels, not secrets. They are
+# the entire description of a finding that this validator ever emits: Findings
+# .add below builds every stderr line from one of these keys, a validated
+# 40-hex commit id, and a truncated SHA-256 of the path — never from the blob,
+# the path, or anything matched. The VALUES are detection patterns for content
+# that must never be published. Naming the table for the material it hunts
+# rather than for the labels it hands out misdescribed the only strings that
+# leave this process, and read as though matched content were being retained.
+PROHIBITED_CONTENT_PATTERNS = {
     "age private identity": re.compile(r"AGE-SECRET-KEY-(?:PQ-)?1[A-Z0-9]+"),
     "private key block": re.compile(
         r"-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----"
@@ -437,7 +445,7 @@ def _has_forbidden_ipv6(text):
 def _text_findings(text, relative_path, is_test):
     findings = []
     inspected = text + "\n" + relative_path
-    for label, pattern in SECRET_PATTERNS.items():
+    for label, pattern in PROHIBITED_CONTENT_PATTERNS.items():
         if pattern.search(inspected):
             findings.append(label)
     if _contains_plaintext_encryption_configuration(text):
