@@ -45,6 +45,9 @@ SKILL_LOCAL_FORBIDDEN_IDENTITY = {
 # either platform's spelling, and a cross-reference to an issue or pull request
 # that only exists in this repository.
 FORBIDDEN_IDENTITY_SHAPES = {
+    # Subsumed by "bare commit" below — every pinned form also matches the
+    # bare one — and kept only so the failure message names the likelier
+    # mistake. It is not an independent guard; do not read it as one.
     "pinned commit": re.compile(r"@[0-9a-f]{40}\b"),
     "bare commit": re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{40}(?![0-9a-zA-Z])"),
     "windows workstation path": re.compile(r"(?i)[A-Z]:[\\/](?:Users|dev)[\\/]"),
@@ -192,13 +195,13 @@ class SkillStructureTests(unittest.TestCase):
             "OUTSIDE a rule's match block",
             "A SKIP counts as a pass",
             "RENAMING a rule out of existence",
-            "short-circuit setting",
+            "can retire the rule that carries the property",
             "Disabling enforcement wholesale",
             "MULTI-DOCUMENT deny fixture",
             "its own SOURCE TEXT",
             "reads its THRESHOLD from the artifact it verifies",
             "satisfied by a COMMENT",
-            "CALL SITE",
+            "whose CALL SITE no test invokes",
             "DIFFERENTIAL harness",
             "bind scope to KIND",
             "Patching by INDEX",
@@ -210,6 +213,34 @@ class SkillStructureTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, doctrine)
+
+    def test_repository_contract_routes_review_to_the_doctrine(self):
+        """The contract must point INTO the skill, and the pointer must land.
+
+        A review protocol that delegates to a document is only as good as the
+        cross-reference: renaming the reference, or citing one that was never
+        written, would otherwise leave the protocol quietly pointing at
+        nothing while every other check stays green.
+        """
+        contract = collapsed(ROOT / "AGENTS.md")
+        referenced = re.findall(
+            r"skills/[a-z0-9.-]+/references/[a-z0-9.-]+\.md", contract
+        )
+        self.assertIn(
+            "skills/gh-pr-flow/references/evidence-doctrine.md", referenced
+        )
+        for reference in sorted(set(referenced)):
+            with self.subTest(reference=reference):
+                self.assertTrue((ROOT / reference).is_file())
+        # The two authority facts that agents got wrong when the protocol
+        # described the transition without naming who performs it.
+        for fragment in (
+            "That removal is NOT a readiness signal",
+            "The COORDINATOR performs the flip",
+            "the owner then merges",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, contract)
 
 
 if __name__ == "__main__":
