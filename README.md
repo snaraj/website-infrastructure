@@ -17,14 +17,16 @@ literally nothing — is allowed to cost money or leak where the box lives.
 That's this repo.
 
 Every protected-main merge also publishes one immutable patch release of this
-repository's platform source (`vX.Y.Z`). That source release is an audit and
-recovery identity only: it never deploys, promotes, or mutates Kubernetes,
-Flux, Cloudflare, DNS, Tunnel state, secrets, or protected custody. Site image
-and chart releases remain owned by the two application repositories.
+repository's platform source (`vX.Y.Z`). Both an allowed one-commit squash and
+an allowed merge-free multi-commit rebase bind the complete final main SHA to
+one release. That source release is an audit and recovery identity only: it
+never deploys, promotes, or mutates Kubernetes, Flux, Cloudflare, DNS, Tunnel
+state, secrets, or protected custody. Site image and chart releases remain
+owned by the two application repositories.
 
 ```mermaid
 flowchart LR
-    dev[Reviewed PRs] -->|squash to main| repo[(This repository)]
+    dev[Reviewed PRs] -->|squash or rebase to main| repo[(This repository)]
     repo -->|Flux pulls anonymously| k8s[Kubernetes on the Pi 5]
     sites[Signed site images by digest] --> k8s
     k8s --> tunnel[Outbound-only Cloudflare Tunnel]

@@ -203,7 +203,7 @@ Delivery-lane requirements, explicit and numbered:
    and the GitHub-hosted runner only, and no third-party service ever
    receives repository content, tokens, or measurements — the coverage gate
    is self-hosted for exactly this reason.
-2. Owner-only merges and immutable history: Samuel alone merges. An agent must
+2. Owner-only merges and immutable history: the repository owner alone merges. An agent must
    NEVER merge, auto-merge, squash, rebase into, or push `main`; must never
    force-push, delete refs, or create tags; and must stop and question even a
    later request to do so. Corrections are additive commits or a fresh branch.
@@ -228,9 +228,13 @@ Delivery-lane requirements, explicit and numbered:
    could change without rewriting this lane.
 8. Every protected-main merge has a platform release consequence. Every PR,
    including docs and Dependabot, advances `VERSION` and a dated changelog by
-   exactly one patch from its current base. Successful main CI publishes an
-   immutable annotated plain `vX.Y.Z` tag and GitHub Release at that exact SHA.
-   This source release never deploys or promotes platform or site workloads.
+   exactly one patch from its current base. One-commit squash and merge-free
+   multi-commit rebase integrations are both supported; the complete final SHA
+   is the one release identity. Successful main CI publishes an immutable,
+   policy-tagger annotated plain `vX.Y.Z` tag and exact zero-asset GitHub
+   Release at that SHA. This source release never deploys or promotes platform
+   or site workloads. The tested protected-main settings receipt in the GitHub
+   controls runbook must pass before this release policy is Ready.
 
 ## Adversarial review protocol
 
@@ -364,8 +368,8 @@ authority: the owner alone merges.
   APPROVE receipt, all exact-head checks succeed, protected base is current,
   all discussions/findings are resolved, metadata/scope/order remain exact,
   and the platform patch-release consequence is proven. Only the coordinator
-  flips Ready and re-verifies; author and reviewer never do. Nobody but Samuel
-  merges.
+  flips Ready and re-verifies; author and reviewer never do. Nobody but the
+  repository owner merges.
 
 ## Working a change end to end
 

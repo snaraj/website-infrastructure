@@ -7,9 +7,12 @@ This folder is where we make “prove it first” real: none of these files is p
 [`ci/coverage_gate.py`](./ci/coverage_gate.py) enforces the self-hosted coverage contract fail-closed — measured floor, bounded drift against the committed ledger, and byte-exact regeneration of the committed badge — so coverage claims never depend on an external upload service.
 [`ci/platform_release_contract.py`](./ci/platform_release_contract.py) is the
 standard-library-only policy shared by pull-request CI and the success-only
-main publisher: it binds the exact workflow-run identity and SHA, requires one
-semantic patch from the first parent, and classifies immutable tag/release
-retry state without deploying anything. [`validate_review_receipt.py`](./validate_review_receipt.py)
+main publisher: it binds the exact workflow-run identity and final SHA,
+accepts either one squash commit or one merge-free multi-commit rebase range
+with one endpoint patch, verifies annotated tag and zero-asset Release records
+through authoritative REST state, and validates the value-only protected-main
+settings receipt without deploying or changing repository settings.
+[`validate_review_receipt.py`](./validate_review_receipt.py)
 validates the portable exact-head adversarial-review receipt shape, while
 [`validate_destructive_test_ledger.py`](./validate_destructive_test_ledger.py)
 validates the bounded prestate-to-poststate evidence shape for a separately

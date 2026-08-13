@@ -9,6 +9,12 @@ on:
 
 permissions: {}
 
+# Identical reruns serialize and converge on the same exact REST state. Distinct
+# main SHAs never share a group and can neither cancel nor suppress each other.
+concurrency:
+  group: platform-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     if: >-
@@ -24,7 +30,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Bind event, source, and exact patch
         id: release
         env:
@@ -35,16 +41,16 @@ jobs:
             --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
           test "${event_sha}" = "${COMPLETED_SHA}"
           test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
-          base_sha="$(git rev-parse HEAD^1)"
-          intent="$(python3 -I -B scripts/ci/platform_release_contract.py transition \
-            --repository . --base "${base_sha}" --head "${COMPLETED_SHA}" --first-parent)"
+          intent="$(python3 -I -B scripts/ci/platform_release_contract.py release-window \
+            --repository . --head "${COMPLETED_SHA}")"
+          base_sha="$(jq -er '.base_sha' <<<"${intent}")"
           source_sha="$(jq -er '.source_sha' <<<"${intent}")"
           version="$(jq -er '.version' <<<"${intent}")"
           tag="$(jq -er '.tag' <<<"${intent}")"
           test "${source_sha}" = "${COMPLETED_SHA}"
           test "${tag}" = "v${version}"
-          printf 'source_sha=%s\nversion=%s\ntag=%s\n' \
-            "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
+            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
       - name: Create or verify exact annotated tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,26 +58,71 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          ref_json="${RUNNER_TEMP}/ref.json"
-          tag_json="${RUNNER_TEMP}/tag.json"
-          verify_tag() {
-            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > "${ref_json}"
-            jq -e --arg tag "${TAG}" '.ref == ("refs/tags/" + $tag) and .object.type == "tag"' "${ref_json}" >/dev/null
-            object="$(jq -er '.object.sha' "${ref_json}")"
-            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object}" > "${tag_json}"
-            jq -e --arg tag "${TAG}" --arg sha "${SOURCE_SHA}" \
-              '.tag == $tag and .object.type == "commit" and .object.sha == $sha' "${tag_json}" >/dev/null
+          ref_json="${RUNNER_TEMP}/platform-ref.json"
+          tag_json="${RUNNER_TEMP}/platform-tag.json"
+          tagger_name='github-actions[bot]'
+          tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
+          tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
+          message="Platform release ${TAG} from ${SOURCE_SHA}"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+
+          get_json() {
+            local url="$1"
+            local output="$2"
+            curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "${output}" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${url}"
           }
-          if ! verify_tag 2>/dev/null; then
-            object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
-              -f tag="${TAG}" -f message="Platform release ${TAG} from ${SOURCE_SHA}" \
-              -f object="${SOURCE_SHA}" -f type=commit --jq '.sha')"
-            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${TAG}" -f sha="${object}" >/dev/null; then
-              verify_tag
+
+          classify_tag() {
+            local object_status required="$1" status tag_object
+            local -a record_args=()
+            status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
+            if [ "${status}" = 200 ]; then
+              tag_object="$(jq -er '.object.sha' "${ref_json}")"
+              object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
+              test "${object_status}" = 200
+              record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
             fi
+            python3 -I -B scripts/ci/platform_release_contract.py tag-state \
+              --http-status "${status}" --require "${required}" "${record_args[@]}" \
+              --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+              --message "${message}" --tagger-name "${tagger_name}" \
+              --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
+          }
+
+          if classify_tag exact >/dev/null 2>&1; then
+            printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
+            exit 0
           fi
-          verify_tag
+          classify_tag absent >/dev/null
+
+          tag_object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+            -f tag="${TAG}" \
+            -f message="${message}" \
+            -f object="${SOURCE_SHA}" \
+            -f type=commit \
+            -f "tagger[name]=${tagger_name}" \
+            -f "tagger[email]=${tagger_email}" \
+            -f "tagger[date]=${tagger_date}" \
+            --jq '.sha')"
+          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
+            printf 'tag ref create did not succeed; checking for an exact concurrent winner\n' >&2
+          fi
+          race_verified=false
+          for attempt in 1 2 3 4 5; do
+            if classify_tag exact >/dev/null 2>&1; then
+              race_verified=true
+              break
+            fi
+            sleep "${attempt}"
+          done
+          test "${race_verified}" = true
+          classify_tag exact >/dev/null
       - name: Create or verify exact GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,53 +130,51 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          notes="${RUNNER_TEMP}/notes.md"
-          existing="${RUNNER_TEMP}/release.json"
+          notes="${RUNNER_TEMP}/platform-notes.md"
+          existing="${RUNNER_TEMP}/platform-release.json"
           {
             printf '## Platform %s\n\n' "${TAG}"
-            printf 'Immutable repository source: `%s`\n\n' "${SOURCE_SHA}"
+            printf "Immutable repository source: \`%s\`\n\n" "${SOURCE_SHA}"
             printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
-            printf 'See `CHANGELOG.md` at this tag for the human-readable change record.\n'
+            printf "See \`CHANGELOG.md\` at this tag for the human-readable change record.\n"
           } > "${notes}"
-          verify_release() {
-            test "$(git rev-list -n 1 "${TAG}")" = "${SOURCE_SHA}"
-            gh release view "${TAG}" --json tagName,name,body,isDraft,isPrerelease > "${existing}"
-            jq -e --arg tag "${TAG}" \
-              '.tagName == $tag and .name == ("Platform " + $tag) and (.isDraft | not) and (.isPrerelease | not)' \
-              "${existing}" >/dev/null
-            python3 -I -B - "${existing}" "${notes}" <<'PY'
-          import json
-          import pathlib
-          import sys
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}"
 
-          actual = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["body"].rstrip("\r\n")
-          expected = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip("\r\n")
-          if actual != expected:
-              raise SystemExit("existing release body conflicts with exact source state")
-          PY
+          classify_release() {
+            local required="$1" status
+            local -a record_args=()
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${existing}" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}")"
+            if [ "${status}" = 200 ]; then
+              record_args=(--release-json "${existing}")
+            fi
+            python3 -I -B scripts/ci/platform_release_contract.py release-state \
+              --http-status "${status}" --require "${required}" \
+              "${record_args[@]}" --tag "${TAG}" \
+              --title "Platform ${TAG}" --body "${notes}"
           }
-          release_present=false
-          release_exact=false
-          if verify_release 2>/dev/null; then
-            release_present=true
-            release_exact=true
-          elif gh release view "${TAG}" >/dev/null 2>&1; then
-            release_present=true
+
+          if classify_release exact >/dev/null 2>&1; then
+            printf 'verified complete existing GitHub Release %s\n' "${TAG}"
+          else
+            classify_release absent >/dev/null
+            if ! gh release create "${TAG}" --verify-tag \
+              --title "Platform ${TAG}" --notes-file "${notes}"; then
+              printf 'release create did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            # Creation and a concurrent 422 winner share this same bounded,
+            # authoritative REST verification path. No local tag ref is used.
+            race_verified=false
+            for attempt in 1 2 3 4 5; do
+              if classify_release exact >/dev/null 2>&1; then
+                race_verified=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${race_verified}" = true
+            classify_release exact >/dev/null
           fi
-          set +e
-          state="$(python3 -I -B scripts/ci/platform_release_contract.py publication-state \
-            --tag-present true --tag-exact true \
-            --release-present "${release_present}" --release-exact "${release_exact}")"
-          classifier_status=$?
-          set -e
-          printf 'platform publication state: %s\n' "${state}"
-          if [ "${state}" = complete ]; then
-            exit 0
-          fi
-          if [ "${classifier_status}" -ne 0 ] || [ "${state}" != resume-release ]; then
-            printf 'existing release %s conflicts with exact source state\n' "${TAG}" >&2
-            exit 1
-          fi
-          gh release create "${TAG}" --verify-tag \
-            --title "Platform ${TAG}" --notes-file "${notes}"
-          verify_release

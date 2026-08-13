@@ -52,6 +52,54 @@ manually review every change beneath `.github/`, `.githooks/`, `policies/`, and
 the publication validators before merge. A candidate-generated PASS is not a
 substitute for that out-of-band rule and review.
 
+## Platform release readiness receipt
+
+The platform publisher supports both merge methods enabled for this repository:
+one-commit squash and merge-free multi-commit rebase. Merge commits stay
+disabled. That code cannot prevent an owner from merging a failing or stale PR
+when server-side checks are optional, so the automatic-release policy remains
+Draft and must not receive `requires-review` until the repository owner observes
+and configures this exact protected-`main` state:
+
+- pull request and linear history required, with no bypass actors;
+- strict required checks `dependency-review` and
+  `repository-and-infrastructure`, with the branch current before merge;
+- force pushes and branch deletion disabled; and
+- exactly `squash` and `rebase` enabled as merge methods.
+
+Record only those value-level observations, never actor or ruleset identifiers,
+in an untracked JSON receipt with this closed shape:
+
+```json
+{
+  "repository": "snaraj/website-infrastructure",
+  "branch": "main",
+  "merge_methods": ["rebase", "squash"],
+  "required_status_checks": [
+    "dependency-review",
+    "repository-and-infrastructure"
+  ],
+  "strict_status_checks": true,
+  "require_pull_request": true,
+  "require_linear_history": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "bypass_actors": []
+}
+```
+
+Validate the observation without network or write authority:
+
+```bash
+python3 -I -B scripts/ci/platform_release_contract.py settings-receipt \
+  --receipt <owner-observed-settings.json> \
+  --repository snaraj/website-infrastructure
+```
+
+Any missing, extra, duplicated, or inverted setting is a failed receipt. The
+receipt confirms the observed server contract only; it is not permission to
+change GitHub settings or merge a pull request.
+
 GitHub Actions uses the per-job ephemeral `GITHUB_TOKEN`. PR jobs remain
 read-only with checkout credential persistence disabled. Only the trusted
 publisher job on protected `main` receives the minimum package/OIDC/attestation
