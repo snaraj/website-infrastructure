@@ -144,6 +144,31 @@ SIGNAL_FIELDS = frozenset(
 )
 
 
+class LedgerJSONError(ValueError):
+    """The serialized authorization ledger is not strict JSON."""
+
+
+def decode_ledger(payload):
+    """Decode one ledger without normalizing duplicate or non-finite input."""
+
+    def unique_object(pairs):
+        document = {}
+        for key, value in pairs:
+            if key in document:
+                raise LedgerJSONError(f"ledger JSON contains duplicate member {key!r}")
+            document[key] = value
+        return document
+
+    def reject_constant(value):
+        raise LedgerJSONError(f"ledger JSON contains non-finite constant {value}")
+
+    return json.loads(
+        payload,
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
+
+
 def _hash(value):
     return isinstance(value, str) and bool(SHA256.fullmatch(value))
 
@@ -341,8 +366,8 @@ def main(argv=None):
     parser.add_argument("ledger", type=Path)
     args = parser.parse_args(argv)
     try:
-        document = json.loads(args.ledger.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        document = decode_ledger(args.ledger.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, LedgerJSONError) as exc:
         print(f"DENY: {exc}", file=sys.stderr)
         return 1
     reason = denial(document)

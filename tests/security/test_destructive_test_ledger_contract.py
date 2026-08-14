@@ -229,26 +229,105 @@ class DestructiveLedgerTests(unittest.TestCase):
             )
             self.assertNotEqual(denied.returncode, 0, denied.stdout + denied.stderr)
 
+    def test_cli_rejects_duplicate_members_recursively_before_classification(self):
+        payload = json.dumps(valid_ledger(), sort_keys=True, separators=(",", ":"))
+        protected = '"protected_exclusions":' + json.dumps(
+            sorted(MODULE.PROTECTED), separators=(",", ":")
+        )
+        replacements = (
+            (
+                "authorization",
+                '"authorization":"explicit-owner-window"',
+                '"authorization":"assumed"',
+            ),
+            (
+                "top-classification",
+                '"classification":"ephemeral-disposable"',
+                '"classification":"protected-stateful"',
+            ),
+            ("protected-exclusions", protected, '"protected_exclusions":[]'),
+            ("inventory-api", '"apiVersion":"apps/v1"', '"apiVersion":"v1"'),
+            ("inventory-kind", '"kind":"Deployment"', '"kind":"Secret"'),
+            ("inventory-scope", '"scope":"Namespaced"', '"scope":"Cluster"'),
+            (
+                "inventory-classification",
+                '"classification":"ephemeral-workload"',
+                '"classification":"protected-stateful"',
+            ),
+            ("inventory-fault-target", '"fault_target":true', '"fault_target":false'),
+            ("metric-rto", '"rto_seconds":120', '"rto_seconds":0'),
+            ("scenario-name", '"name":"clean-recreate"', '"name":"foreign"'),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.json"
+            for label, exact, hostile in replacements:
+                self.assertEqual(payload.count(exact), 1, label)
+                key = exact.split(":", 1)[0]
+                for order, replacement in (
+                    ("hostile-first", hostile + "," + exact),
+                    ("hostile-last", exact + "," + hostile),
+                ):
+                    with self.subTest(member=label, order=order):
+                        path.write_text(
+                            payload.replace(exact, replacement, 1),
+                            encoding="utf-8",
+                        )
+                        denied = subprocess.run(
+                            [sys.executable, str(Path(MODULE.__file__)), str(path)],
+                            check=False,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        self.assertEqual(
+                            denied.returncode, 1, denied.stdout + denied.stderr
+                        )
+                        self.assertEqual(denied.stdout, "")
+                        self.assertEqual(
+                            denied.stderr,
+                            f"DENY: ledger JSON contains duplicate member {json.loads(key)!r}\n",
+                        )
+
+    def test_strict_decoder_rejects_nonfinite_serialized_constants(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                with self.assertRaisesRegex(
+                    MODULE.LedgerJSONError,
+                    rf"^ledger JSON contains non-finite constant {constant}$",
+                ):
+                    MODULE.decode_ledger('{"value":' + constant + "}")
+
 
 @unittest.skipUnless(
     os.name == "posix" and all(hasattr(signal, name) for name in ("SIGHUP", "SIGINT", "SIGTERM", "SIGKILL")),
     "POSIX signals are required for the executable rollback contract",
 )
 class DestructiveSignalTransactionTests(unittest.TestCase):
-    def wait_for(self, path, process, timeout=5):
+    MUTANT_REASONS = (
+        "rollback-aborted-before-receipt",
+        "prepared-journal-missing",
+        "rollback-receipt-recorded-residue",
+        "cleanup-receipt-rollback-count",
+        "cleanup-receipt-count",
+        "rollback-receipt-concealed-residue",
+        "recovery-journal-not-closed",
+    )
+
+    def poll_for(self, path, process, timeout=5):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if path.exists():
-                return
+                return None
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                self.fail(
-                    "fixture exited before {}: {}".format(
-                        path.name, stdout + stderr
-                    )
-                )
+                return f"process-exited-before-{path.name}"
             time.sleep(0.01)
-        self.fail("fixture did not create {} within bound".format(path.name))
+        return f"timeout-before-{path.name}"
+
+    def wait_for(self, path, process, timeout=5):
+        reason = self.poll_for(path, process, timeout)
+        if reason is not None:
+            stdout, stderr = process.communicate()
+            self.fail(f"{reason}: {stdout}{stderr}")
 
     def validate_closed(self, root, completed):
         self.assertFalse((root / "mutation.marker").exists())
@@ -292,7 +371,84 @@ class DestructiveSignalTransactionTests(unittest.TestCase):
         self.assertEqual(stat_mode(journal_path), 0o600)
         self.assertEqual(stat_mode(receipt_path), 0o600)
 
-    def execute_signals(self, script_text, signal_sequence):
+    def signal_result_reason(self, root, result, expected_returncode):
+        journal_path = root / "journal.json"
+        receipt_path = root / "cleanup.receipt.json"
+        try:
+            journal = (
+                json.loads(journal_path.read_text(encoding="utf-8"))
+                if journal_path.is_file()
+                else None
+            )
+            receipt = (
+                json.loads(receipt_path.read_text(encoding="utf-8"))
+                if receipt_path.is_file()
+                else None
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return "durable-record-malformed"
+
+        if (root / "mutation.marker").exists():
+            if receipt is None:
+                return "rollback-aborted-before-receipt"
+            if (
+                receipt.get("residue_orphans") != 0
+                or receipt.get("rollback_status") != "verified"
+            ):
+                return "rollback-receipt-recorded-residue"
+            return "rollback-receipt-concealed-residue"
+        if journal is None:
+            return "prepared-journal-missing"
+        if journal.get("state") != "closed":
+            return "recovery-journal-not-closed"
+        if receipt is None:
+            return "cleanup-receipt-missing"
+        if receipt.get("rollback_count") != 1:
+            return "cleanup-receipt-rollback-count"
+        if receipt.get("receipt_count") != 1:
+            return "cleanup-receipt-count"
+        if receipt.get("residue_orphans") != 0:
+            return "cleanup-receipt-residue-count"
+        if receipt.get("rollback_status") != "verified":
+            return "cleanup-receipt-status"
+        if receipt.get("signals_deferred") is not True:
+            return "cleanup-receipt-signal-policy"
+        if result["returncode"] != expected_returncode:
+            return "unexpected-cleanup-exit"
+        if {path.name for path in root.iterdir()} != {
+            ".offline-destructive-fixture",
+            "cleanup.receipt.json",
+            "journal.json",
+        }:
+            return "closed-root-inventory-mismatch"
+        if journal.get("rollback_count") != 1 or journal.get("residue_orphans") != 0:
+            return "closed-journal-counts"
+        if journal.get("receipt_sha256") != __import__("hashlib").sha256(
+            receipt_path.read_bytes()
+        ).hexdigest():
+            return "closed-journal-receipt-binding"
+        if stat_mode(journal_path) != 0o600 or stat_mode(receipt_path) != 0o600:
+            return "durable-record-mode"
+        return None
+
+    @staticmethod
+    def mutant_matches(result, expected_reason):
+        return (
+            result["reason"] == expected_reason
+            and result["process_reaped"] is True
+            and result["streams_closed"] is True
+            and isinstance(result["returncode"], int)
+        )
+
+    def execute_signals(self, script_text, signal_sequence, ready_timeout=5):
+        result = {
+            "reason": None,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "process_reaped": False,
+            "streams_closed": False,
+        }
         with tempfile.TemporaryDirectory(prefix="offline-destructive-signals-") as temporary:
             base = Path(temporary)
             script = base / "fixture.py"
@@ -302,37 +458,74 @@ class DestructiveSignalTransactionTests(unittest.TestCase):
             (root / ".offline-destructive-fixture").write_text(
                 "offline-fixture-v1\n", encoding="utf-8"
             )
-            process = subprocess.Popen(
-                [sys.executable, "-I", "-B", str(script), "run", str(root)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self.wait_for(root / "mutation.ready", process)
-            self.assertTrue((root / "journal.json").is_file())
-            self.assertTrue((root / "mutation.marker").is_file())
-            os.kill(process.pid, signal_sequence[0])
-            self.wait_for(root / "cleanup.started", process)
-            for item in signal_sequence[1:]:
-                os.kill(process.pid, item)
-            (root / "cleanup.continue").write_text("continue\n", encoding="utf-8")
+            process = None
+            communicated = False
             try:
-                stdout, stderr = process.communicate(timeout=8)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
-                self.fail("fixture did not finish cleanup within bound")
-            completed = type(
-                "Completed",
-                (),
-                {
-                    "returncode": process.returncode,
-                    "expected_returncode": 128 + signal_sequence[0],
-                    "stdout": stdout,
-                    "stderr": stderr,
-                },
-            )()
-            self.validate_closed(root, completed)
+                process = subprocess.Popen(
+                    [sys.executable, "-I", "-B", str(script), "run", str(root)],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                result["reason"] = self.poll_for(
+                    root / "mutation.ready", process, ready_timeout
+                )
+                if result["reason"] is None and not (root / "journal.json").is_file():
+                    result["reason"] = "prepared-journal-missing"
+                if result["reason"] is None and not (root / "mutation.marker").is_file():
+                    result["reason"] = "mutation-marker-missing"
+                if result["reason"] is None:
+                    os.kill(process.pid, signal_sequence[0])
+                    result["reason"] = self.poll_for(root / "cleanup.started", process)
+                if result["reason"] is None:
+                    for item in signal_sequence[1:]:
+                        if process.poll() is not None:
+                            break
+                        os.kill(process.pid, item)
+                    (root / "cleanup.continue").write_text(
+                        "continue\n", encoding="utf-8"
+                    )
+                    try:
+                        result["stdout"], result["stderr"] = process.communicate(
+                            timeout=8
+                        )
+                        communicated = True
+                    except subprocess.TimeoutExpired:
+                        result["reason"] = "cleanup-timeout"
+                if communicated:
+                    result["returncode"] = process.returncode
+                    result["reason"] = self.signal_result_reason(
+                        root,
+                        result,
+                        128 + signal_sequence[0],
+                    )
+            except OSError as error:
+                result["reason"] = "orchestration-os-error"
+                result["stderr"] = str(error)
+            finally:
+                if process is not None:
+                    if not communicated:
+                        if process.poll() is None:
+                            process.terminate()
+                        try:
+                            stdout, stderr = process.communicate(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            stdout, stderr = process.communicate(timeout=5)
+                        result["stdout"] += stdout
+                        result["stderr"] += stderr
+                        communicated = True
+                    process.wait(timeout=5)
+                    result["returncode"] = process.returncode
+                    for stream in (process.stdout, process.stderr):
+                        if stream is not None and not stream.closed:
+                            stream.close()
+                    result["process_reaped"] = process.poll() is not None
+                    result["streams_closed"] = all(
+                        stream is None or stream.closed
+                        for stream in (process.stdout, process.stderr)
+                    )
+        return result
 
     def test_repeated_and_mixed_signals_produce_one_rollback_receipt_and_no_residue(self):
         source = FIXTURE_SCRIPT.read_text(encoding="utf-8")
@@ -344,7 +537,10 @@ class DestructiveSignalTransactionTests(unittest.TestCase):
         )
         for sequence in cases:
             with self.subTest(signals=sequence):
-                self.execute_signals(source, sequence)
+                result = self.execute_signals(source, sequence)
+                self.assertIsNone(result["reason"], result)
+                self.assertTrue(result["process_reaped"], result)
+                self.assertTrue(result["streams_closed"], result)
 
     def test_kill_leaves_prepared_journal_and_recovery_closes_once(self):
         with tempfile.TemporaryDirectory(prefix="offline-destructive-kill-") as temporary:
@@ -504,27 +700,108 @@ class DestructiveSignalTransactionTests(unittest.TestCase):
         ignore = "            signal.signal(item, signal.SIG_IGN)\n"
         journal = "        _write_json(self.journal, self._journal_document(\"prepared\"))\n"
         mutants = (
-            source.replace(guard, "", 1).replace(
-                ignore, "            signal.signal(item, self.handle_signal)\n", 1
+            (
+                "signal-reentry",
+                source.replace(guard, "", 1).replace(
+                    ignore, "            signal.signal(item, self.handle_signal)\n", 1
+                ),
+                "rollback-aborted-before-receipt",
             ),
-            source.replace(journal, "", 1),
-            source.replace("            self.mutation.unlink()\n", "            pass\n", 1),
-            source.replace('"rollback_count": 1,', '"rollback_count": 2,', 1),
-            source.replace('"receipt_count": 1,', '"receipt_count": 0,', 1),
-            source.replace("            self.mutation.unlink()\n", "            pass\n", 1).replace(
-                "        residue = len(self._exact_root_entries() - allowed_before_receipt)\n",
-                "        residue = 0\n",
-                1,
+            (
+                "prepared-journal",
+                source.replace(journal, "", 1),
+                "prepared-journal-missing",
             ),
-            source.replace("            replace=True,\n", "            replace=False,\n", 1),
+            (
+                "honest-residue",
+                source.replace("            self.mutation.unlink()\n", "            pass\n", 1),
+                "rollback-receipt-recorded-residue",
+            ),
+            (
+                "rollback-count",
+                source.replace('"rollback_count": 1,', '"rollback_count": 2,', 1),
+                "cleanup-receipt-rollback-count",
+            ),
+            (
+                "receipt-count",
+                source.replace('"receipt_count": 1,', '"receipt_count": 0,', 1),
+                "cleanup-receipt-count",
+            ),
+            (
+                "concealed-residue",
+                source.replace("            self.mutation.unlink()\n", "            pass\n", 1).replace(
+                    "        residue = len(self._exact_root_entries() - allowed_before_receipt)\n",
+                    "        residue = 0\n",
+                    1,
+                ),
+                "rollback-receipt-concealed-residue",
+            ),
+            (
+                "journal-replace",
+                source.replace("            replace=True,\n", "            replace=False,\n", 1),
+                "recovery-journal-not-closed",
+            ),
         )
-        for index, mutant in enumerate(mutants):
-            self.assertNotEqual(mutant, source, f"transaction mutant {index} is inert")
-            with self.subTest(transaction_mutant=index), self.assertRaises(
-                (AssertionError, KeyError, OSError)
-            ):
-                self.execute_signals(
+        self.assertEqual(tuple(item[2] for item in mutants), self.MUTANT_REASONS)
+        for label, mutant, expected_reason in mutants:
+            self.assertNotEqual(mutant, source, f"transaction mutant {label} is inert")
+            with self.subTest(transaction_mutant=label):
+                result = self.execute_signals(
                     mutant, (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+                )
+                self.assertTrue(
+                    self.mutant_matches(result, expected_reason),
+                    result,
+                )
+
+
+class DestructiveMutantOracleControlTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = DestructiveSignalTransactionTests(
+            "test_signal_guard_journal_receipt_and_residue_mutants_are_killed"
+        )
+
+    def test_mutant_oracle_rejects_unrelated_startup_and_child_leak_controls(self):
+        early_exit = self.harness.execute_signals(
+            'raise RuntimeError("unrelated startup failure")\n',
+            (signal.SIGTERM,),
+        )
+        self.assertEqual(
+            early_exit["reason"], "process-exited-before-mutation.ready", early_exit
+        )
+        self.assertTrue(early_exit["process_reaped"], early_exit)
+        self.assertTrue(early_exit["streams_closed"], early_exit)
+        for expected_reason in self.harness.MUTANT_REASONS:
+            with self.subTest(unrelated_exit=expected_reason):
+                self.assertFalse(
+                    self.harness.mutant_matches(early_exit, expected_reason)
+                )
+
+        hanging_child = self.harness.execute_signals(
+            "import time\nwhile True:\n    time.sleep(1)\n",
+            (signal.SIGTERM,),
+            ready_timeout=0.1,
+        )
+        self.assertEqual(
+            hanging_child["reason"], "timeout-before-mutation.ready", hanging_child
+        )
+        self.assertTrue(hanging_child["process_reaped"], hanging_child)
+        self.assertTrue(hanging_child["streams_closed"], hanging_child)
+
+        otherwise_matching = {
+            "reason": self.harness.MUTANT_REASONS[0],
+            "returncode": 1,
+            "process_reaped": True,
+            "streams_closed": True,
+        }
+        for lifecycle_field in ("process_reaped", "streams_closed"):
+            leaked = dict(otherwise_matching)
+            leaked[lifecycle_field] = False
+            with self.subTest(leaked_lifecycle=lifecycle_field):
+                self.assertFalse(
+                    self.harness.mutant_matches(
+                        leaked, self.harness.MUTANT_REASONS[0]
+                    )
                 )
 
 

@@ -508,8 +508,9 @@ is the consolidated command view:
 
 - **Coverage floor.** The committed contract in
   `docs/badges/coverage.json`: floor 76.0%, drift tolerance 2.5%,
-  measured over `scripts/**` by the canonical suite recorded there
-  (80.8% at the last refresh). Ratchet only (delivery-lane
+  measured over `scripts/**` by the canonical suite recorded there. Its
+  `total_percent` is the sole numeric source of truth; do not duplicate a
+  measured snapshot in prose. Ratchet only (delivery-lane
   requirement 6): the floor may rise and never falls, and coverage moves
   by adding tests, never by trimming the measured surface.
   `make coverage-refresh` re-measures and rewrites the ledger/badge for

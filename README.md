@@ -106,7 +106,7 @@ kubernetes/            desired state for the single environment
 policies/              Conftest and Kyverno controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
-tests/                 allow/deny fixtures and 806 repository tests
+tests/                 allow/deny fixtures collected by canonical unittest discovery
 ```
 
 The two sites live in their own repositories
