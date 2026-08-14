@@ -90,6 +90,66 @@ classify_release() {
     --title "Platform ${tag}" --body "${notes}"
 }
 
+preflight_publication_state() {
+  local recovery_tagger_date recovery_message recovery_release_state
+  local current_tagger_date current_message current_tag_state current_release_state
+
+  recovery_tagger_date="$(git show -s --format=%cI "${recovery_source_sha}")"
+  recovery_message="Platform release ${recovery_tag} from ${recovery_source_sha}"
+  current_tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
+  current_message="Platform release ${TAG} from ${SOURCE_SHA}"
+
+  # Close all four remote objects before any mutation. The recovery tag must
+  # already be the exact owner-prepared annotated tag. Both Releases and the
+  # current tag may be reused only when exact; every other present record is
+  # foreign, and a current Release without its exact tag is impossible state.
+  write_notes "${recovery_source_sha}" "${recovery_tag}"
+  classify_tag exact \
+    "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
+    "${recovery_tagger_date}" >/dev/null
+  if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+    recovery_release_state=exact
+  else
+    classify_release absent "${recovery_tag}" >/dev/null
+    recovery_release_state=absent
+  fi
+
+  write_notes "${SOURCE_SHA}" "${TAG}"
+  if classify_tag exact \
+    "${SOURCE_SHA}" "${TAG}" "${current_message}" \
+    "${current_tagger_date}" >/dev/null 2>&1; then
+    current_tag_state=exact
+  else
+    classify_tag absent \
+      "${SOURCE_SHA}" "${TAG}" "${current_message}" \
+      "${current_tagger_date}" >/dev/null
+    current_tag_state=absent
+  fi
+  if classify_release exact "${TAG}" >/dev/null 2>&1; then
+    current_release_state=exact
+  else
+    classify_release absent "${TAG}" >/dev/null
+    current_release_state=absent
+  fi
+  if [ "${current_tag_state}" = absent ]; then
+    test "${current_release_state}" = absent
+  fi
+
+  # Repeat the same closed classification after the complete first pass. A
+  # tag or Release that changes while its sibling is inspected cannot cross a
+  # later mutation boundary on the strength of a stale observation.
+  write_notes "${recovery_source_sha}" "${recovery_tag}"
+  classify_tag exact \
+    "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
+    "${recovery_tagger_date}" >/dev/null
+  classify_release "${recovery_release_state}" "${recovery_tag}" >/dev/null
+  write_notes "${SOURCE_SHA}" "${TAG}"
+  classify_tag "${current_tag_state}" \
+    "${SOURCE_SHA}" "${TAG}" "${current_message}" \
+    "${current_tagger_date}" >/dev/null
+  classify_release "${current_release_state}" "${TAG}" >/dev/null
+}
+
 complete_recovery_release() {
   local tagger_date message release_race_verified attempt
   tagger_date="$(git show -s --format=%cI "${recovery_source_sha}")"
@@ -113,6 +173,12 @@ complete_recovery_release() {
     classify_tag exact \
       "${recovery_source_sha}" "${recovery_tag}" "${message}" \
       "${tagger_date}" >/dev/null
+    preflight_publication_state
+    write_notes "${recovery_source_sha}" "${recovery_tag}"
+    classify_tag exact \
+      "${recovery_source_sha}" "${recovery_tag}" "${message}" \
+      "${tagger_date}" >/dev/null
+    classify_release absent "${recovery_tag}" >/dev/null
     if ! run_write_gh release create "${recovery_tag}" --verify-tag \
       --title "Platform ${recovery_tag}" --notes-file "${notes}"; then
       printf 'recovery Release create did not succeed; checking for an exact concurrent winner\n' >&2
@@ -145,6 +211,11 @@ publish_current_release() {
   else
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    classify_release absent "${TAG}" >/dev/null
+    preflight_publication_state
+    classify_tag absent \
+      "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    classify_release absent "${TAG}" >/dev/null
     tag_object="$(run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -154,6 +225,10 @@ publish_current_release() {
       -f "tagger[name]=${tagger_name}" \
       -f "tagger[email]=${tagger_email}" \
       -f "tagger[date]=${tagger_date}" --jq '.sha')"
+    preflight_publication_state
+    classify_tag absent \
+      "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    classify_release absent "${TAG}" >/dev/null
     if ! run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -182,6 +257,11 @@ publish_current_release() {
     classify_release absent "${TAG}" >/dev/null
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    preflight_publication_state
+    write_notes "${SOURCE_SHA}" "${TAG}"
+    classify_tag exact \
+      "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    classify_release absent "${TAG}" >/dev/null
     if ! run_write_gh release create "${TAG}" --verify-tag \
       --title "Platform ${TAG}" --notes-file "${notes}"; then
       printf 'Release create did not succeed; checking for an exact concurrent winner\n' >&2
@@ -204,6 +284,7 @@ publish_current_release() {
 test "${SOURCE_SHA}" != "${recovery_source_sha}"
 test "${TAG}" != "${recovery_tag}"
 test "${TAG}" = "${current_tag}"
+preflight_publication_state
 complete_recovery_release
 publish_current_release
 

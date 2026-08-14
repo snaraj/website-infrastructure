@@ -2283,10 +2283,11 @@ class PublicationTransactionShellTests(unittest.TestCase):
         script: str,
         *,
         race: bool = False,
-        initial_exact: bool = False,
+        current_state: str = "missing",
         immutable: bool = True,
         drift_before_release: bool = False,
         drift_during_release: bool = False,
+        current_release_race: bool = False,
         settings_fail_call: int = 0,
         settings_env: str | None = None,
         actions_env: str | None = None,
@@ -2321,19 +2322,42 @@ class PublicationTransactionShellTests(unittest.TestCase):
                     (state_root / f"release-{self.RECOVERY_TAG}.json").write_text(
                         json.dumps(release), encoding="utf-8"
                     )
-            if initial_exact:
+            if current_state not in {
+                "missing",
+                "tag",
+                "complete",
+                "foreign-tag",
+                "release-only",
+                "foreign-release",
+                "partial-release",
+            }:
+                raise AssertionError("current fixture state is not closed")
+            if current_state != "missing":
                 ref, tag, release = self.exact_records(
                     self.TAG, self.SOURCE, "c" * 40
                 )
-                (state_root / f"ref-{self.TAG}.json").write_text(
-                    json.dumps(ref), encoding="utf-8"
-                )
-                (state_root / f"tag-{'c' * 40}.json").write_text(
-                    json.dumps(tag), encoding="utf-8"
-                )
-                (state_root / f"release-{self.TAG}.json").write_text(
-                    json.dumps(release), encoding="utf-8"
-                )
+                if current_state == "foreign-tag":
+                    tag["object"]["sha"] = "0" * 40
+                if current_state != "release-only":
+                    (state_root / f"ref-{self.TAG}.json").write_text(
+                        json.dumps(ref), encoding="utf-8"
+                    )
+                    (state_root / f"tag-{'c' * 40}.json").write_text(
+                        json.dumps(tag), encoding="utf-8"
+                    )
+                if current_state in {
+                    "complete",
+                    "release-only",
+                    "foreign-release",
+                    "partial-release",
+                }:
+                    if current_state == "foreign-release":
+                        release["author"] = {"login": "owner", "id": 1}
+                    if current_state == "partial-release":
+                        release["immutable"] = False
+                    (state_root / f"release-{self.TAG}.json").write_text(
+                        json.dumps(release), encoding="utf-8"
+                    )
             prelude = r'''
 python3() {
   "${TEST_PYTHON}" "$@"
@@ -2402,6 +2426,19 @@ curl() {
       path="${MOCK_STATE}/ref-${tag}.json"
       if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
       else printf '{}' > "${output}"; printf '404'; fi
+      if [ "${tag}" = "${MOCK_CURRENT_TAG}" ] && \
+         [ "${MOCK_CURRENT_RELEASE_RACE}" = true ]; then
+        current_ref_reads=0
+        if [ -f "${MOCK_CURRENT_REF_READS}" ]; then
+          current_ref_reads="$(<"${MOCK_CURRENT_REF_READS}")"
+        fi
+        current_ref_reads=$((current_ref_reads + 1))
+        printf '%s' "${current_ref_reads}" > "${MOCK_CURRENT_REF_READS}"
+        if [ "${current_ref_reads}" -eq 3 ]; then
+          printf '{"tag_name":"%s"}' "${tag}" > \
+            "${MOCK_STATE}/release-${tag}.json"
+        fi
+      fi
       ;;
     */git/tags/*)
       if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
@@ -2524,6 +2561,9 @@ sleep() { :; }
                     "MOCK_RACE": "true" if race else "false",
                     "MOCK_DRIFT_BEFORE_RELEASE": "true" if drift_before_release else "false",
                     "MOCK_DRIFT_DURING_RELEASE": "true" if drift_during_release else "false",
+                    "MOCK_CURRENT_RELEASE_RACE": "true" if current_release_race else "false",
+                    "MOCK_CURRENT_TAG": self.TAG,
+                    "MOCK_CURRENT_REF_READS": f"{relative}/current-ref-reads",
                     "MOCK_DRIFT_MARKER": f"{relative}/drift.marker",
                     "MOCK_SETTINGS_FAIL_CALL": str(settings_fail_call),
                     "MOCK_SETTINGS_COUNT": f"{relative}/settings-count",
@@ -2620,12 +2660,21 @@ sleep() { :; }
                     self.assertIn("exact concurrent winner", completed.stderr)
 
         existing, calls, _state = self.execute(
-            script, initial_exact=True, recovery_state="complete"
+            script, current_state="complete", recovery_state="complete"
         )
         self.assertEqual(existing.returncode, 0, existing.stdout + existing.stderr)
         self.assertEqual(calls, "")
         self.assertIn("verified existing", existing.stdout)
         self.assertIn("verified complete existing", existing.stdout)
+
+        resumable, calls, state = self.execute(
+            script, current_state="tag", recovery_state="complete"
+        )
+        self.assertEqual(resumable.returncode, 0, resumable.stdout + resumable.stderr)
+        self.assertNotIn(f"<object={self.SOURCE}>", calls)
+        self.assertEqual(calls.count("CALL\n"), 1)
+        self.assertIn(f"<{self.TAG}>", calls)
+        self.assertEqual(state[self.TAG]["release"]["immutable"], True)
 
     def test_app_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
@@ -2671,6 +2720,34 @@ sleep() { :; }
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(calls, "")
                 self.assertNotIn(self.TAG, state)
+
+    def test_foreign_partial_current_states_and_races_deny_before_every_write(self):
+        script = self.script()
+        for current_state in (
+            "foreign-tag",
+            "release-only",
+            "foreign-release",
+            "partial-release",
+        ):
+            with self.subTest(current_state=current_state):
+                completed, calls, state = self.execute(
+                    script, current_state=current_state
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+                self.assertNotIn("release", state[self.RECOVERY_TAG])
+
+        race_cases = (
+            {"current_state": "tag", "drift_before_release": True},
+            {"current_state": "missing", "current_release_race": True},
+        )
+        for race_case in race_cases:
+            with self.subTest(race_case=race_case):
+                completed, calls, _state = self.execute(
+                    script, recovery_state="complete", **race_case
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
 
     def test_recovery_workflow_refuses_to_skip_v011(self):
         completed, calls, state = self.execute(
@@ -3232,6 +3309,10 @@ class WorkflowStructureTests(unittest.TestCase):
             'tagger[date]=${tagger_date}',
             "release-state",
             '"${api}/releases/tags/${tag}"',
+            "preflight_publication_state",
+            'classify_tag "${current_tag_state}"',
+            'classify_release "${current_release_state}"',
+            'test "${current_release_state}" = absent',
             "for attempt in 1 2 3 4 5",
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
@@ -3246,6 +3327,14 @@ class WorkflowStructureTests(unittest.TestCase):
             raise ValueError("existing exact tags must never gain a workflow-sensitive target")
         if transaction.count("for attempt in 1 2 3 4 5") != 3:
             raise ValueError("recovery Release, current tag, and current Release need bounded retries")
+        if transaction.count("preflight_publication_state") != 6:
+            raise ValueError("all four states need an initial preflight and four mutation-boundary rechecks")
+        if (
+            "preflight_publication_state\n"
+            "complete_recovery_release\n"
+            "publish_current_release"
+        ) not in transaction:
+            raise ValueError("all four states must be classified before either publication phase")
         if transaction.count('test "${tag_race_verified}" = true') != 1:
             raise ValueError("current tag race must have one terminal exact-state assertion")
         if transaction.count('test "${release_race_verified}" = true') != 2:
@@ -3255,7 +3344,13 @@ class WorkflowStructureTests(unittest.TestCase):
         if transaction.count("classify_release exact") < 6:
             raise ValueError("recovery/current Release paths must reach exact REST state")
 
+        preflight_start = transaction.index("preflight_publication_state() {")
         recovery_start = transaction.index("complete_recovery_release() {")
+        initial_preflight = transaction[preflight_start:recovery_start]
+        if initial_preflight.count(
+            'classify_tag exact \\\n    "${recovery_source_sha}"'
+        ) != 2 or 'classify_tag absent \\\n    "${recovery_source_sha}"' in initial_preflight:
+            raise ValueError("both recovery-tag preflight observations must require exact state")
         current_start = transaction.index("publish_current_release() {")
         recovery = transaction[recovery_start:current_start]
         recovery_write = 'run_write_gh release create "${recovery_tag}" --verify-tag'
@@ -3433,6 +3528,10 @@ class WorkflowStructureTests(unittest.TestCase):
             'tagger[date]=${tagger_date}',
             "release-state",
             '"${api}/releases/tags/${tag}"',
+            "preflight_publication_state",
+            'classify_tag "${current_tag_state}"',
+            'classify_release "${current_release_state}"',
+            'test "${current_release_state}" = absent',
             "for attempt in 1 2 3 4 5",
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
