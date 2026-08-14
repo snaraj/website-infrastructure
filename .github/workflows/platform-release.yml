@@ -1,0 +1,62 @@
+name: Platform release
+
+# One independent exact-SHA release path follows each successful main-CI run.
+# Publication names repository source only. It never deploys or promotes.
+on:
+  workflow_run:
+    workflows: [Pull request]
+    types: [completed]
+
+permissions: {}
+
+# Identical reruns serialize and converge on the same exact REST state. Distinct
+# main SHAs never share a group and can neither cancel nor suppress each other.
+concurrency:
+  group: platform-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind event, source, and exact patch
+        id: release
+        env:
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/platform_release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          intent="$(python3 -I -B scripts/ci/platform_release_contract.py release-window \
+            --repository . --head "${COMPLETED_SHA}")"
+          base_sha="$(jq -er '.base_sha' <<<"${intent}")"
+          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+          version="$(jq -er '.version' <<<"${intent}")"
+          tag="$(jq -er '.tag' <<<"${intent}")"
+          test "${source_sha}" = "${COMPLETED_SHA}"
+          test "${tag}" = "v${version}"
+          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
+            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Publish or verify exact immutable source release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/publish-platform-release.sh

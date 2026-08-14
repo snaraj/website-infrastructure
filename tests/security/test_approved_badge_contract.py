@@ -57,6 +57,24 @@ class ApprovedBadgeContractTests(unittest.TestCase):
         )
         self.assertEqual(self.committed, rendered)
 
+    def test_docs_derive_coverage_and_test_inventory_without_stale_snapshots(self):
+        agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "`total_percent` is the sole numeric source of truth; do not duplicate a\n"
+            "  measured snapshot in prose",
+            agents,
+        )
+        self.assertNotRegex(
+            agents,
+            r"\b\d+(?:\.\d+)?% at the last refresh\b",
+        )
+        self.assertIn(
+            "tests/                 allow/deny fixtures collected by canonical unittest discovery",
+            readme,
+        )
+        self.assertNotRegex(readme, r"\b\d[\d,]* repository tests\b")
+
     def test_active_content_and_references_are_rejected(self):
         body = self.committed.decode("ascii")
         prefix = MODULE.BADGE_REQUIRED_PREFIX

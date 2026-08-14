@@ -1,27 +1,22 @@
 """Merge-path GitHub Actions spend-exposure audit (issue #45).
 
 GitHub-side spend is clean today — every job runs on the free
-``ubuntu-24.04`` runner, every action is commit-pinned, no artifact
-retention is configured, and the two scheduled workflows fire weekly —
+``ubuntu-24.04`` runner, every action is commit-pinned, every job has a
+positive timeout, no artifact retention is configured, and the two scheduled
+workflows fire weekly —
 but nothing on the merge path would fail if a larger or macOS runner, an
 unpinned third-party action, artifact retention, or a fast cron
 appeared. This battery pins that exposure surface so the CI unittest
 sweep rejects the drift in the pull request that introduces it.
 
-The audit is a line-shape scan, not a YAML load: the repository's
-policy tooling is dependency-free by contract, so no YAML parser is
-available or added. The scan therefore demands block-style YAML for
-every spend-relevant construct: any line carrying a spend-relevant
-token (``jobs:``, ``runs-on:``, ``uses:``, ``schedule:``, ``cron:``,
-or a non-scalar ``on:`` value) that the anchored block-style
-classifiers did not match is a violation — flow-style YAML such as
-``jobs: {m: {runs-on: …}}`` or ``on: {schedule: [{cron: …}]}`` fails
-closed instead of hiding from the line anchors. Symlinks anywhere
-under the scanned tree are failures too (they can point content out
-of scope). The deny-path tests prove every rejection fires on
-synthetic bad workflows — including both flow-style evasions from
-the adversarial review of PR #48 verbatim — instead of trusting that
-the auditor would.
+The audit uses a dependency-free strict YAML structure parser. It follows
+mapping indentation and block scalars, accepts any valid block indentation,
+and identifies every direct child of ``jobs`` before judging its direct
+``runs-on`` and ``timeout-minutes`` fields. Unsupported flow mappings that
+could hide a job, runner, timeout, action, or schedule fail closed. Symlinks
+anywhere under the scanned tree are failures too. The deny-path tests execute
+four-space jobs, nested/matrix decoys, flow mappings, and block-scalar decoys so
+timeout coverage cannot become vacuous through formatting.
 """
 
 import re
@@ -55,12 +50,10 @@ PINNED_CRON_INVENTORY = {
     "scheduled-security.yml": ("19 10 * * 6",),
 }
 
-_RUNS_ON_LINE = re.compile(r"^\s*runs-on:\s*(.*?)\s*$")
-_USES_LINE = re.compile(r"^\s*(?:-\s+)?uses:\s*(.*?)\s*$")
-_SCHEDULE_LINE = re.compile(r"^\s*schedule:\s*$")
-_CRON_LINE = re.compile(r"^\s*-\s*cron:\s*(.*?)\s*$")
-_JOBS_LINE = re.compile(r"^jobs:\s*$")
-_ON_LINE = re.compile(r"^on:\s*(.*?)\s*$")
+_KEY_LINE = re.compile(
+    r"^(?P<indent> *)(?P<sequence>-\s+)?"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_-]*):(?P<value>.*)$"
+)
 # The one scalar trigger form that cannot smuggle spend configuration
 # (``on: push``). Anything else after ``on:`` — flow mappings, flow
 # sequences, quoting tricks — must be rewritten in block style.
@@ -70,8 +63,146 @@ _BARE_TRIGGER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # an unclassifiable shape (flow-style YAML, odd quoting) and is denied
 # outright rather than silently passed.
 _SPEND_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:runs-on|uses|cron|schedule|jobs)\s*:"
+    r"(?<![A-Za-z0-9_-])(?:runs-on|timeout-minutes|uses|cron|schedule|jobs)\s*:"
 )
+
+
+def _flow_violation(path, number, line):
+    return (
+        "spend-relevant token outside the strict block YAML structure "
+        "(flow-style YAML is forbidden) at {}:{}: {!r}".format(
+            path, number, line.strip()
+        )
+    )
+
+
+def _parse_workflow(path, text):
+    """Return a closed workflow shape plus structural violations.
+
+    GitHub/actionlint remains the complete YAML grammar authority. This parser
+    deliberately handles only the block mapping/sequence shapes needed to
+    enumerate triggers and jobs; a flow value carrying a governed key is a
+    denial rather than an input whose nested structure is guessed.
+    """
+
+    violations = []
+    stack = []
+    block_scalar_indent = None
+    shape = {
+        "events": set(),
+        "jobs": {},
+        "crons": [],
+        "schedule_lines": 0,
+        "trigger_values": {},
+    }
+    root_on_count = 0
+    root_jobs_count = 0
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line[: len(line) - len(line.lstrip())]:
+            violations.append(
+                "tabs are forbidden in workflow indentation at {}:{}".format(
+                    path, number
+                )
+            )
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if block_scalar_indent is not None:
+            if indent > block_scalar_indent:
+                continue
+            block_scalar_indent = None
+        match = _KEY_LINE.match(line)
+        if match is None:
+            if _SPEND_TOKEN.search(line):
+                violations.append(_flow_violation(path, number, line))
+            continue
+        key = match.group("key")
+        value = match.group("value").strip()
+        while stack and stack[-1]["indent"] >= indent:
+            stack.pop()
+        parent = stack[-1]["path"] if stack else ()
+        current = parent + (key,)
+
+        if key == "on" and not parent:
+            root_on_count += 1
+            if not value:
+                pass
+            elif _BARE_TRIGGER.fullmatch(value):
+                shape["events"].add(value)
+            else:
+                violations.append(
+                    "workflow trigger value must be one bare event or "
+                    "block-style at {}:{}: {!r}".format(path, number, value)
+                )
+        elif len(current) == 2 and current[0] == "on":
+            shape["events"].add(key)
+            shape["trigger_values"][key] = value
+
+        if key == "jobs" and not parent:
+            root_jobs_count += 1
+            if value:
+                violations.append(_flow_violation(path, number, line))
+        elif parent == ("jobs",):
+            jobs = shape["jobs"]
+            if key in jobs:
+                violations.append(
+                    "duplicate workflow job {!r} at {}:{}".format(key, path, number)
+                )
+            jobs.setdefault(key, {"runs-on": [], "timeout-minutes": []})
+            if value:
+                violations.append(_flow_violation(path, number, line))
+        elif len(current) == 3 and current[0] == "jobs" and current[1] in shape["jobs"]:
+            if key in {"runs-on", "timeout-minutes"}:
+                shape["jobs"][current[1]][key].append((value, number))
+        elif key in {"runs-on", "timeout-minutes"}:
+            violations.append(
+                "{} appears outside a direct job mapping at {}:{}".format(
+                    key, path, number
+                )
+            )
+
+        if key == "uses":
+            reference = _unquoted(value)
+            if _PINNED_USES.fullmatch(reference) is None:
+                violations.append(
+                    "uses is not pinned to a 40-hex commit SHA at "
+                    "{}:{}: {!r}".format(path, number, reference)
+                )
+        if key == "retention-days":
+            violations.append("artifact retention is configured in " + str(path))
+        if current == ("on", "schedule"):
+            shape["schedule_lines"] += 1
+            if value:
+                violations.append(_flow_violation(path, number, line))
+        elif key == "schedule":
+            violations.append(
+                "schedule appears outside the workflow trigger mapping at {}:{}".format(
+                    path, number
+                )
+            )
+        if current == ("on", "schedule", "cron"):
+            shape["crons"].append(_unquoted(value))
+        elif key == "cron":
+            violations.append(
+                "cron appears outside on.schedule at {}:{}".format(path, number)
+            )
+
+        if key not in {"jobs", "runs-on", "timeout-minutes", "uses", "schedule", "cron"} and _SPEND_TOKEN.search(value):
+            violations.append(_flow_violation(path, number, line))
+        if re.fullmatch(r"[|>]([+-])?[1-9]?", value):
+            block_scalar_indent = indent
+        stack.append({"indent": indent, "path": current})
+
+    if root_on_count != 1:
+        violations.append(
+            "workflow must contain exactly one root on mapping in {}".format(path)
+        )
+    if root_jobs_count != 1:
+        violations.append(
+            "workflow must contain exactly one root jobs mapping in {}".format(path)
+        )
+    return shape, violations
 
 
 def workflow_files(workflow_root):
@@ -137,64 +268,42 @@ def exposure_violations(files, allowed_runners, pinned_cron_inventory):
                     path, error
                 )
             )
-        if "retention-days" in text:
-            violations.append(
-                "artifact retention is configured in " + str(path)
-            )
-        crons = []
-        schedule_lines = 0
-        for number, line in enumerate(text.splitlines(), start=1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                # A full-line comment cannot declare a YAML key; trailing
-                # comments stay part of the judged line below.
-                continue
-            runs_on = _RUNS_ON_LINE.match(line)
-            if runs_on is not None:
+        shape, structural = _parse_workflow(path, text)
+        violations.extend(structural)
+        for job, fields in sorted(shape["jobs"].items()):
+            runners = fields["runs-on"]
+            timeouts = fields["timeout-minutes"]
+            if len(runners) != 1:
+                violations.append(
+                    "job {!r} must contain exactly one direct runs-on in {}".format(
+                        job, path
+                    )
+                )
+            else:
                 runner_lines += 1
-                runner = _unquoted(runs_on.group(1))
+                raw_runner, number = runners[0]
+                runner = _unquoted(raw_runner)
                 if runner not in allowed_runners:
                     violations.append(
                         "runs-on is outside the pinned free-runner "
                         "allowlist at {}:{}: {!r}".format(path, number, runner)
                     )
-                continue
-            uses = _USES_LINE.match(line)
-            if uses is not None:
-                reference = _unquoted(uses.group(1))
-                if _PINNED_USES.match(reference) is None:
-                    violations.append(
-                        "uses is not pinned to a 40-hex commit SHA at "
-                        "{}:{}: {!r}".format(path, number, reference)
-                    )
-                continue
-            if _SCHEDULE_LINE.match(line) is not None:
-                schedule_lines += 1
-                continue
-            cron = _CRON_LINE.match(line)
-            if cron is not None:
-                crons.append(_unquoted(cron.group(1)))
-                continue
-            if _JOBS_LINE.match(line) is not None:
-                continue
-            trigger = _ON_LINE.match(line)
-            if trigger is not None:
-                value = trigger.group(1)
-                if value and _BARE_TRIGGER.match(value) is None:
-                    violations.append(
-                        "workflow trigger value must be one bare event or "
-                        "block-style at {}:{}: {!r}".format(path, number, value)
-                    )
-                continue
-            if _SPEND_TOKEN.search(line) is not None:
+            if len(timeouts) != 1:
                 violations.append(
-                    "spend-relevant token outside the block-style shapes "
-                    "the scan classifies (flow-style YAML is forbidden) at "
-                    "{}:{}: {!r}".format(path, number, stripped)
+                    "job {!r} must contain exactly one direct positive "
+                    "timeout-minutes in {}".format(job, path)
                 )
-        observed_crons[path.name] = tuple(crons)
-        observed_schedule_lines[path.name] = schedule_lines
-    if runner_lines == 0 and not violations:
+            else:
+                raw_timeout, number = timeouts[0]
+                timeout = _unquoted(raw_timeout)
+                if re.fullmatch(r"[1-9][0-9]*", timeout) is None:
+                    violations.append(
+                        "timeout-minutes must be one positive literal at "
+                        "{}:{}: {!r}".format(path, number, timeout)
+                    )
+        observed_crons[path.name] = tuple(shape["crons"])
+        observed_schedule_lines[path.name] = shape["schedule_lines"]
+    if runner_lines == 0:
         raise AssertionError(
             "fail closed: the workflow scan matched no runs-on lines and "
             "reported no violations; the scan itself is broken"
@@ -279,8 +388,85 @@ class ActionsZeroSpendDenyPathTests(unittest.TestCase):
             "jobs:\n"
             "  scan:\n"
             "    runs-on: {}\n".format(runs_on)
+            + "    timeout-minutes: 30\n"
             + extra
         )
+
+    def test_missing_zero_expression_and_duplicate_timeouts_are_violations(self):
+        base = self._job()
+        mutations = (
+            base.replace("    timeout-minutes: 30\n", ""),
+            base.replace("timeout-minutes: 30", "timeout-minutes: 0"),
+            base.replace("timeout-minutes: 30", "timeout-minutes: ${{ vars.TIMEOUT }}"),
+            base.replace(
+                "    timeout-minutes: 30\n",
+                "    timeout-minutes: 30\n    timeout-minutes: 40\n",
+            ),
+        )
+        for index, workflow in enumerate(mutations):
+            with self.subTest(timeout_mutation=index):
+                violations = self._audit_synthetic({"bad.yml": workflow}, pins={})
+                self.assertTrue(
+                    any("timeout-minutes" in item for item in violations), violations
+                )
+
+    def test_four_space_job_indentation_is_parsed_and_missing_timeout_is_denied(self):
+        valid = (
+            "on: push\n"
+            "jobs:\n"
+            "    scan:\n"
+            "        runs-on: ubuntu-24.04\n"
+            "        timeout-minutes: 30\n"
+            "        steps:\n"
+            "          - run: echo ok\n"
+        )
+        self.assertEqual(self._audit_synthetic({"valid.yml": valid}, pins={}), [])
+        violations = self._audit_synthetic(
+            {"missing.yml": valid.replace("        timeout-minutes: 30\n", "")},
+            pins={},
+        )
+        self.assertTrue(
+            any("scan" in item and "timeout-minutes" in item for item in violations),
+            violations,
+        )
+
+    def test_nested_matrix_timeout_cannot_satisfy_the_direct_job_timeout(self):
+        workflow = (
+            "on: push\n"
+            "jobs:\n"
+            "   matrix_job:\n"
+            "      runs-on: ubuntu-24.04\n"
+            "      strategy:\n"
+            "         matrix:\n"
+            "            timeout-minutes: 30\n"
+            "            os: [ubuntu-24.04]\n"
+            "      steps:\n"
+            "        - run: echo ok\n"
+        )
+        violations = self._audit_synthetic({"nested.yml": workflow}, pins={})
+        self.assertTrue(
+            any("outside a direct job" in item for item in violations), violations
+        )
+        self.assertTrue(
+            any("matrix_job" in item and "timeout-minutes" in item for item in violations),
+            violations,
+        )
+
+    def test_block_scalar_job_decoy_is_ignored_but_real_job_stays_counted(self):
+        workflow = (
+            "on: push\n"
+            "jobs:\n"
+            "  scan:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    timeout-minutes: 30\n"
+            "    steps:\n"
+            "      - run: |\n"
+            "          jobs:\n"
+            "            hidden:\n"
+            "              runs-on: macos-14\n"
+            "              timeout-minutes: 0\n"
+        )
+        self.assertEqual(self._audit_synthetic({"scalar.yml": workflow}, pins={}), [])
 
     def test_macos_runner_is_a_violation(self):
         violations = self._audit_synthetic(

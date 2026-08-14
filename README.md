@@ -4,6 +4,7 @@
 [![CodeQL](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/codeql.yml)
 [![Scheduled security](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml/badge.svg)](https://github.com/snaraj/website-infrastructure/actions/workflows/scheduled-security.yml)
 [![Coverage](docs/badges/coverage.svg)](docs/badges/coverage.json)
+[![Platform release](https://img.shields.io/github/v/release/snaraj/website-infrastructure?sort=semver)](https://github.com/snaraj/website-infrastructure/releases)
 
 Everything needed to run two real websites from one Raspberry Pi 5 at home —
 upstream Kubernetes bootstrapped with kubeadm, GitOps with Flux, and
@@ -15,9 +16,18 @@ every byte of configuration is reviewable in this repository, and nothing —
 literally nothing — is allowed to cost money or leak where the box lives.
 That's this repo.
 
+Once the repository owner's immutable-release and protected-main readiness
+receipt passes, every protected-main merge publishes one immutable patch
+release of this repository's platform source (`vX.Y.Z`). Both an allowed
+one-commit squash and an allowed merge-free multi-commit rebase bind the
+complete final main SHA to one release. That source release is an audit and
+recovery identity only: it never deploys, promotes, or mutates Kubernetes,
+Flux, Cloudflare, DNS, Tunnel state, secrets, or protected custody. Site image
+and chart releases remain owned by the two application repositories.
+
 ```mermaid
 flowchart LR
-    dev[Reviewed PRs] -->|squash to main| repo[(This repository)]
+    dev[Reviewed PRs] -->|squash or rebase to main| repo[(This repository)]
     repo -->|Flux pulls anonymously| k8s[Kubernetes on the Pi 5]
     sites[Signed site images by digest] --> k8s
     k8s --> tunnel[Outbound-only Cloudflare Tunnel]
@@ -96,7 +106,7 @@ kubernetes/            desired state for the single environment
 policies/              Conftest and Kyverno controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
-tests/                 allow/deny fixtures and 806 repository tests
+tests/                 allow/deny fixtures collected by canonical unittest discovery
 ```
 
 The two sites live in their own repositories

@@ -32,6 +32,21 @@ ALLOWED_NAMESPACES = (
 
 _BRANCH_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 
+FORBIDDEN_AGENT_OPERATIONS = frozenset(
+    {
+        "merge",
+        "auto-merge",
+        "squash-merge",
+        "rebase-main",
+        "push-main",
+        "force-push",
+        "delete-ref",
+        "create-tag",
+        "ready-author",
+        "ready-reviewer",
+    }
+)
+
 
 def branch_denial(name):
     """Return the reason a work-branch name is denied, or None if allowed."""
@@ -88,15 +103,28 @@ def refspec_denial(refspec, current_branch):
     return None
 
 
+def operation_denial(operation):
+    """Deny operations outside an agent's authority without exceptions."""
+    if not isinstance(operation, str) or not operation:
+        return "operation is empty"
+    if operation in FORBIDDEN_AGENT_OPERATIONS:
+        return "operation is reserved to the owner or coordinator"
+    if operation not in {"author", "review", "comment", "draft-pr", "push-work-branch"}:
+        return "operation is unknown and therefore denied"
+    return None
+
+
 def _main(argv):
     if len(argv) == 3 and argv[1] == "branch":
         denial = branch_denial(argv[2])
     elif len(argv) == 4 and argv[1] == "refspec":
         denial = refspec_denial(argv[2], argv[3])
+    elif len(argv) == 3 and argv[1] == "operation":
+        denial = operation_denial(argv[2])
     else:
         print(
             "usage: validate_pr_flow.py branch <name> | "
-            "refspec <refspec> <current-branch>",
+            "refspec <refspec> <current-branch> | operation <name>",
             file=sys.stderr,
         )
         return 2

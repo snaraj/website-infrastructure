@@ -84,5 +84,17 @@ class RefspecRuleTests(unittest.TestCase):
         self.assertIsNotNone(MODULE.refspec_denial("wip:wip", "wip"))
 
 
+class OperationRuleTests(unittest.TestCase):
+    def test_allows_only_bounded_agent_operations(self):
+        for operation in ("author", "review", "comment", "draft-pr", "push-work-branch"):
+            self.assertIsNone(MODULE.operation_denial(operation), operation)
+
+    def test_never_merge_ready_rewrite_or_delete(self):
+        for operation in sorted(MODULE.FORBIDDEN_AGENT_OPERATIONS):
+            self.assertIsNotNone(MODULE.operation_denial(operation), operation)
+        for unknown in ("", None, "deploy", "override"):
+            self.assertIsNotNone(MODULE.operation_denial(unknown), repr(unknown))
+
+
 if __name__ == "__main__":
     unittest.main()
