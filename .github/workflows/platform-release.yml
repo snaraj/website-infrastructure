@@ -6,6 +6,7 @@ on:
   workflow_run:
     workflows: [Pull request]
     types: [completed]
+    branches: [main]
 
 permissions: {}
 
@@ -16,11 +17,107 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  main-ci-jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
+    outputs:
+      attestation: ${{ steps.required-jobs.outputs.attestation }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify required protected-main jobs and steps
+        id: required-jobs
+        env:
+          ACTIONS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPLETED_RUN_ID: ${{ github.event.workflow_run.id }}
+          COMPLETED_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/verify-platform-release-main-jobs.sh
+
+  immutable-settings:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    outputs:
+      attestation: ${{ steps.immutable-settings.outputs.attestation }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: platform-release
+      deployment: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind event, source, and exact patch
+        id: release
+        env:
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/platform_release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          intent="$(python3 -I -B scripts/ci/platform_release_contract.py release-window \
+            --repository . --head "${COMPLETED_SHA}")"
+          base_sha="$(jq -er '.base_sha' <<<"${intent}")"
+          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+          version="$(jq -er '.version' <<<"${intent}")"
+          tag="$(jq -er '.tag' <<<"${intent}")"
+          test "${source_sha}" = "${COMPLETED_SHA}"
+          test "${tag}" = "v${version}"
+          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
+            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Mint current-settings proof token
+        id: immutable-settings-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: snaraj
+          repositories: website-infrastructure
+          permission-administration: read
+          skip-token-revoke: false
+          github-api-url: ${{ github.api_url }}
+      - name: Verify current immutable-release setting
+        id: immutable-settings
+        env:
+          IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/verify-platform-release-settings.sh
+
+  publish:
+    needs: [main-ci-jobs, immutable-settings]
+    if: >-
+      needs.main-ci-jobs.outputs.attestation ==
+      format('PASS:{0}:{1}:{2}:{3}', github.repository,
+      github.event.workflow_run.id, github.event.workflow_run.run_attempt,
+      github.event.workflow_run.head_sha) &&
+      needs.immutable-settings.outputs.attestation ==
+      format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,
+      github.run_attempt, github.event.workflow_run.head_sha)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -32,7 +129,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Bind event, source, and exact patch
+      - name: Rebind event, source, and exact patch
         id: release
         env:
           COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}

@@ -15,11 +15,18 @@ state machine, verifies annotated tag and immutable zero-asset GitHub-Actions
 Release records through authoritative REST state, and derives a closed
 value-only protected-main, immutable-release, and private-reporting receipt
 through GET-only GitHub queries without deploying or changing repository
-settings.
+settings. [`ci/verify-platform-release-main-jobs.sh`](./ci/verify-platform-release-main-jobs.sh)
+uses only Actions/Contents read to bind the exact completed protected-main job
+and step inventory plus the sole exact-SHA CodeQL run, while
+[`ci/verify-platform-release-settings.sh`](./ci/verify-platform-release-settings.sh)
+uses only the short-lived Administration-read App token to prove the current
+immutable-release setting. Each emits a value-only, run-bound attestation; no
+read credential crosses into the publisher.
 [`ci/publish-platform-release.sh`](./ci/publish-platform-release.sh) is the
 directly executable, transaction-tested tag/Release implementation used by the
-success-only publisher; it rechecks immutable-release state before mutation and
-converges both create races only onto exact REST records.
+success-only write job. It completes the frozen v0.1.0 Release only after the
+owner has prepared its exact annotated tag, then converges the current release
+and both create races only onto exact REST records.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
 validates the portable exact-PR-head adversarial-review receipt and distinct
 bounded Main Worker Ready-receipt shapes and rejects issue resources, while
