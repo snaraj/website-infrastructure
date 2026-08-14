@@ -298,10 +298,7 @@ def settings_api() -> dict[str, object]:
             },
             "bypass_actors": [],
             "rules": [
-                {
-                    "type": "update",
-                    "parameters": {"update_allows_fetch_and_merge": False},
-                },
+                {"type": "update"},
                 {"type": "deletion"},
                 {"type": "non_fast_forward"},
             ],
@@ -460,6 +457,12 @@ class SettingsReceiptTests(unittest.TestCase):
             "settings-preflight",
             "settings-receipt",
             "must not become Ready until",
+            "2026-03-10 repository-ruleset REST schema",
+            "describes `update_allows_fetch_and_merge` as branch behavior",
+            'exact type-only object `{"type":"update"}`',
+            "any `parameters` object,",
+            "top-level update escape, or foreign update-rule field denies",
+            "remain independently load-bearing",
         ):
             if required not in text:
                 raise ValueError(f"GitHub settings contract lost: {required}")
@@ -770,6 +773,7 @@ class SettingsReceiptTests(unittest.TestCase):
             mutations.append(changed)
         for update_parameters in (
             {},
+            {"update_allows_fetch_and_merge": False},
             {"update_allows_fetch_and_merge": True},
             {
                 "update_allows_fetch_and_merge": False,
@@ -783,6 +787,19 @@ class SettingsReceiptTests(unittest.TestCase):
                 if rule["type"] == "update"
             )
             update["parameters"] = update_parameters
+            mutations.append(changed)
+        for field, value in (
+            ("update_allows_fetch_and_merge", False),
+            ("update_allows_fetch_and_merge", True),
+            ("foreign", False),
+        ):
+            changed = copy.deepcopy(exact)
+            update = next(
+                rule
+                for rule in changed[tag_detail]["rules"]
+                if rule["type"] == "update"
+            )
+            update[field] = value
             mutations.append(changed)
         for rule_type in ("deletion", "non_fast_forward"):
             changed = copy.deepcopy(exact)
@@ -866,7 +883,35 @@ class SettingsReceiptTests(unittest.TestCase):
             {rule["type"] for rule in record["rules"]},
             {"update", "deletion", "non_fast_forward"},
         )
+        self.assertEqual(
+            next(rule for rule in record["rules"] if rule["type"] == "update"),
+            {"type": "update"},
+        )
         self.assertNotIn("creation", {rule["type"] for rule in record["rules"]})
+
+        for hostile_update in (
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": False},
+            },
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": True},
+            },
+            {"type": "update", "update_allows_fetch_and_merge": False},
+            {"type": "update", "foreign": False},
+        ):
+            changed = copy.deepcopy(record)
+            changed["rules"] = [
+                hostile_update if rule["type"] == "update" else rule
+                for rule in changed["rules"]
+            ]
+            with self.subTest(hostile_update=hostile_update), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE._release_tag_ruleset_receipt(
+                    43, changed, "owner/platform"
+                )
 
     def test_github_settings_reader_is_get_only_and_fails_closed(self):
         completed = subprocess.CompletedProcess(
@@ -1118,6 +1163,12 @@ class SettingsReceiptTests(unittest.TestCase):
             "settings-preflight",
             "settings-receipt",
             "must not become Ready until",
+            "2026-03-10 repository-ruleset REST schema",
+            "describes `update_allows_fetch_and_merge` as branch behavior",
+            'exact type-only object `{"type":"update"}`',
+            "any `parameters` object,",
+            "top-level update escape, or foreign update-rule field denies",
+            "remain independently load-bearing",
         )
         for token in tokens:
             with self.subTest(deletion=token), self.assertRaises(ValueError):
@@ -1148,6 +1199,14 @@ class SettingsReceiptTests(unittest.TestCase):
             (
                 '"release_tag_non_fast_forward_allowed": false',
                 '"release_tag_non_fast_forward_allowed": true',
+            ),
+            (
+                'exact type-only object `{"type":"update"}`',
+                'parameterized object `{"type":"update","parameters":{}}`',
+            ),
+            (
+                "foreign update-rule field denies",
+                "foreign update-rule field passes",
             ),
             ('"require_signed_commits": true', '"require_signed_commits": false'),
             ('"secret_scanning": true', '"secret_scanning": false'),

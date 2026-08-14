@@ -923,13 +923,14 @@ def _release_tag_ruleset_receipt(
             "release-tag rules must allow creation and forbid update/deletion/force-update"
         )
     update = rules_by_type["update"]
-    if set(update) != {"type", "parameters"}:
-        raise ContractError("release-tag update rule fields are missing or foreign")
-    update_parameters = _object(
-        update.get("parameters"), "release-tag update parameters"
-    )
-    if update_parameters != {"update_allows_fetch_and_merge": False}:
-        raise ContractError("release-tag update rule must allow no update escape")
+    # GitHub's canonical GET omits the branch-only update parameter from tag
+    # rulesets even when the accepted write payload set that parameter false.
+    # Bind the authoritative read shape exactly: any parameter or foreign field
+    # is an unproved update escape and must fail closed.
+    if set(update) != {"type"}:
+        raise ContractError(
+            "release-tag update rule must use the exact safe tag normalization"
+        )
     for rule_type in ("deletion", "non_fast_forward"):
         if set(rules_by_type[rule_type]) != {"type"}:
             raise ContractError(f"release-tag {rule_type} rule has foreign parameters")

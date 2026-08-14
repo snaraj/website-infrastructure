@@ -188,6 +188,14 @@ The preflight uses `gh api --method GET` only with REST API version
 workflow-token policy, security-analysis, and exact active repository-owned
 `only-me-merge` records. The same exhaustive inventory includes all active tag
 rulesets, including inherited rules, before reading the exact release-tag rule.
+GitHub's [2026-03-10 repository-ruleset REST schema](https://docs.github.com/en/rest/repos/rules?apiVersion=2026-03-10)
+describes `update_allows_fetch_and_merge` as branch behavior. For a tag-targeted
+ruleset, GitHub accepts a write payload that sets it false but canonicalizes the
+authoritative GET to the exact type-only object `{"type":"update"}`. The
+preflight accepts only that safe tag normalization: any `parameters` object,
+top-level update escape, or foreign update-rule field denies. The exact tag
+target, closed update/deletion/non-fast-forward inventory, and empty bypass set
+remain independently load-bearing.
 The owner
 credential is load-bearing here: GitHub omits `bypass_actors` for ruleset
 callers without write access, so the runtime Administration-read App must not
