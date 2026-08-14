@@ -102,6 +102,10 @@ the owner. In order:
 - A claim that a Kubernetes workload is ephemeral is load-bearing only after
   `skills/gh-pr-flow/references/destructive-workloads.md` is satisfied and
   `scripts/validate_destructive_test_ledger.py` accepts the exact evidence.
+  The ledger uses the closed namespaced workload allowlist, exact cardinalities,
+  and one fault target; unknown or cluster-scoped API/kinds fail closed. Its
+  disposable fixture must prove a mode-0600 pre-mutation recovery journal,
+  repeated/mixed-signal-safe single rollback, bounded receipt, and zero residue.
   Stateful/PV/PVC/database/operator resources remain supported but never
   inherit deletion permission. Protected tokens, Secrets, SOPS/age material,
   private keys, etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and
@@ -229,12 +233,16 @@ Delivery-lane requirements, explicit and numbered:
 8. Every protected-main merge has a platform release consequence. Every PR,
    including docs and Dependabot, advances `VERSION` and a dated changelog by
    exactly one patch from its current base. One-commit squash and merge-free
-   multi-commit rebase integrations are both supported; the complete final SHA
-   is the one release identity. Successful main CI publishes an immutable,
+   multi-commit rebase integrations are both supported only when every
+   intermediate `VERSION` state is monotonic and the range has exactly one
+   patch boundary; publisher recovery proves that same complete-history state
+   machine. The complete final SHA is the one release identity. Successful main
+   CI publishes an immutable,
    policy-tagger annotated plain `vX.Y.Z` tag and exact zero-asset GitHub
    Release at that SHA. This source release never deploys or promotes platform
    or site workloads. The authoritative GET-only protected-main settings
    receipt in the GitHub controls runbook must prove immutable releases,
+   Private Vulnerability Reporting,
    strict current-base required checks bound to GitHub Actions, required signed
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
    or update restriction before this release policy is Ready.
@@ -263,6 +271,19 @@ the shape with `scripts/validate_review_receipt.py --resource-kind pull-request`
 the validator rejects issue resources, and context independence still requires
 coordinator verification. If the owner merged first, record a post-merge audit
 rather than retroactive approval.
+
+**Main Worker Ready receipt.** After an exact-head `APPROVE`, a coordinator
+context distinct from both author and reviewer performs one bounded sanity pass
+over architecture, merge order, authority, owner-observed settings, base
+freshness, and required checks. Its normal comment contains exactly one `HEAD:
+<40-lowercase-hex>`, exactly `ROLE: MAIN-WORKER`, exactly `VERDICT: PASS`, the
+closed scope line defined in `skills/gh-pr-flow/references/reviews.md`, and a
+final `- <context> (Main Worker)` signature. Validate it with
+`scripts/validate_review_receipt.py --receipt-kind main-worker
+--resource-kind pull-request --required-verdict PASS`; `BLOCK`, a broadened
+scope, shared author/reviewer context, or any head change cannot satisfy Ready.
+This gate is architecture/order coordination, not a second code review, a
+settings mutation, Ready authority, or merge authority.
 
 **The review must:**
 
@@ -375,11 +396,11 @@ authority: the owner alone merges.
   controls. Tool or runner outages are reported as infrastructure failures;
   they never waive a real product failure.
 - **Merge readiness.** Keep Draft until the exact head has a fresh independent
-  APPROVE receipt, all exact-head checks succeed, protected base is current,
-  all discussions/findings are resolved, metadata/scope/order remain exact,
-  and the platform patch-release consequence is proven. Only the coordinator
-  flips Ready and re-verifies; author and reviewer never do. Nobody but the
-  repository owner merges.
+  APPROVE receipt and a fresh bounded Main Worker `PASS` receipt, all exact-head
+  checks succeed, protected base is current, all discussions/findings are
+  resolved, metadata/scope/order remain exact, and the platform patch-release
+  consequence is proven. Only the coordinator flips Ready and re-verifies;
+  author and reviewer never do. Nobody but the repository owner merges.
 
 ## Working a change end to end
 
@@ -417,8 +438,10 @@ The complete delivery loop, each step gated by the sections around it:
 7. **Adversarial review** per the protocol above; findings are fixed on
    the same branch by the same writer and delta re-reviewed before the
    flip to ready.
-8. **Owner comments** are handled per the owner review protocol below.
-9. **The owner merges.** Nothing you can do — approval, green checks,
+8. **Main Worker gate** per the protocol above; its exact-head `PASS` receipt
+   is required after approval and before coordinator Ready evaluation.
+9. **Owner comments** are handled per the owner review protocol below.
+10. **The owner merges.** Nothing you can do — approval, green checks,
    ready state — substitutes for that.
 
 ## Commit identity mechanics
@@ -516,9 +539,9 @@ is the consolidated command view:
 
 ## CI map
 
-- **pull-request.yml** — pull requests and manual dispatch ONLY; no job
-  runs on pushes to `main`. The battery: immutable-PR-history
-  validation (`validate_publication_history.py` over base..head —
+- **pull-request.yml** — pull requests, pushes to `main`, and manual dispatch.
+  Pull requests run immutable-PR-history validation
+  (`validate_publication_history.py` over base..head —
   noreply identity closure and linear, non-shallow history), gitleaks
   over the exact PR range with the empty ignore file, actionlint, a
   compile sweep of every tracked `scripts/**/*.py` with a count floor,
@@ -530,11 +553,20 @@ is the consolidated command view:
   determinism, the assurance-ledger / no-security-toggles /
   attack-surface-manifest / ingress-guard validators, Kyverno policy
   tests, and credential-free OpenTofu validation — plus a separate
-  `dependency-review` job (pull requests only; fails on high severity).
-- **codeql.yml** — pull requests, `main` pushes, weekly cron, and
-  manual dispatch. **scheduled-security.yml** — weekly cron full-history
-  scan, plus manual dispatch. Nothing else runs post-merge: what merges
-  is what was gated.
+  `dependency-review` job (pull requests only; fails on high severity). Main
+  pushes run the same repository/infrastructure battery plus the exact
+  base-to-final-SHA release transition; manual dispatch runs the battery but
+  deliberately skips event-bound transition/history checks.
+- **codeql.yml** — pull requests, `main` pushes, weekly cron, and manual
+  dispatch.
+- **platform-release.yml** — `workflow_run` of the named Pull request workflow;
+  its publish job is eligible only after that workflow completed successfully
+  for a push to `main`, then binds and publishes the exact final SHA. A distinct
+  main SHA has an independent non-canceling transaction.
+- **scheduled-security.yml** — weekly cron full-history scan plus manual
+  dispatch. Post-merge therefore consists of the full main-push battery and
+  CodeQL, followed success-only by the source publisher; scheduled security is
+  independent of merges.
 - **Zero-spend guardrails on the merge path.** The `tests/security`
   battery IS the guard: `test_actions_zero_spend_exposure.py` pins the
   workflows' exposure (secretless PRs, read-only default permissions,

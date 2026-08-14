@@ -65,6 +65,12 @@ Any head change invalidates it. See
 shape; it rejects issue resources but cannot prove human or context
 independence, so the coordinator verifies that separately.
 
+After `APPROVE`, require a distinct Main Worker/coordinator context to post the
+bounded architecture, merge-order, authority, settings, base-freshness, and
+required-check sanity receipt defined in the same reference. Validate its exact
+head, `ROLE: MAIN-WORKER`, and `VERDICT: PASS` with the executable receipt gate.
+This receipt neither repeats adversarial review nor grants Ready/merge authority.
+
 On `REQUEST-CHANGES`, the author reproduces findings, adds repairs without
 rewriting history, updates evidence, and re-applies `requires-review`. A fresh
 exact-head review is required. If the owner merges before review, do not forge a
@@ -83,6 +89,8 @@ Keep Draft unless every condition is true at the same instant:
   `REQUEST-CHANGES` exists;
 - one fresh structurally valid `APPROVE` receipt from an independent context
   binds the exact head;
+- one fresh structurally valid Main Worker `PASS` receipt from a context
+  distinct from both author and reviewer binds the exact head and closed scope;
 - labels, owner assignee, milestone, issue link, intended commit/file scope, and
   merge order remain correct;
 - the repository-specific release transition still follows current base and

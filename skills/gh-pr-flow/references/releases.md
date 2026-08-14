@@ -21,9 +21,16 @@ it never permits numeric Git/image tags or calling `tag@digest` a tag.
 
 Each PR—including docs and dependency automation—moves exactly one patch from
 its current protected base, or uses an equally strong repository automation
-that keeps committed source truthful. A base move invalidates the transition.
-Concurrent PRs may propose the same next patch only while Draft; after one
-lands, every survivor resyncs on a fresh branch and takes the new patch.
+that keeps committed source truthful. When rebase integration is enabled, the
+entire reviewed base..head chain must be merge-free and every intermediate
+`VERSION` state must either retain the prior value or advance exactly one patch;
+there must be exactly one boundary in the range. Reject skips, reversions,
+transient future values, and merge-bearing topics whose rebase outcome cannot
+obey the same state machine. Squash remains valid because its installed single
+commit preserves the exact final boundary. A base move invalidates the
+transition. Concurrent PRs may propose the same next patch only while Draft;
+after one lands, every survivor resyncs on a fresh branch and takes the new
+patch.
 
 ## Success-only exact-SHA publication
 
@@ -33,6 +40,14 @@ push workflows; use an explicit supported dispatch when chaining is required.
 `workflow_run` fires regardless of conclusion and carries default-branch
 context, so verify conclusion/event/branch/repository/workflow and explicitly
 checkout payload `head_sha`.
+
+Use the same complete-history monotonic state machine for main validation and
+publisher recovery. Discover the latest retained patch boundary only after
+proving every earlier state; never infer an expected version from transient
+endpoints alone. Test no-version initialization, the bump at every position in
+a multi-commit rebase, squash, skips, reversions, transient future versions,
+and post-boundary commits. Any main SHA that passes must map to exactly one
+publisher-recoverable release intent.
 
 Do not use generic concurrency ordering as a release ledger. Distinct main SHAs
 must have independent paths and unique immutable versions. Deduplicate only the

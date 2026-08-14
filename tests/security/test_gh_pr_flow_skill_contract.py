@@ -2,9 +2,13 @@ import re
 import unittest
 from pathlib import Path
 
+from . import test_actions_zero_spend_exposure as actions_contract
+from .support import load_script
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "gh-pr-flow"
+RECEIPTS = load_script("validate_review_receipt.py", module_name="flow_receipts")
 
 
 class GitHubFlowSkillContractTests(unittest.TestCase):
@@ -85,7 +89,7 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("shared account", governance),
             ("**Author:**", governance),
             ("**Reviewer:**", governance),
-            ("**Coordinator:**", governance),
+            ("**Coordinator/Main Worker:**", governance),
             ("**Owner:**", governance),
             ("`requires-review` is PR-head-only", governance),
             ("cannot satisfy a PR receipt or Ready gate", governance),
@@ -95,6 +99,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("bypass actors", governance),
             ("Every merge", releases),
             ("exactly one patch", releases),
+            ("every intermediate\n`VERSION` state", releases),
+            ("transient future values", releases),
+            ("same complete-history monotonic state machine", releases),
+            ("publisher-recoverable release intent", releases),
             ("Distinct main SHAs", releases),
             ("two and three rapid merges", releases),
             ("burned/conflicting", releases),
@@ -174,6 +182,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         destructive = (SKILL / "references" / "destructive-workloads.md").read_text(encoding="utf-8")
         for fragment in (
             "engineered and proven",
+            "closed positive allowlist",
+            "ClusterRole, CRD,\nNamespace, PVC, and Secret",
+            "1–32 unique inventory entries",
+            "exactly one explicit\n  fault target",
             "clean recreate from zero",
             "termination, restart, node loss, and dependency loss",
             "never encode replica=1",
@@ -188,6 +200,9 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "one rollback, one bounded\nreceipt, and no residue",
             "uncatchable kill and power loss",
             "recovery journal",
+            "mode\n0600 `prepared` recovery journal",
+            "scripts/ci/destructive_transaction_fixture.py",
+            "neither\nauthenticates live state",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, destructive)
@@ -202,11 +217,113 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "Platform source release",
             "requires-review",
             "Independent normal-comment verdict",
-            "architecture sanity review",
+            "ROLE: MAIN-WORKER",
+            "VERDICT: PASS",
             "Merge order and collision paths",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, template)
+
+    def test_main_worker_is_an_executable_exact_head_ready_gate(self):
+        main = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        reviews = (SKILL / "references" / "reviews.md").read_text(encoding="utf-8")
+        ready = main.split("## Ready gate", 1)[1].split("\n## ", 1)[0]
+        for fragment in (
+            "Main Worker",
+            "distinct from both author and reviewer",
+            "exact head",
+            "closed scope",
+        ):
+            with self.subTest(ready_fragment=fragment):
+                self.assertIn(fragment, ready)
+        for fragment in (
+            "ROLE: MAIN-WORKER",
+            "VERDICT: PASS",
+            f"SCOPE: {RECEIPTS.MAIN_WORKER_SCOPE}",
+            "--receipt-kind\nmain-worker",
+            "--required-verdict PASS",
+            "Any head\nchange invalidates it",
+        ):
+            with self.subTest(receipt_fragment=fragment):
+                self.assertIn(fragment, reviews)
+
+        head = "a" * 40
+        receipt = (
+            f"HEAD: {head}\n"
+            "ROLE: MAIN-WORKER\n"
+            "VERDICT: PASS\n"
+            f"SCOPE: {RECEIPTS.MAIN_WORKER_SCOPE}\n\n"
+            "- coordinator-context (Main Worker)\n"
+        )
+        self.assertIsNone(
+            RECEIPTS.main_worker_denial(
+                receipt,
+                head,
+                "author-context",
+                "reviewer-context",
+                "pull-request",
+            )
+        )
+        mutants = (
+            receipt.replace(head, "b" * 40),
+            receipt.replace("ROLE: MAIN-WORKER", "ROLE: REVIEWER"),
+            receipt.replace("VERDICT: PASS", "VERDICT: BLOCK"),
+            receipt.replace(RECEIPTS.MAIN_WORKER_SCOPE, "architecture"),
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(main_worker_mutant=index):
+                self.assertIsNotNone(
+                    RECEIPTS.main_worker_denial(
+                        mutant,
+                        head,
+                        "author-context",
+                        "reviewer-context",
+                        "pull-request",
+                    )
+                )
+
+    def test_agents_ci_map_matches_executable_workflow_trigger_topology(self):
+        expected = {
+            "codeql.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
+            "platform-release.yml": {"workflow_run"},
+            "pull-request.yml": {"pull_request", "push", "workflow_dispatch"},
+            "scheduled-security.yml": {"schedule", "workflow_dispatch"},
+        }
+        actual = {}
+        for name in expected:
+            path = ROOT / ".github" / "workflows" / name
+            shape, violations = actions_contract._parse_workflow(
+                path, path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(violations, [], name)
+            actual[name] = shape["events"]
+        self.assertEqual(actual, expected)
+
+        def require_documented_topology(text):
+            section = text.split("## CI map", 1)[1].split("\n## ", 1)[0]
+            fragments = {
+                "pull-request.yml": "pull requests, pushes to `main`, and manual dispatch",
+                "codeql.yml": "pull requests, `main` pushes, weekly cron, and manual",
+                "platform-release.yml": "`workflow_run` of the named Pull request workflow",
+                "scheduled-security.yml": "weekly cron full-history scan plus manual",
+            }
+            for name, fragment in fragments.items():
+                if section.count(f"**{name}**") != 1 or fragment not in section:
+                    raise ValueError(f"CI map is stale for {name}")
+            if "followed success-only by the source publisher" not in section:
+                raise ValueError("post-merge publisher topology is absent")
+
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        require_documented_topology(agents)
+        mutants = (
+            agents.replace("pushes to `main`", "does not run on main", 1),
+            agents.replace("platform-release.yml", "publisher.yml", 1),
+            agents.replace("`workflow_run`", "manual dispatch", 1),
+            agents.replace("followed success-only by the source publisher", "publisher omitted", 1),
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(ci_map_mutant=index), self.assertRaises(ValueError):
+                require_documented_topology(mutant)
 
 
 if __name__ == "__main__":

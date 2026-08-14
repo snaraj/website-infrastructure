@@ -3,15 +3,23 @@
 ## Reporting
 
 Do not open a public issue containing a credential, home address, account ID,
-zone ID, tunnel ID, private hostname, kubeconfig, or infrastructure plan. Revoke
-or isolate exposed material first, preserve minimal evidence, and report through
-GitHub Private Vulnerability Reporting on this repository (Security tab →
-"Report a vulnerability"), which is the private maintainer channel. Reports are
-acknowledged on a best-effort basis, normally within 7 days; this is a
-single-operator project with no paid program and no bounty. Please allow up to
-90 days for remediation before any public disclosure, and never test against
-the live host, tunnels, or domains — every validator in this repository runs
-credential-free against fixtures, so findings are demonstrable offline.
+zone ID, tunnel ID, private hostname, kubeconfig, infrastructure plan, or
+vulnerability detail. Revoke or isolate exposed material first and preserve
+minimal evidence. GitHub Private Vulnerability Reporting is currently disabled
+for this repository, so the repository does not presently claim a working
+private intake. A detail-free public issue may ask the repository owner to
+enable the Security-tab reporting form, but withhold all sensitive details
+until the authoritative
+`repos/snaraj/website-infrastructure/private-vulnerability-reporting` GET and
+the closed GitHub-controls readiness receipt both report `enabled: true`.
+
+Once that owner-applied setting is authoritatively enabled, use Security tab →
+"Report a vulnerability"; never paste the report into the enabling issue.
+Reports are acknowledged on a best-effort basis, normally within 7 days; this
+is a single-operator project with no paid program and no bounty. Please allow
+up to 90 days for remediation before any public disclosure, and never test
+against the live host, tunnels, or domains — every validator in this repository
+runs credential-free against fixtures, so findings are demonstrable offline.
 
 ## Supported versions
 

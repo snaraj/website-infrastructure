@@ -152,6 +152,62 @@ def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]
     return commits
 
 
+def _linear_history(repository: Path, head_sha: str) -> list[str]:
+    """Return the complete merge-free history ending at one exact head."""
+    raw = _git(repository, "rev-list", "--reverse", head_sha)
+    commits = raw.splitlines() if raw else []
+    if not commits or commits[-1] != head_sha:
+        raise ContractError("release history is empty or does not end at the exact head")
+    previous: str | None = None
+    for commit in commits:
+        fields = _git(repository, "rev-list", "--parents", "-n", "1", commit).split()
+        if fields[0] != commit:
+            raise ContractError("release history commit identity is not exact")
+        if previous is None:
+            if len(fields) != 1:
+                raise ContractError("release history root must have no parent")
+        elif len(fields) != 2 or fields[1] != previous:
+            raise ContractError("release history must be one contiguous linear commit chain")
+        previous = commit
+    return commits
+
+
+def _monotonic_transitions(
+    repository: Path, base_sha: str, commits: list[str]
+) -> list[tuple[str, str, Version]]:
+    """Classify exact patch boundaries without permitting skips or reversions."""
+    current = _version_at(repository, base_sha)
+    previous = base_sha
+    transitions: list[tuple[str, str, Version]] = []
+    for commit in commits:
+        observed = _version_at(repository, commit)
+        if observed == current:
+            previous = commit
+            continue
+        expected = next_version(current)
+        if observed != expected:
+            rendered = "absent" if observed is None else str(observed)
+            raise ContractError(
+                f"commit {commit} version {rendered} must remain at the base "
+                f"or advance exactly once to {expected}"
+            )
+        transitions.append((previous, commit, expected))
+        current = expected
+        previous = commit
+    return transitions
+
+
+def _validated_history_transitions(
+    repository: Path, head_sha: str
+) -> list[tuple[str, str, Version]]:
+    """Prove the complete publisher-visible history and return its boundaries."""
+    history = _linear_history(repository, head_sha)
+    root = history[0]
+    if _version_at(repository, root) is not None:
+        raise ContractError("platform release history must begin before VERSION exists")
+    return _monotonic_transitions(repository, root, history[1:])
+
+
 def validate_transition(
     repository: Path, base_sha: str, head_sha: str, *, first_parent: bool
 ) -> Intent:
@@ -162,13 +218,21 @@ def validate_transition(
         raise ContractError("base did not resolve exactly")
     if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
         raise ContractError("head did not resolve exactly")
-    if first_parent:
-        # Merge commits are disabled. A squash is one commit; GitHub rebase
-        # may install several commits in one push. Both are one exact linear
-        # base -> final-tree release intent.
-        _linear_commits(repository, base_sha, head_sha)
-    else:
-        _git(repository, "merge-base", "--is-ancestor", base_sha, head_sha)
+    # A squash may collapse several reviewed commits to one main commit, while
+    # GitHub rebase installs those commits individually. Both enabled owner
+    # choices are release-live only when the reviewed and installed range is a
+    # single linear chain with the same monotonic VERSION state machine. A
+    # merge-bearing topic is therefore denied even on the PR endpoint: prose
+    # cannot make its enabled rebase outcome publisher-recoverable.
+    commits = _linear_commits(repository, base_sha, head_sha)
+    transitions = _monotonic_transitions(repository, base_sha, commits)
+    if len(transitions) != 1:
+        raise ContractError("release range must contain exactly one patch boundary")
+    history_transitions = _validated_history_transitions(repository, head_sha)
+    if not history_transitions or history_transitions[-1] != transitions[0]:
+        raise ContractError(
+            "release range boundary is not the exact publisher-visible boundary"
+        )
 
     base = _version_at(repository, base_sha)
     head_raw = _file(repository, head_sha, "VERSION")
@@ -184,23 +248,23 @@ def validate_transition(
 
 
 def discover_transition_window(repository: Path, head_sha: str) -> TransitionWindow:
-    """Recover the exact linear version boundary ending at a main SHA."""
+    """Recover the last boundary from the same monotonic history main CI enforces."""
     head_sha = require_sha(head_sha, "head SHA")
     if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
         raise ContractError("head did not resolve exactly")
+    transitions = _validated_history_transitions(repository, head_sha)
+    if not transitions:
+        raise ContractError("release history contains no patch boundary")
     head_version = _version_at(repository, head_sha)
     if head_version is None:
         raise ContractError("release head has no VERSION")
-    cursor = head_sha
-    while True:
-        fields = _git(repository, "rev-list", "--parents", "-n", "1", cursor).split()
-        if len(fields) != 2 or fields[0] != cursor:
-            raise ContractError("could not recover one linear release boundary")
-        parent = fields[1]
-        if _version_at(repository, parent) != head_version:
-            intent = validate_transition(repository, parent, head_sha, first_parent=True)
-            return TransitionWindow(parent, intent)
-        cursor = parent
+    base_sha, _transition_commit, transition_version = transitions[-1]
+    if transition_version != head_version:
+        raise ContractError("release head does not retain the last patch boundary")
+    changelog = _file(repository, head_sha, "CHANGELOG.md")
+    assert changelog is not None
+    validate_changelog(changelog, head_version)
+    return TransitionWindow(base_sha, Intent(head_sha, head_version))
 
 
 def plan_workflow_run(event: Mapping[str, object], expected_repository: str) -> str:
@@ -278,6 +342,16 @@ def validate_immutable_settings(settings: Mapping[str, object]) -> None:
         raise ContractError("immutable-release owner-enforcement state must be boolean")
 
 
+def validate_private_vulnerability_reporting(settings: Mapping[str, object]) -> None:
+    """Require the authoritative private vulnerability reporting control."""
+    if set(settings) != {"enabled"}:
+        raise ContractError(
+            "private-vulnerability-reporting settings fields are missing or foreign"
+        )
+    if settings.get("enabled") is not True:
+        raise ContractError("GitHub private vulnerability reporting must be enabled")
+
+
 def validate_settings_receipt(receipt: Mapping[str, object], repository: str) -> None:
     """Validate an owner-observed, value-only protected-main settings receipt."""
     fields = {
@@ -292,6 +366,7 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         "default_workflow_permissions",
         "immutable_releases",
         "merge_methods",
+        "private_vulnerability_reporting",
         "repository",
         "require_linear_history",
         "require_pull_request",
@@ -324,6 +399,7 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         ("actions_sha_pinning_required", True),
         ("actions_can_approve_pull_request_reviews", False),
         ("immutable_releases", True),
+        ("private_vulnerability_reporting", True),
         ("strict_status_checks", True),
         ("require_pull_request", True),
         ("require_linear_history", True),
@@ -372,6 +448,7 @@ def build_settings_receipt(
     repository: str,
     repository_record: Mapping[str, object],
     immutable_record: Mapping[str, object],
+    private_vulnerability_record: Mapping[str, object],
     actions_record: Mapping[str, object],
     workflow_permissions_record: Mapping[str, object],
     ruleset_id: int,
@@ -395,6 +472,7 @@ def build_settings_receipt(
         if enabled:
             merge_methods.append(method)
     validate_immutable_settings(immutable_record)
+    validate_private_vulnerability_reporting(private_vulnerability_record)
 
     actions_enabled = actions_record.get("enabled")
     actions_allowed = actions_record.get("allowed_actions")
@@ -501,6 +579,7 @@ def build_settings_receipt(
         # receipt fact, and the only accepted value is the empty set.
         "bypass_actors": [] if not bypass else ["present"],
         "immutable_releases": immutable_record.get("enabled"),
+        "private_vulnerability_reporting": private_vulnerability_record.get("enabled"),
         "secret_scanning": security_enabled("secret_scanning"),
         "secret_scanning_push_protection": security_enabled(
             "secret_scanning_push_protection"
@@ -561,6 +640,10 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         _github_api_get(f"repos/{repository}/immutable-releases"),
         "immutable-release settings",
     )
+    private_vulnerability_record = _object(
+        _github_api_get(f"repos/{repository}/private-vulnerability-reporting"),
+        "private-vulnerability-reporting settings",
+    )
     actions_record = _object(
         _github_api_get(f"repos/{repository}/actions/permissions"),
         "Actions policy settings",
@@ -579,6 +662,7 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         repository,
         repository_record,
         immutable_record,
+        private_vulnerability_record,
         actions_record,
         workflow_permissions_record,
         ruleset_id,

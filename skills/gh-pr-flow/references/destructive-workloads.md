@@ -6,7 +6,12 @@ authorization identifies exact targets and a serialized live window.
 ## Classification is engineering, not prose
 
 Every Kubernetes app/resource claimed ephemeral must be engineered and proven
-disposable, not merely described. Every resource is classified:
+disposable, not merely described. Admit only a closed positive allowlist of
+namespaced workload controllers/resources: `apps/v1` DaemonSet, Deployment, or
+ReplicaSet; `batch/v1` CronJob or Job; and `v1` Pod. Reject every cluster-scoped,
+state-bearing, secret-bearing, or unknown API/kind, including ClusterRole, CRD,
+Namespace, PVC, and Secret. Do not infer safety from the absence of a denylisted
+kind. Every admitted resource is classified:
 
 - **ephemeral/disposable:** all durable state is externalized and a clean recreate from zero
   is tested;
@@ -19,9 +24,11 @@ never encode replica=1 as a security invariant.
 
 ## Preconditions
 
-Bind a ledger to:
+Bind a ledger to a closed schema with no missing or foreign fields and:
 
-- exact resource inventory and namespace/UID set;
+- 1–32 unique inventory entries, each exact Namespaced/ephemeral-workload
+  identity (`apiVersion`, kind, namespace, name, UID) and exactly one explicit
+  fault target;
 - immutable desired-state and deployable-artifact SHA-256 hashes;
 - prestate health/readiness/availability and externalized-state proof;
 - explicit protected exclusions: Secrets and token material; SOPS/age keys and ciphertext;
@@ -47,11 +54,14 @@ acceptance after recovery.
 Make signal-triggered rollback re-entry safe. The first caught INT, TERM, or HUP
 sets a cleanup guard and defers or ignores further catchable termination signals
 until deterministic rollback and residue recording finish; never restore the
-default signal action while cleanup is still vulnerable. Hostile tests deliver
-repeated and mixed signals during cleanup and prove one rollback, one bounded
-receipt, and no residue. Distinguish uncatchable kill and power loss: persist a
-recovery journal before mutation so the next run can detect and safely finish or
-escalate an interrupted transaction.
+default signal action while cleanup is still vulnerable. Hostile tests for
+repeated and mixed signals deliver repeated HUP, INT, and TERM plus a mixed
+TERM/INT/HUP sequence during cleanup and prove one rollback, one bounded
+receipt, and no residue within the declared RTO.
+Distinguish uncatchable kill and power loss: atomically persist and fsync a mode
+0600 `prepared` recovery journal before mutation so the next run can detect and
+safely finish or escalate an interrupted transaction. Close the journal only
+after rollback, receipt, and residue verification are durable.
 
 ## Ledger
 
@@ -61,13 +71,18 @@ The append-only evidence binds:
 prestate hash -> exact fault -> recovery action -> poststate hash
 ```
 
-Include timestamps, desired-state/artifact hashes, target inventory, protected
-exclusions, scenario, expected/observed downtime and RTO, acceptance results,
-rollback status, deterministic cleanup receipt, recovery-journal state, and
-residue/orphan scan. A missing field, changed target/hash,
-secret overlap, orphan, failed recovery, or unproven externalized state is a hard
-stop—not permission to broaden deletion.
+Include timestamps, desired-state/artifact hashes, target inventory, the exact
+protected-exclusion set, the five exact scenarios, expected/observed downtime
+and RTO, acceptance results, rollback status, deterministic cleanup receipt,
+recovery-journal state/hash, the four exact signal cases, and residue/orphan
+scan. Bind every scenario to the sole fault-target UID and the same journal and
+receipt hashes. A missing/foreign field, duplicate, widened cardinality, changed
+target/hash, secret overlap, orphan, failed recovery, or unproven externalized
+state is a hard stop—not permission to broaden deletion.
 
-Use `scripts/validate_destructive_test_ledger.py` for the portable JSON shape.
-The validator checks evidence structure only; it does not authenticate live
-state, grant authorization, or execute a fault.
+Use `scripts/validate_destructive_test_ledger.py` for the portable JSON shape
+and `scripts/ci/destructive_transaction_fixture.py` for the disposable local
+signal/journal transaction proof. The validator checks evidence structure only
+and the fixture mutates only a caller-provided disposable sentinel root; neither
+authenticates live state, grants authorization, contacts a cluster, or executes
+a live fault.

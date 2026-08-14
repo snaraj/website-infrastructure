@@ -70,6 +70,7 @@ def settings_receipt() -> dict[str, object]:
         "restrict_updates": False,
         "bypass_actors": [],
         "immutable_releases": True,
+        "private_vulnerability_reporting": True,
         "secret_scanning": True,
         "secret_scanning_push_protection": True,
         "secret_scanning_non_provider_patterns": False,
@@ -100,6 +101,9 @@ def settings_api() -> dict[str, object]:
         "repos/owner/platform/immutable-releases": {
             "enabled": True,
             "enforced_by_owner": False,
+        },
+        "repos/owner/platform/private-vulnerability-reporting": {
+            "enabled": True,
         },
         "repos/owner/platform/actions/permissions": {
             "enabled": True,
@@ -234,6 +238,7 @@ class SettingsReceiptTests(unittest.TestCase):
         for required in (
             "Platform release readiness receipt",
             '"immutable_releases": true',
+            '"private_vulnerability_reporting": true',
             '"actions_enabled": true',
             '"actions_allowed_actions": "all"',
             '"actions_sha_pinning_required": true',
@@ -255,6 +260,7 @@ class SettingsReceiptTests(unittest.TestCase):
             '"secret_scanning_push_protection": true',
             '"secret_scanning_non_provider_patterns": false',
             '"secret_scanning_validity_checks": false',
+            "private-vulnerability-reporting",
             "settings-preflight",
             "settings-receipt",
             "must not become Ready until",
@@ -286,6 +292,7 @@ class SettingsReceiptTests(unittest.TestCase):
             ("restrict_updates", True),
             ("bypass_actors", ["present"]),
             ("immutable_releases", False),
+            ("private_vulnerability_reporting", False),
             ("secret_scanning", False),
             ("secret_scanning_push_protection", False),
             ("secret_scanning_non_provider_patterns", "false"),
@@ -330,6 +337,7 @@ class SettingsReceiptTests(unittest.TestCase):
         expected = [
             "repos/owner/platform",
             "repos/owner/platform/immutable-releases",
+            "repos/owner/platform/private-vulnerability-reporting",
             "repos/owner/platform/actions/permissions",
             "repos/owner/platform/actions/permissions/workflow",
             "repos/owner/platform/rulesets",
@@ -337,12 +345,12 @@ class SettingsReceiptTests(unittest.TestCase):
         ]
         if calls != expected:
             raise AssertionError(f"unexpected settings endpoints: {calls}")
-        if getter.call_args_list[4].kwargs != {"paginate": True}:
+        if getter.call_args_list[5].kwargs != {"paginate": True}:
             raise AssertionError("ruleset inventory must use exhaustive pagination")
         if any(
             call.kwargs
             for index, call in enumerate(getter.call_args_list)
-            if index != 4
+            if index != 5
         ):
             raise AssertionError("only the ruleset-list endpoint should paginate")
         return receipt
@@ -357,6 +365,11 @@ class SettingsReceiptTests(unittest.TestCase):
             ("repos/owner/platform", ("allow_rebase_merge",), False),
             ("repos/owner/platform", ("default_branch",), "release"),
             ("repos/owner/platform/immutable-releases", ("enabled",), False),
+            (
+                "repos/owner/platform/private-vulnerability-reporting",
+                ("enabled",),
+                False,
+            ),
             ("repos/owner/platform/actions/permissions", ("enabled",), False),
             (
                 "repos/owner/platform/actions/permissions",
@@ -564,6 +577,13 @@ class SettingsReceiptTests(unittest.TestCase):
                 )
             self.assertEqual(output.getvalue().strip(), "exact")
 
+    def test_private_vulnerability_reporting_kills_field_mutants(self):
+        exact = {"enabled": True}
+        MODULE.validate_private_vulnerability_reporting(exact)
+        for changed in ({"enabled": False}, {}, {"enabled": True, "foreign": True}):
+            with self.subTest(changed=changed), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_private_vulnerability_reporting(changed)
+
     def test_settings_receipt_cli_is_load_bearing(self):
         with tempfile.TemporaryDirectory() as temporary:
             receipt = Path(temporary) / "settings.json"
@@ -611,6 +631,7 @@ class SettingsReceiptTests(unittest.TestCase):
         tokens = (
             "Platform release readiness receipt",
             '"immutable_releases": true',
+            '"private_vulnerability_reporting": true',
             '"actions_enabled": true',
             '"actions_allowed_actions": "all"',
             '"actions_sha_pinning_required": true',
@@ -640,6 +661,10 @@ class SettingsReceiptTests(unittest.TestCase):
                 self.require_documented_settings_contract(runbook.replace(token, "", 1))
         for old, new in (
             ('"immutable_releases": true', '"immutable_releases": false'),
+            (
+                '"private_vulnerability_reporting": true',
+                '"private_vulnerability_reporting": false',
+            ),
             ('"actions_sha_pinning_required": true', '"actions_sha_pinning_required": false'),
             ('"strict_status_checks": true', '"strict_status_checks": false'),
             ('"allow_force_pushes": false', '"allow_force_pushes": true'),
@@ -654,6 +679,36 @@ class SettingsReceiptTests(unittest.TestCase):
         ):
             with self.subTest(inversion=old), self.assertRaises(ValueError):
                 self.require_documented_settings_contract(runbook.replace(old, new, 1))
+
+    def test_security_reporting_is_truthful_and_bound_to_the_live_setting(self):
+        policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        def require_contract(text: str) -> None:
+            for token in (
+                "Private Vulnerability Reporting is currently disabled",
+                "does not presently claim a working\nprivate intake",
+                "detail-free public issue",
+                "withhold all sensitive details",
+                "private-vulnerability-reporting` GET",
+                "both report `enabled: true`",
+                'Security tab →\n"Report a vulnerability"',
+            ):
+                if token not in text:
+                    raise ValueError(f"security reporting contract lost: {token}")
+
+        require_contract(policy)
+        for token in (
+            "currently disabled",
+            "does not presently claim a working\nprivate intake",
+            "detail-free public issue",
+            "withhold all sensitive details",
+            "private-vulnerability-reporting` GET",
+            "both report `enabled: true`",
+        ):
+            with self.subTest(deletion=token), self.assertRaises(ValueError):
+                require_contract(policy.replace(token, "", 1))
+        with self.assertRaises(ValueError):
+            require_contract(policy.replace("currently disabled", "currently enabled", 1))
 
 
 class ImmutableMetadataTests(unittest.TestCase):
@@ -1340,6 +1395,11 @@ class GitTransitionTests(unittest.TestCase):
         self.git(root, "branch", "-m", "main")
         return self.commit(root, None, "initial")
 
+    def remove_version(self, root: Path, marker: str) -> str:
+        for name in ("VERSION", "CHANGELOG.md"):
+            (root / name).unlink()
+        return self.commit(root, None, marker)
+
     def assert_fixture_git_is_quiescent(self, root: Path) -> None:
         expected = {
             "maintenance.auto": "false",
@@ -1441,7 +1501,71 @@ class GitTransitionTests(unittest.TestCase):
             with self.assertRaises(MODULE.ContractError):
                 MODULE.validate_transition(root, initial, double_head, first_parent=True)
 
-    def test_main_rejects_merge_ranges_while_pr_endpoint_allows_squashable_history(self):
+    def test_squash_and_every_rebase_bump_position_share_window_semantics(self):
+        for before, after in ((0, 0), (0, 2), (2, 0), (2, 2)):
+            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                initial = self.initialize(root)
+                for index in range(before):
+                    self.commit(root, None, f"content before {index}")
+                boundary_parent = self.git(root, "rev-parse", "HEAD")
+                self.commit(root, "0.1.0", "exact patch boundary")
+                for index in range(after):
+                    self.commit(root, None, f"content after {index}")
+                head = self.git(root, "rev-parse", "HEAD")
+                for first_parent in (False, True):
+                    self.assertEqual(
+                        MODULE.validate_transition(
+                            root, initial, head, first_parent=first_parent
+                        ),
+                        MODULE.Intent(head, MODULE.Version(0, 1, 0)),
+                    )
+                window = MODULE.discover_transition_window(root, head)
+                self.assertEqual(window.base_sha, boundary_parent)
+                self.assertEqual(window.intent.source_sha, head)
+                self.assertEqual(window.intent.tag, "v0.1.0")
+
+    def test_skip_and_reversion_histories_fail_main_pr_and_window_together(self):
+        builders = (
+            lambda root: (
+                self.commit(root, "0.1.1", "skip transient required patch"),
+                self.commit(root, "0.1.0", "revert skip to final endpoint"),
+            )[-1],
+            lambda root: (
+                self.commit(root, "0.1.0", "premature required patch"),
+                self.remove_version(root, "revert VERSION and changelog"),
+                self.commit(root, "0.1.0", "reintroduce endpoint patch"),
+            )[-1],
+        )
+        for index, build in enumerate(builders):
+            with self.subTest(history_mutant=index), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                initial = self.initialize(root)
+                head = build(root)
+                for first_parent in (False, True):
+                    with self.assertRaises(MODULE.ContractError):
+                        MODULE.validate_transition(
+                            root, initial, head, first_parent=first_parent
+                        )
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.discover_transition_window(root, head)
+
+    def test_clean_range_on_poisoned_prefix_cannot_pass_main_before_publisher_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.initialize(root)
+            self.commit(root, "0.1.0", "historical premature patch")
+            base = self.remove_version(root, "historical VERSION reversion")
+            head = self.commit(root, "0.1.0", "locally clean endpoint patch")
+            for first_parent in (False, True):
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(
+                        root, base, head, first_parent=first_parent
+                    )
+            with self.assertRaises(MODULE.ContractError):
+                MODULE.discover_transition_window(root, head)
+
+    def test_pr_and_main_reject_merge_ranges_that_cannot_guarantee_rebase_liveness(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             initial = self.initialize(root)
@@ -1464,12 +1588,11 @@ class GitTransitionTests(unittest.TestCase):
                 "merge side",
             )
             head = self.commit(root, "0.1.1", "final bump")
-            self.assertEqual(
-                MODULE.validate_transition(root, base, head, first_parent=False).tag,
-                "v0.1.1",
-            )
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.validate_transition(root, base, head, first_parent=True)
+            for first_parent in (False, True):
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(
+                        root, base, head, first_parent=first_parent
+                    )
 
             self.git(root, "checkout", "-q", "-b", "stale", initial)
             stale = self.commit(root, "0.1.2", "stale")

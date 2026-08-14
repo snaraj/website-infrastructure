@@ -50,3 +50,27 @@ current head.
 
 If merge precedes review, mark the result POST-MERGE AUDIT. Findings become
 linked follow-up issues/PRs; never relabel the audit as pre-merge approval.
+
+## Main Worker Ready receipt
+
+After one exact-head `APPROVE`, have a coordinator context distinct from both
+author and reviewer perform one bounded sanity pass over architecture, merge
+order, authority, owner-observed settings, base freshness, and required checks.
+Do not repeat code review and do not contact a named worker automatically. Post
+one normal comment with these exact standalone lines:
+
+```text
+HEAD: 0123456789abcdef0123456789abcdef01234567
+ROLE: MAIN-WORKER
+VERDICT: PASS
+SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks
+
+- Coordinator context (Main Worker)
+```
+
+Use `VERDICT: BLOCK` to record a failed pass; it cannot satisfy Ready. Validate
+the Ready receipt with `scripts/validate_review_receipt.py --receipt-kind
+main-worker --resource-kind pull-request --required-verdict PASS --head <head>
+--author-context <author> --reviewer-context <reviewer> <receipt>`. Any head
+change invalidates it. The validator proves closed text shape, not context
+independence, settings truth, Ready authority, or merge authority.

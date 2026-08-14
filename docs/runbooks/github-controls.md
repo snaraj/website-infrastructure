@@ -63,6 +63,8 @@ repository owner configures and then observes this exact server state:
 
 - GitHub immutable releases enabled before the first affected Release is
   published; enabling the control later does not retrofit an existing Release;
+- GitHub Private Vulnerability Reporting enabled so `SECURITY.md` names a
+  private intake that the repository actually provides;
 - pull request, linear history, and signed commits required, with no bypass
   actors;
 - strict required checks `dependency-review` and
@@ -76,16 +78,16 @@ repository owner configures and then observes this exact server state:
   requests; and
 - secret scanning and push protection enabled.
 
-Read-only observation on 2026-08-13 found immutable releases disabled, no
-required-status-check rule, an update restriction, and an always-on
-repository-role bypass. It also found Actions SHA pinning disabled. The
-authoritative preflight therefore returns `DENY`. Actions currently allow all
-publishers even though every checked-in reference is pinned; selected-action
-allowlisting is a separate owner-applied hardening decision. Secret scanning
-and push protection are enabled, while non-provider-pattern and validity checks
-remain disabled residuals. Those optional residuals are recorded rather than
-misrepresented as enforced. None of this grants an agent permission to change
-settings.
+Read-only observation on 2026-08-13 found immutable releases and Private
+Vulnerability Reporting disabled, no required-status-check rule, an update
+restriction, and an always-on repository-role bypass. It also found Actions
+SHA pinning disabled. The authoritative preflight therefore returns `DENY`.
+Actions currently allow all publishers even though every checked-in reference
+is pinned; selected-action allowlisting is a separate owner-applied hardening
+decision. Secret scanning and push protection are enabled, while
+non-provider-pattern and validity checks remain disabled residuals. Those
+optional residuals are recorded rather than misrepresented as enforced. None
+of this grants an agent permission to change settings.
 
 Record only those value-level observations, never actor or ruleset identifiers,
 in an untracked JSON receipt with this closed shape:
@@ -100,6 +102,7 @@ in an untracked JSON receipt with this closed shape:
   "default_workflow_permissions": "read",
   "actions_can_approve_pull_request_reviews": false,
   "immutable_releases": true,
+  "private_vulnerability_reporting": true,
   "merge_methods": ["rebase", "squash"],
   "required_status_checks": [
     {"context": "dependency-review", "integration_id": 15368},
@@ -138,14 +141,16 @@ sha256sum "${receipt}"
 
 The preflight uses `gh api --method GET` only with REST API version
 `2026-03-10`; it exhaustively reads the ruleset inventory plus the repository,
-immutable-release, Actions policy, workflow-token policy, security-analysis,
-and exact active repository-owned `only-me-merge` records.
+`/immutable-releases`, `/private-vulnerability-reporting`, Actions policy,
+workflow-token policy, security-analysis, and exact active repository-owned
+`only-me-merge` records.
 An authentication, pagination, schema, missing, extra, duplicated,
 foreign-integration, inverted, update-restricted, or bypass-bearing result emits
 no receipt. A successful receipt is necessary but not sufficient for Ready:
-exact-head CI, current base, resolved findings, and a fresh independent approval
-remain required. The receipt grants no settings-write or merge authority; only
-the coordinator changes Draft/Ready and only the repository owner merges.
+exact-head CI, current base, resolved findings, a fresh independent approval,
+and the bounded Main Worker `PASS` receipt remain required. The receipt grants
+no settings-write or merge authority; only the coordinator changes Draft/Ready
+and only the repository owner merges.
 
 The publication transaction rechecks the same immutable-release endpoint before
 creating a tag. It then accepts a GitHub Release only when authoritative REST

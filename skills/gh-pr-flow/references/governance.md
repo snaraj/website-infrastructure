@@ -39,7 +39,9 @@ label state nor a review receipt alone makes a PR Ready.
 
 - **Author:** owns one branch, implementation, repairs, evidence, metadata.
 - **Reviewer:** independent context, read-only experiments, exact-head receipt.
-- **Coordinator:** re-queries mutable state, resolves ordering, may flip Ready.
+- **Coordinator/Main Worker:** re-queries mutable state, performs the bounded
+  exact-head architecture/order/authority/settings sanity gate, and may flip
+  Ready only after its separate `PASS` receipt.
 - **Owner:** sole merge authority and policy exception authority.
 
 Do not imply separate GitHub users when agents operate through the owner's

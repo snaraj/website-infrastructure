@@ -43,7 +43,8 @@ make check-fast / make check / make coverage / make pre-push-security -->
 
 - `requires-review` applied only after author completion: pending/yes
 - Independent normal-comment verdict bound to exact head: pending
-- Main Worker bounded architecture sanity review: pending
+- Main Worker receipt (`HEAD`, `ROLE: MAIN-WORKER`, `VERDICT: PASS`, closed
+  scope) from a context distinct from author/reviewer: pending
 - Base freshness and successful required checks re-verified before Ready: pending
 
 ## Security

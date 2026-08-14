@@ -9,21 +9,28 @@ This folder is where we make “prove it first” real: none of these files is p
 standard-library-only policy shared by pull-request CI and the success-only
 main publisher: it binds the exact workflow-run identity and final SHA,
 accepts either one squash commit or one merge-free multi-commit rebase range
-with one endpoint patch, verifies annotated tag and immutable zero-asset
-GitHub-Actions Release records through authoritative REST state, and derives a
-closed value-only protected-main and immutable-release receipt through GET-only
-GitHub queries without deploying or changing repository settings.
+whose every intermediate `VERSION` state is monotonic and contains exactly one
+patch boundary, discovers publisher recovery from that same complete-history
+state machine, verifies annotated tag and immutable zero-asset GitHub-Actions
+Release records through authoritative REST state, and derives a closed
+value-only protected-main, immutable-release, and private-reporting receipt
+through GET-only GitHub queries without deploying or changing repository
+settings.
 [`ci/publish-platform-release.sh`](./ci/publish-platform-release.sh) is the
 directly executable, transaction-tested tag/Release implementation used by the
 success-only publisher; it rechecks immutable-release state before mutation and
 converges both create races only onto exact REST records.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
-validates the portable exact-PR-head adversarial-review receipt shape and
-rejects issue resources, while
+validates the portable exact-PR-head adversarial-review receipt and distinct
+bounded Main Worker Ready-receipt shapes and rejects issue resources, while
 [`validate_destructive_test_ledger.py`](./validate_destructive_test_ledger.py)
-validates the bounded prestate-to-poststate evidence shape for a separately
-authorized disposable-workload experiment; neither validator authenticates an
-agent identity, grants a live window, or performs a mutation.
+validates the closed positive kind allowlist and bounded prestate-to-poststate
+evidence shape for a separately authorized disposable-workload experiment.
+[`ci/destructive_transaction_fixture.py`](./ci/destructive_transaction_fixture.py)
+proves the repeated/mixed-signal guard and durable recovery journal only inside
+a caller-provided disposable sentinel root. None of these tools authenticates
+an agent identity, grants a live window, contacts a cluster, or performs a live
+mutation.
 [`generate_encryption_config.py`](./generate_encryption_config.py) is the
 no-display writer used by the protected Pi API-encryption ceremony. It accepts
 no key through arguments or environment, uses the operating-system CSPRNG,
