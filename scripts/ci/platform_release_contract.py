@@ -20,13 +20,60 @@ WORKFLOW_NAME = "Pull request"
 WORKFLOW_PATH = ".github/workflows/pull-request.yml"
 GITHUB_API_VERSION = "2026-03-10"
 EXPECTED_MAIN_RULESET = "only-me-merge"
+EXPECTED_RELEASE_TAG_RULESET = "immutable-platform-release-tags"
+EXPECTED_RELEASE_TAG_PATTERN = "refs/tags/v*.*.*"
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
 REQUIRED_CHECKS = (
     "dependency-review",
     "repository-and-infrastructure",
 )
-RELEASE_AUTHOR_LOGIN = "github-actions[bot]"
-RELEASE_AUTHOR_ID = 41898282
+MAIN_CI_REQUIRED_STEPS = (
+    "Check out repository",
+    "Enforce the platform release transition",
+    "Install checksum-verified tools",
+    "Validate workflows",
+    "Validate Python policy tooling",
+    "Enforce the self-hosted coverage contract",
+    "Check shell",
+    "Scan current tree for secrets",
+    "Render and validate Helm and Kubernetes",
+    "Prove render determinism and validate the assurance ledger",
+    "Test staged Kyverno policies",
+    "Validate OpenTofu without credentials",
+    "Scan dependencies and full-tree secrets",
+    "Scan IaC and configuration",
+)
+MAIN_CI_PUSH_SKIPPED_STEPS = ("Scan immutable pull-request history",)
+MAIN_CI_EXACT_STEPS = (
+    ("Set up job", "success"),
+    *((name, "success") for name in MAIN_CI_REQUIRED_STEPS[:3]),
+    *((name, "skipped") for name in MAIN_CI_PUSH_SKIPPED_STEPS),
+    *((name, "success") for name in MAIN_CI_REQUIRED_STEPS[3:]),
+    ("Post Check out repository", "success"),
+    ("Complete job", "success"),
+)
+CODEQL_WORKFLOW_NAME = "CodeQL"
+CODEQL_WORKFLOW_PATH = ".github/workflows/codeql.yml"
+CODEQL_JOB_NAME = "analyze (python, none)"
+CODEQL_REQUIRED_STEPS = (
+    "Check out repository",
+    "Initialize CodeQL",
+    "Analyze",
+)
+CODEQL_EXACT_STEPS = (
+    ("Set up job", "success"),
+    *((name, "success") for name in CODEQL_REQUIRED_STEPS),
+    ("Post Analyze", "success"),
+    ("Post Initialize CodeQL", "success"),
+    ("Post Check out repository", "success"),
+    ("Complete job", "success"),
+)
+RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
+RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
+RECOVERY_TAG = "v0.1.0"
+PREFLIGHT_APP_ID_VARIABLE = "PLATFORM_RELEASE_APP_ID"
+PREFLIGHT_APP_PRIVATE_KEY_SECRET = "PLATFORM_RELEASE_APP_PRIVATE_KEY"
+PREFLIGHT_ENVIRONMENT = "platform-release"
 
 
 class ContractError(ValueError):
@@ -267,6 +314,19 @@ def discover_transition_window(repository: Path, head_sha: str) -> TransitionWin
     return TransitionWindow(base_sha, Intent(head_sha, head_version))
 
 
+def validate_recovery_release(repository: Path, source_sha: str, tag: str) -> Intent:
+    """Bind the sole pre-App release backlog entry to its immutable history."""
+    source_sha = require_sha(source_sha, "recovery source SHA")
+    if source_sha != RECOVERY_SOURCE_SHA or tag != RECOVERY_TAG:
+        raise ContractError("release recovery source or tag is not the exact frozen backlog")
+    window = discover_transition_window(repository, source_sha)
+    if window.base_sha != RECOVERY_BASE_SHA:
+        raise ContractError("release recovery base is not the exact protected predecessor")
+    if window.intent.source_sha != RECOVERY_SOURCE_SHA or window.intent.tag != RECOVERY_TAG:
+        raise ContractError("release recovery history does not reproduce the frozen intent")
+    return window.intent
+
+
 def plan_workflow_run(event: Mapping[str, object], expected_repository: str) -> str:
     repository = event.get("repository")
     run = event.get("workflow_run")
@@ -342,6 +402,320 @@ def validate_immutable_settings(settings: Mapping[str, object]) -> None:
         raise ContractError("immutable-release owner-enforcement state must be boolean")
 
 
+def build_immutable_settings_receipt(
+    settings: Mapping[str, object],
+    repository: str,
+    source_sha: str,
+    run_id: str,
+    run_attempt: str,
+) -> Mapping[str, object]:
+    """Return a public, value-only receipt after current-settings validation."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ContractError("repository identity must be owner/name")
+    source_sha = require_sha(source_sha, "settings source SHA")
+    if not run_id.isascii() or not run_id.isdecimal() or int(run_id) <= 0:
+        raise ContractError("settings run ID must be one positive decimal integer")
+    if (
+        not run_attempt.isascii()
+        or not run_attempt.isdecimal()
+        or int(run_attempt) <= 0
+    ):
+        raise ContractError("settings run attempt must be one positive decimal integer")
+    validate_immutable_settings(settings)
+    receipt: dict[str, object] = {
+        "immutable_releases_enabled": True,
+        "repository": repository,
+        "run_attempt": int(run_attempt),
+        "run_id": int(run_id),
+        "schema": "platform-release-immutable-settings-v1",
+        "source_sha": source_sha,
+        "status": "PASS",
+    }
+    return receipt
+
+
+def build_main_ci_jobs_receipt(
+    jobs_record: Mapping[str, object],
+    codeql_runs_record: Mapping[str, object],
+    codeql_jobs_record: Mapping[str, object],
+    repository: str,
+    run_id: str,
+    run_attempt: str,
+    source_sha: str,
+) -> Mapping[str, object]:
+    """Prove the exact protected-main jobs and ordered step inventory."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ContractError("jobs repository identity must be owner/name")
+    source_sha = require_sha(source_sha, "jobs source SHA")
+    if not run_id.isascii() or not run_id.isdecimal() or int(run_id) <= 0:
+        raise ContractError("jobs run ID must be one positive decimal integer")
+    if (
+        not run_attempt.isascii()
+        or not run_attempt.isdecimal()
+        or int(run_attempt) <= 0
+    ):
+        raise ContractError("jobs run attempt must be one positive decimal integer")
+    if set(jobs_record) != {"jobs", "total_count"}:
+        raise ContractError("Actions jobs response fields are missing or foreign")
+    total_count = jobs_record.get("total_count")
+    jobs = _array(jobs_record.get("jobs"), "Actions jobs")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or total_count != 2
+        or len(jobs) != 2
+    ):
+        raise ContractError("protected-main run must expose exactly two jobs")
+
+    by_name: dict[str, Mapping[str, object]] = {}
+    for value in jobs:
+        job = _object(value, "Actions job")
+        name = job.get("name")
+        if not isinstance(name, str) or not name or name in by_name:
+            raise ContractError("Actions job names must be non-empty and unique")
+        if (
+            job.get("run_id") != int(run_id)
+            or job.get("run_attempt") != int(run_attempt)
+            or job.get("head_sha") != source_sha
+            or job.get("head_branch") != "main"
+            or job.get("workflow_name") != WORKFLOW_NAME
+            or job.get("status") != "completed"
+        ):
+            raise ContractError("Actions job identity or completed-run binding is not exact")
+        by_name[name] = job
+    if set(by_name) != set(REQUIRED_CHECKS):
+        raise ContractError("Actions job inventory is missing, duplicate, or foreign")
+
+    repository_job = by_name["repository-and-infrastructure"]
+    if repository_job.get("conclusion") != "success":
+        raise ContractError("required repository job did not conclude success")
+    step_conclusions: dict[str, str] = {}
+    ordered_steps: list[tuple[str, str]] = []
+    for value in _array(repository_job.get("steps"), "repository job steps"):
+        step = _object(value, "repository job step")
+        name = step.get("name")
+        conclusion = step.get("conclusion")
+        if not isinstance(name, str) or not name or name in step_conclusions:
+            raise ContractError("repository job step names must be non-empty and unique")
+        if not isinstance(conclusion, str) or not conclusion:
+            raise ContractError("repository job step conclusion is missing")
+        step_conclusions[name] = conclusion
+        ordered_steps.append((name, conclusion))
+    if tuple(ordered_steps) != MAIN_CI_EXACT_STEPS:
+        raise ContractError(
+            "protected-main step order, inventory, or conclusions are not exact"
+        )
+
+    dependency_job = by_name["dependency-review"]
+    if dependency_job.get("conclusion") != "skipped":
+        raise ContractError("dependency-review must be skipped for a protected-main push")
+    dependency_steps = _array(dependency_job.get("steps"), "dependency-review steps")
+    if dependency_steps != []:
+        raise ContractError("skipped dependency-review must expose no steps")
+
+    codeql_run = classify_codeql_run(codeql_runs_record, source_sha)
+    if codeql_run is None:
+        raise ContractError("exact-SHA CodeQL main run is absent or incomplete")
+    codeql_run_id, codeql_run_attempt = codeql_run
+    if not codeql_jobs_ready(
+        codeql_jobs_record,
+        run_id=codeql_run_id,
+        run_attempt=codeql_run_attempt,
+        source_sha=source_sha,
+    ):
+        raise ContractError("exact-SHA CodeQL main job is absent or incomplete")
+
+    return {
+        "codeql": "success",
+        "dependency_review": "skipped-on-push",
+        "repository": repository,
+        "repository_and_infrastructure": "success",
+        "run_attempt": int(run_attempt),
+        "run_id": int(run_id),
+        "schema": "platform-release-main-ci-jobs-v1",
+        "source_sha": source_sha,
+        "status": "PASS",
+    }
+
+
+def classify_codeql_run(
+    runs_record: Mapping[str, object], source_sha: str
+) -> tuple[int, int] | None:
+    """Return the one exact completed CodeQL run ID, or None while pending."""
+    source_sha = require_sha(source_sha, "CodeQL source SHA")
+    if set(runs_record) != {"total_count", "workflow_runs"}:
+        raise ContractError("CodeQL run response fields are missing or foreign")
+    total_count = runs_record.get("total_count")
+    runs = _array(runs_record.get("workflow_runs"), "CodeQL workflow runs")
+    if isinstance(total_count, bool) or not isinstance(total_count, int):
+        raise ContractError("CodeQL run count must be an integer")
+    if total_count == 0 and runs == []:
+        return None
+    if total_count != 1 or len(runs) != 1:
+        raise ContractError("expected exactly one CodeQL push run for the source SHA")
+    run = _object(runs[0], "CodeQL workflow run")
+    run_id = run.get("id")
+    run_attempt = run.get("run_attempt")
+    if (
+        isinstance(run_id, bool)
+        or not isinstance(run_id, int)
+        or run_id <= 0
+        or isinstance(run_attempt, bool)
+        or not isinstance(run_attempt, int)
+        or run_attempt <= 0
+        or run.get("name") != CODEQL_WORKFLOW_NAME
+        or run.get("path") != CODEQL_WORKFLOW_PATH
+        or run.get("event") != "push"
+        or run.get("head_branch") != "main"
+        or run.get("head_sha") != source_sha
+    ):
+        raise ContractError("CodeQL run identity or protected-main binding is not exact")
+    status = run.get("status")
+    conclusion = run.get("conclusion")
+    if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
+        if conclusion is not None:
+            raise ContractError("incomplete CodeQL run has a foreign conclusion")
+        return None
+    if status != "completed" or conclusion != "success":
+        raise ContractError("CodeQL run did not complete successfully")
+    return run_id, run_attempt
+
+
+def codeql_jobs_ready(
+    jobs_record: Mapping[str, object], *, run_id: int, run_attempt: int, source_sha: str
+) -> bool:
+    """Validate the sole exact CodeQL job and ordered step inventory."""
+    source_sha = require_sha(source_sha, "CodeQL job source SHA")
+    if (
+        isinstance(run_id, bool)
+        or not isinstance(run_id, int)
+        or run_id <= 0
+        or isinstance(run_attempt, bool)
+        or not isinstance(run_attempt, int)
+        or run_attempt <= 0
+    ):
+        raise ContractError("CodeQL job run identity is not positive integers")
+    if set(jobs_record) != {"jobs", "total_count"}:
+        raise ContractError("CodeQL jobs response fields are missing or foreign")
+    total_count = jobs_record.get("total_count")
+    jobs = _array(jobs_record.get("jobs"), "CodeQL jobs")
+    if isinstance(total_count, bool) or not isinstance(total_count, int):
+        raise ContractError("CodeQL job count must be an integer")
+    if total_count == 0 and jobs == []:
+        return False
+    if total_count != 1 or len(jobs) != 1:
+        raise ContractError("expected exactly one CodeQL job for the source SHA")
+    job = _object(jobs[0], "CodeQL job")
+    if (
+        job.get("name") != CODEQL_JOB_NAME
+        or job.get("run_id") != run_id
+        or job.get("run_attempt") != run_attempt
+        or job.get("head_sha") != source_sha
+        or job.get("head_branch") != "main"
+        or job.get("workflow_name") != CODEQL_WORKFLOW_NAME
+    ):
+        raise ContractError("CodeQL job identity or source binding is not exact")
+    status = job.get("status")
+    conclusion = job.get("conclusion")
+    if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
+        if conclusion is not None:
+            raise ContractError("incomplete CodeQL job has a foreign conclusion")
+        return False
+    if status != "completed" or conclusion != "success":
+        raise ContractError("CodeQL job did not complete successfully")
+    conclusions: dict[str, str] = {}
+    ordered_steps: list[tuple[str, str]] = []
+    for value in _array(job.get("steps"), "CodeQL job steps"):
+        step = _object(value, "CodeQL job step")
+        name = step.get("name")
+        conclusion = step.get("conclusion")
+        if not isinstance(name, str) or not name or name in conclusions:
+            raise ContractError("CodeQL step names must be non-empty and unique")
+        if not isinstance(conclusion, str) or not conclusion:
+            raise ContractError("CodeQL step conclusion is missing")
+        conclusions[name] = conclusion
+        ordered_steps.append((name, conclusion))
+    if tuple(ordered_steps) != CODEQL_EXACT_STEPS:
+        raise ContractError("CodeQL step order, inventory, or conclusions are not exact")
+    return True
+
+
+def validate_app_provisioning_receipt(
+    receipt: Mapping[str, object], repository: str
+) -> None:
+    """Validate the value-only, independently observed release-App authority."""
+    fields = {
+        "app_identity_binding_exact",
+        "environment_branch_policies",
+        "environment_custom_branch_policies",
+        "environment_name",
+        "environment_private_key_secret_name",
+        "environment_private_key_secret_present",
+        "environment_protected_branches",
+        "environment_required_reviewers",
+        "environment_variable_name",
+        "environment_wait_timer_minutes",
+        "immutable_releases",
+        "installation_account",
+        "installation_events",
+        "installation_permissions",
+        "installation_repositories",
+        "installation_repository_selection",
+        "installation_suspended",
+        "repository",
+    }
+    if set(receipt) != fields:
+        raise ContractError("release-App receipt fields are missing or foreign")
+    if receipt.get("repository") != repository:
+        raise ContractError("release-App receipt repository is not exact")
+    owner, separator, _name = repository.partition("/")
+    if not separator or receipt.get("installation_account") != owner:
+        raise ContractError("release-App installation account is not the repository owner")
+    if receipt.get("environment_name") != PREFLIGHT_ENVIRONMENT:
+        raise ContractError("release-App environment name is not exact")
+    reviewers = receipt.get("environment_required_reviewers")
+    wait_minutes = receipt.get("environment_wait_timer_minutes")
+    if (
+        receipt.get("environment_protected_branches") is not False
+        or receipt.get("environment_custom_branch_policies") is not True
+        or receipt.get("environment_branch_policies")
+        != [{"name": "main", "type": "branch"}]
+        or isinstance(reviewers, bool)
+        or not isinstance(reviewers, int)
+        or reviewers != 0
+        or isinstance(wait_minutes, bool)
+        or not isinstance(wait_minutes, int)
+        or wait_minutes != 0
+    ):
+        raise ContractError("release-App environment is not unattended protected-main only")
+    if receipt.get("environment_variable_name") != PREFLIGHT_APP_ID_VARIABLE:
+        raise ContractError("release-App ID variable name is not exact")
+    if (
+        receipt.get("environment_private_key_secret_name")
+        != PREFLIGHT_APP_PRIVATE_KEY_SECRET
+        or receipt.get("environment_private_key_secret_present") is not True
+    ):
+        raise ContractError("release-App private-key secret-name receipt is not exact")
+    if receipt.get("app_identity_binding_exact") is not True:
+        raise ContractError("release-App variable and installation identity are not exact")
+    if receipt.get("installation_repository_selection") != "selected":
+        raise ContractError("release-App installation must use selected repositories")
+    repositories = receipt.get("installation_repositories")
+    if repositories != [repository]:
+        raise ContractError("release-App installation must select only the exact repository")
+    if receipt.get("installation_permissions") != {
+        "administration": "read",
+        "metadata": "read",
+    }:
+        raise ContractError("release-App installation permissions are not least-authority")
+    if receipt.get("installation_events") != []:
+        raise ContractError("release-App installation must subscribe to no events")
+    if receipt.get("installation_suspended") is not False:
+        raise ContractError("release-App installation must be active")
+    if receipt.get("immutable_releases") is not True:
+        raise ContractError("release-App token did not prove immutable releases enabled")
+
+
 def validate_private_vulnerability_reporting(settings: Mapping[str, object]) -> None:
     """Require the authoritative private vulnerability reporting control."""
     if set(settings) != {"enabled"}:
@@ -367,6 +741,20 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         "immutable_releases",
         "merge_methods",
         "private_vulnerability_reporting",
+        "active_release_tag_ruleset_count",
+        "release_tag_bypass_actors",
+        "release_tag_creation_restricted",
+        "release_tag_deletions_allowed",
+        "release_tag_excludes",
+        "release_tag_includes",
+        "release_tag_non_fast_forward_allowed",
+        "release_tag_pattern",
+        "release_tag_rule_types",
+        "release_tag_ruleset",
+        "release_tag_ruleset_active",
+        "release_tag_ruleset_repository_owned",
+        "release_tag_ruleset_target",
+        "release_tag_updates_allowed",
         "repository",
         "require_linear_history",
         "require_pull_request",
@@ -400,6 +788,11 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         ("actions_can_approve_pull_request_reviews", False),
         ("immutable_releases", True),
         ("private_vulnerability_reporting", True),
+        ("release_tag_ruleset_active", True),
+        ("release_tag_creation_restricted", False),
+        ("release_tag_updates_allowed", False),
+        ("release_tag_deletions_allowed", False),
+        ("release_tag_non_fast_forward_allowed", False),
         ("strict_status_checks", True),
         ("require_pull_request", True),
         ("require_linear_history", True),
@@ -421,6 +814,28 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
     bypass = receipt.get("bypass_actors")
     if bypass != []:
         raise ContractError("protected-main rules must have no bypass actors")
+    if receipt.get("release_tag_ruleset") != EXPECTED_RELEASE_TAG_RULESET:
+        raise ContractError("release-tag ruleset identity is not exact")
+    if receipt.get("release_tag_pattern") != EXPECTED_RELEASE_TAG_PATTERN:
+        raise ContractError("release-tag ruleset pattern is not exact")
+    if receipt.get("release_tag_bypass_actors") != []:
+        raise ContractError("release-tag rules must have no bypass actors")
+    if receipt.get("active_release_tag_ruleset_count") != 1:
+        raise ContractError("release-tag ruleset count is not exact")
+    if receipt.get("release_tag_ruleset_repository_owned") is not True:
+        raise ContractError("release-tag ruleset is not repository-owned")
+    if receipt.get("release_tag_ruleset_target") != "tag":
+        raise ContractError("release-tag ruleset target is not exact")
+    if receipt.get("release_tag_includes") != [EXPECTED_RELEASE_TAG_PATTERN]:
+        raise ContractError("release-tag include inventory is not exact")
+    if receipt.get("release_tag_excludes") != []:
+        raise ContractError("release-tag exclusions must be empty")
+    if receipt.get("release_tag_rule_types") != [
+        "deletion",
+        "non_fast_forward",
+        "update",
+    ]:
+        raise ContractError("release-tag rule inventory is not exact")
 
 
 def _select_main_ruleset_id(summaries: object, repository: str) -> int:
@@ -444,6 +859,98 @@ def _select_main_ruleset_id(summaries: object, repository: str) -> int:
     return ruleset_id
 
 
+def _select_release_tag_ruleset_id(summaries: object, repository: str) -> int:
+    active_tag_rulesets: list[Mapping[str, object]] = []
+    for value in _array(summaries, "repository rulesets"):
+        summary = _object(value, "repository ruleset summary")
+        if summary.get("target") == "tag" and summary.get("enforcement") == "active":
+            active_tag_rulesets.append(summary)
+    if len(active_tag_rulesets) != 1:
+        raise ContractError(
+            "expected exactly one active release-tag ruleset across all sources"
+        )
+    candidate = active_tag_rulesets[0]
+    if (
+        candidate.get("name") != EXPECTED_RELEASE_TAG_RULESET
+        or candidate.get("source_type") != "Repository"
+        or candidate.get("source") != repository
+    ):
+        raise ContractError("active release-tag ruleset is not the exact repository rule")
+    ruleset_id = candidate.get("id")
+    if isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0:
+        raise ContractError("release-tag ruleset has no authoritative numeric ID")
+    return ruleset_id
+
+
+def _release_tag_ruleset_receipt(
+    ruleset_id: int,
+    ruleset_record: Mapping[str, object],
+    repository: str,
+) -> dict[str, object]:
+    """Validate creation-permitting, pre-Release immutable tag protection."""
+    if (
+        ruleset_record.get("id") != ruleset_id
+        or ruleset_record.get("name") != EXPECTED_RELEASE_TAG_RULESET
+        or ruleset_record.get("target") != "tag"
+        or ruleset_record.get("source_type") != "Repository"
+        or ruleset_record.get("source") != repository
+        or ruleset_record.get("enforcement") != "active"
+    ):
+        raise ContractError("release-tag ruleset identity or enforcement is not exact")
+    conditions = _object(ruleset_record.get("conditions"), "release-tag conditions")
+    if set(conditions) != {"ref_name"}:
+        raise ContractError("release-tag conditions are missing or foreign")
+    ref_name = _object(conditions.get("ref_name"), "release-tag ref condition")
+    if (
+        set(ref_name) != {"exclude", "include"}
+        or ref_name.get("exclude") != []
+        or ref_name.get("include") != [EXPECTED_RELEASE_TAG_PATTERN]
+    ):
+        raise ContractError("release-tag ruleset must target the exact conservative v*.*.* namespace")
+    bypass = _array(ruleset_record.get("bypass_actors"), "release-tag bypass actors")
+    if bypass:
+        raise ContractError("release-tag ruleset must have no bypass actors")
+
+    rules_by_type: dict[str, Mapping[str, object]] = {}
+    for value in _array(ruleset_record.get("rules"), "release-tag rules"):
+        rule = _object(value, "release-tag rule")
+        rule_type = rule.get("type")
+        if not isinstance(rule_type, str) or not rule_type or rule_type in rules_by_type:
+            raise ContractError("release-tag rule types must be non-empty and unique")
+        rules_by_type[rule_type] = rule
+    if set(rules_by_type) != {"update", "deletion", "non_fast_forward"}:
+        raise ContractError(
+            "release-tag rules must allow creation and forbid update/deletion/force-update"
+        )
+    update = rules_by_type["update"]
+    if set(update) != {"type", "parameters"}:
+        raise ContractError("release-tag update rule fields are missing or foreign")
+    update_parameters = _object(
+        update.get("parameters"), "release-tag update parameters"
+    )
+    if update_parameters != {"update_allows_fetch_and_merge": False}:
+        raise ContractError("release-tag update rule must allow no update escape")
+    for rule_type in ("deletion", "non_fast_forward"):
+        if set(rules_by_type[rule_type]) != {"type"}:
+            raise ContractError(f"release-tag {rule_type} rule has foreign parameters")
+    return {
+        "active_release_tag_ruleset_count": 1,
+        "release_tag_ruleset": EXPECTED_RELEASE_TAG_RULESET,
+        "release_tag_ruleset_active": True,
+        "release_tag_ruleset_repository_owned": True,
+        "release_tag_ruleset_target": "tag",
+        "release_tag_pattern": EXPECTED_RELEASE_TAG_PATTERN,
+        "release_tag_includes": [EXPECTED_RELEASE_TAG_PATTERN],
+        "release_tag_excludes": [],
+        "release_tag_creation_restricted": False,
+        "release_tag_updates_allowed": False,
+        "release_tag_deletions_allowed": False,
+        "release_tag_non_fast_forward_allowed": False,
+        "release_tag_bypass_actors": [],
+        "release_tag_rule_types": ["deletion", "non_fast_forward", "update"],
+    }
+
+
 def build_settings_receipt(
     repository: str,
     repository_record: Mapping[str, object],
@@ -453,6 +960,8 @@ def build_settings_receipt(
     workflow_permissions_record: Mapping[str, object],
     ruleset_id: int,
     ruleset_record: Mapping[str, object],
+    tag_ruleset_id: int,
+    tag_ruleset_record: Mapping[str, object],
 ) -> dict[str, object]:
     """Derive and validate a privacy-bounded receipt from authoritative REST."""
     if (
@@ -591,6 +1100,13 @@ def build_settings_receipt(
             "secret_scanning_validity_checks"
         ),
     }
+    receipt.update(
+        _release_tag_ruleset_receipt(
+            tag_ruleset_id,
+            tag_ruleset_record,
+            repository,
+        )
+    )
     validate_settings_receipt(receipt, repository)
     return receipt
 
@@ -652,11 +1168,19 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         _github_api_get(f"repos/{repository}/actions/permissions/workflow"),
         "default workflow permission settings",
     )
-    summaries = _github_api_get(f"repos/{repository}/rulesets", paginate=True)
+    summaries = _github_api_get(
+        f"repos/{repository}/rulesets?includes_parents=true&per_page=100",
+        paginate=True,
+    )
     ruleset_id = _select_main_ruleset_id(summaries, repository)
+    tag_ruleset_id = _select_release_tag_ruleset_id(summaries, repository)
     ruleset_record = _object(
         _github_api_get(f"repos/{repository}/rulesets/{ruleset_id}"),
         "protected-main ruleset",
+    )
+    tag_ruleset_record = _object(
+        _github_api_get(f"repos/{repository}/rulesets/{tag_ruleset_id}"),
+        "release-tag ruleset",
     )
     return build_settings_receipt(
         repository,
@@ -667,6 +1191,8 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         workflow_permissions_record,
         ruleset_id,
         ruleset_record,
+        tag_ruleset_id,
+        tag_ruleset_record,
     )
 
 
@@ -706,6 +1232,12 @@ def validate_tag_record(
         raise ContractError("annotated tag target is not the exact source commit")
     if tag_record.get("message") != message:
         raise ContractError("annotated tag message is not exact")
+    if (
+        tagger_name != "github-actions[bot]"
+        or tagger_email
+        != "41898282+github-actions[bot]@users.noreply.github.com"
+    ):
+        raise ContractError("expected annotated tagger is not the GitHub Actions bot")
     tagger = _object(tag_record.get("tagger"), "annotated tagger")
     if tagger.get("name") != tagger_name or tagger.get("email") != tagger_email:
         raise ContractError("annotated tagger identity violates policy")
@@ -727,8 +1259,8 @@ def validate_release_record(
         raise ContractError("GitHub Release must be authoritatively immutable")
     author = _object(release_record.get("author"), "GitHub Release author")
     if (
-        author.get("login") != RELEASE_AUTHOR_LOGIN
-        or author.get("id") != RELEASE_AUTHOR_ID
+        author.get("login") != "github-actions[bot]"
+        or author.get("id") != 41898282
     ):
         raise ContractError("GitHub Release author is not the GitHub Actions bot")
     if release_record.get("assets") != []:
@@ -808,6 +1340,10 @@ def _parser() -> argparse.ArgumentParser:
     window = commands.add_parser("release-window")
     window.add_argument("--repository", type=Path, required=True)
     window.add_argument("--head", required=True)
+    recovery = commands.add_parser("recovery-release")
+    recovery.add_argument("--repository", type=Path, required=True)
+    recovery.add_argument("--source-sha", required=True)
+    recovery.add_argument("--tag", required=True)
     event = commands.add_parser("workflow-run")
     event.add_argument("--event", type=Path, required=True)
     event.add_argument("--repository", required=True)
@@ -816,8 +1352,33 @@ def _parser() -> argparse.ArgumentParser:
     settings.add_argument("--repository", required=True)
     settings_preflight = commands.add_parser("settings-preflight")
     settings_preflight.add_argument("--repository", required=True)
+    app_receipt = commands.add_parser("app-provisioning-receipt")
+    app_receipt.add_argument("--receipt", type=Path, required=True)
+    app_receipt.add_argument("--repository", required=True)
     immutable_settings = commands.add_parser("immutable-settings")
     immutable_settings.add_argument("--settings-json", type=Path, required=True)
+    immutable_receipt = commands.add_parser("immutable-settings-receipt")
+    immutable_receipt.add_argument("--settings-json", type=Path, required=True)
+    immutable_receipt.add_argument("--repository", required=True)
+    immutable_receipt.add_argument("--source-sha", required=True)
+    immutable_receipt.add_argument("--run-id", required=True)
+    immutable_receipt.add_argument("--run-attempt", required=True)
+    jobs_receipt = commands.add_parser("main-ci-jobs-receipt")
+    jobs_receipt.add_argument("--jobs-json", type=Path, required=True)
+    jobs_receipt.add_argument("--codeql-runs-json", type=Path, required=True)
+    jobs_receipt.add_argument("--codeql-jobs-json", type=Path, required=True)
+    jobs_receipt.add_argument("--repository", required=True)
+    jobs_receipt.add_argument("--source-sha", required=True)
+    jobs_receipt.add_argument("--run-id", required=True)
+    jobs_receipt.add_argument("--run-attempt", required=True)
+    codeql_run_state = commands.add_parser("codeql-run-state")
+    codeql_run_state.add_argument("--runs-json", type=Path, required=True)
+    codeql_run_state.add_argument("--source-sha", required=True)
+    codeql_jobs_state = commands.add_parser("codeql-jobs-state")
+    codeql_jobs_state.add_argument("--jobs-json", type=Path, required=True)
+    codeql_jobs_state.add_argument("--run-id", type=int, required=True)
+    codeql_jobs_state.add_argument("--run-attempt", type=int, required=True)
+    codeql_jobs_state.add_argument("--source-sha", required=True)
     tag_record = commands.add_parser("tag-record")
     tag_record.add_argument("--ref-json", type=Path, required=True)
     tag_record.add_argument("--tag-json", type=Path, required=True)
@@ -878,6 +1439,14 @@ def main(argv: list[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
+        elif args.command == "recovery-release":
+            _emit(
+                validate_recovery_release(
+                    args.repository,
+                    args.source_sha,
+                    args.tag,
+                )
+            )
         elif args.command == "workflow-run":
             print(
                 plan_workflow_run(
@@ -890,9 +1459,61 @@ def main(argv: list[str] | None = None) -> int:
             print("exact")
         elif args.command == "settings-preflight":
             print(json.dumps(observe_live_settings(args.repository), indent=2, sort_keys=True))
+        elif args.command == "app-provisioning-receipt":
+            validate_app_provisioning_receipt(
+                _read_object(args.receipt), args.repository
+            )
+            print("exact")
         elif args.command == "immutable-settings":
             validate_immutable_settings(_read_object(args.settings_json))
             print("exact")
+        elif args.command == "immutable-settings-receipt":
+            print(
+                json.dumps(
+                    build_immutable_settings_receipt(
+                        _read_object(args.settings_json),
+                        args.repository,
+                        args.source_sha,
+                        args.run_id,
+                        args.run_attempt,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        elif args.command == "main-ci-jobs-receipt":
+            print(
+                json.dumps(
+                    build_main_ci_jobs_receipt(
+                        _read_object(args.jobs_json),
+                        _read_object(args.codeql_runs_json),
+                        _read_object(args.codeql_jobs_json),
+                        args.repository,
+                        args.run_id,
+                        args.run_attempt,
+                        args.source_sha,
+                    ),
+                    sort_keys=True,
+                )
+            )
+        elif args.command == "codeql-run-state":
+            codeql_run = classify_codeql_run(
+                _read_object(args.runs_json), args.source_sha
+            )
+            if codeql_run is None:
+                print("pending")
+            else:
+                print(f"ready:{codeql_run[0]}:{codeql_run[1]}")
+        elif args.command == "codeql-jobs-state":
+            print(
+                "ready"
+                if codeql_jobs_ready(
+                    _read_object(args.jobs_json),
+                    run_id=args.run_id,
+                    run_attempt=args.run_attempt,
+                    source_sha=args.source_sha,
+                )
+                else "pending"
+            )
         elif args.command == "tag-record":
             validate_tag_record(
                 _read_object(args.ref_json),

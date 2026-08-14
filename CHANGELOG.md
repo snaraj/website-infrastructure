@@ -6,6 +6,43 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-14
+
+### Fixed
+
+- Restored unattended per-main source publication after the built-in workflow
+  token proved unable to read the immutable-release repository setting. A
+  short-lived, repository-selected GitHub App token now performs only that
+  Administration-read check; the built-in token remains the sole tag and
+  Release writer.
+- Added a one-time fail-closed recovery for the stranded `v0.1.0` publication.
+  The owner prepares only its exact annotated tag; the workflow refuses every
+  write until that tag is exact, creates the immutable zero-asset Release as
+  `github-actions[bot]`, and completes it before beginning `v0.1.1`.
+- Required an exact GET-only inventory of the completed protected-main jobs and
+  all declared gate steps. A workflow-level `success` with a skipped, missing,
+  cancelled, duplicate, or foreign critical job/step no longer authorizes
+  publication; the push-only dependency-review skip remains explicit. The same
+  read-only gate boundedly waits for the exact main-SHA CodeQL run and requires
+  its sole Python analysis job and declared analysis steps to succeed.
+
+### Security
+
+- Bound the release App to the `platform-release` environment, exact selected
+  branch `main`, one repository, Administration read plus implicit Metadata
+  read, no events, and no Contents write. The environment suppresses deployment
+  objects and keeps its private key unavailable to pull-request jobs.
+- Separated the App and write credentials into different jobs. The read-only
+  job exports only a sanitized `PASS` receipt; the write job has no environment,
+  App variable, App secret, or App token. Hostile coverage rejects merged jobs,
+  token outputs/crossover, broadened authority, foreign state, races, and
+  partial recovery.
+- Added an owner-observed, no-bypass release-tag ruleset prerequisite that
+  permits initial `vX.Y.Z` tag creation but denies update, deletion, and
+  non-fast-forward movement during the interval before GitHub locks the tag to
+  its immutable Release. The least-authority runtime App does not overclaim the
+  bypass field that GitHub redacts from read-only ruleset callers.
+
 ## [0.1.0] - 2026-08-13
 
 ### Added

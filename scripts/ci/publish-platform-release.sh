@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Converge one exact source SHA to its immutable annotated tag and GitHub Release.
-# The workflow invokes this file directly so the same transaction, including
-# every API-construction choice and retry path, runs in hostile tests.
+# Complete the Release for the frozen owner-prepared v0.1.0 tag, then converge
+# this exact main SHA. This transaction receives only the workflow write token;
+# a separate prerequisite job proves the immutable-release server setting.
 set -euo pipefail
 
 : "${GH_TOKEN:?GH_TOKEN is required}"
@@ -10,6 +10,13 @@ set -euo pipefail
 : "${GITHUB_API_URL:?GITHUB_API_URL is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+test -z "${IMMUTABLE_SETTINGS_TOKEN-}"
+test -z "${ACTIONS_READ_TOKEN-}"
+
+# Keep the credential in a non-exported shell variable. Every external write
+# child receives only the ordinary per-job GITHUB_TOKEN.
+write_token="${GH_TOKEN}"
+unset GH_TOKEN
 
 contract='scripts/ci/platform_release_contract.py'
 api_version='2026-03-10'
@@ -17,129 +24,187 @@ api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
 ref_json="${RUNNER_TEMP}/platform-ref.json"
 tag_json="${RUNNER_TEMP}/platform-tag.json"
 release_json="${RUNNER_TEMP}/platform-release.json"
-immutable_json="${RUNNER_TEMP}/platform-immutable.json"
 notes="${RUNNER_TEMP}/platform-notes.md"
 tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
-tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
-message="Platform release ${TAG} from ${SOURCE_SHA}"
+recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'
+recovery_tag='v0.1.0'
+current_tag='v0.1.1'
 
 get_json() {
-  local url="$1"
-  local output="$2"
+  local token="$1" url="$2" output="$3"
   curl --silent --show-error --location \
     --proto '=https' --tlsv1.2 \
     --output "${output}" --write-out '%{http_code}' \
     --header 'Accept: application/vnd.github+json' \
     --header "X-GitHub-Api-Version: ${api_version}" \
-    --header "Authorization: Bearer ${GH_TOKEN}" \
+    --header "Authorization: Bearer ${token}" \
     "${url}"
 }
 
-# Refuse to create even the immutable-prefix tag if the server control has
-# drifted. The Ready receipt checks the same authoritative endpoint before
-# merge; this in-transaction GET closes the time between that receipt and use.
-immutable_status="$(get_json "${api}/immutable-releases" "${immutable_json}")"
-test "${immutable_status}" = 200
-python3 -I -B "${contract}" immutable-settings \
-  --settings-json "${immutable_json}" >/dev/null
+run_write_gh() {
+  GH_TOKEN="${write_token}" gh "$@"
+}
 
 classify_tag() {
-  local required="$1" status tag_object object_status
+  local required="$1" source_sha="$2" tag="$3" message="$4" tagger_date="$5"
+  local status tag_object object_status
   local -a record_args=()
-  status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
+  status="$(get_json "${write_token}" \
+    "${api}/git/ref/tags/${tag}" "${ref_json}")"
   if [ "${status}" = 200 ]; then
     tag_object="$(jq -er '.object.sha' "${ref_json}")"
-    object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
+    object_status="$(get_json "${write_token}" \
+      "${api}/git/tags/${tag_object}" "${tag_json}")"
     test "${object_status}" = 200
     record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
   fi
   python3 -I -B "${contract}" tag-state \
     --http-status "${status}" --require "${required}" "${record_args[@]}" \
-    --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+    --tag "${tag}" --source-sha "${source_sha}" \
     --message "${message}" --tagger-name "${tagger_name}" \
     --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
 }
 
-if classify_tag exact >/dev/null 2>&1; then
-  printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
-else
-  classify_tag absent >/dev/null
-  tag_object="$(gh api --method POST \
-    --header 'Accept: application/vnd.github+json' \
-    --header "X-GitHub-Api-Version: ${api_version}" \
-    "repos/${GITHUB_REPOSITORY}/git/tags" \
-    -f tag="${TAG}" \
-    -f message="${message}" \
-    -f object="${SOURCE_SHA}" \
-    -f type=commit \
-    -f "tagger[name]=${tagger_name}" \
-    -f "tagger[email]=${tagger_email}" \
-    -f "tagger[date]=${tagger_date}" \
-    --jq '.sha')"
-  if ! gh api --method POST \
-    --header 'Accept: application/vnd.github+json' \
-    --header "X-GitHub-Api-Version: ${api_version}" \
-    "repos/${GITHUB_REPOSITORY}/git/refs" \
-    -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
-    printf 'tag ref create did not succeed; checking for an exact concurrent winner\n' >&2
-  fi
-  tag_race_verified=false
-  for attempt in 1 2 3 4 5; do
-    if classify_tag exact >/dev/null 2>&1; then
-      tag_race_verified=true
-      break
-    fi
-    sleep "${attempt}"
-  done
-  test "${tag_race_verified}" = true
-  classify_tag exact >/dev/null
-fi
-
-{
-  printf '## Platform %s\n\n' "${TAG}"
-  printf "Immutable repository source: \`%s\`\n\n" "${SOURCE_SHA}"
-  printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
-  printf "See \`CHANGELOG.md\` at this tag for the human-readable change record.\n"
-} > "${notes}"
+write_notes() {
+  local source_sha="$1" tag="$2"
+  {
+    printf '## Platform %s\n\n' "${tag}"
+    printf "Immutable repository source: \`%s\`\n\n" "${source_sha}"
+    printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
+    printf "See \`CHANGELOG.md\` at this tag for the human-readable change record.\n"
+  } > "${notes}"
+}
 
 classify_release() {
-  local required="$1" status
+  local required="$1" tag="$2" status
   local -a record_args=()
-  status="$(get_json "${api}/releases/tags/${TAG}" "${release_json}")"
+  status="$(get_json "${write_token}" \
+    "${api}/releases/tags/${tag}" "${release_json}")"
   if [ "${status}" = 200 ]; then
     record_args=(--release-json "${release_json}")
   fi
   python3 -I -B "${contract}" release-state \
     --http-status "${status}" --require "${required}" \
-    "${record_args[@]}" --tag "${TAG}" \
-    --title "Platform ${TAG}" --body "${notes}"
+    "${record_args[@]}" --tag "${tag}" \
+    --title "Platform ${tag}" --body "${notes}"
 }
 
-if classify_release exact >/dev/null 2>&1; then
-  printf 'verified complete existing GitHub Release %s\n' "${TAG}"
-else
-  classify_release absent >/dev/null
-  # The tag is not locked until the Release exists. Close the last observable
-  # pre-publication window after proving Release absence and before creating it.
-  classify_tag exact >/dev/null
-  if ! gh release create "${TAG}" --verify-tag \
-    --title "Platform ${TAG}" --notes-file "${notes}"; then
-    printf 'release create did not succeed; checking for an exact concurrent winner\n' >&2
-  fi
-  release_race_verified=false
-  for attempt in 1 2 3 4 5; do
-    if classify_release exact >/dev/null 2>&1; then
-      release_race_verified=true
-      break
-    fi
-    sleep "${attempt}"
-  done
-  test "${release_race_verified}" = true
-  classify_release exact >/dev/null
-fi
+complete_recovery_release() {
+  local tagger_date message release_race_verified attempt
+  tagger_date="$(git show -s --format=%cI "${recovery_source_sha}")"
+  message="Platform release ${recovery_tag} from ${recovery_source_sha}"
 
-# Re-query both halves after create/reuse. An immutable Release locks its tag,
-# but a foreign pre-lock race must never be accepted as a successful release.
-classify_release exact >/dev/null
-classify_tag exact >/dev/null
+  python3 -I -B "${contract}" recovery-release \
+    --repository . --source-sha "${recovery_source_sha}" \
+    --tag "${recovery_tag}" >/dev/null
+  write_notes "${recovery_source_sha}" "${recovery_tag}"
+
+  # The owner-prepared annotated tag is a hard prerequisite. This function has
+  # no tag-create path: absence or foreign state fails before any remote write.
+  classify_tag exact \
+    "${recovery_source_sha}" "${recovery_tag}" "${message}" \
+    "${tagger_date}" >/dev/null
+
+  if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+    printf 'verified complete existing recovery Release %s\n' "${recovery_tag}"
+  else
+    classify_release absent "${recovery_tag}" >/dev/null
+    classify_tag exact \
+      "${recovery_source_sha}" "${recovery_tag}" "${message}" \
+      "${tagger_date}" >/dev/null
+    if ! run_write_gh release create "${recovery_tag}" --verify-tag \
+      --title "Platform ${recovery_tag}" --notes-file "${notes}"; then
+      printf 'recovery Release create did not succeed; checking for an exact concurrent winner\n' >&2
+    fi
+    release_race_verified=false
+    for attempt in 1 2 3 4 5; do
+      if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+        release_race_verified=true
+        break
+      fi
+      sleep "${attempt}"
+    done
+    test "${release_race_verified}" = true
+  fi
+  classify_release exact "${recovery_tag}" >/dev/null
+  classify_tag exact \
+    "${recovery_source_sha}" "${recovery_tag}" "${message}" \
+    "${tagger_date}" >/dev/null
+}
+
+publish_current_release() {
+  local tagger_date message tag_object
+  local tag_race_verified release_race_verified attempt
+  tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
+  message="Platform release ${TAG} from ${SOURCE_SHA}"
+
+  if classify_tag exact \
+    "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null 2>&1; then
+    printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
+  else
+    classify_tag absent \
+      "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    tag_object="$(run_write_gh api --method POST \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/git/tags" \
+      -f tag="${TAG}" -f message="${message}" \
+      -f object="${SOURCE_SHA}" -f type=commit \
+      -f "tagger[name]=${tagger_name}" \
+      -f "tagger[email]=${tagger_email}" \
+      -f "tagger[date]=${tagger_date}" --jq '.sha')"
+    if ! run_write_gh api --method POST \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/git/refs" \
+      -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
+      printf 'tag ref create did not succeed; checking for an exact concurrent winner\n' >&2
+    fi
+    tag_race_verified=false
+    for attempt in 1 2 3 4 5; do
+      if classify_tag exact \
+        "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null 2>&1; then
+        tag_race_verified=true
+        break
+      fi
+      sleep "${attempt}"
+    done
+    test "${tag_race_verified}" = true
+  fi
+  classify_tag exact \
+    "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+
+  write_notes "${SOURCE_SHA}" "${TAG}"
+  if classify_release exact "${TAG}" >/dev/null 2>&1; then
+    printf 'verified complete existing GitHub Release %s\n' "${TAG}"
+  else
+    classify_release absent "${TAG}" >/dev/null
+    classify_tag exact \
+      "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+    if ! run_write_gh release create "${TAG}" --verify-tag \
+      --title "Platform ${TAG}" --notes-file "${notes}"; then
+      printf 'Release create did not succeed; checking for an exact concurrent winner\n' >&2
+    fi
+    release_race_verified=false
+    for attempt in 1 2 3 4 5; do
+      if classify_release exact "${TAG}" >/dev/null 2>&1; then
+        release_race_verified=true
+        break
+      fi
+      sleep "${attempt}"
+    done
+    test "${release_race_verified}" = true
+  fi
+  classify_release exact "${TAG}" >/dev/null
+  classify_tag exact \
+    "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+}
+
+test "${SOURCE_SHA}" != "${recovery_source_sha}"
+test "${TAG}" != "${recovery_tag}"
+test "${TAG}" = "${current_tag}"
+complete_recovery_release
+publish_current_release
+
+unset write_token
