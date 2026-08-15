@@ -7,10 +7,18 @@ practical. With one trusted operator, do not create an impossible second-reviewe
 requirement.
 
 Keep default workflow token permissions read-only and Actions restricted to
-GitHub-hosted runners. The publish job alone receives package/OIDC/attestation
-permissions on `snaraj/website-infrastructure` `main`. No repository/environment
-secret may contain kubeconfig, Cloudflare, SSH, age, Kubernetes PKI/bootstrap,
-API-encryption, or tunnel credentials.
+GitHub-hosted runners. Platform publication uses three jobs that never share a
+credential: one non-environment job receives Actions/Contents read and proves
+the exact completed-main job and step inventory; the `platform-release`
+environment job receives `contents: read` plus a short-lived GitHub App token
+with repository Administration read; and the dependent publish job receives
+only `contents: write` through its ordinary per-job `GITHUB_TOKEN`. No
+repository/environment secret may contain kubeconfig,
+Cloudflare, SSH, age, Kubernetes PKI/bootstrap, API-encryption, or tunnel
+credentials. The sole exception in this release lane is the dedicated
+`PLATFORM_RELEASE_APP_PRIVATE_KEY`, held only by the selected-main
+`platform-release` environment and usable only to mint that read-only settings
+token.
 
 Posting source to GitHub remains a workstation responsibility. Authenticate Git
 with the dedicated passphrase-protected SSH agent or the OS credential manager/
@@ -76,18 +84,34 @@ repository owner configures and then observes this exact server state:
 - Actions enabled with server-side full-SHA pinning required, default workflow
   token permissions read-only, and workflow tokens unable to approve pull
   requests; and
-- secret scanning and push protection enabled.
+- secret scanning and push protection enabled;
+- exactly one active tag ruleset across repository and inherited sources,
+  repository-owned as `immutable-platform-release-tags`, targeting only
+  `refs/tags/v*.*.*`, with no bypass actors or creation restriction and exact
+  update, deletion, and non-fast-forward restrictions. Initial release-tag
+  creation therefore remains possible, while every later move, force-move, or
+  deletion is denied before immutable Release publication. GitHub documents
+  the independent [ruleset rule semantics](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
+  and [`fnmatch` ref syntax](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository#using-fnmatch-syntax);
+  the stars are conservative wildcards, not a numeric SemVer grammar, so the
+  source-release validator separately enforces exact `vX.Y.Z` arithmetic;
+- environment `platform-release` using selected branch policies with exactly
+  one branch rule named `main`, no tag/wildcard policy, no required reviewer,
+  no wait timer, and `deployment: false` in the workflow;
+- environment variable `PLATFORM_RELEASE_APP_ID` and environment secret
+  `PLATFORM_RELEASE_APP_PRIVATE_KEY`, with no copy at repository scope; and
+- one active GitHub App installation selected to exactly this repository, no
+  subscribed events, and permissions exactly Administration read plus implicit
+  Metadata read—never Contents write.
 
-Read-only observation on 2026-08-13 found immutable releases and Private
-Vulnerability Reporting disabled, no required-status-check rule, an update
-restriction, and an always-on repository-role bypass. It also found Actions
-SHA pinning disabled. The authoritative preflight therefore returns `DENY`.
-Actions currently allow all publishers even though every checked-in reference
+The original 2026-08-13 observation returned `DENY`; the later exact-main
+settings receipt passed after the owner closed immutable releases, Private
+Vulnerability Reporting, SHA pinning, required-check, bypass, and update-rule
+gaps. Actions still allow all publishers even though every checked-in reference
 is pinned; selected-action allowlisting is a separate owner-applied hardening
-decision. Secret scanning and push protection are enabled, while
-non-provider-pattern and validity checks remain disabled residuals. Those
-optional residuals are recorded rather than misrepresented as enforced. None
-of this grants an agent permission to change settings.
+decision. Non-provider-pattern and validity secret-scanning checks remain
+disabled residuals. Record those values rather than misrepresenting them as
+enforced. None of this grants an agent permission to change settings.
 
 Record only those value-level observations, never actor or ruleset identifiers,
 in an untracked JSON receipt with this closed shape:
@@ -116,6 +140,20 @@ in an untracked JSON receipt with this closed shape:
   "allow_deletions": false,
   "restrict_updates": false,
   "bypass_actors": [],
+  "active_release_tag_ruleset_count": 1,
+  "release_tag_ruleset": "immutable-platform-release-tags",
+  "release_tag_ruleset_active": true,
+  "release_tag_ruleset_repository_owned": true,
+  "release_tag_ruleset_target": "tag",
+  "release_tag_pattern": "refs/tags/v*.*.*",
+  "release_tag_includes": ["refs/tags/v*.*.*"],
+  "release_tag_excludes": [],
+  "release_tag_creation_restricted": false,
+  "release_tag_updates_allowed": false,
+  "release_tag_deletions_allowed": false,
+  "release_tag_non_fast_forward_allowed": false,
+  "release_tag_bypass_actors": [],
+  "release_tag_rule_types": ["deletion", "non_fast_forward", "update"],
   "secret_scanning": true,
   "secret_scanning_push_protection": true,
   "secret_scanning_non_provider_patterns": false,
@@ -139,11 +177,29 @@ python3 -I -B scripts/ci/platform_release_contract.py settings-receipt \
 sha256sum "${receipt}"
 ```
 
+The JSON and digest prove exact observed values, not when or by whom the GETs
+were performed. Never replay them as freshness evidence. Bind the command
+transcript to the exact current main SHA and authenticated owner session, and
+rerun the authoritative GETs immediately before the one-time recovery writes.
+
 The preflight uses `gh api --method GET` only with REST API version
 `2026-03-10`; it exhaustively reads the ruleset inventory plus the repository,
 `/immutable-releases`, `/private-vulnerability-reporting`, Actions policy,
 workflow-token policy, security-analysis, and exact active repository-owned
-`only-me-merge` records.
+`only-me-merge` records. The same exhaustive inventory includes all active tag
+rulesets, including inherited rules, before reading the exact release-tag rule.
+GitHub's [2026-03-10 repository-ruleset REST schema](https://docs.github.com/en/rest/repos/rules?apiVersion=2026-03-10)
+describes `update_allows_fetch_and_merge` as branch behavior. For a tag-targeted
+ruleset, GitHub accepts a write payload that sets it false but canonicalizes the
+authoritative GET to the exact type-only object `{"type":"update"}`. The
+preflight accepts only that safe tag normalization: any `parameters` object,
+top-level update escape, or foreign update-rule field denies. The exact tag
+target, closed update/deletion/non-fast-forward inventory, and empty bypass set
+remain independently load-bearing.
+The owner
+credential is load-bearing here: GitHub omits `bypass_actors` for ruleset
+callers without write access, so the runtime Administration-read App must not
+claim to prove the empty-bypass state.
 An authentication, pagination, schema, missing, extra, duplicated,
 foreign-integration, inverted, update-restricted, or bypass-bearing result emits
 no receipt. A successful receipt is necessary but not sufficient for Ready:
@@ -152,25 +208,124 @@ and the bounded Main Worker `PASS` receipt remain required. The receipt grants
 no settings-write or merge authority; only the coordinator changes Draft/Ready
 and only the repository owner merges.
 
-The publication transaction rechecks the same immutable-release endpoint before
-creating a tag. It then accepts a GitHub Release only when authoritative REST
-reports `immutable:true`, exact published/non-prerelease metadata, the GitHub
-Actions bot author identity, and an exactly empty asset inventory.
+## Release App provisioning and job separation
+
+The workflow `GITHUB_TOKEN` cannot read `/immutable-releases`: GitHub requires
+repository Administration read, which is not an available workflow permission.
+Do not remove the pre-write proof and do not broaden the publisher token. Pin
+`actions/create-github-app-token` to
+`bcd2ba49218906704ab6c1aa796996da409d3eb1` (`v3.2.0`), request only
+`permission-administration: read`, scope it explicitly to owner `snaraj` and
+repository `website-infrastructure`, and leave token revocation enabled.
+
+Workflow-level `success` is not publication authority: GitHub can report a
+successful workflow even when a job or step is intentionally skipped. The
+separate `main-ci-jobs` job uses only `actions: read` plus `contents: read` to
+GET the exact latest-attempt job inventory for the completed run. It requires
+exactly `repository-and-infrastructure: success`, exactly
+`dependency-review: skipped` for a protected-main push, and every declared
+repository gate step successful except the one PR-only history scan, which must
+be exactly skipped. Missing, duplicate, foreign, failed, cancelled, or newly
+skipped jobs/steps emit no attestation. The same bounded read-only job waits up
+to five minutes for exactly one `CodeQL` push run at the same main SHA, then
+requires its sole `analyze (python, none)` job and checkout, initialization, and
+analysis steps to succeed. PR CodeQL is never reused as evidence for a
+squash/rebase-created main SHA. Its run-bound value receipt is required
+alongside the settings receipt; neither read token crosses into the publisher.
+
+The environment's selected-`main` policy governs access to its credential but
+does not independently authenticate `workflow_run.head_branch`, because the
+called workflow runs in default-branch context. The trigger's explicit
+`branches: [main]`, all three job `if` conditions, and exact event/source
+validators remain separate load-bearing checks.
+
+The `immutable-settings` job is the only job attached to environment
+`platform-release`. It has `contents: read`, checks out and binds the exact
+successful main SHA, mints the App token, performs one GET-only immutable-setting
+probe, and exports only one sanitized attestation bound to repository, workflow
+run ID, run attempt, and source SHA. A partial job rerun cannot replay an older
+settings result; only a rerun of the settings job can produce the current
+attempt's exact value. Its step summary contains this closed value-only receipt:
+
+```json
+{
+  "immutable_releases_enabled": true,
+  "repository": "snaraj/website-infrastructure",
+  "run_attempt": 1,
+  "run_id": 123456789,
+  "schema": "platform-release-immutable-settings-v1",
+  "source_sha": "<lowercase 40-hex successful-main SHA>",
+  "status": "PASS"
+}
+```
+
+The dependent `publish` job independently checks out and rebinds the same event
+SHA. It has `contents: write`, no environment, no App variable, no App secret,
+and no App token. The settings shell rejects `GH_TOKEN`; the publisher rejects
+`IMMUTABLE_SETTINGS_TOKEN` and the Actions-read token. Never combine the jobs,
+export either read token as a job output, or pass any read credential to the
+publication transaction.
+
+Before Ready, produce a separate untracked provisioning receipt with the closed
+schema enforced by `app-provisioning-receipt`. It must combine owner-authenticated
+GETs for the environment, selected-main policy, variable name, and secret name
+with App-authenticated GETs for installation account, selected repository
+inventory, permissions, events, suspension, identity equality, and a successful
+immutable-setting probe. The ordinary owner OAuth token cannot read the App
+installation endpoints, so it cannot truthfully produce the whole receipt by
+itself. Keep raw App/installation IDs, tokens, and the private key local; emit
+only `app_identity_binding_exact: true`, the closed value fields, and the
+receipt digest. Validate it with:
+
+```bash
+python3 -I -B scripts/ci/platform_release_contract.py app-provisioning-receipt \
+  --receipt "${untracked_receipt}" \
+  --repository snaraj/website-infrastructure
+```
+
+## Immutable publication and one-time v0.1.0 recovery
+
+The publication transaction accepts a GitHub Release only when authoritative
+REST reports `immutable:true`, exact published/non-prerelease metadata, the
+GitHub Actions bot author identity, and an exactly empty asset inventory.
 [GitHub's immutable-release contract](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
 locks the associated tag while the Release exists and prevents reuse after
 deletion. Before that lock exists, this transaction verifies the exact
 annotated-tag object, source, message, tagger, and instant immediately around a
 bounded Release create/re-query; a drifted tag is never accepted or moved.
+The external release-tag ruleset is a Ready prerequisite for that interval. It
+contains no `creation` rule, but independently forbids update, deletion, and
+non-fast-forward changes with no bypass. The non-fast-forward rule is retained
+in addition to the update restriction so force-move semantics remain explicit
+and fail closed if GitHub evolves the update-rule parameter surface. This
+closes the race against Contents writers; an administrator who can edit the
+ruleset remains outside the publication threat model, so a fresh owner settings
+receipt is still required before Ready and before the one-time recovery window.
 GitHub still permits editing an immutable Release's human title and notes, so
 those fields are revalidated but are not an external-artifact identity. This
 platform Release intentionally claims source only and therefore requires zero
 assets. Any future external image/chart/package claim must move its digest and
 identity tuple into one byte-exact manifest asset uploaded before publication.
 
-GitHub Actions uses the per-job ephemeral `GITHUB_TOKEN`. PR jobs remain
-read-only with checkout credential persistence disabled. Only the trusted
-publisher job on protected `main` receives the minimum package/OIDC/attestation
-permissions; it never receives Cloudflare or deployment authority.
+The stranded first release has one deliberately narrow recovery. After the
+v0.1.1 recovery change reaches `main`, the owner may execute only an independently
+audited tag-preparation packet: create the exact annotated `v0.1.0` tag at frozen
+source `51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e` with the contract's exact bot
+tagger metadata. The owner must not create the Release. Until that tag is exact,
+the automatic transaction performs no write. The workflow's own `GITHUB_TOKEN`
+then creates or verifies the immutable zero-asset v0.1.0 Release as
+`github-actions[bot]` before it begins v0.1.1. Missing, lightweight, moved,
+foreign, partial, or raced states fail closed; exact completion is idempotent.
+The Release call uses `--verify-tag` and deliberately omits `--target`: GitHub
+documents `target_commitish` as unused when the tag already exists. Supplying
+the historical workflow-bearing target would require Workflows write, an
+authority unavailable to `GITHUB_TOKEN`. A disposable-repository canary must
+still prove this exact existing-tag path before Ready; documentation is not a
+substitute for observed API behavior.
+
+PR jobs remain read-only with checkout credential persistence disabled. Neither
+release job receives Cloudflare, cluster, deployment, package, OIDC, or
+attestation authority.
 
 Make each exact GHCR package public independently after verifying its source
 linkage, digest, attestations, and repository ownership. Package publication is

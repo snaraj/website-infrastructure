@@ -17,6 +17,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Mapping
 from unittest import mock
 
 
@@ -69,6 +70,20 @@ def settings_receipt() -> dict[str, object]:
         "allow_deletions": False,
         "restrict_updates": False,
         "bypass_actors": [],
+        "active_release_tag_ruleset_count": 1,
+        "release_tag_ruleset": "immutable-platform-release-tags",
+        "release_tag_ruleset_active": True,
+        "release_tag_ruleset_repository_owned": True,
+        "release_tag_ruleset_target": "tag",
+        "release_tag_pattern": "refs/tags/v*.*.*",
+        "release_tag_includes": ["refs/tags/v*.*.*"],
+        "release_tag_excludes": [],
+        "release_tag_creation_restricted": False,
+        "release_tag_updates_allowed": False,
+        "release_tag_deletions_allowed": False,
+        "release_tag_non_fast_forward_allowed": False,
+        "release_tag_bypass_actors": [],
+        "release_tag_rule_types": ["deletion", "non_fast_forward", "update"],
         "immutable_releases": True,
         "private_vulnerability_reporting": True,
         "secret_scanning": True,
@@ -78,8 +93,112 @@ def settings_receipt() -> dict[str, object]:
     }
 
 
+def app_provisioning_receipt() -> dict[str, object]:
+    return {
+        "repository": "owner/platform",
+        "environment_name": "platform-release",
+        "environment_protected_branches": False,
+        "environment_custom_branch_policies": True,
+        "environment_branch_policies": [{"name": "main", "type": "branch"}],
+        "environment_required_reviewers": 0,
+        "environment_wait_timer_minutes": 0,
+        "environment_variable_name": "PLATFORM_RELEASE_APP_ID",
+        "environment_private_key_secret_name": "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+        "environment_private_key_secret_present": True,
+        "app_identity_binding_exact": True,
+        "installation_account": "owner",
+        "installation_repository_selection": "selected",
+        "installation_repositories": ["owner/platform"],
+        "installation_permissions": {
+            "administration": "read",
+            "metadata": "read",
+        },
+        "installation_events": [],
+        "installation_suspended": False,
+        "immutable_releases": True,
+    }
+
+
+def main_ci_jobs_record() -> dict[str, object]:
+    source = "a" * 40
+    repository_steps = [
+        {"name": name, "conclusion": conclusion}
+        for name, conclusion in MODULE.MAIN_CI_EXACT_STEPS
+    ]
+    common = {
+        "run_id": 4242,
+        "run_attempt": 1,
+        "head_sha": source,
+        "head_branch": "main",
+        "workflow_name": "Pull request",
+        "status": "completed",
+    }
+    return {
+        "total_count": 2,
+        "jobs": [
+            {
+                **common,
+                "id": 1001,
+                "name": "repository-and-infrastructure",
+                "conclusion": "success",
+                "steps": repository_steps,
+            },
+            {
+                **common,
+                "id": 1002,
+                "name": "dependency-review",
+                "conclusion": "skipped",
+                "steps": [],
+            },
+        ],
+    }
+
+
+def codeql_runs_record() -> dict[str, object]:
+    return {
+        "total_count": 1,
+        "workflow_runs": [
+            {
+                "id": 5001,
+                "name": "CodeQL",
+                "path": ".github/workflows/codeql.yml",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "head_branch": "main",
+                "head_sha": "a" * 40,
+                "run_attempt": 1,
+            }
+        ],
+    }
+
+
+def codeql_jobs_record() -> dict[str, object]:
+    return {
+        "total_count": 1,
+        "jobs": [
+            {
+                "id": 6001,
+                "name": "analyze (python, none)",
+                "run_id": 5001,
+                "run_attempt": 1,
+                "head_sha": "a" * 40,
+                "head_branch": "main",
+                "workflow_name": "CodeQL",
+                "status": "completed",
+                "conclusion": "success",
+                "steps": [
+                    {"name": name, "conclusion": conclusion}
+                    for name, conclusion in MODULE.CODEQL_EXACT_STEPS
+                ],
+            }
+        ],
+    }
+
+
 def settings_api() -> dict[str, object]:
     ruleset_id = 42
+    tag_ruleset_id = 43
     checks = [
         {"context": context, "integration_id": 15368}
         for context in MODULE.REQUIRED_CHECKS
@@ -114,7 +233,7 @@ def settings_api() -> dict[str, object]:
             "default_workflow_permissions": "read",
             "can_approve_pull_request_reviews": False,
         },
-        "repos/owner/platform/rulesets": [
+        "repos/owner/platform/rulesets?includes_parents=true&per_page=100": [
             {
                 "id": ruleset_id,
                 "name": "only-me-merge",
@@ -122,7 +241,15 @@ def settings_api() -> dict[str, object]:
                 "source_type": "Repository",
                 "source": "owner/platform",
                 "enforcement": "active",
-            }
+            },
+            {
+                "id": tag_ruleset_id,
+                "name": "immutable-platform-release-tags",
+                "target": "tag",
+                "source_type": "Repository",
+                "source": "owner/platform",
+                "enforcement": "active",
+            },
         ],
         f"repos/owner/platform/rulesets/{ruleset_id}": {
             "id": ruleset_id,
@@ -154,6 +281,26 @@ def settings_api() -> dict[str, object]:
                     },
                 },
                 {"type": "required_signatures"},
+            ],
+        },
+        f"repos/owner/platform/rulesets/{tag_ruleset_id}": {
+            "id": tag_ruleset_id,
+            "name": "immutable-platform-release-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "owner/platform",
+            "enforcement": "active",
+            "conditions": {
+                "ref_name": {
+                    "exclude": [],
+                    "include": ["refs/tags/v*.*.*"],
+                },
+            },
+            "bypass_actors": [],
+            "rules": [
+                {"type": "update"},
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
             ],
         },
     }
@@ -231,6 +378,38 @@ class VersionAndEventTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(output.getvalue().strip(), self.SHA)
 
+    def test_frozen_recovery_release_is_exact_history_not_an_input_escape(self):
+        intent = MODULE.validate_recovery_release(
+            ROOT, MODULE.RECOVERY_SOURCE_SHA, MODULE.RECOVERY_TAG
+        )
+        self.assertEqual(intent.source_sha, MODULE.RECOVERY_SOURCE_SHA)
+        self.assertEqual(intent.tag, MODULE.RECOVERY_TAG)
+        for source, tag in (
+            ("a" * 40, MODULE.RECOVERY_TAG),
+            (MODULE.RECOVERY_SOURCE_SHA, "v0.1.1"),
+        ):
+            with self.subTest(source=source, tag=tag), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE.validate_recovery_release(ROOT, source, tag)
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(
+                MODULE.main(
+                    [
+                        "recovery-release",
+                        "--repository",
+                        str(ROOT),
+                        "--source-sha",
+                        MODULE.RECOVERY_SOURCE_SHA,
+                        "--tag",
+                        MODULE.RECOVERY_TAG,
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(output.getvalue())["tag"], MODULE.RECOVERY_TAG)
+
 
 class SettingsReceiptTests(unittest.TestCase):
     @staticmethod
@@ -256,6 +435,20 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_deletions": false',
             '"restrict_updates": false',
             '"bypass_actors": []',
+            '"active_release_tag_ruleset_count": 1',
+            '"release_tag_ruleset": "immutable-platform-release-tags"',
+            '"release_tag_ruleset_active": true',
+            '"release_tag_ruleset_repository_owned": true',
+            '"release_tag_ruleset_target": "tag"',
+            '"release_tag_pattern": "refs/tags/v*.*.*"',
+            '"release_tag_includes": ["refs/tags/v*.*.*"]',
+            '"release_tag_excludes": []',
+            '"release_tag_creation_restricted": false',
+            '"release_tag_updates_allowed": false',
+            '"release_tag_deletions_allowed": false',
+            '"release_tag_non_fast_forward_allowed": false',
+            '"release_tag_bypass_actors": []',
+            '"release_tag_rule_types": ["deletion", "non_fast_forward", "update"]',
             '"secret_scanning": true',
             '"secret_scanning_push_protection": true',
             '"secret_scanning_non_provider_patterns": false',
@@ -264,6 +457,12 @@ class SettingsReceiptTests(unittest.TestCase):
             "settings-preflight",
             "settings-receipt",
             "must not become Ready until",
+            "2026-03-10 repository-ruleset REST schema",
+            "describes `update_allows_fetch_and_merge` as branch behavior",
+            'exact type-only object `{"type":"update"}`',
+            "any `parameters` object,",
+            "top-level update escape, or foreign update-rule field denies",
+            "remain independently load-bearing",
         ):
             if required not in text:
                 raise ValueError(f"GitHub settings contract lost: {required}")
@@ -291,6 +490,20 @@ class SettingsReceiptTests(unittest.TestCase):
             ("allow_deletions", True),
             ("restrict_updates", True),
             ("bypass_actors", ["present"]),
+            ("active_release_tag_ruleset_count", 2),
+            ("release_tag_ruleset", "foreign"),
+            ("release_tag_ruleset_active", False),
+            ("release_tag_ruleset_repository_owned", False),
+            ("release_tag_ruleset_target", "branch"),
+            ("release_tag_pattern", "refs/tags/v*"),
+            ("release_tag_includes", ["refs/tags/v*"]),
+            ("release_tag_excludes", ["refs/tags/v0.1.0"]),
+            ("release_tag_creation_restricted", True),
+            ("release_tag_updates_allowed", True),
+            ("release_tag_deletions_allowed", True),
+            ("release_tag_non_fast_forward_allowed", True),
+            ("release_tag_bypass_actors", ["present"]),
+            ("release_tag_rule_types", ["deletion", "update"]),
             ("immutable_releases", False),
             ("private_vulnerability_reporting", False),
             ("secret_scanning", False),
@@ -340,8 +553,9 @@ class SettingsReceiptTests(unittest.TestCase):
             "repos/owner/platform/private-vulnerability-reporting",
             "repos/owner/platform/actions/permissions",
             "repos/owner/platform/actions/permissions/workflow",
-            "repos/owner/platform/rulesets",
+            "repos/owner/platform/rulesets?includes_parents=true&per_page=100",
             "repos/owner/platform/rulesets/42",
+            "repos/owner/platform/rulesets/43",
         ]
         if calls != expected:
             raise AssertionError(f"unexpected settings endpoints: {calls}")
@@ -426,6 +640,37 @@ class SettingsReceiptTests(unittest.TestCase):
                 ("bypass_actors",),
                 [{"actor_type": "RepositoryRole"}],
             ),
+            ("repos/owner/platform/rulesets/43", ("id",), 44),
+            ("repos/owner/platform/rulesets/43", ("name",), "foreign"),
+            ("repos/owner/platform/rulesets/43", ("target",), "branch"),
+            ("repos/owner/platform/rulesets/43", ("source_type",), "Organization"),
+            ("repos/owner/platform/rulesets/43", ("source",), "owner/foreign"),
+            ("repos/owner/platform/rulesets/43", ("enforcement",), "evaluate"),
+            (
+                "repos/owner/platform/rulesets/43",
+                ("conditions", "ref_name", "include"),
+                ["refs/tags/v*"],
+            ),
+            (
+                "repos/owner/platform/rulesets/43",
+                ("conditions", "ref_name", "include"),
+                ["~ALL"],
+            ),
+            (
+                "repos/owner/platform/rulesets/43",
+                ("conditions", "ref_name", "include"),
+                ["refs/heads/main"],
+            ),
+            (
+                "repos/owner/platform/rulesets/43",
+                ("conditions", "ref_name", "exclude"),
+                ["refs/tags/v0.1.0"],
+            ),
+            (
+                "repos/owner/platform/rulesets/43",
+                ("bypass_actors",),
+                [{"actor_type": "RepositoryRole"}],
+            ),
         ):
             changed = copy.deepcopy(exact)
             parent = changed[endpoint]
@@ -498,8 +743,125 @@ class SettingsReceiptTests(unittest.TestCase):
             status["parameters"]["required_status_checks"] = replacement
             mutations.append(changed)
         changed = copy.deepcopy(exact)
-        changed["repos/owner/platform/rulesets"].append(
-            copy.deepcopy(changed["repos/owner/platform/rulesets"][0])
+        changed[
+            "repos/owner/platform/rulesets?includes_parents=true&per_page=100"
+        ].append(
+            copy.deepcopy(
+                changed[
+                    "repos/owner/platform/rulesets?includes_parents=true&per_page=100"
+                ][0]
+            )
+        )
+        mutations.append(changed)
+
+        tag_inventory = "repos/owner/platform/rulesets?includes_parents=true&per_page=100"
+        tag_detail = "repos/owner/platform/rulesets/43"
+        tag_rules = exact[tag_detail]["rules"]
+        for rule_type in ("update", "deletion", "non_fast_forward"):
+            changed = copy.deepcopy(exact)
+            changed[tag_detail]["rules"] = [
+                rule for rule in tag_rules if rule["type"] != rule_type
+            ]
+            mutations.append(changed)
+        for foreign_rule in (
+            {"type": "creation"},
+            {"type": "required_signatures"},
+            copy.deepcopy(tag_rules[0]),
+        ):
+            changed = copy.deepcopy(exact)
+            changed[tag_detail]["rules"].append(foreign_rule)
+            mutations.append(changed)
+        for update_parameters in (
+            {},
+            {"update_allows_fetch_and_merge": False},
+            {"update_allows_fetch_and_merge": True},
+            {
+                "update_allows_fetch_and_merge": False,
+                "foreign": False,
+            },
+        ):
+            changed = copy.deepcopy(exact)
+            update = next(
+                rule
+                for rule in changed[tag_detail]["rules"]
+                if rule["type"] == "update"
+            )
+            update["parameters"] = update_parameters
+            mutations.append(changed)
+        for field, value in (
+            ("update_allows_fetch_and_merge", False),
+            ("update_allows_fetch_and_merge", True),
+            ("foreign", False),
+        ):
+            changed = copy.deepcopy(exact)
+            update = next(
+                rule
+                for rule in changed[tag_detail]["rules"]
+                if rule["type"] == "update"
+            )
+            update[field] = value
+            mutations.append(changed)
+        for rule_type in ("deletion", "non_fast_forward"):
+            changed = copy.deepcopy(exact)
+            rule = next(
+                rule
+                for rule in changed[tag_detail]["rules"]
+                if rule["type"] == rule_type
+            )
+            rule["parameters"] = {}
+            mutations.append(changed)
+        for field in (
+            "id",
+            "name",
+            "target",
+            "source_type",
+            "source",
+            "enforcement",
+            "conditions",
+            "bypass_actors",
+            "rules",
+        ):
+            changed = copy.deepcopy(exact)
+            del changed[tag_detail][field]
+            mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed[tag_detail]["conditions"]["foreign"] = {}
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed[tag_detail]["conditions"]["ref_name"]["foreign"] = []
+        mutations.append(changed)
+
+        changed = copy.deepcopy(exact)
+        changed[tag_inventory] = [
+            summary
+            for summary in changed[tag_inventory]
+            if summary["target"] != "tag"
+        ]
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed[tag_inventory].append(copy.deepcopy(changed[tag_inventory][1]))
+        mutations.append(changed)
+        for field, value in (
+            ("name", "foreign"),
+            ("target", "branch"),
+            ("source_type", "Organization"),
+            ("source", "owner/foreign"),
+            ("enforcement", "evaluate"),
+            ("id", "43"),
+        ):
+            changed = copy.deepcopy(exact)
+            changed[tag_inventory][1][field] = value
+            mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed[tag_inventory].append(
+            {
+                "id": 44,
+                "name": "inherited-tag-policy",
+                "target": "tag",
+                "source_type": "Organization",
+                "source": "owner",
+                "enforcement": "active",
+            }
         )
         mutations.append(changed)
 
@@ -508,6 +870,48 @@ class SettingsReceiptTests(unittest.TestCase):
                 MODULE.ContractError
             ):
                 self.observe(changed)
+
+    def test_release_tag_rules_permit_creation_and_deny_every_ref_rewrite(self):
+        exact = settings_api()
+        record = exact["repos/owner/platform/rulesets/43"]
+        receipt = MODULE._release_tag_ruleset_receipt(43, record, "owner/platform")
+        self.assertFalse(receipt["release_tag_creation_restricted"])
+        self.assertFalse(receipt["release_tag_updates_allowed"])
+        self.assertFalse(receipt["release_tag_deletions_allowed"])
+        self.assertFalse(receipt["release_tag_non_fast_forward_allowed"])
+        self.assertEqual(
+            {rule["type"] for rule in record["rules"]},
+            {"update", "deletion", "non_fast_forward"},
+        )
+        self.assertEqual(
+            next(rule for rule in record["rules"] if rule["type"] == "update"),
+            {"type": "update"},
+        )
+        self.assertNotIn("creation", {rule["type"] for rule in record["rules"]})
+
+        for hostile_update in (
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": False},
+            },
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": True},
+            },
+            {"type": "update", "update_allows_fetch_and_merge": False},
+            {"type": "update", "foreign": False},
+        ):
+            changed = copy.deepcopy(record)
+            changed["rules"] = [
+                hostile_update if rule["type"] == "update" else rule
+                for rule in changed["rules"]
+            ]
+            with self.subTest(hostile_update=hostile_update), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE._release_tag_ruleset_receipt(
+                    43, changed, "owner/platform"
+                )
 
     def test_github_settings_reader_is_get_only_and_fails_closed(self):
         completed = subprocess.CompletedProcess(
@@ -547,6 +951,33 @@ class SettingsReceiptTests(unittest.TestCase):
             ), self.assertRaises(MODULE.ContractError):
                 MODULE._github_api_get("repos/owner/platform/immutable-releases")
 
+    def test_paginated_tag_inventory_rejects_inherited_second_page(self):
+        exact = settings_api()[
+            "repos/owner/platform/rulesets?includes_parents=true&per_page=100"
+        ]
+        inherited = {
+            "id": 44,
+            "name": "inherited-tag-policy",
+            "target": "tag",
+            "source_type": "Organization",
+            "source": "owner",
+            "enforcement": "active",
+        }
+        pages = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps([[exact[0], exact[1]], [inherited]]),
+            stderr="",
+        )
+        with mock.patch.object(MODULE.subprocess, "run", return_value=pages):
+            flattened = MODULE._github_api_get(
+                "repos/owner/platform/rulesets?includes_parents=true&per_page=100",
+                paginate=True,
+            )
+        self.assertEqual(len(flattened), 3)
+        with self.assertRaises(MODULE.ContractError):
+            MODULE._select_release_tag_ruleset_id(flattened, "owner/platform")
+
     def test_immutable_settings_cli_kills_field_deletion_and_inversion(self):
         exact = {"enabled": True, "enforced_by_owner": False}
         MODULE.validate_immutable_settings(exact)
@@ -571,6 +1002,69 @@ class SettingsReceiptTests(unittest.TestCase):
                             "immutable-settings",
                             "--settings-json",
                             str(settings),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(output.getvalue().strip(), "exact")
+
+    def test_release_app_receipt_is_value_only_exact_and_load_bearing(self):
+        exact = app_provisioning_receipt()
+        MODULE.validate_app_provisioning_receipt(exact, "owner/platform")
+        replacements = (
+            ("repository", "other/platform"),
+            ("environment_name", "production"),
+            ("environment_protected_branches", True),
+            ("environment_custom_branch_policies", False),
+            ("environment_branch_policies", []),
+            ("environment_branch_policies", [{"name": "*", "type": "branch"}]),
+            ("environment_branch_policies", [{"name": "main", "type": "tag"}]),
+            ("environment_required_reviewers", 1),
+            ("environment_required_reviewers", False),
+            ("environment_wait_timer_minutes", 1),
+            ("environment_wait_timer_minutes", False),
+            ("environment_variable_name", "FOREIGN_APP_ID"),
+            ("environment_private_key_secret_name", "FOREIGN_PRIVATE_KEY"),
+            ("environment_private_key_secret_present", False),
+            ("app_identity_binding_exact", False),
+            ("installation_account", "other"),
+            ("installation_repository_selection", "all"),
+            ("installation_repositories", ["owner/platform", "owner/foreign"]),
+            ("installation_permissions", {"administration": "write", "metadata": "read"}),
+            ("installation_permissions", {"administration": "read", "metadata": "read", "contents": "read"}),
+            ("installation_events", ["push"]),
+            ("installation_suspended", True),
+            ("immutable_releases", False),
+        )
+        for key, value in replacements:
+            changed = copy.deepcopy(exact)
+            changed[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE.validate_app_provisioning_receipt(changed, "owner/platform")
+        for key in exact:
+            changed = copy.deepcopy(exact)
+            del changed[key]
+            with self.subTest(missing=key), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_app_provisioning_receipt(changed, "owner/platform")
+        changed = copy.deepcopy(exact)
+        changed["installation_id"] = "not-for-publication"
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.validate_app_provisioning_receipt(changed, "owner/platform")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = Path(temporary) / "app.json"
+            receipt.write_text(json.dumps(exact), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(
+                    MODULE.main(
+                        [
+                            "app-provisioning-receipt",
+                            "--receipt",
+                            str(receipt),
+                            "--repository",
+                            "owner/platform",
                         ]
                     ),
                     0,
@@ -648,6 +1142,20 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_deletions": false',
             '"restrict_updates": false',
             '"bypass_actors": []',
+            '"active_release_tag_ruleset_count": 1',
+            '"release_tag_ruleset": "immutable-platform-release-tags"',
+            '"release_tag_ruleset_active": true',
+            '"release_tag_ruleset_repository_owned": true',
+            '"release_tag_ruleset_target": "tag"',
+            '"release_tag_pattern": "refs/tags/v*.*.*"',
+            '"release_tag_includes": ["refs/tags/v*.*.*"]',
+            '"release_tag_excludes": []',
+            '"release_tag_creation_restricted": false',
+            '"release_tag_updates_allowed": false',
+            '"release_tag_deletions_allowed": false',
+            '"release_tag_non_fast_forward_allowed": false',
+            '"release_tag_bypass_actors": []',
+            '"release_tag_rule_types": ["deletion", "non_fast_forward", "update"]',
             '"secret_scanning": true',
             '"secret_scanning_push_protection": true',
             '"secret_scanning_non_provider_patterns": false',
@@ -655,6 +1163,12 @@ class SettingsReceiptTests(unittest.TestCase):
             "settings-preflight",
             "settings-receipt",
             "must not become Ready until",
+            "2026-03-10 repository-ruleset REST schema",
+            "describes `update_allows_fetch_and_merge` as branch behavior",
+            'exact type-only object `{"type":"update"}`',
+            "any `parameters` object,",
+            "top-level update escape, or foreign update-rule field denies",
+            "remain independently load-bearing",
         )
         for token in tokens:
             with self.subTest(deletion=token), self.assertRaises(ValueError):
@@ -670,6 +1184,30 @@ class SettingsReceiptTests(unittest.TestCase):
             ('"allow_force_pushes": false', '"allow_force_pushes": true'),
             ('"allow_deletions": false', '"allow_deletions": true'),
             ('"restrict_updates": false', '"restrict_updates": true'),
+            (
+                '"release_tag_creation_restricted": false',
+                '"release_tag_creation_restricted": true',
+            ),
+            (
+                '"release_tag_updates_allowed": false',
+                '"release_tag_updates_allowed": true',
+            ),
+            (
+                '"release_tag_deletions_allowed": false',
+                '"release_tag_deletions_allowed": true',
+            ),
+            (
+                '"release_tag_non_fast_forward_allowed": false',
+                '"release_tag_non_fast_forward_allowed": true',
+            ),
+            (
+                'exact type-only object `{"type":"update"}`',
+                'parameterized object `{"type":"update","parameters":{}}`',
+            ),
+            (
+                "foreign update-rule field denies",
+                "foreign update-rule field passes",
+            ),
             ('"require_signed_commits": true', '"require_signed_commits": false'),
             ('"secret_scanning": true', '"secret_scanning": false'),
             (
@@ -777,6 +1315,19 @@ class ImmutableMetadataTests(unittest.TestCase):
                 MODULE.validate_tag_record(
                     changed_ref, changed_tag, **self.tag_expected()
                 )
+        for field, foreign in (
+            ("tagger_name", "repository-owner"),
+            ("tagger_email", "foreign@example.invalid"),
+        ):
+            changed_ref, changed_tag = copy.deepcopy(ref), copy.deepcopy(tag)
+            expected = self.tag_expected()
+            expected[field] = foreign
+            tagger_field = "name" if field == "tagger_name" else "email"
+            changed_tag["tagger"][tagger_field] = foreign
+            with self.subTest(paired_foreign=field), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE.validate_tag_record(changed_ref, changed_tag, **expected)
 
     def test_release_metadata_and_zero_asset_inventory_are_exact(self):
         exact = self.release()
@@ -969,10 +1520,759 @@ class ImmutableMetadataTests(unittest.TestCase):
             )
 
 
-class PublicationTransactionShellTests(unittest.TestCase):
-    TAG = "v0.1.0"
+class MainCIJobsReceiptTests(unittest.TestCase):
     SOURCE = "a" * 40
-    TAG_OBJECT = "b" * 40
+
+    @classmethod
+    def build(
+        cls,
+        jobs: dict[str, object],
+        codeql_runs: dict[str, object] | None = None,
+        codeql_jobs: dict[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        return MODULE.build_main_ci_jobs_receipt(
+            jobs,
+            codeql_runs if codeql_runs is not None else codeql_runs_record(),
+            codeql_jobs if codeql_jobs is not None else codeql_jobs_record(),
+            "owner/platform",
+            "4242",
+            "1",
+            cls.SOURCE,
+        )
+
+    def test_exact_completed_main_job_inventory_emits_value_only_receipt(self):
+        receipt = self.build(main_ci_jobs_record())
+        self.assertEqual(
+            receipt,
+            {
+                "codeql": "success",
+                "dependency_review": "skipped-on-push",
+                "repository": "owner/platform",
+                "repository_and_infrastructure": "success",
+                "run_attempt": 1,
+                "run_id": 4242,
+                "schema": "platform-release-main-ci-jobs-v1",
+                "source_sha": self.SOURCE,
+                "status": "PASS",
+            },
+        )
+        self.assertNotIn("1001", json.dumps(receipt))
+
+    def test_missing_skipped_cancelled_duplicate_and_foreign_jobs_fail_closed(self):
+        exact = main_ci_jobs_record()
+        mutations: list[dict[str, object]] = []
+        for key, value in (
+            ("total_count", 1),
+            ("total_count", True),
+        ):
+            changed = copy.deepcopy(exact)
+            changed[key] = value
+            mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["foreign"] = True
+        mutations.append(changed)
+        for index in (0, 1):
+            changed = copy.deepcopy(exact)
+            del changed["jobs"][index]
+            changed["total_count"] = 1
+            mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][1]["name"] = "repository-and-infrastructure"
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][1]["name"] = "foreign"
+        mutations.append(changed)
+        for job_index in (0, 1):
+            for field, value in (
+                ("run_id", 4243),
+                ("run_attempt", 2),
+                ("head_sha", "b" * 40),
+                ("head_branch", "feature"),
+                ("workflow_name", "foreign"),
+                ("status", "in_progress"),
+            ):
+                changed = copy.deepcopy(exact)
+                changed["jobs"][job_index][field] = value
+                mutations.append(changed)
+        for conclusion in ("skipped", "cancelled", "failure", None):
+            changed = copy.deepcopy(exact)
+            changed["jobs"][0]["conclusion"] = conclusion
+            mutations.append(changed)
+        for conclusion in ("success", "cancelled", "failure", None):
+            changed = copy.deepcopy(exact)
+            changed["jobs"][1]["conclusion"] = conclusion
+            mutations.append(changed)
+
+        for index, changed in enumerate(mutations):
+            with self.subTest(job_mutation=index), self.assertRaises(
+                MODULE.ContractError
+            ):
+                self.build(changed)
+
+    def test_if_false_and_every_exact_step_mutant_fail_closed(self):
+        exact = main_ci_jobs_record()
+        steps = exact["jobs"][0]["steps"]
+        for expected_name, expected_conclusion in MODULE.MAIN_CI_EXACT_STEPS:
+            for conclusion in (None, "success", "skipped", "cancelled", "failure"):
+                if conclusion == expected_conclusion:
+                    continue
+                changed = copy.deepcopy(exact)
+                if conclusion is None:
+                    changed["jobs"][0]["steps"] = [
+                        step for step in steps if step["name"] != expected_name
+                    ]
+                else:
+                    step = next(
+                        value
+                        for value in changed["jobs"][0]["steps"]
+                        if value["name"] == expected_name
+                    )
+                    step["conclusion"] = conclusion
+                with self.subTest(
+                    expected_name=expected_name, conclusion=conclusion
+                ):
+                    with self.assertRaises(MODULE.ContractError):
+                        self.build(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"].append(
+            copy.deepcopy(changed["jobs"][0]["steps"][0])
+        )
+        with self.assertRaises(MODULE.ContractError):
+            self.build(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"].append(
+            {"name": "Foreign successful step", "conclusion": "success"}
+        )
+        with self.assertRaises(MODULE.ContractError):
+            self.build(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"][1:3] = reversed(
+            changed["jobs"][0]["steps"][1:3]
+        )
+        with self.assertRaises(MODULE.ContractError):
+            self.build(changed)
+
+    def test_codeql_run_absent_in_progress_failed_duplicate_and_foreign_fail_closed(self):
+        absent = {"total_count": 0, "workflow_runs": []}
+        self.assertIsNone(MODULE.classify_codeql_run(absent, self.SOURCE))
+        queued = codeql_runs_record()
+        queued["workflow_runs"][0]["status"] = "in_progress"
+        queued["workflow_runs"][0]["conclusion"] = None
+        self.assertIsNone(MODULE.classify_codeql_run(queued, self.SOURCE))
+        for pending in (absent, queued):
+            with self.subTest(pending=pending), self.assertRaises(MODULE.ContractError):
+                self.build(main_ci_jobs_record(), codeql_runs=pending)
+
+        exact = codeql_runs_record()
+        mutations: list[dict[str, object]] = []
+        for field, value in (
+            ("id", 0),
+            ("name", "Foreign"),
+            ("path", ".github/workflows/foreign.yml"),
+            ("event", "pull_request"),
+            ("status", "completed"),
+            ("conclusion", "failure"),
+            ("head_branch", "feature"),
+            ("head_sha", "b" * 40),
+            ("run_attempt", 0),
+        ):
+            changed = copy.deepcopy(exact)
+            changed["workflow_runs"][0][field] = value
+            if field == "status" and value == "completed":
+                changed["workflow_runs"][0]["conclusion"] = "cancelled"
+            mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["total_count"] = 2
+        changed["workflow_runs"].append(copy.deepcopy(changed["workflow_runs"][0]))
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["foreign"] = True
+        mutations.append(changed)
+        for index, changed in enumerate(mutations):
+            with self.subTest(codeql_run_mutation=index), self.assertRaises(
+                MODULE.ContractError
+            ):
+                self.build(main_ci_jobs_record(), codeql_runs=changed)
+
+    def test_codeql_job_and_if_false_step_mutants_fail_closed(self):
+        absent = {"total_count": 0, "jobs": []}
+        self.assertFalse(
+            MODULE.codeql_jobs_ready(
+                absent, run_id=5001, run_attempt=1, source_sha=self.SOURCE
+            )
+        )
+        queued = codeql_jobs_record()
+        queued["jobs"][0]["status"] = "in_progress"
+        queued["jobs"][0]["conclusion"] = None
+        self.assertFalse(
+            MODULE.codeql_jobs_ready(
+                queued, run_id=5001, run_attempt=1, source_sha=self.SOURCE
+            )
+        )
+        for pending in (absent, queued):
+            with self.subTest(codeql_pending=pending), self.assertRaises(
+                MODULE.ContractError
+            ):
+                self.build(main_ci_jobs_record(), codeql_jobs=pending)
+
+        exact = codeql_jobs_record()
+        mutations: list[dict[str, object]] = []
+        for field, value in (
+            ("name", "analyze (javascript)"),
+            ("run_id", 5002),
+            ("run_attempt", 2),
+            ("head_sha", "b" * 40),
+            ("head_branch", "feature"),
+            ("workflow_name", "Foreign"),
+            ("status", "completed"),
+            ("conclusion", "failure"),
+        ):
+            changed = copy.deepcopy(exact)
+            changed["jobs"][0][field] = value
+            if field == "status" and value == "completed":
+                changed["jobs"][0]["conclusion"] = "cancelled"
+            mutations.append(changed)
+        for expected_name, expected_conclusion in MODULE.CODEQL_EXACT_STEPS:
+            for conclusion in (None, "success", "skipped", "cancelled", "failure"):
+                if conclusion == expected_conclusion:
+                    continue
+                changed = copy.deepcopy(exact)
+                if conclusion is None:
+                    changed["jobs"][0]["steps"] = [
+                        step
+                        for step in changed["jobs"][0]["steps"]
+                        if step["name"] != expected_name
+                    ]
+                else:
+                    step = next(
+                        value
+                        for value in changed["jobs"][0]["steps"]
+                        if value["name"] == expected_name
+                    )
+                    step["conclusion"] = conclusion
+                mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["total_count"] = 2
+        changed["jobs"].append(copy.deepcopy(changed["jobs"][0]))
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"].append(
+            copy.deepcopy(changed["jobs"][0]["steps"][0])
+        )
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"].append(
+            {"name": "Foreign successful step", "conclusion": "success"}
+        )
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][0]["steps"][1:3] = reversed(
+            changed["jobs"][0]["steps"][1:3]
+        )
+        mutations.append(changed)
+        for index, changed in enumerate(mutations):
+            with self.subTest(codeql_job_mutation=index), self.assertRaises(
+                MODULE.ContractError
+            ):
+                self.build(main_ci_jobs_record(), codeql_jobs=changed)
+
+    def test_dependency_review_step_and_cli_are_load_bearing(self):
+        changed = main_ci_jobs_record()
+        changed["jobs"][1]["steps"] = [
+            {"name": "Review dependency changes", "conclusion": "success"}
+        ]
+        with self.assertRaises(MODULE.ContractError):
+            self.build(changed)
+        changed = main_ci_jobs_record()
+        changed["jobs"][1]["steps"] = [
+            {"name": "Foreign skipped step", "conclusion": "skipped"}
+        ]
+        with self.assertRaises(MODULE.ContractError):
+            self.build(changed)
+        with tempfile.TemporaryDirectory() as temporary:
+            jobs = Path(temporary) / "jobs.json"
+            jobs.write_text(json.dumps(main_ci_jobs_record()), encoding="utf-8")
+            codeql_runs = Path(temporary) / "codeql-runs.json"
+            codeql_runs.write_text(json.dumps(codeql_runs_record()), encoding="utf-8")
+            codeql_jobs = Path(temporary) / "codeql-jobs.json"
+            codeql_jobs.write_text(json.dumps(codeql_jobs_record()), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(
+                    MODULE.main(
+                        [
+                            "main-ci-jobs-receipt",
+                            "--jobs-json",
+                            str(jobs),
+                            "--codeql-runs-json",
+                            str(codeql_runs),
+                            "--codeql-jobs-json",
+                            str(codeql_jobs),
+                            "--repository",
+                            "owner/platform",
+                            "--source-sha",
+                            self.SOURCE,
+                            "--run-id",
+                            "4242",
+                            "--run-attempt",
+                            "1",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(
+                json.loads(output.getvalue())["repository_and_infrastructure"],
+                "success",
+            )
+
+
+class ImmutableSettingsShellTests(unittest.TestCase):
+    SOURCE = "a" * 40
+
+    @staticmethod
+    def script() -> str:
+        return (
+            ROOT / "scripts" / "ci" / "verify-platform-release-settings.sh"
+        ).read_text(encoding="utf-8")
+
+    @staticmethod
+    def bash_executable() -> str:
+        discovered = shutil.which("bash")
+        if discovered:
+            return discovered
+        if os.name == "nt":
+            candidate = (
+                Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+                / "Git"
+                / "bin"
+                / "bash.exe"
+            )
+            if candidate.is_file():
+                return str(candidate)
+        raise AssertionError("bash is required to execute the settings proof")
+
+    @staticmethod
+    def bash_path(path: str | Path) -> str:
+        normalized = Path(path).resolve().as_posix()
+        if len(normalized) >= 3 and normalized[1:3] == ":/":
+            return f"/{normalized[0].lower()}/{normalized[3:]}"
+        return normalized
+
+    def execute(
+        self,
+        script: str,
+        *,
+        settings: dict[str, object] | None = None,
+        http_status: int = 200,
+        settings_token: str | None = "settings-token",
+        write_token: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str, str]:
+        with tempfile.TemporaryDirectory(
+            dir=ROOT, prefix=".platform-settings-shell-"
+        ) as temporary:
+            runner = Path(temporary)
+            transaction = runner / "settings.sh"
+            with transaction.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(script)
+            fixture = runner / "fixture.json"
+            fixture.write_text(
+                json.dumps(
+                    settings
+                    if settings is not None
+                    else {"enabled": True, "enforced_by_owner": False}
+                ),
+                encoding="utf-8",
+            )
+            output = runner / "output.txt"
+            summary = runner / "summary.md"
+            calls = runner / "calls.log"
+            relative = runner.relative_to(ROOT).as_posix()
+            prelude = r'''
+python3() {
+  "${TEST_PYTHON}" "$@"
+}
+
+curl() {
+  local output='' method='' authorization='' url='' token=''
+  if [ -n "${GH_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ]; then
+    return 92
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --request) method="$2"; shift 2 ;;
+      --header)
+        if [[ "$2" == Authorization:\ Bearer\ * ]]; then
+          authorization="$2"
+        fi
+        shift 2
+        ;;
+      http*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  printf '<%s>\n<%s>\n' "${method}" "${url}" >> "${MOCK_CALLS}"
+  token="${authorization#Authorization: Bearer }"
+  if [ "${method}" != GET ] || [ "${token}" != "${MOCK_SETTINGS_TOKEN}" ]; then
+    printf '{}' > "${output}"
+    printf '403'
+    return 0
+  fi
+  cp "${MOCK_FIXTURE}" "${output}"
+  printf '%s' "${MOCK_HTTP_STATUS}"
+}
+'''
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "TEST_PYTHON": self.bash_path(sys.executable),
+                    "MOCK_FIXTURE": f"{relative}/fixture.json",
+                    "MOCK_CALLS": f"{relative}/calls.log",
+                    "MOCK_HTTP_STATUS": str(http_status),
+                    "MOCK_SETTINGS_TOKEN": "settings-token",
+                    "MOCK_SCRIPT": f"{relative}/settings.sh",
+                    "SOURCE_SHA": self.SOURCE,
+                    "GITHUB_API_URL": "https://api.github.test",
+                    "GITHUB_REPOSITORY": "owner/platform",
+                    "GITHUB_RUN_ID": "4242",
+                    "GITHUB_RUN_ATTEMPT": "1",
+                    "RUNNER_TEMP": relative,
+                    "GITHUB_OUTPUT": f"{relative}/output.txt",
+                    "GITHUB_STEP_SUMMARY": f"{relative}/summary.md",
+                }
+            )
+            if settings_token is None:
+                environment.pop("IMMUTABLE_SETTINGS_TOKEN", None)
+            else:
+                environment["IMMUTABLE_SETTINGS_TOKEN"] = settings_token
+            if write_token is None:
+                environment.pop("GH_TOKEN", None)
+            else:
+                environment["GH_TOKEN"] = write_token
+            completed = subprocess.run(
+                [
+                    self.bash_executable(),
+                    "-c",
+                    prelude + '\nsource "${MOCK_SCRIPT}"\n',
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+            return (
+                completed,
+                output.read_text(encoding="utf-8") if output.exists() else "",
+                summary.read_text(encoding="utf-8") if summary.exists() else "",
+                calls.read_text(encoding="utf-8") if calls.exists() else "",
+            )
+
+    def test_exact_get_emits_only_a_value_receipt_and_pass_state(self):
+        completed, output, summary, calls = self.execute(self.script())
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(
+            output,
+            f"attestation=PASS:owner/platform:4242:1:{self.SOURCE}\n",
+        )
+        match = re.search(r"```json\n([^\n]+)\n```", summary)
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            json.loads(match.group(1)),
+            {
+                "immutable_releases_enabled": True,
+                "repository": "owner/platform",
+                "run_attempt": 1,
+                "run_id": 4242,
+                "schema": "platform-release-immutable-settings-v1",
+                "source_sha": self.SOURCE,
+                "status": "PASS",
+            },
+        )
+        self.assertEqual(calls.count("<GET>"), 1)
+        self.assertNotIn("settings-token", completed.stdout + completed.stderr + summary)
+
+    def test_missing_broadened_or_foreign_settings_authority_fails_closed(self):
+        cases = (
+            {"settings_token": None},
+            {"settings_token": "foreign"},
+            {"write_token": "write-token"},
+            {"http_status": 403},
+            {"settings": {"enabled": False, "enforced_by_owner": False}},
+            {
+                "settings": {
+                    "enabled": True,
+                    "enforced_by_owner": False,
+                    "foreign": True,
+                }
+            },
+        )
+        for index, options in enumerate(cases):
+            with self.subTest(index=index):
+                completed, output, summary, _calls = self.execute(
+                    self.script(), **options
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertEqual(summary, "")
+
+    def test_get_only_token_is_unexported_and_validator_is_load_bearing(self):
+        script = self.script()
+        mutations = (
+            script.replace("unset IMMUTABLE_SETTINGS_TOKEN", ":", 1),
+            script.replace("--request GET", "--request POST", 1),
+            script.replace(
+                'python3 -I -B "${contract}" immutable-settings-receipt',
+                'python3 -I -B "${contract}" immutable-settings',
+                1,
+            ),
+        )
+        for index, mutant in enumerate(mutations):
+            with self.subTest(index=index):
+                completed, output, summary, _calls = self.execute(mutant)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertEqual(summary, "")
+
+
+class MainCIJobsShellTests(unittest.TestCase):
+    SOURCE = "a" * 40
+
+    @staticmethod
+    def script() -> str:
+        return (
+            ROOT / "scripts" / "ci" / "verify-platform-release-main-jobs.sh"
+        ).read_text(encoding="utf-8")
+
+    def execute(
+        self,
+        script: str,
+        *,
+        jobs: dict[str, object] | None = None,
+        codeql_runs: dict[str, object] | None = None,
+        codeql_jobs: dict[str, object] | None = None,
+        http_status: int = 200,
+        actions_token: str | None = "actions-token",
+        write_token: str | None = None,
+        settings_token: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str, str]:
+        with tempfile.TemporaryDirectory(
+            dir=ROOT, prefix=".platform-main-jobs-shell-"
+        ) as temporary:
+            runner = Path(temporary)
+            transaction = runner / "jobs.sh"
+            with transaction.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(script)
+            fixture = runner / "main-jobs.json"
+            fixture.write_text(
+                json.dumps(jobs if jobs is not None else main_ci_jobs_record()),
+                encoding="utf-8",
+            )
+            codeql_runs_fixture = runner / "codeql-runs.json"
+            codeql_runs_fixture.write_text(
+                json.dumps(
+                    codeql_runs if codeql_runs is not None else codeql_runs_record()
+                ),
+                encoding="utf-8",
+            )
+            codeql_jobs_fixture = runner / "codeql-jobs.json"
+            codeql_jobs_fixture.write_text(
+                json.dumps(
+                    codeql_jobs if codeql_jobs is not None else codeql_jobs_record()
+                ),
+                encoding="utf-8",
+            )
+            output = runner / "output.txt"
+            summary = runner / "summary.md"
+            calls = runner / "calls.log"
+            relative = runner.relative_to(ROOT).as_posix()
+            prelude = r'''
+python3() {
+  "${TEST_PYTHON}" "$@"
+}
+
+curl() {
+  local output='' method='' authorization='' url='' token=''
+  if [ -n "${GH_TOKEN-}" ] || [ -n "${GITHUB_TOKEN-}" ] || \
+     [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || [ -n "${ACTIONS_READ_TOKEN-}" ]; then
+    return 92
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --request) method="$2"; shift 2 ;;
+      --header)
+        if [[ "$2" == Authorization:\ Bearer\ * ]]; then
+          authorization="$2"
+        fi
+        shift 2
+        ;;
+      http*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  printf '<%s>\n<%s>\n' "${method}" "${url}" >> "${MOCK_CALLS}"
+  token="${authorization#Authorization: Bearer }"
+  if [ "${method}" != GET ] || [ "${token}" != "${MOCK_ACTIONS_TOKEN}" ]; then
+    printf '{}' > "${output}"
+    printf '403'
+    return 0
+  fi
+  case "${url}" in
+    */actions/workflows/codeql.yml/runs\?*)
+      cp "${MOCK_CODEQL_RUNS}" "${output}"
+      ;;
+    */actions/runs/5001/jobs\?*)
+      cp "${MOCK_CODEQL_JOBS}" "${output}"
+      ;;
+    */actions/runs/4242/jobs\?*)
+      cp "${MOCK_FIXTURE}" "${output}"
+      ;;
+    *) return 94 ;;
+  esac
+  printf '%s' "${MOCK_HTTP_STATUS}"
+}
+'''
+            environment = os.environ.copy()
+            for name in (
+                "ACTIONS_READ_TOKEN",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "IMMUTABLE_SETTINGS_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ):
+                environment.pop(name, None)
+            environment.update(
+                {
+                    "TEST_PYTHON": ImmutableSettingsShellTests.bash_path(sys.executable),
+                    "MOCK_FIXTURE": f"{relative}/main-jobs.json",
+                    "MOCK_CODEQL_RUNS": f"{relative}/codeql-runs.json",
+                    "MOCK_CODEQL_JOBS": f"{relative}/codeql-jobs.json",
+                    "MOCK_CALLS": f"{relative}/calls.log",
+                    "MOCK_HTTP_STATUS": str(http_status),
+                    "MOCK_ACTIONS_TOKEN": "actions-token",
+                    "MOCK_SCRIPT": f"{relative}/jobs.sh",
+                    "SOURCE_SHA": self.SOURCE,
+                    "COMPLETED_RUN_ID": "4242",
+                    "COMPLETED_RUN_ATTEMPT": "1",
+                    "GITHUB_API_URL": "https://api.github.test",
+                    "GITHUB_REPOSITORY": "owner/platform",
+                    "RUNNER_TEMP": relative,
+                    "GITHUB_OUTPUT": f"{relative}/output.txt",
+                    "GITHUB_STEP_SUMMARY": f"{relative}/summary.md",
+                }
+            )
+            if actions_token is not None:
+                environment["ACTIONS_READ_TOKEN"] = actions_token
+            if write_token is not None:
+                environment["GH_TOKEN"] = write_token
+            if settings_token is not None:
+                environment["IMMUTABLE_SETTINGS_TOKEN"] = settings_token
+            completed = subprocess.run(
+                [
+                    ImmutableSettingsShellTests.bash_executable(),
+                    "-c",
+                    prelude + '\nsource "${MOCK_SCRIPT}"\n',
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+            return (
+                completed,
+                output.read_text(encoding="utf-8") if output.exists() else "",
+                summary.read_text(encoding="utf-8") if summary.exists() else "",
+                calls.read_text(encoding="utf-8") if calls.exists() else "",
+            )
+
+    def test_exact_actions_get_emits_only_run_bound_value_receipt(self):
+        completed, output, summary, calls = self.execute(self.script())
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(
+            output,
+            f"attestation=PASS:owner/platform:4242:1:{self.SOURCE}\n",
+        )
+        match = re.search(r"```json\n([^\n]+)\n```", summary)
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            json.loads(match.group(1)),
+            {
+                "codeql": "success",
+                "dependency_review": "skipped-on-push",
+                "repository": "owner/platform",
+                "repository_and_infrastructure": "success",
+                "run_attempt": 1,
+                "run_id": 4242,
+                "schema": "platform-release-main-ci-jobs-v1",
+                "source_sha": self.SOURCE,
+                "status": "PASS",
+            },
+        )
+        self.assertEqual(calls.count("<GET>"), 3)
+        self.assertIn("filter=latest&per_page=100", calls)
+        self.assertIn(
+            "/actions/workflows/codeql.yml/runs?branch=main&event=push&head_sha=",
+            calls,
+        )
+        self.assertNotIn("actions-token", completed.stdout + completed.stderr + summary)
+
+    def test_missing_swapped_crossover_and_if_false_fixtures_fail_closed(self):
+        skipped = main_ci_jobs_record()
+        step = next(
+            value
+            for value in skipped["jobs"][0]["steps"]
+            if value["name"] == "Validate Python policy tooling"
+        )
+        step["conclusion"] = "skipped"
+        cases = (
+            {"actions_token": None},
+            {"actions_token": "foreign"},
+            {"write_token": "write-token"},
+            {"settings_token": "settings-token"},
+            {"http_status": 403},
+            {"jobs": skipped},
+        )
+        for index, options in enumerate(cases):
+            with self.subTest(index=index):
+                completed, output, summary, _calls = self.execute(
+                    self.script(), **options
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertEqual(summary, "")
+
+    def test_actions_token_is_unexported_and_validator_is_load_bearing(self):
+        script = self.script()
+        mutations = (
+            script.replace("unset ACTIONS_READ_TOKEN", ":", 1),
+            script.replace("--request GET", "--request POST", 1),
+            script.replace(
+                'python3 -I -B "${contract}" main-ci-jobs-receipt',
+                'python3 -I -B "${contract}" immutable-settings-receipt',
+                1,
+            ),
+        )
+        for index, mutant in enumerate(mutations):
+            with self.subTest(index=index):
+                completed, output, summary, _calls = self.execute(mutant)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertEqual(summary, "")
+
+
+class PublicationTransactionShellTests(unittest.TestCase):
+    TAG = "v0.1.1"
+    SOURCE = "a" * 40
+    RECOVERY_TAG = MODULE.RECOVERY_TAG
+    RECOVERY_SOURCE = MODULE.RECOVERY_SOURCE_SHA
     DATE = "2026-08-13T15:21:32Z"
 
     @staticmethod
@@ -1004,22 +2304,31 @@ class PublicationTransactionShellTests(unittest.TestCase):
             return f"/{normalized[0].lower()}/{normalized[3:]}"
         return normalized
 
-    @property
-    def notes(self) -> str:
+    @staticmethod
+    def notes(tag: str, source: str) -> str:
         return (
-            f"## Platform {self.TAG}\n\n"
-            f"Immutable repository source: `{self.SOURCE}`\n\n"
+            f"## Platform {tag}\n\n"
+            f"Immutable repository source: `{source}`\n\n"
             "This release names platform source only. It does not deploy, promote, "
             "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
             "See `CHANGELOG.md` at this tag for the human-readable change record.\n"
         )
 
-    def exact_records(self) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-        ref, tag = exact_tag_records(self.TAG, self.SOURCE, f"Platform release {self.TAG} from {self.SOURCE}", self.DATE)
+    def exact_records(
+        self, tag_name: str, source: str, tag_object: str
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        ref, tag = exact_tag_records(
+            tag_name,
+            source,
+            f"Platform release {tag_name} from {source}",
+            self.DATE,
+        )
+        ref["object"]["sha"] = tag_object
+        tag["sha"] = tag_object
         release = {
-            "tag_name": self.TAG,
-            "name": f"Platform {self.TAG}",
-            "body": self.notes,
+            "tag_name": tag_name,
+            "name": f"Platform {tag_name}",
+            "body": self.notes(tag_name, source),
             "draft": False,
             "prerelease": False,
             "immutable": True,
@@ -1033,10 +2342,17 @@ class PublicationTransactionShellTests(unittest.TestCase):
         script: str,
         *,
         race: bool = False,
-        initial_exact: bool = False,
+        current_state: str = "missing",
         immutable: bool = True,
         drift_before_release: bool = False,
         drift_during_release: bool = False,
+        current_release_race: bool = False,
+        settings_fail_call: int = 0,
+        settings_env: str | None = None,
+        actions_env: str | None = None,
+        write_env: str | None = "write-token",
+        recovery_state: str = "tag",
+        event_tag: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, dict[str, object]]:
         with tempfile.TemporaryDirectory(
             dir=ROOT, prefix=".platform-release-shell-"
@@ -1045,13 +2361,62 @@ class PublicationTransactionShellTests(unittest.TestCase):
             transaction_path = runner / "transaction.sh"
             with transaction_path.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(script)
-            if initial_exact:
-                ref, tag, release = self.exact_records()
-                (runner / "ref.json").write_text(json.dumps(ref), encoding="utf-8")
-                (runner / "tag.json").write_text(json.dumps(tag), encoding="utf-8")
-                (runner / "release.json").write_text(
-                    json.dumps(release), encoding="utf-8"
+            state_root = runner / "state"
+            state_root.mkdir()
+            if recovery_state not in {"missing", "tag", "complete", "foreign"}:
+                raise AssertionError("recovery fixture state is not closed")
+            if recovery_state != "missing":
+                ref, tag, release = self.exact_records(
+                    self.RECOVERY_TAG, self.RECOVERY_SOURCE, "b" * 40
                 )
+                if recovery_state == "foreign":
+                    tag["object"]["sha"] = "0" * 40
+                (state_root / f"ref-{self.RECOVERY_TAG}.json").write_text(
+                    json.dumps(ref), encoding="utf-8"
+                )
+                (state_root / f"tag-{'b' * 40}.json").write_text(
+                    json.dumps(tag), encoding="utf-8"
+                )
+                if recovery_state == "complete":
+                    (state_root / f"release-{self.RECOVERY_TAG}.json").write_text(
+                        json.dumps(release), encoding="utf-8"
+                    )
+            if current_state not in {
+                "missing",
+                "tag",
+                "complete",
+                "foreign-tag",
+                "release-only",
+                "foreign-release",
+                "partial-release",
+            }:
+                raise AssertionError("current fixture state is not closed")
+            if current_state != "missing":
+                ref, tag, release = self.exact_records(
+                    self.TAG, self.SOURCE, "c" * 40
+                )
+                if current_state == "foreign-tag":
+                    tag["object"]["sha"] = "0" * 40
+                if current_state != "release-only":
+                    (state_root / f"ref-{self.TAG}.json").write_text(
+                        json.dumps(ref), encoding="utf-8"
+                    )
+                    (state_root / f"tag-{'c' * 40}.json").write_text(
+                        json.dumps(tag), encoding="utf-8"
+                    )
+                if current_state in {
+                    "complete",
+                    "release-only",
+                    "foreign-release",
+                    "partial-release",
+                }:
+                    if current_state == "foreign-release":
+                        release["author"] = {"login": "owner", "id": 1}
+                    if current_state == "partial-release":
+                        release["immutable"] = False
+                    (state_root / f"release-{self.TAG}.json").write_text(
+                        json.dumps(release), encoding="utf-8"
+                    )
             prelude = r'''
 python3() {
   "${TEST_PYTHON}" "$@"
@@ -1072,33 +2437,89 @@ jq() {
 }
 
 curl() {
-  local output='' url='' value
+  local output='' url='' authorization='' token='' tag='' object_sha='' path=''
+  if [ -n "${GH_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
+     [ -n "${ACTIONS_READ_TOKEN-}" ]; then
+    return 93
+  fi
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --output) output="$2"; shift 2 ;;
+      --header)
+        if [[ "$2" == Authorization:\ Bearer\ * ]]; then
+          authorization="$2"
+        fi
+        shift 2
+        ;;
       http*) url="$1"; shift ;;
       *) shift ;;
     esac
   done
+  token="${authorization#Authorization: Bearer }"
   case "${url}" in
     */immutable-releases)
+      if [ "${token}" != "${MOCK_SETTINGS_TOKEN}" ]; then
+        printf '{}' > "${output}"
+        printf '403'
+        return 0
+      fi
+      settings_count=0
+      if [ -f "${MOCK_SETTINGS_COUNT}" ]; then
+        settings_count="$(<"${MOCK_SETTINGS_COUNT}")"
+      fi
+      settings_count=$((settings_count + 1))
+      printf '%s' "${settings_count}" > "${MOCK_SETTINGS_COUNT}"
+      if [ "${MOCK_SETTINGS_FAIL_CALL}" -eq "${settings_count}" ]; then
+        printf '{}' > "${output}"
+        printf '403'
+        return 0
+      fi
       printf '{"enabled":%s,"enforced_by_owner":false}' "${MOCK_IMMUTABLE}" > "${output}"
       printf '200'
       ;;
     */git/ref/tags/*)
-      if [ -f "${MOCK_REF_JSON}" ]; then cp "${MOCK_REF_JSON}" "${output}"; printf '200';
+      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
+        printf '{}' > "${output}"; printf '403'; return 0
+      fi
+      tag="${url##*/}"
+      path="${MOCK_STATE}/ref-${tag}.json"
+      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
       else printf '{}' > "${output}"; printf '404'; fi
+      if [ "${tag}" = "${MOCK_CURRENT_TAG}" ] && \
+         [ "${MOCK_CURRENT_RELEASE_RACE}" = true ]; then
+        current_ref_reads=0
+        if [ -f "${MOCK_CURRENT_REF_READS}" ]; then
+          current_ref_reads="$(<"${MOCK_CURRENT_REF_READS}")"
+        fi
+        current_ref_reads=$((current_ref_reads + 1))
+        printf '%s' "${current_ref_reads}" > "${MOCK_CURRENT_REF_READS}"
+        if [ "${current_ref_reads}" -eq 3 ]; then
+          printf '{"tag_name":"%s"}' "${tag}" > \
+            "${MOCK_STATE}/release-${tag}.json"
+        fi
+      fi
       ;;
     */git/tags/*)
-      if [ -f "${MOCK_TAG_JSON}" ]; then cp "${MOCK_TAG_JSON}" "${output}"; printf '200';
+      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
+        printf '{}' > "${output}"; printf '403'; return 0
+      fi
+      object_sha="${url##*/}"
+      path="${MOCK_STATE}/tag-${object_sha}.json"
+      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
       else printf '{}' > "${output}"; printf '404'; fi
       ;;
     */releases/tags/*)
-      if [ -f "${MOCK_RELEASE_JSON}" ]; then cp "${MOCK_RELEASE_JSON}" "${output}"; printf '200';
+      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
+        printf '{}' > "${output}"; printf '403'; return 0
+      fi
+      tag="${url##*/}"
+      path="${MOCK_STATE}/release-${tag}.json"
+      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
       else
         if [ "${MOCK_DRIFT_BEFORE_RELEASE}" = true ] && [ ! -f "${MOCK_DRIFT_MARKER}" ]; then
+          object_sha="$("${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "${MOCK_STATE}/ref-${tag}.json")"
           "${TEST_PYTHON}" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p,encoding="utf-8")); v["object"]["sha"]="0"*40; json.dump(v,open(p,"w",encoding="utf-8")); open(sys.argv[2],"w").close()' \
-            "${MOCK_TAG_JSON}" "${MOCK_DRIFT_MARKER}"
+            "${MOCK_STATE}/tag-${object_sha}.json" "${MOCK_DRIFT_MARKER}"
         fi
         printf '{}' > "${output}"; printf '404'
       fi
@@ -1108,10 +2529,15 @@ curl() {
 }
 
 gh() {
+  if [ "${GH_TOKEN}" != "${MOCK_WRITE_TOKEN}" ] || \
+    [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
+    [ -n "${ACTIONS_READ_TOKEN-}" ]; then
+    return 91
+  fi
   printf 'CALL\n' >> "${MOCK_CALLS}"
   printf '<%s>\n' "$@" >> "${MOCK_CALLS}"
   if [ "$1" = api ]; then
-    local endpoint='' arg tag='' message='' object='' type=''
+    local endpoint='' arg tag='' message='' object='' type='' tag_object=''
     local tagger_name='' tagger_email='' tagger_date='' ref='' sha=''
     for arg in "$@"; do
       case "${arg}" in
@@ -1134,18 +2560,19 @@ gh() {
           [ -z "${tagger_email}" ] || [ -z "${tagger_date}" ]; then
           return 2
         fi
+        tag_object="$("${TEST_PYTHON}" -c 'import hashlib,sys; print(hashlib.sha1(sys.argv[1].encode()).hexdigest())' "${tag}")"
         "${TEST_PYTHON}" -c 'import json,sys; json.dump({"sha":sys.argv[2],"tag":sys.argv[3],"message":sys.argv[4],"object":{"type":"commit","sha":sys.argv[5]},"tagger":{"name":sys.argv[6],"email":sys.argv[7],"date":sys.argv[8]}},open(sys.argv[1],"w",encoding="utf-8"))' \
-          "${MOCK_TAG_JSON}" "${MOCK_TAG_OBJECT}" "${tag}" "${message}" "${object}" \
+          "${MOCK_STATE}/tag-${tag_object}.json" "${tag_object}" "${tag}" "${message}" "${object}" \
           "${tagger_name}" "${tagger_email}" "${tagger_date}"
-        printf '%s\n' "${MOCK_TAG_OBJECT}"
+        printf '%s\n' "${tag_object}"
         ;;
       */git/refs)
-        if [ "${ref}" != "refs/tags/${TAG}" ] || \
-          [ "${sha}" != "${MOCK_TAG_OBJECT}" ]; then
+        if [[ "${ref}" != refs/tags/* ]] || \
+          [ ! -f "${MOCK_STATE}/tag-${sha}.json" ]; then
           return 2
         fi
         "${TEST_PYTHON}" -c 'import json,sys; json.dump({"ref":sys.argv[2],"object":{"type":"tag","sha":sys.argv[3]}},open(sys.argv[1],"w",encoding="utf-8"))' \
-          "${MOCK_REF_JSON}" "${ref}" "${sha}"
+          "${MOCK_STATE}/ref-${ref#refs/tags/}.json" "${ref}" "${sha}"
         if [ "${MOCK_RACE}" = true ]; then return 1; fi
         ;;
       *) return 2 ;;
@@ -1153,7 +2580,7 @@ gh() {
     return 0
   fi
   if [ "$1" = release ] && [ "$2" = create ]; then
-    local release_tag="$3" tag_verified='' draft=false prerelease=false title='' notes=''
+    local release_tag="$3" tag_verified='' draft=false prerelease=false title='' notes='' object_sha=''
     shift 3
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -1169,10 +2596,11 @@ gh() {
       return 2
     fi
     "${TEST_PYTHON}" -c 'import json,sys; json.dump({"tag_name":sys.argv[2],"name":sys.argv[3],"body":open(sys.argv[4],encoding="utf-8").read(),"draft":sys.argv[5]=="true","prerelease":sys.argv[6]=="true","immutable":sys.argv[7]=="true","author":{"login":"github-actions[bot]","id":41898282},"assets":[]},open(sys.argv[1],"w",encoding="utf-8"))' \
-      "${MOCK_RELEASE_JSON}" "${release_tag}" "${title}" "${notes}" "${draft}" "${prerelease}" "${MOCK_IMMUTABLE}"
+      "${MOCK_STATE}/release-${release_tag}.json" "${release_tag}" "${title}" "${notes}" "${draft}" "${prerelease}" "${MOCK_IMMUTABLE}"
     if [ "${MOCK_DRIFT_DURING_RELEASE}" = true ]; then
+      object_sha="$("${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "${MOCK_STATE}/ref-${release_tag}.json")"
       "${TEST_PYTHON}" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p,encoding="utf-8")); v["object"]["sha"]="0"*40; json.dump(v,open(p,"w",encoding="utf-8"))' \
-        "${MOCK_TAG_JSON}"
+        "${MOCK_STATE}/tag-${object_sha}.json"
     fi
     if [ "${MOCK_RACE}" = true ]; then return 1; fi
     return 0
@@ -1192,21 +2620,36 @@ sleep() { :; }
                     "MOCK_RACE": "true" if race else "false",
                     "MOCK_DRIFT_BEFORE_RELEASE": "true" if drift_before_release else "false",
                     "MOCK_DRIFT_DURING_RELEASE": "true" if drift_during_release else "false",
+                    "MOCK_CURRENT_RELEASE_RACE": "true" if current_release_race else "false",
+                    "MOCK_CURRENT_TAG": self.TAG,
+                    "MOCK_CURRENT_REF_READS": f"{relative}/current-ref-reads",
                     "MOCK_DRIFT_MARKER": f"{relative}/drift.marker",
-                    "MOCK_TAG_OBJECT": self.TAG_OBJECT,
-                    "MOCK_REF_JSON": f"{relative}/ref.json",
-                    "MOCK_TAG_JSON": f"{relative}/tag.json",
-                    "MOCK_RELEASE_JSON": f"{relative}/release.json",
+                    "MOCK_SETTINGS_FAIL_CALL": str(settings_fail_call),
+                    "MOCK_SETTINGS_COUNT": f"{relative}/settings-count",
+                    "MOCK_SETTINGS_TOKEN": "settings-token",
+                    "MOCK_WRITE_TOKEN": "write-token",
+                    "MOCK_STATE": f"{relative}/state",
                     "MOCK_CALLS": f"{relative}/calls.log",
                     "MOCK_SCRIPT": f"{relative}/transaction.sh",
-                    "GH_TOKEN": "fixture-token",
                     "SOURCE_SHA": self.SOURCE,
-                    "TAG": self.TAG,
+                    "TAG": event_tag if event_tag is not None else self.TAG,
                     "GITHUB_API_URL": "https://api.github.test",
                     "GITHUB_REPOSITORY": "owner/platform",
                     "RUNNER_TEMP": relative,
                 }
             )
+            if settings_env is None:
+                environment.pop("IMMUTABLE_SETTINGS_TOKEN", None)
+            else:
+                environment["IMMUTABLE_SETTINGS_TOKEN"] = settings_env
+            if actions_env is None:
+                environment.pop("ACTIONS_READ_TOKEN", None)
+            else:
+                environment["ACTIONS_READ_TOKEN"] = actions_env
+            if write_env is None:
+                environment.pop("GH_TOKEN", None)
+            else:
+                environment["GH_TOKEN"] = write_env
             completed = subprocess.run(
                 [
                     self.bash_executable(),
@@ -1228,10 +2671,21 @@ sleep() { :; }
                 else ""
             )
             state: dict[str, object] = {}
-            for name in ("ref", "tag", "release"):
-                path = runner / f"{name}.json"
-                if path.exists():
-                    state[name] = json.loads(path.read_text(encoding="utf-8"))
+            for ref_path in state_root.glob("ref-*.json"):
+                ref = json.loads(ref_path.read_text(encoding="utf-8"))
+                tag_ref = ref["ref"]
+                tag_name = tag_ref[len("refs/tags/") :]
+                object_sha = ref["object"]["sha"]
+                record: dict[str, object] = {"ref": ref}
+                tag_path = state_root / f"tag-{object_sha}.json"
+                release_path = state_root / f"release-{tag_name}.json"
+                if tag_path.exists():
+                    record["tag"] = json.loads(tag_path.read_text(encoding="utf-8"))
+                if release_path.exists():
+                    record["release"] = json.loads(
+                        release_path.read_text(encoding="utf-8")
+                    )
+                state[tag_name] = record
             return completed, calls, state
 
     def test_actual_absent_existing_and_both_concurrent_winner_paths(self):
@@ -1247,98 +2701,170 @@ sleep() { :; }
                 self.assertIn("<--verify-tag>", calls)
                 self.assertNotIn("<--draft>", calls)
                 self.assertNotIn("<--prerelease>", calls)
-                self.assertEqual(state["tag"]["object"]["sha"], self.SOURCE)
-                self.assertEqual(state["release"]["draft"], False)
-                self.assertEqual(state["release"]["prerelease"], False)
-                self.assertEqual(state["release"]["immutable"], True)
+                self.assertEqual(
+                    state[self.TAG]["tag"]["object"]["sha"], self.SOURCE
+                )
+                self.assertEqual(state[self.TAG]["release"]["draft"], False)
+                self.assertEqual(state[self.TAG]["release"]["prerelease"], False)
+                self.assertEqual(state[self.TAG]["release"]["immutable"], True)
+                self.assertEqual(
+                    state[self.RECOVERY_TAG]["release"]["author"]["login"],
+                    "github-actions[bot]",
+                )
+                self.assertLess(
+                    calls.index(f"<{self.RECOVERY_TAG}>"),
+                    calls.index(f"<object={self.SOURCE}>")
+                )
                 if race:
                     self.assertIn("exact concurrent winner", completed.stderr)
 
-        existing, calls, _state = self.execute(script, initial_exact=True)
+        existing, calls, _state = self.execute(
+            script, current_state="complete", recovery_state="complete"
+        )
         self.assertEqual(existing.returncode, 0, existing.stdout + existing.stderr)
         self.assertEqual(calls, "")
         self.assertIn("verified existing", existing.stdout)
         self.assertIn("verified complete existing", existing.stdout)
 
-    def test_immutable_setting_denies_before_any_publication_call(self):
+        resumable, calls, state = self.execute(
+            script, current_state="tag", recovery_state="complete"
+        )
+        self.assertEqual(resumable.returncode, 0, resumable.stdout + resumable.stderr)
+        self.assertNotIn(f"<object={self.SOURCE}>", calls)
+        self.assertEqual(calls.count("CALL\n"), 1)
+        self.assertIn(f"<{self.TAG}>", calls)
+        self.assertEqual(state[self.TAG]["release"]["immutable"], True)
+
+    def test_app_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
-        completed, calls, state = self.execute(script, immutable=False)
+        completed, calls, state = self.execute(
+            script, settings_env="settings-token"
+        )
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(calls, "")
-        self.assertEqual(state, {})
-        self.assertIn("GitHub immutable releases must be enabled", completed.stderr)
-
-        guard = (
-            'python3 -I -B "${contract}" immutable-settings \\\n'
-            '  --settings-json "${immutable_json}" >/dev/null'
-        )
+        self.assertNotIn(self.TAG, state)
+        self.assertNotIn("release", state[self.RECOVERY_TAG])
+        guard = 'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"'
         self.assertIn(guard, script)
         deleted_guard, mutant_calls, _state = self.execute(
-            script.replace(guard, ":", 1), immutable=False
+            script.replace(guard, ":", 1), settings_env="settings-token"
         )
         self.assertNotEqual(deleted_guard.returncode, 0)
-        self.assertNotEqual(mutant_calls, "")
+        self.assertEqual(mutant_calls, "")
 
-    def test_foreign_tag_races_are_rejected_before_and_after_release_create(self):
+    def test_actions_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
-        pre_guard = (
-            "  # The tag is not locked until the Release exists. Close the last observable\n"
-            "  # pre-publication window after proving Release absence and before creating it.\n"
-            "  classify_tag exact >/dev/null\n"
+        completed, calls, state = self.execute(
+            script, actions_env="actions-token"
         )
-        post_guard = (
-            "# Re-query both halves after create/reuse. An immutable Release locks its tag,\n"
-            "# but a foreign pre-lock race must never be accepted as a successful release.\n"
-            "classify_release exact >/dev/null\n"
-            "classify_tag exact >/dev/null\n"
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, "")
+        self.assertNotIn(self.TAG, state)
+        self.assertNotIn("release", state[self.RECOVERY_TAG])
+        guard = 'test -z "${ACTIONS_READ_TOKEN-}"'
+        self.assertIn(guard, script)
+        deleted_guard, mutant_calls, _state = self.execute(
+            script.replace(guard, ":", 1), actions_env="actions-token"
         )
-        self.assertIn(pre_guard, script)
-        self.assertIn(post_guard, script)
+        self.assertNotEqual(deleted_guard.returncode, 0)
+        self.assertEqual(mutant_calls, "")
 
-        before, _calls, before_state = self.execute(
-            script, drift_before_release=True
-        )
-        self.assertNotEqual(before.returncode, 0)
-        self.assertNotIn("release", before_state)
-        deleted_pre, _calls, deleted_pre_state = self.execute(
-            script.replace(pre_guard, "", 1), drift_before_release=True
-        )
-        self.assertNotEqual(deleted_pre.returncode, 0)
-        self.assertIn("release", deleted_pre_state)
-
-        during, _calls, during_state = self.execute(
-            script, drift_during_release=True
-        )
-        self.assertNotEqual(during.returncode, 0)
-        self.assertIn("release", during_state)
-        deleted_post, _calls, _state = self.execute(
-            script.replace(post_guard, "", 1), drift_during_release=True
-        )
-        self.assertEqual(
-            deleted_post.returncode, 0, deleted_post.stdout + deleted_post.stderr
-        )
-
-    def test_source_creation_and_publication_mutants_are_killed_end_to_end(self):
+    def test_missing_or_foreign_recovery_tag_denies_before_every_write(self):
         script = self.script()
-        source = '-f object="${SOURCE_SHA}" \\\n'
-        release = 'gh release create "${TAG}" --verify-tag \\\n'
+        for recovery_state in ("missing", "foreign"):
+            with self.subTest(recovery_state=recovery_state):
+                completed, calls, state = self.execute(
+                    script, recovery_state=recovery_state
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+                self.assertNotIn(self.TAG, state)
+
+    def test_foreign_partial_current_states_and_races_deny_before_every_write(self):
+        script = self.script()
+        for current_state in (
+            "foreign-tag",
+            "release-only",
+            "foreign-release",
+            "partial-release",
+        ):
+            with self.subTest(current_state=current_state):
+                completed, calls, state = self.execute(
+                    script, current_state=current_state
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+                self.assertNotIn("release", state[self.RECOVERY_TAG])
+
+        race_cases = (
+            {"current_state": "tag", "drift_before_release": True},
+            {"current_state": "missing", "current_release_race": True},
+        )
+        for race_case in race_cases:
+            with self.subTest(race_case=race_case):
+                completed, calls, _state = self.execute(
+                    script, recovery_state="complete", **race_case
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+
+    def test_recovery_workflow_refuses_to_skip_v011(self):
+        completed, calls, state = self.execute(
+            self.script(), event_tag="v0.1.2"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, "")
+        self.assertNotIn("v0.1.2", state)
+
+    def test_write_credential_is_process_scoped_and_fails_closed(self):
+        script = self.script()
+        for write_env in (None, "settings-token"):
+            completed, calls, _state = self.execute(
+                script, write_env=write_env
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(calls, "")
+        for required in (
+            'write_token="${GH_TOKEN}"',
+            "unset GH_TOKEN",
+            'GH_TOKEN="${write_token}" gh "$@"',
+        ):
+            self.assertIn(required, script)
+        self.assertNotIn("settings_token", script)
+
+    def test_current_source_creation_and_publication_mutants_are_killed(self):
+        script = self.script()
+        source = '-f object="${SOURCE_SHA}" -f type=commit \\\n'
+        release = 'run_write_gh release create "${TAG}" --verify-tag \\\n'
         verify = '"${TAG}" --verify-tag \\\n'
-        markers = (source, release, verify, "-f type=commit")
+        markers = (source, release, verify)
         for marker in markers:
             self.assertIn(marker, script)
         mutants = (
-            script.replace(source, '-f object="0000000000000000000000000000000000000000" \\\n', 1),
+            script.replace(
+                source,
+                '-f object="0000000000000000000000000000000000000000" -f type=commit \\\n',
+                1,
+            ),
             script.replace(source, "", 1),
             script.replace("-f type=commit", "-f type=tree", 1),
-            script.replace(release, 'gh release create "${TAG}" --verify-tag --draft \\\n', 1),
-            script.replace(release, 'gh release create "${TAG}" --verify-tag --prerelease \\\n', 1),
+            script.replace(
+                release,
+                'run_write_gh release create "${TAG}" --verify-tag --draft \\\n',
+                1,
+            ),
+            script.replace(
+                release,
+                'run_write_gh release create "${TAG}" --verify-tag --prerelease \\\n',
+                1,
+            ),
             script.replace(verify, '"${TAG}" \\\n', 1),
-            script.replace("classify_tag absent >/dev/null", "classify_tag exact >/dev/null", 1),
-            script.replace("classify_release absent >/dev/null", "classify_release exact >/dev/null", 1),
         )
         for index, mutant in enumerate(mutants):
             with self.subTest(transaction_mutant=index):
-                completed, _calls, _state = self.execute(mutant)
+                completed, _calls, _state = self.execute(
+                    mutant, recovery_state="complete"
+                )
                 self.assertNotEqual(
                     completed.returncode, 0, completed.stdout + completed.stderr
                 )
@@ -1601,113 +3127,569 @@ class GitTransitionTests(unittest.TestCase):
 
 
 class WorkflowStructureTests(unittest.TestCase):
+    ACTION_PIN = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0"
+
     @staticmethod
-    def require_exact_wiring(workflow: str, transaction: str) -> None:
+    def require_exact_wiring(
+        workflow: str,
+        jobs_verifier: str,
+        settings_verifier: str,
+        transaction: str,
+    ) -> None:
+        if workflow.count("  main-ci-jobs:\n") != 1:
+            raise ValueError("workflow must have one dedicated main-CI jobs proof")
+        if workflow.count("  immutable-settings:\n") != 1:
+            raise ValueError("workflow must have one dedicated immutable-settings job")
+        if workflow.count("  publish:\n") != 1:
+            raise ValueError("workflow must have one physically separate publish job")
+        jobs_start = workflow.index("  main-ci-jobs:\n")
+        settings_start = workflow.index("  immutable-settings:\n")
+        publish_start = workflow.index("  publish:\n")
+        if not jobs_start < settings_start < publish_start:
+            raise ValueError("both read-only proofs must precede publication")
+        jobs_job = workflow[jobs_start:settings_start]
+        settings_job = workflow[settings_start:publish_start]
+        publish_job = workflow[publish_start:]
+
         for required in (
-            "fetch-depth: 0",
-            "release-window",
             "platform-release-${{ github.event.workflow_run.head_sha }}",
             "cancel-in-progress: false",
-            "bash scripts/ci/publish-platform-release.sh",
+            "branches: [main]",
         ):
             if required not in workflow:
-                raise ValueError(f"platform publisher lost exact wiring: {required}")
+                raise ValueError(f"platform workflow lost exact wiring: {required}")
+        if workflow.count("fetch-depth: 0") != 2:
+            raise ValueError("both jobs must independently fetch exact complete history")
+        if workflow.count("release-window") != 2:
+            raise ValueError("both jobs must independently bind the release window")
+
         for required in (
+            "outputs:\n      attestation: ${{ steps.required-jobs.outputs.attestation }}",
+            "permissions:\n      actions: read\n      contents: read",
+            "ACTIONS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "COMPLETED_RUN_ID: ${{ github.event.workflow_run.id }}",
+            "COMPLETED_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}",
+            "SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}",
+            "bash scripts/ci/verify-platform-release-main-jobs.sh",
+        ):
+            if required not in jobs_job:
+                raise ValueError(f"read-only main-CI jobs proof lost exact wiring: {required}")
+        for forbidden in (
+            "environment:",
+            "contents: write",
+            "create-github-app-token",
+            "PLATFORM_RELEASE_APP_ID",
+            "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+            "IMMUTABLE_SETTINGS_TOKEN",
+            "permission-administration",
+        ):
+            if forbidden in jobs_job:
+                raise ValueError(f"foreign authority crossed into jobs proof: {forbidden}")
+        jobs_outputs = jobs_job[
+            jobs_job.index("    outputs:\n") : jobs_job.index("    runs-on:")
+        ]
+        if "token" in jobs_outputs.lower() or jobs_outputs.count("attestation:") != 1:
+            raise ValueError("jobs proof may export only one sanitized attestation")
+
+        for required in (
+            "outputs:\n      attestation: ${{ steps.immutable-settings.outputs.attestation }}",
+            "environment:\n      name: platform-release\n      deployment: false",
+            "permissions:\n      contents: read",
+            WorkflowStructureTests.ACTION_PIN,
+            "app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}",
+            "private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}",
+            "owner: snaraj",
+            "repositories: website-infrastructure",
+            "permission-administration: read",
+            "skip-token-revoke: false",
+            "IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}",
+            "bash scripts/ci/verify-platform-release-settings.sh",
+        ):
+            if required not in settings_job:
+                raise ValueError(f"read-only settings job lost exact wiring: {required}")
+        if (
+            "contents: write" in settings_job
+            or "GH_TOKEN:" in settings_job
+            or "actions:" in settings_job
+            or "ACTIONS_READ_TOKEN" in settings_job
+        ):
+            raise ValueError("settings job must never receive publication authority")
+        outputs = settings_job[
+            settings_job.index("    outputs:\n") : settings_job.index("    runs-on:")
+        ]
+        if "token" in outputs.lower() or outputs.count("attestation:") != 1:
+            raise ValueError("settings job may export only one sanitized attestation")
+
+        for required in (
+            "needs: [main-ci-jobs, immutable-settings]",
+            "needs.main-ci-jobs.outputs.attestation ==",
+            "github.event.workflow_run.id, github.event.workflow_run.run_attempt,",
+            "needs.immutable-settings.outputs.attestation ==",
+            "format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,",
+            "github.run_attempt, github.event.workflow_run.head_sha)",
+            "permissions:\n      contents: write",
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "bash scripts/ci/publish-platform-release.sh",
+        ):
+            if required not in publish_job:
+                raise ValueError(f"write-only publish job lost exact wiring: {required}")
+        for forbidden in (
+            "environment:",
+            "create-github-app-token",
+            "PLATFORM_RELEASE_APP_ID",
+            "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+            "IMMUTABLE_SETTINGS_TOKEN",
+            "ACTIONS_READ_TOKEN",
+            "permission-administration",
+            "verify-platform-release-settings.sh",
+            "verify-platform-release-main-jobs.sh",
+        ):
+            if forbidden in publish_job:
+                raise ValueError(f"App authority crossed into publish job: {forbidden}")
+
+        if workflow.count("permission-administration: read") != 1:
+            raise ValueError("release App token must request Administration:read exactly once")
+        if workflow.count("PLATFORM_RELEASE_APP_ID") != 1:
+            raise ValueError("release App ID must occur only in the settings job")
+        if workflow.count("PLATFORM_RELEASE_APP_PRIVATE_KEY") != 1:
+            raise ValueError("release App key must occur only in the settings job")
+        if workflow.count("actions: read") != 1:
+            raise ValueError("Actions read must occur only in the jobs-proof job")
+        if workflow.count("ACTIONS_READ_TOKEN") != 1:
+            raise ValueError("Actions token must occur only in the jobs-proof job")
+        for forbidden in (
+            "permission-administration: write",
+            "permission-contents:",
+            "actions: write",
+            "skip-token-revoke: true",
+            "deployment: true",
+        ):
+            if forbidden in workflow:
+                raise ValueError(f"release App workflow broadened authority: {forbidden}")
+
+        for required in (
+            ': "${ACTIONS_READ_TOKEN:?ACTIONS_READ_TOKEN is required}"',
+            ': "${COMPLETED_RUN_ID:?COMPLETED_RUN_ID is required}"',
+            ': "${COMPLETED_RUN_ATTEMPT:?COMPLETED_RUN_ATTEMPT is required}"',
+            'actions_token="${ACTIONS_READ_TOKEN}"',
+            "unset ACTIONS_READ_TOKEN",
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            "--request GET",
+            '"Authorization: Bearer ${actions_token}"',
+            "unset actions_token",
+            "/actions/runs/${COMPLETED_RUN_ID}/jobs?filter=latest&per_page=100",
+            "/actions/workflows/codeql.yml/runs?branch=main&event=push&head_sha=${SOURCE_SHA}&per_page=100",
+            "/actions/runs/${codeql_run_id}/jobs?filter=latest&per_page=100",
+            "for poll_attempt in {1..30}",
+            'python3 -I -B "${contract}" codeql-run-state',
+            'python3 -I -B "${contract}" codeql-jobs-state',
+            'test "${codeql_ready}" = true',
+            'python3 -I -B "${contract}" main-ci-jobs-receipt',
+            '--codeql-runs-json "${codeql_runs_json}"',
+            '--codeql-jobs-json "${codeql_jobs_json}"',
+            '--run-id "${COMPLETED_RUN_ID}"',
+            '--run-attempt "${COMPLETED_RUN_ATTEMPT}"',
+            "printf 'attestation=PASS:%s:%s:%s:%s\\n'",
+        ):
+            if required not in jobs_verifier:
+                raise ValueError(f"main-CI jobs verifier lost exact guard: {required}")
+        if jobs_verifier.count("actions_token") != 3:
+            raise ValueError("Actions token must be captured, used once, and cleared")
+        for forbidden in (
+            "--request POST",
+            "--request PUT",
+            "--request PATCH",
+            "--request DELETE",
+            "gh ",
+            "/git/refs",
+            "/releases/tags",
+            "IMMUTABLE_SETTINGS_TOKEN: ${{",
+        ):
+            if forbidden in jobs_verifier:
+                raise ValueError(f"jobs verifier gained foreign authority: {forbidden}")
+
+        for required in (
+            ': "${IMMUTABLE_SETTINGS_TOKEN:?IMMUTABLE_SETTINGS_TOKEN is required}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            'settings_token="${IMMUTABLE_SETTINGS_TOKEN}"',
+            "unset IMMUTABLE_SETTINGS_TOKEN",
+            "--request GET",
+            '"Authorization: Bearer ${settings_token}"',
+            "unset settings_token",
             "/immutable-releases",
-            "immutable-settings",
+            'python3 -I -B "${contract}" immutable-settings-receipt',
+            ': "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"',
+            ': "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"',
+            "--run-id \"${GITHUB_RUN_ID}\"",
+            "--run-attempt \"${GITHUB_RUN_ATTEMPT}\"",
+            "printf 'attestation=PASS:%s:%s:%s:%s\\n'",
+        ):
+            if required not in settings_verifier:
+                raise ValueError(f"settings verifier lost exact guard: {required}")
+        if settings_verifier.count("settings_token") != 3:
+            raise ValueError("App token must be captured, used once, and cleared")
+        for forbidden in (
+            "--request POST",
+            "--request PUT",
+            "--request PATCH",
+            "--request DELETE",
+            "gh ",
+            "/git/refs",
+            "/releases/tags",
+            "/rulesets",
+            "bypass_actors",
+            "settings-preflight",
+            "release_tag_",
+        ):
+            if forbidden in settings_verifier:
+                raise ValueError(f"settings verifier gained mutation surface: {forbidden}")
+
+        for required in (
             "tag-state",
-            "classify_tag exact >/dev/null",
-            "classify_tag absent >/dev/null",
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${ACTIONS_READ_TOKEN-}"',
+            'write_token="${GH_TOKEN}"',
+            "unset GH_TOKEN",
+            'GH_TOKEN="${write_token}" gh "$@"',
+            "recovery-release",
+            "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
+            "recovery_tag='v0.1.0'",
+            "current_tag='v0.1.1'",
+            'test "${TAG}" = "${current_tag}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
             "release-state",
-            "classify_release exact >/dev/null",
-            "classify_release absent >/dev/null",
-            "/releases/tags/${TAG}",
+            '"${api}/releases/tags/${tag}"',
+            "preflight_publication_state",
+            'classify_tag "${current_tag_state}"',
+            'classify_release "${current_release_state}"',
+            'test "${current_release_state}" = absent',
             "for attempt in 1 2 3 4 5",
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
-            'gh release create "${TAG}" --verify-tag',
+            'run_write_gh release create "${recovery_tag}" --verify-tag',
+            'run_write_gh release create "${TAG}" --verify-tag',
         ):
             if required not in transaction:
                 raise ValueError(f"platform transaction lost exact wiring: {required}")
-        if transaction.count("classify_tag exact >/dev/null") < 5:
-            raise ValueError("tag reuse/create/race and pre/post Release checks must be exact")
-        if transaction.count("classify_release exact >/dev/null") < 4:
-            raise ValueError("Release reuse/create/race must each reach exact REST state")
-        if transaction.count("for attempt in 1 2 3 4 5") != 2:
-            raise ValueError("tag and Release transactions each need one bounded retry loop")
+        if "settings_token" in transaction or "/immutable-releases" in transaction:
+            raise ValueError("App settings authority must not enter the write transaction")
+        if "--target" in transaction:
+            raise ValueError("existing exact tags must never gain a workflow-sensitive target")
+        if transaction.count("for attempt in 1 2 3 4 5") != 3:
+            raise ValueError("recovery Release, current tag, and current Release need bounded retries")
+        if transaction.count("preflight_publication_state") != 6:
+            raise ValueError("all four states need an initial preflight and four mutation-boundary rechecks")
+        if (
+            "preflight_publication_state\n"
+            "complete_recovery_release\n"
+            "publish_current_release"
+        ) not in transaction:
+            raise ValueError("all four states must be classified before either publication phase")
+        if transaction.count('test "${tag_race_verified}" = true') != 1:
+            raise ValueError("current tag race must have one terminal exact-state assertion")
+        if transaction.count('test "${release_race_verified}" = true') != 2:
+            raise ValueError("both Release races must have terminal exact-state assertions")
+        if transaction.count("classify_tag exact") < 8:
+            raise ValueError("recovery/current tag reuse and pre/post checks must be exact")
+        if transaction.count("classify_release exact") < 6:
+            raise ValueError("recovery/current Release paths must reach exact REST state")
+
+        preflight_start = transaction.index("preflight_publication_state() {")
+        recovery_start = transaction.index("complete_recovery_release() {")
+        initial_preflight = transaction[preflight_start:recovery_start]
+        if initial_preflight.count(
+            'classify_tag exact \\\n    "${recovery_source_sha}"'
+        ) != 2 or 'classify_tag absent \\\n    "${recovery_source_sha}"' in initial_preflight:
+            raise ValueError("both recovery-tag preflight observations must require exact state")
+        current_start = transaction.index("publish_current_release() {")
+        recovery = transaction[recovery_start:current_start]
+        recovery_write = 'run_write_gh release create "${recovery_tag}" --verify-tag'
+        if "classify_tag absent" in recovery or "run_write_gh api" in recovery:
+            raise ValueError("recovery path must never create or accept an absent v0.1.0 tag")
+        if recovery.index("classify_tag exact") > recovery.index(recovery_write):
+            raise ValueError("exact owner-prepared recovery tag must precede every write")
+        if recovery.index("classify_release absent") > recovery.index(recovery_write):
+            raise ValueError("recovery Release absence must precede its create")
+
+        current = transaction[current_start:]
+        for required in (
+            "classify_tag absent",
+            "run_write_gh api --method POST",
+            '-f object="${SOURCE_SHA}" -f type=commit',
+            'run_write_gh release create "${TAG}" --verify-tag',
+        ):
+            if required not in current:
+                raise ValueError(f"current Release transaction lost exact create guard: {required}")
         for forbidden in (
             'git rev-list -n 1 "${TAG}"',
             "publication-state",
             "targetCommitish",
         ):
-            if forbidden in workflow + transaction:
+            if forbidden in workflow + jobs_verifier + settings_verifier + transaction:
                 raise ValueError(f"platform publisher has non-authoritative verifier: {forbidden}")
 
-    def test_every_main_sha_has_an_independent_non_deploying_exact_path(self):
+    def test_every_main_sha_has_split_read_and_write_exact_paths(self):
         ci = (ROOT / ".github" / "workflows" / "pull-request.yml").read_text(
             encoding="utf-8"
         )
-        publish = (ROOT / ".github" / "workflows" / "platform-release.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = (
+            ROOT / ".github" / "workflows" / "platform-release.yml"
+        ).read_text(encoding="utf-8")
+        settings_verifier = (
+            ROOT / "scripts" / "ci" / "verify-platform-release-settings.sh"
+        ).read_text(encoding="utf-8")
+        jobs_verifier = (
+            ROOT / "scripts" / "ci" / "verify-platform-release-main-jobs.sh"
+        ).read_text(encoding="utf-8")
         transaction = (
             ROOT / "scripts" / "ci" / "publish-platform-release.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("github.event.pull_request.number || github.run_id", ci)
         self.assertIn('first_parent=(--first-parent)', ci)
-        self.assertIn("workflow_run:", publish)
-        self.assertIn("github.event.workflow_run.head_sha", publish)
-        self.assertNotIn("queue:", ci + publish)
-        self.require_exact_wiring(publish, transaction)
-        for token in (
+        self.assertIn("workflow_run:", workflow)
+        self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertNotIn("queue:", ci + workflow)
+        self.require_exact_wiring(
+            workflow, jobs_verifier, settings_verifier, transaction
+        )
+
+        workflow_deletions = (
+            "  main-ci-jobs:\n",
+            "  immutable-settings:\n",
+            "  publish:\n",
             "fetch-depth: 0",
             "release-window",
             "platform-release-${{ github.event.workflow_run.head_sha }}",
             "cancel-in-progress: false",
+            "branches: [main]",
+            "outputs:\n      attestation: ${{ steps.immutable-settings.outputs.attestation }}",
+            "environment:\n      name: platform-release\n      deployment: false",
+            self.ACTION_PIN,
+            "app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}",
+            "private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}",
+            "owner: snaraj",
+            "repositories: website-infrastructure",
+            "permission-administration: read",
+            "skip-token-revoke: false",
+            "IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}",
+            "bash scripts/ci/verify-platform-release-settings.sh",
+            "outputs:\n      attestation: ${{ steps.required-jobs.outputs.attestation }}",
+            "permissions:\n      actions: read\n      contents: read",
+            "ACTIONS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "COMPLETED_RUN_ID: ${{ github.event.workflow_run.id }}",
+            "COMPLETED_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}",
+            "bash scripts/ci/verify-platform-release-main-jobs.sh",
+            "needs: [main-ci-jobs, immutable-settings]",
+            "needs.main-ci-jobs.outputs.attestation ==",
+            "github.event.workflow_run.id, github.event.workflow_run.run_attempt,",
+            "needs.immutable-settings.outputs.attestation ==",
+            "format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,",
+            "github.run_attempt, github.event.workflow_run.head_sha)",
             "bash scripts/ci/publish-platform-release.sh",
-        ):
+        )
+        for token in workflow_deletions:
             with self.subTest(workflow_deletion=token), self.assertRaises(ValueError):
-                self.require_exact_wiring(publish.replace(token, "", 1), transaction)
-        for token in (
+                self.require_exact_wiring(
+                    workflow.replace(token, "", 1),
+                    jobs_verifier,
+                    settings_verifier,
+                    transaction,
+                )
+
+        jobs_deletions = (
+            ': "${ACTIONS_READ_TOKEN:?ACTIONS_READ_TOKEN is required}"',
+            ': "${COMPLETED_RUN_ID:?COMPLETED_RUN_ID is required}"',
+            ': "${COMPLETED_RUN_ATTEMPT:?COMPLETED_RUN_ATTEMPT is required}"',
+            'actions_token="${ACTIONS_READ_TOKEN}"',
+            "unset ACTIONS_READ_TOKEN",
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            "--request GET",
+            '"Authorization: Bearer ${actions_token}"',
+            "unset actions_token",
+            "/actions/runs/${COMPLETED_RUN_ID}/jobs?filter=latest&per_page=100",
+            "/actions/workflows/codeql.yml/runs?branch=main&event=push&head_sha=${SOURCE_SHA}&per_page=100",
+            "/actions/runs/${codeql_run_id}/jobs?filter=latest&per_page=100",
+            "for poll_attempt in {1..30}",
+            'python3 -I -B "${contract}" codeql-run-state',
+            'python3 -I -B "${contract}" codeql-jobs-state',
+            'test "${codeql_ready}" = true',
+            'python3 -I -B "${contract}" main-ci-jobs-receipt',
+            '--codeql-runs-json "${codeql_runs_json}"',
+            '--codeql-jobs-json "${codeql_jobs_json}"',
+            '--run-id "${COMPLETED_RUN_ID}"',
+            '--run-attempt "${COMPLETED_RUN_ATTEMPT}"',
+            "printf 'attestation=PASS:%s:%s:%s:%s\\n'",
+        )
+        for token in jobs_deletions:
+            with self.subTest(jobs_deletion=token), self.assertRaises(ValueError):
+                self.require_exact_wiring(
+                    workflow,
+                    jobs_verifier.replace(token, "", 1),
+                    settings_verifier,
+                    transaction,
+                )
+
+        settings_deletions = (
+            ': "${IMMUTABLE_SETTINGS_TOKEN:?IMMUTABLE_SETTINGS_TOKEN is required}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            'settings_token="${IMMUTABLE_SETTINGS_TOKEN}"',
+            "unset IMMUTABLE_SETTINGS_TOKEN",
+            "--request GET",
+            '"Authorization: Bearer ${settings_token}"',
+            "unset settings_token",
             "/immutable-releases",
-            "immutable-settings",
+            'python3 -I -B "${contract}" immutable-settings-receipt',
+            ': "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"',
+            ': "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"',
+            "--run-id \"${GITHUB_RUN_ID}\"",
+            "--run-attempt \"${GITHUB_RUN_ATTEMPT}\"",
+            "printf 'attestation=PASS:%s:%s:%s:%s\\n'",
+        )
+        for token in settings_deletions:
+            with self.subTest(settings_deletion=token), self.assertRaises(ValueError):
+                self.require_exact_wiring(
+                    workflow,
+                    jobs_verifier,
+                    settings_verifier.replace(token, "", 1),
+                    transaction,
+                )
+
+        transaction_deletions = (
             "tag-state",
-            "classify_tag exact >/dev/null",
-            "classify_tag absent >/dev/null",
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${ACTIONS_READ_TOKEN-}"',
+            'write_token="${GH_TOKEN}"',
+            "unset GH_TOKEN",
+            'GH_TOKEN="${write_token}" gh "$@"',
+            "recovery-release",
+            "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
+            "recovery_tag='v0.1.0'",
+            "current_tag='v0.1.1'",
+            'test "${TAG}" = "${current_tag}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
             "release-state",
-            "classify_release exact >/dev/null",
-            "classify_release absent >/dev/null",
-            "/releases/tags/${TAG}",
+            '"${api}/releases/tags/${tag}"',
+            "preflight_publication_state",
+            'classify_tag "${current_tag_state}"',
+            'classify_release "${current_release_state}"',
+            'test "${current_release_state}" = absent',
             "for attempt in 1 2 3 4 5",
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
-            'gh release create "${TAG}" --verify-tag',
-        ):
+            'run_write_gh release create "${recovery_tag}" --verify-tag',
+            'run_write_gh release create "${TAG}" --verify-tag',
+        )
+        for token in transaction_deletions:
             with self.subTest(transaction_deletion=token), self.assertRaises(ValueError):
-                self.require_exact_wiring(publish, transaction.replace(token, "", 1))
-        for old, new in (
-            ("classify_tag absent >/dev/null", "classify_tag exact >/dev/null"),
-            ("classify_release absent >/dev/null", "classify_release exact >/dev/null"),
-        ):
-            with self.subTest(inversion=old), self.assertRaises(ValueError):
-                self.require_exact_wiring(publish, transaction.replace(old, new, 1))
+                self.require_exact_wiring(
+                    workflow,
+                    jobs_verifier,
+                    settings_verifier,
+                    transaction.replace(token, "", 1),
+                )
+
+        workflow_mutants = (
+            workflow.replace("permission-administration: read", "permission-administration: write", 1),
+            workflow.replace("repositories: website-infrastructure", "repositories: other-repository", 1),
+            workflow.replace("deployment: false", "deployment: true", 1),
+            workflow.replace(
+                "outputs:\n      attestation: ${{ steps.immutable-settings.outputs.attestation }}",
+                "outputs:\n      token: ${{ steps.immutable-settings-token.outputs.token }}",
+                1,
+            ),
+            workflow.replace(
+                "  publish:\n",
+                "  publish:\n    environment: platform-release\n",
+                1,
+            ),
+            workflow.replace(
+                "  publish:\n",
+                "  publish:\n    env:\n      IMMUTABLE_SETTINGS_TOKEN: crossed\n",
+                1,
+            ),
+            workflow.replace("actions: read", "actions: write", 1),
+            workflow.replace(
+                "outputs:\n      attestation: ${{ steps.required-jobs.outputs.attestation }}",
+                "outputs:\n      token: ${{ secrets.GITHUB_TOKEN }}",
+                1,
+            ),
+            workflow.replace(
+                "  main-ci-jobs:\n",
+                "  main-ci-jobs:\n    environment: platform-release\n",
+                1,
+            ),
+            workflow.replace(
+                "  publish:\n",
+                "  publish:\n    env:\n      ACTIONS_READ_TOKEN: crossed\n",
+                1,
+            ),
+        )
+        for index, mutant in enumerate(workflow_mutants):
+            with self.subTest(workflow_mutant=index), self.assertRaises(ValueError):
+                self.require_exact_wiring(
+                    mutant, jobs_verifier, settings_verifier, transaction
+                )
+
+        transaction_mutants = (
+            transaction.replace(
+                'GH_TOKEN="${write_token}" gh "$@"',
+                'GH_TOKEN="${settings_token}" gh "$@"',
+                1,
+            ),
+            transaction.replace("classify_tag exact \\", "classify_tag absent \\", 1),
+            transaction.replace(
+                'run_write_gh release create "${recovery_tag}" --verify-tag',
+                'gh release create "${recovery_tag}" --verify-tag',
+                1,
+            ),
+            transaction.replace(
+                '"${recovery_tag}" --verify-tag',
+                '"${recovery_tag}" --verify-tag --target "${recovery_source_sha}"',
+                1,
+            ),
+        )
+        for index, mutant in enumerate(transaction_mutants):
+            with self.subTest(transaction_mutant=index), self.assertRaises(ValueError):
+                self.require_exact_wiring(
+                    workflow, jobs_verifier, settings_verifier, mutant
+                )
         with self.assertRaises(ValueError):
             self.require_exact_wiring(
-                publish.replace("cancel-in-progress: false", "cancel-in-progress: true", 1),
+                workflow.replace("cancel-in-progress: false", "cancel-in-progress: true", 1),
+                jobs_verifier,
+                settings_verifier,
                 transaction,
             )
         with self.assertRaises(ValueError):
             self.require_exact_wiring(
-                publish, transaction + '\ngit rev-list -n 1 "${TAG}"\n'
+                workflow,
+                jobs_verifier,
+                settings_verifier,
+                transaction + '\ngit rev-list -n 1 "${TAG}"\n',
             )
         for forbidden in ("kubectl", "flux", "tofu apply", "terraform apply", "cloudflared"):
-            self.assertNotIn(forbidden, (publish + transaction).lower())
+            self.assertNotIn(
+                forbidden,
+                (workflow + jobs_verifier + settings_verifier + transaction).lower(),
+            )
 
 
 if __name__ == "__main__":
