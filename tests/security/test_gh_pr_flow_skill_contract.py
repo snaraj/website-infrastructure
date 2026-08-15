@@ -26,7 +26,13 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         references = sorted((SKILL / "references").glob("*.md"))
         self.assertEqual(
             [path.name for path in references],
-            ["destructive-workloads.md", "governance.md", "releases.md", "reviews.md"],
+            [
+                "destructive-workloads.md",
+                "evidence-doctrine.md",
+                "governance.md",
+                "releases.md",
+                "reviews.md",
+            ],
         )
         for reference in references:
             with self.subTest(reference=reference.name):
@@ -47,6 +53,7 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
                 "SKILL.md",
                 "agents/openai.yaml",
                 "references/destructive-workloads.md",
+                "references/evidence-doctrine.md",
                 "references/governance.md",
                 "references/releases.md",
                 "references/reviews.md",
@@ -82,7 +89,7 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("never infer completion from a title", main),
             ("repo-specific coverage", main),
             ("neutral/skipped/canceled", main),
-            ("HEAD: 0123456789abcdef0123456789abcdef01234567", reviews),
+            ("HEAD: <40-lowercase-hex>", reviews),
             ("VERDICT: REQUEST-CHANGES", reviews),
             ("Any new commit invalidates", reviews),
             ("POST-MERGE AUDIT", reviews),
@@ -281,6 +288,72 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
                         "pull-request",
                     )
                 )
+
+    def test_ready_requires_zero_unresolved_blockers(self):
+        """Owner attention and merge authority never waive a Ready blocker."""
+
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        ready = skill.split("## Ready gate", 1)[1].split("\n## ", 1)[0]
+
+        def collapsed(text):
+            return " ".join(text.split())
+
+        def doctrine_denial(skill_ready, repository_contract):
+            required = (
+                "Ready means zero unresolved blockers",
+                "code, CI, review, sequencing, settings, Main Worker, "
+                "metadata, or any other declared gate",
+                "Owner review or owner merge authority does not waive a blocker",
+                "a blocker-bearing PR stays Draft",
+            )
+            for document in (skill_ready, repository_contract):
+                normalized = collapsed(document)
+                for fragment in required:
+                    if fragment not in normalized:
+                        return "Ready zero-blocker doctrine is incomplete"
+            return None
+
+        self.assertIsNone(doctrine_denial(ready, agents))
+        normalized_ready = collapsed(ready)
+        mutants = (
+            normalized_ready.replace(
+                "zero unresolved blockers", "some unresolved blockers"
+            ),
+            normalized_ready.replace(
+                "does not waive a blocker", "may waive a blocker"
+            ),
+            normalized_ready.replace(
+                "a blocker-bearing PR stays Draft", "a blocker may leave Draft"
+            ),
+            normalized_ready.replace("settings, Main Worker, ", ""),
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(doctrine_mutant=index):
+                self.assertIsNotNone(doctrine_denial(mutant, agents))
+
+        blocker_names = (
+            "code",
+            "ci",
+            "review",
+            "sequencing",
+            "settings",
+            "main_worker",
+            "metadata",
+            "declared_other",
+        )
+
+        def ready_from_packet(packet):
+            return not any(packet[name] for name in blocker_names)
+
+        raw_packet = {name: False for name in blocker_names}
+        raw_packet.update(owner_reviewed=True, owner_may_merge=True)
+        self.assertTrue(ready_from_packet(raw_packet))
+        for blocker in blocker_names:
+            packet = dict(raw_packet)
+            packet[blocker] = True
+            with self.subTest(raw_minimal_packet_blocker=blocker):
+                self.assertFalse(ready_from_packet(packet))
 
     def test_agents_ci_map_matches_executable_workflow_trigger_topology(self):
         expected = {

@@ -5,7 +5,7 @@
 The durable PR comment contains these standalone lines exactly once:
 
 ```text
-HEAD: 0123456789abcdef0123456789abcdef01234567
+HEAD: <40-lowercase-hex>
 VERDICT: APPROVE
 ```
 
@@ -60,7 +60,7 @@ Do not repeat code review and do not contact a named worker automatically. Post
 one normal comment with these exact standalone lines:
 
 ```text
-HEAD: 0123456789abcdef0123456789abcdef01234567
+HEAD: <40-lowercase-hex>
 ROLE: MAIN-WORKER
 VERDICT: PASS
 SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks

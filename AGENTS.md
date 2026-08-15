@@ -132,9 +132,17 @@ delivery-lane changes never edit platform-lane files, and platform
 decisions (the safety invariants above, including PLAT-DEC-001) are
 referenced from here, never restated or reworded.
 
-**Lane-surface rulings (owner, 2026-08-12).** Load-bearing surfaces the two
-lists above never named, each assigned once so the question stops being
-re-adjudicated per pull request:
+**Lane-surface rulings (owner, 2026-08-12; later rulings identify their
+source).** Load-bearing surfaces the two lists above never named, each assigned
+once so the question stops being re-adjudicated per pull request:
+
+- `skills/**` — SHARED AGENT GOVERNANCE (peer/platform ruling, 2026-08-13),
+  not the exclusive property of either implementation lane. Either lane may
+  author there under one-writer-per-branch, but review comes from a different
+  context and, where a skill touches a lane-specific security boundary, from
+  the other lane. A skill never supersedes AGENTS.md and never grants
+  credential, live-mutation, or merge authority; any change that expands
+  permission requires an owner ruling.
 
 - `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
   docs. `bootstrap.sh` embeds the inventory and desired-state assertions
@@ -258,9 +266,13 @@ Neither gets a different protocol.)
 
 **Reviewer independence.** The reviewer is a different agent or context
 than the author — a fresh session of the same vendor qualifies; a
-different lane is better. The reviewer works in a disposable worktree at
-the PR head, stays read-only toward the author's workspace, reverts every
-experiment, and removes the worktree afterward.
+different lane is better. Both contexts use this repository's already
+configured, task-authorized owner account: the GitHub principal is transport,
+not the independence boundary. Never acquire, extract, exchange, or change
+credentials to manufacture reviewer separation, and never print or repurpose
+them. The reviewer works in a disposable worktree at the PR head, stays
+read-only toward the author's workspace, reverts every experiment, and removes
+the worktree afterward.
 
 **Exact-head receipt.** Agents share the owner's GitHub principal, so identity
 is textual workflow evidence. A normal PR comment contains exactly one
@@ -297,7 +309,13 @@ settings mutation, Ready authority, or merge authority.
 3. Probe for vacuity: a guard that cannot fail is no guard. For each new
    or changed assertion, demonstrate at least one input that turns it
    red (the kill matrix usually supplies it); an assertion no input can
-   fail is decorative, and decorative checks are findings.
+   fail is decorative, and decorative checks are findings. Work through
+   `skills/gh-pr-flow/references/evidence-doctrine.md` rather than
+   re-deriving it: it catalogues the distinct, reproducible mechanisms
+   by which a fully green run proves nothing — coverage that a policy
+   suite cannot see, fixtures and gates that disable themselves, and the
+   ways a fix written to close a finding is itself vacuous — each with
+   its general correction.
 4. Probe for flakes: the full suite at least three times, plus the race
    detector where the language has one. Any nondeterminism is a finding
    naming the test.
@@ -320,11 +338,19 @@ confirmation the scratch workspace was removed; the reviewing agent's
 signature in the form `- <Agent> (adversarial reviewer)`, matching its
 agent label. Posting the verdict also removes the `requires-review`
 label, whichever way the verdict went — the item is no longer waiting on
-review attention. A REQUEST-CHANGES verdict returns the work to the same
-branch owner — fixes land on the same branch and receive a delta
-re-review of the changed scope. A PR flips from draft to ready only
-after an APPROVE verdict (or after findings are fixed and re-verified),
-and the evidence comment remains on the PR as the permanent record.
+review attention. That removal is NOT a readiness signal: the draft flag
+is the only readiness signal, so label-off while still draft is the
+normal mid-cycle state. A REQUEST-CHANGES verdict returns the work to
+the same branch owner — fixes land on the same branch and receive a
+delta re-review of the changed scope. Role compatibility is fixed: the
+branch author and independent reviewer are never the same context, and
+neither the author nor the reviewer performs the readiness flip. The
+coordinator/Main Worker context is distinct from both author and reviewer and
+performs that flip. The flip happens only once the verdict is APPROVE
+(or its findings are fixed and re-verified), no owner or peer comment is
+outstanding, and every check is green at the exact head. A coordination
+action never confers merge authority; the owner alone merges. The evidence
+comment remains on the PR as the permanent record.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
@@ -359,6 +385,11 @@ authority: the owner alone merges.
   `requires-review` are migration residue for coordinator cleanup, not review
   readiness. The label is never a substitute for Draft/Ready state, a fresh
   APPROVE receipt, or owner merge authority.
+  The APPROVE verdict and the flip by the coordinator are necessary but not
+  sufficient. Ready means zero unresolved blockers across code, CI, review,
+  sequencing, settings, Main Worker, metadata, or any other declared gate.
+  Owner review or owner merge authority does not waive a blocker; a
+  blocker-bearing PR stays Draft.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`

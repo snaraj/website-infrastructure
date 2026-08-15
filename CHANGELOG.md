@@ -6,6 +6,31 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-14
+
+### Added
+
+- A portable catalogue of vacuous-green review failures, with exact-head
+  author/reviewer/coordinator authority, strict visible-resource discovery,
+  and forward-testable skill packaging rules.
+- A bounded destructive-recreation method for explicitly classified ephemeral
+  Kubernetes workloads; protected durable state never inherits its deletion
+  permission.
+
+### Changed
+
+- Ready now means zero unresolved code, CI, review, sequencing, settings, Main
+  Worker, metadata, or other declared blockers. Author, reviewer, and Main
+  Worker contexts remain distinct, and `requires-review` remains a PR-head-only
+  request rather than a readiness signal.
+
+### Security
+
+- Review evidence now rejects inert GitHub Markdown links, escaped delimiters,
+  nested container fences, symlink escapes, repository identity leakage, and
+  untested or vacuous guard claims without granting credential, live-system,
+  durable-state deletion, settings, Ready, or merge authority.
+
 ## [0.1.1] - 2026-08-14
 
 ### Fixed
