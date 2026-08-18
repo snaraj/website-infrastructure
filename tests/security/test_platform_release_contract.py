@@ -31,6 +31,20 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+# The publisher binds the tag it publishes to the version the checked-out
+# source declares, never to a frozen literal. Several independent gates below
+# pin this exact line, so it is spelled once here and they cannot drift apart.
+PUBLISHER_TAG_GUARD = "test \"${TAG}\" = \"v$(tr -d '[:space:][:cntrl:]' < VERSION)\""
+
+# Every shape a frozen version can take in the publisher, including the
+# un-prefixed one. The `v` is OPTIONAL on purpose: the guard above builds its
+# tag as `v` + a value, so a constant written without the prefix and
+# interpolated at the use site — `frozen='X.Y.Z'` … `= "v${frozen}"` — is the
+# same stranding defect wearing the same idiom the fix itself introduces, and a
+# `v`-anchored pattern cannot see it. The pins below are subtracted in both
+# forms so widening never mistakes frozen history for a stale constant.
+VERSION_LITERAL = r"v?[0-9]+\.[0-9]+\.[0-9]+"
+
 
 def event(sha: str) -> dict[str, object]:
     return {
@@ -2269,7 +2283,11 @@ curl() {
 
 
 class PublicationTransactionShellTests(unittest.TestCase):
-    TAG = "v0.1.1"
+    # The publisher accepts only the tag the checked-out VERSION declares, and
+    # this harness executes it from the repository root, so the fixture tag is
+    # derived the same way. A literal here would go stale every patch exactly
+    # as the script constant it replaces did.
+    TAG = f"v{(ROOT / 'VERSION').read_text(encoding='utf-8').strip()}"
     SOURCE = "a" * 40
     RECOVERY_TAG = MODULE.RECOVERY_TAG
     RECOVERY_SOURCE = MODULE.RECOVERY_SOURCE_SHA
@@ -2808,13 +2826,52 @@ sleep() { :; }
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(calls, "")
 
-    def test_recovery_workflow_refuses_to_skip_v011(self):
-        completed, calls, state = self.execute(
-            self.script(), event_tag="v0.1.2"
+    def test_event_tag_that_is_not_the_checked_out_version_is_refused(self):
+        version = MODULE.Version.parse((ROOT / "VERSION").read_text(encoding="utf-8"))
+        # An event tag ahead of the source, the stranded era constant, and a
+        # plainly foreign tag must all deny before any write. Each candidate is
+        # asserted distinct from the derived tag, so this can never pass by
+        # accidentally naming the version the publisher would rightly accept.
+        for event_tag in (MODULE.next_version(version).tag, "v0.1.1", "v9.9.9"):
+            with self.subTest(event_tag=event_tag):
+                self.assertNotEqual(event_tag, self.TAG)
+                completed, calls, state = self.execute(
+                    self.script(), event_tag=event_tag
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+                self.assertNotIn(event_tag, state)
+
+    def test_publisher_derives_the_tag_and_pins_no_current_version_literal(self):
+        script = self.script()
+        # Run 32174376337 (the #123 merge, TAG=v0.1.2) died on this guard:
+        # `current_tag='v0.1.1'`, written for the #122 recovery era, made the
+        # publisher structurally unable to publish any later patch, and no gate
+        # bound that constant to VERSION — so the first post-era advance
+        # stranded publication in silence. The recovery pins stay frozen
+        # because they name immutable history; nothing else may name a version.
+        self.assertIn(PUBLISHER_TAG_GUARD, script)
+        self.assertNotIn("current_tag=", script)
+        self.assertIn(f"recovery_tag='{self.RECOVERY_TAG}'", script)
+        self.assertIn(f"recovery_source_sha='{self.RECOVERY_SOURCE}'", script)
+        stale_pins = set(re.findall(VERSION_LITERAL, script)) - {
+            self.RECOVERY_TAG,
+            self.RECOVERY_TAG.removeprefix("v"),
+        }
+        self.assertEqual(stale_pins, set())
+
+        # Executable proof, not merely textual: a publisher frozen to any one
+        # patch refuses the tag its own checked-out source declares, and does
+        # it with no output at all — the exact signature of the failed run.
+        stranded = script.replace(
+            PUBLISHER_TAG_GUARD, "test \"${TAG}\" = 'v0.1.1'", 1
         )
+        self.assertNotIn(PUBLISHER_TAG_GUARD, stranded)
+        completed, calls, state = self.execute(stranded, recovery_state="complete")
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(calls, "")
-        self.assertNotIn("v0.1.2", state)
+        self.assertNotIn(self.TAG, state)
+        self.assertEqual(completed.stdout + completed.stderr, "")
 
     def test_write_credential_is_process_scoped_and_fails_closed(self):
         script = self.script()
@@ -3361,8 +3418,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "recovery-release",
             "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
             "recovery_tag='v0.1.0'",
-            "current_tag='v0.1.1'",
-            'test "${TAG}" = "${current_tag}"',
+            PUBLISHER_TAG_GUARD,
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
@@ -3380,6 +3436,21 @@ class WorkflowStructureTests(unittest.TestCase):
         ):
             if required not in transaction:
                 raise ValueError(f"platform transaction lost exact wiring: {required}")
+        # The two recovery pins are legitimately frozen history; any OTHER
+        # version literal is a current-version constant that goes stale at the
+        # next patch and silently strands publication, as `current_tag='v0.1.1'`
+        # did for v0.1.2. Only the derivation above may name the current tag.
+        # The pattern accepts the un-prefixed form too — see VERSION_LITERAL —
+        # because the prefix lives at the use site in the very idiom this
+        # publisher uses, so keying on it alone would leave the defect reachable.
+        stale_pins = set(re.findall(VERSION_LITERAL, transaction)) - {
+            MODULE.RECOVERY_TAG,
+            MODULE.RECOVERY_TAG.removeprefix("v"),
+        }
+        if stale_pins:
+            raise ValueError(
+                f"platform transaction pins a current-version tag literal: {sorted(stale_pins)}"
+            )
         if "settings_token" in transaction or "/immutable-releases" in transaction:
             raise ValueError("App settings authority must not enter the write transaction")
         if "--target" in transaction:
@@ -3580,8 +3651,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "recovery-release",
             "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
             "recovery_tag='v0.1.0'",
-            "current_tag='v0.1.1'",
-            'test "${TAG}" = "${current_tag}"',
+            PUBLISHER_TAG_GUARD,
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
@@ -3648,6 +3718,17 @@ class WorkflowStructureTests(unittest.TestCase):
                     mutant, jobs_verifier, settings_verifier, transaction
                 )
 
+        # The un-prefixed mutant below pins whatever version this source
+        # currently declares, so it can never age into a literal the gate would
+        # flag for the wrong reason. A value equal to the recovery pin WOULD be
+        # subtracted as frozen history and let the mutant survive; VERSION only
+        # advances past 0.1.0, so assert that distinction instead of assuming it.
+        current_version = MODULE.Version.parse(
+            (ROOT / "VERSION").read_text(encoding="utf-8")
+        )
+        self.assertNotEqual(
+            str(current_version), MODULE.RECOVERY_TAG.removeprefix("v")
+        )
         transaction_mutants = (
             transaction.replace(
                 'GH_TOKEN="${write_token}" gh "$@"',
@@ -3663,6 +3744,36 @@ class WorkflowStructureTests(unittest.TestCase):
             transaction.replace(
                 '"${recovery_tag}" --verify-tag',
                 '"${recovery_tag}" --verify-tag --target "${recovery_source_sha}"',
+                1,
+            ),
+            # Both mutants name the version this source currently declares, so
+            # they are the hardest case: a literal that is correct TODAY still
+            # strands the very next patch, and the gate must refuse it in both
+            # the inline shape and the named-constant shape the era used.
+            transaction.replace(
+                PUBLISHER_TAG_GUARD, 'test "${TAG}" = "v0.1.3"', 1
+            ),
+            transaction.replace(
+                "recovery_tag='v0.1.0'",
+                "recovery_tag='v0.1.0'\ncurrent_tag='v0.1.3'",
+                1,
+            ),
+            # The shape a `v`-anchored gate cannot see, and the reason the
+            # pattern is un-anchored: the constant omits the prefix and the `v`
+            # is added at the USE site — exactly how the real derivation
+            # composes its tag — beneath a derivation left fully intact, so no
+            # structural wiring is lost and no other arm has anything to catch.
+            # It names the version this source declares right now, which is what
+            # also hides it from the executable transaction tests: the publisher
+            # is correct today and strands the very next patch in silence. Only
+            # the un-prefixed arm of the stale-pin gate kills this one.
+            transaction.replace(
+                "recovery_tag='v0.1.0'",
+                f"recovery_tag='v0.1.0'\nfrozen_version='{current_version}'",
+                1,
+            ).replace(
+                PUBLISHER_TAG_GUARD,
+                PUBLISHER_TAG_GUARD + '\ntest "${TAG}" = "v${frozen_version}"',
                 1,
             ),
         )

@@ -29,7 +29,6 @@ tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
 recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'
 recovery_tag='v0.1.0'
-current_tag='v0.1.1'
 
 get_json() {
   local token="$1" url="$2" output="$3"
@@ -283,7 +282,14 @@ publish_current_release() {
 
 test "${SOURCE_SHA}" != "${recovery_source_sha}"
 test "${TAG}" != "${recovery_tag}"
-test "${TAG}" = "${current_tag}"
+# Publish exactly the version the checked-out source declares. The publish job
+# checks out the exact completed main SHA and asserts `git rev-parse HEAD`
+# equals it, so VERSION here is that SHA's own patch — the same identity
+# `platform_release_contract.py release-window` already derived and asserted as
+# `v${version}` before this script runs. A frozen literal here instead of this
+# derivation silently refuses every later patch — the guard exits non-zero with
+# no output — so the first advance past the era it names strands publication.
+test "${TAG}" = "v$(tr -d '[:space:][:cntrl:]' < VERSION)"
 preflight_publication_state
 complete_recovery_release
 publish_current_release

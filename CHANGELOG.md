@@ -6,6 +6,26 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-18
+
+### Fixed
+
+- The platform source publisher again publishes every patch. Its tag guard was
+  frozen to one literal release from the recovery era, so the first version
+  advance past that era stranded publication: the guard exited non-zero with no
+  output and the tag and Release were never created. The guard now derives the
+  expected tag from the `VERSION` the checked-out source declares, which is the
+  same identity the release window already binds, so it can never go stale
+  against a later patch.
+
+### Security
+
+- A repository gate now refuses any current-version tag literal in the
+  publisher. Only the frozen recovery tag may name a version; the tag the
+  publisher accepts must be derived from source. The gate is proven by
+  execution as well as by inspection — a publisher pinned to a single patch is
+  shown refusing the tag its own source declares.
+
 ## [0.1.3] - 2026-08-18
 
 ### Changed
