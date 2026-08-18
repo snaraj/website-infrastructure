@@ -6,6 +6,22 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-18
+
+### Changed
+
+- Bumped `github/codeql-action/init` and `github/codeql-action/analyze` from
+  4.37.6 to 4.37.7 together in `.github/workflows/codeql.yml`, superseding
+  Dependabot PRs #124 and #125 with one commit so both steps stay on the
+  same released version.
+
+### Fixed
+
+- Added a `groups` stanza to the `github-actions` ecosystem entry in
+  `.github/dependabot.yml` scoping `github/codeql-action*`, the root cause of
+  #124/#125 landing as two mutually-blocking PRs instead of one: future
+  coordinated codeql-action releases now arrive grouped.
+
 ## [0.1.2] - 2026-08-14
 
 ### Added
