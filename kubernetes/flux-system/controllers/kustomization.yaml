@@ -1,5 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# This root is the reviewed controller install surface: building it yields
+# exactly the bytes the install ceremony applies, and it contains no Flux
+# custom resource, so applying it reconciles nothing
+# (docs/runbooks/flux-install.md).
 resources:
   # Generated locally from the pinned Flux CLI before bootstrap.
   - gotk-components.yaml
@@ -25,6 +29,18 @@ patches:
       name: helm-controller
       namespace: flux-system
     path: patches/helm-controller.yaml
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: allow-egress
+      namespace: flux-system
+    path: patches/allow-egress.yaml
+  - target:
+      version: v1
+      kind: Namespace
+      name: flux-system
+    path: patches/namespace.yaml
   # Authorization narrowing (AUDIT S12). The first patch deletes the generated
   # cluster-admin binding outright; the second replaces the shared controller
   # ClusterRole with the enumerated authority the three installed controllers

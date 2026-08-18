@@ -1,0 +1,38 @@
+# One reopening of the flux-system egress closure, alone in its own file.
+#
+# One document per file, and one `expect-deny` per file, is deliberate:
+# scripts/test-policy-fixtures.sh asserts that THIS fixture is rejected for THIS
+# reason. A multi-document deny fixture asserted at file level cannot do that --
+# the other documents keep failing the file while one deny arm is quietly
+# neutered, and the suite stays green.
+#
+# One private range dropped from the exclusion set, which opens the home LAN to
+# the controllers. A shorter exclusion list is a wider allow, and the shortening
+# is invisible unless the exact set is pinned.
+# expect-deny: NetworkPolicy flux-system/flux-controllers-public-https is outside the exact Flux controller DNS, artifact, public-HTTPS, and API-server egress allowlist
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-public-https
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP

@@ -1,5 +1,12 @@
 # Pod-level defaults protect current and future sidecars; the generated
 # controller already repeats these controls on its manager container.
+#
+# `--no-cross-namespace-refs` is deliberately absent here and present on
+# kustomize-controller and helm-controller. The flag bounds cross-namespace
+# `sourceRef` on the kinds those two controllers own; source-controller does
+# not accept it, and passing it makes the binary exit 2 with `unknown flag`
+# before it serves anything. The tenancy boundary is unaffected: it is enforced
+# where the referring kinds are reconciled.
 - op: add
   path: /spec/template/spec/securityContext/runAsNonRoot
   value: true
@@ -7,9 +14,6 @@
   path: /spec/template/spec/securityContext/seccompProfile
   value:
     type: RuntimeDefault
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: --no-cross-namespace-refs=true
 - op: add
   path: /spec/template/spec/containers/0/resources/requests/ephemeral-storage
   value: 128Mi

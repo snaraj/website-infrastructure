@@ -178,8 +178,12 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Cloudflare subscription audit | Not run |
 | kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
 | CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
-| Cluster initialization | Not run |
-| Flux bootstrap | Not run |
+| Cluster initialization | Not run or evidenced from this repository; a live cluster nevertheless exists and is running Flux (see the Flux rows below) |
+| Flux controller install | Reviewed desired state only: render + guarded installer (`scripts/install-flux-controllers.sh`) + [runbook](docs/runbooks/flux-install.md). A stock upstream v2.9.3 install is ALREADY live and does not match it; the installer is fresh-install-only and refuses that cluster |
+| Flux live-vs-reviewed drift | Open. The live install still grants `cluster-admin` through `cluster-reconciler-flux-system`, still allows blanket `flux-system` egress, and carries warn-only Pod Security. Converging it (in place or by reinstall) is an owner decision, not part of this repository's merge path |
+| `flux-system` egress policy | Fail-closed set committed; the API-server allow keeps an unresolved sentinel address until an operator substitutes it locally. Not applied to the cluster |
+| Flux reconciliation (suspend flip) | Not run; every source and release stays `suspend: true` pending a separate reviewed change |
+| Flux bootstrap (SOPS + sync) | Not run |
 | SOPS key ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |

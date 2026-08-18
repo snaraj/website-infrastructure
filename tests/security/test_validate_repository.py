@@ -1250,6 +1250,36 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertTrue(any("image reference" in error for error in errors))
             self.assertTrue(any("public Service" in error for error in errors))
 
+    def test_serviceaccount_token_mount_exception_is_exactly_the_flux_api_canary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "kubernetes" / "site"
+            target.mkdir(parents=True)
+            (target / "bad.yaml").write_text(
+                "apiVersion: v1\nkind: Pod\nmetadata:\n  name: workload\n"
+                "spec:\n  automountServiceAccountToken: true\n",
+                encoding="utf-8",
+            )
+            errors = MODULE.check_kubernetes(root)
+            self.assertIn("ServiceAccount token mount in kubernetes/site/bad.yaml", errors)
+
+            # Moving an incomplete lookalike to the reserved path is not enough
+            # to acquire the exception.
+            canary = root / "kubernetes" / "flux-system" / "canary"
+            canary.mkdir(parents=True)
+            (canary / "pod.yaml").write_text(
+                "apiVersion: v1\nkind: Pod\nmetadata:\n"
+                "  name: flux-api-reachability-canary\n"
+                "  namespace: flux-system\nspec:\n"
+                "  automountServiceAccountToken: true\n",
+                encoding="utf-8",
+            )
+            errors = MODULE.check_kubernetes(root)
+            self.assertIn(
+                "ServiceAccount token mount in kubernetes/flux-system/canary/pod.yaml",
+                errors,
+            )
+
     def test_generated_flux_components_match_pinned_three_controller_export(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
