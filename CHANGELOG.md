@@ -6,6 +6,39 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-18
+
+### Added
+
+- A staged, bound, reversible Kyverno admission-install transaction as dormant
+  desired state: seven classified phases, a render/target/network/attempt-bound
+  rollback journal, an exact-identity pre-controller in-cluster API canary, and
+  a promotion gate bound to exact controller rollout and fresh reviewed reports.
+  Neither mutating stage is authorized, so nothing is installed or enforced.
+- An admission-only ReplicaSet identity policy requiring the built-in Deployment
+  controller and the exact live same-namespace owner UID, with positive,
+  spoofed-UID, and wrong-actor fixtures.
+
+### Changed
+
+- Role-specific admission NetworkPolicies now select the admission controller by
+  component rather than by the shared `part-of` label, so the reports controller
+  no longer inherits webhook ingress or public egress.
+- The Kyverno policy README and the report-only acceptance runbook now describe
+  the committed policy actions and the achievable per-webhook `failurePolicy`
+  matrix instead of a state the install cannot reach.
+
+### Security
+
+- The rollback journal binds the complete exact `kind|namespace|name` render
+  inventory, with cardinality and uniqueness, before any delete or webhook
+  sweep; a same-namespace identity outside the reviewed inventory is refused.
+- The pre-controller canary declares numeric `runAsUser`/`runAsGroup` so its
+  restricted `runAsNonRoot` identity is startable rather than admitted and
+  then rejected by the kubelet.
+- The installer binds its Kustomize executable to the official Linux AMD64
+  SHA-256 digest rather than to a self-reported version string.
+
 ## [0.1.5] - 2026-08-18
 
 ### Added

@@ -1,0 +1,11 @@
+# The exact denial each document in token-bypass.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+Pod token-bypass must use only ServiceAccount naranjo-online
+container token-bypass must declare a cpu limit
+container token-bypass must declare a cpu request
+container token-bypass must declare a memory limit
+container token-bypass must declare a memory request
+volume stolen-api-token is outside the exact ephemeral/credential volume allowlist for namespace naranjo-online
+volume stolen-api-token must not project a ServiceAccount token

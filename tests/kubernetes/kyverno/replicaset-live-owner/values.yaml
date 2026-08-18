@@ -1,0 +1,12 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Values
+metadata:
+  name: replicaset-live-owner-values
+policies:
+  - name: require-replicaset-admission-identity
+    rules:
+      - name: require-replicaset-controller-and-live-owner-uid
+        values:
+          ownerDeploymentUID: live-owner-uid
+globalValues:
+namespaceSelector:

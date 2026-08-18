@@ -1,0 +1,5 @@
+# The exact denial each document in connector-egress-wrong-instance.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+NetworkPolicy cloudflare-public/cloudflared-naranjo-online is outside the exact DNS, edge, and site egress allowlist

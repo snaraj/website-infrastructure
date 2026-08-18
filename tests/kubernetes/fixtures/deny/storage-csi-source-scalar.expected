@@ -1,0 +1,5 @@
+# The exact denial each document in storage-csi-source-scalar.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+PersistentVolume storage-csi-scalar names a CSI driver outside the enumerated local-provisioner allowlist

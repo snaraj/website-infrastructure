@@ -123,6 +123,11 @@ SITE_BASELINE_FILES = (
         "kubernetes/reconciliation/lidersea-com.yaml",
     ),
 )
+# The single release failure the validator both MANDATES elsewhere and refuses
+# here; spelled once so the two directions below cannot drift apart.
+FLUX_SENTINEL_RELEASE_ERROR = (
+    "flux-system API-server egress still carries the unresolved control-plane sentinel"
+)
 DIGEST_LINE = re.compile(r"(?m)^      digest: sha256:[0-9a-f]{64}$")
 TAG_LINE = re.compile(r"(?m)^      tag: v[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -1782,6 +1787,76 @@ class RepositoryPolicyTests(unittest.TestCase):
                 MODULE, "check_release", return_value=[shared_error]
             ):
                 self.assertEqual(MODULE.check_activation(root), [shared_error])
+
+    def test_transition_filters_the_mandated_flux_control_plane_sentinel(self):
+        """The one error this validator simultaneously requires and refuses.
+
+        ``check_kubernetes`` FAILS when the flux-system API-server allow has
+        lost its RFC 5737 sentinel, and ``check_release`` fails while the
+        sentinel is still there. Both are correct — the sentinel is the
+        committed desired state, and a full release claim while it stands would
+        claim a control plane the repository has never described — but a tree
+        cannot satisfy both at once, so the transition path must filter it.
+
+        Nothing else is filtered with it: the shared admission failure below is
+        the control, and it must still survive.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            copy_activation_fixture(root)
+            # A promoted, ready release is what moves the fixture out of
+            # scaffold mode; the filter under test lives on the transition path
+            # and scaffold state would short-circuit before reaching it.
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "    deploymentReady: false\n",
+                "    deploymentReady: true\n",
+            )
+            replace_once(
+                root,
+                "kubernetes/websites/naranjo-online/release.yaml",
+                "      digest: {}\n".format(MODULE.ZERO_DIGEST),
+                "      digest: sha256:{}\n".format("a" * 64),
+            )
+            # Signature enforcement is the activation signal that reaches the
+            # shared release checks at all; without it check_activation returns
+            # early and this filter is never exercised.
+            policy = root / "policies/kyverno/require-signed-naranjo-online.yaml"
+            policy.parent.mkdir(parents=True, exist_ok=True)
+            policy.write_bytes(b"spec:\n  validationFailureAction: Enforce\n")
+            shared_error = (
+                "admission desired state is missing active resource: "
+                "kyverno/controllers.yaml"
+            )
+            with mock.patch.object(
+                MODULE,
+                "check_release",
+                return_value=[FLUX_SENTINEL_RELEASE_ERROR, shared_error],
+            ):
+                self.assertEqual(MODULE.check_activation(root), [shared_error])
+
+    def test_release_mode_never_filters_the_flux_control_plane_sentinel(self):
+        """The filter is transition-only; a real release claim still fails.
+
+        If this ever goes green the sentinel would stop blocking a release,
+        which is the entire reason ``check_release`` inspects it.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            copy_activation_fixture(root)
+            with mock.patch.object(
+                MODULE,
+                "classify_release_transition",
+                return_value=types.SimpleNamespace(mode="release"),
+            ), mock.patch.object(
+                MODULE, "check_release", return_value=[FLUX_SENTINEL_RELEASE_ERROR]
+            ):
+                self.assertEqual(
+                    MODULE.check_activation(root), [FLUX_SENTINEL_RELEASE_ERROR]
+                )
 
     def test_active_connector_never_filters_its_sops_failure(self):
         with tempfile.TemporaryDirectory() as directory:

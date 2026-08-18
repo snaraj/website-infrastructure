@@ -1,0 +1,151 @@
+# The install transaction's binding record: what the operator is allowed to
+# apply, stated before the ceremony and asserted during it.
+#
+# scripts/install-kyverno-admission.sh renders the stage's root, hashes the
+# bytes, and refuses to continue unless the digest and the object inventory
+# below match exactly. A render that differs by one byte is not the reviewed
+# install no matter which commit produced it — so a stale checkout, a different
+# kustomize build, a local edit, or a supply-chain substitution in the pinned
+# component export all stop the ceremony at the same guard.
+#
+# This file is DATA, never sourced. Parsed as `key=value`, `#` comments, no
+# expansion, no execution.
+#
+# Regenerating it is a reviewed act, not a script flag: the installer has no
+# mode that rewrites its own expectation. Produce the values with
+#   ./scripts/install-kyverno-admission.sh --stage <stage> --render
+# and commit them in the same pull request as whatever changed the render.
+# tests/security/test_kyverno_install_contract.py re-derives both digests from
+# the working tree, so a policy or patch change that forgets this file fails the
+# suite rather than the install.
+
+# The renderer identity these digests were produced by. A different kustomize
+# build can legitimately produce different bytes; the installer proves the tool
+# matches versions.env before it compares anything.
+render.tool.name=kustomize
+render.tool.version=v5.8.1
+
+# MUTATING STAGE AUTHORIZATION — neither stage may be applied.
+#
+# Authorization is a REVIEWED DECISION, recorded here rather than remembered,
+# because a document that says "not authorized" is weaker than a script that
+# refuses. The installer reads this before anything else: `--stage enforce`
+# with `--apply` is refused outright and names the blockers, and `--plan`
+# (which mutates nothing and is how the promotion gate is rehearsed and tested)
+# prints the same refusal as a warning and continues.
+#
+# Stage 1 is also an activation boundary. It remains unreachable until the
+# fresh-cluster CRD/provenance contract (#101) and the private selected-CNI/HA
+# runtime-network contract plus exact-ServiceAccount canary are reviewed.
+stage.report-only.authorized=no
+stage.report-only.blocked-by=#101, runtime-network-canary
+
+# Stage 2 inherits every stage-1 blocker and adds the enforcement findings:
+#   #100  the ReplicaSet controller username and exact live-owner lookup must
+#         be proven against the live API path in report-only mode
+#   #102  fresh positive/negative promotion canaries and evidence review remain
+#         dependent work (the transaction/journal binding is implemented here)
+#   runtime-network-canary is transitive from stage 1
+# Finding #99 is closed in these bytes: both signature policies are Enforce in
+# this root and the report-only overlay performs their sole Audit downgrade.
+#
+# Flipping this to `yes` is a reviewed change with peer/platform validation
+# recorded on the pull request that does it — never an edit made during a
+# ceremony.
+stage.enforce.authorized=no
+stage.enforce.blocked-by=#100, #101, #102, runtime-network-canary
+stage.enforce.minimum-observation-seconds=86400
+
+# Exact controller rollout inventory required for stage-1 evidence. A broad
+# label match cannot let an unrelated Deployment stand in for either component;
+# every name must report current generation, positive desired replicas, and
+# updated/available replicas equal to desired before promotion can rehearse.
+runtime.controllers.names=kyverno-admission-controller,kyverno-reports-controller
+
+# THE BASE THESE DIGESTS DESCRIBE.
+#
+# Both roots compose `policies/kyverno/` through `../../admission`, so the
+# rendered bytes depend on the committed policy set — and therefore on the base
+# this branch lands on, not on this branch alone. #87 added a fourth rule to
+# require-release-readiness and #96 rewrote the storage policy's rule bodies,
+# both after this branch was cut, and each changes the rendered bytes. This
+# branch has since MERGED `origin/main`, so the digests below describe this
+# branch's own working tree, which is also the tree that lands. Re-derive them
+# in the same pull request as anything that changes a committed policy, and
+# keep the base recorded here so a reader can tell which tree they describe.
+render.base=c63f357fbc77d55f6e60050f687cceb8723eda6c
+
+# STAGE 1 — kubernetes/platform/admission-install/report-only
+report-only.sha256=59696a083dd6ceb496cddc3c773ff70f575633485757e6b00183c2eb668feb0b
+report-only.objects=23
+
+# STAGE 2 — kubernetes/platform/admission-install/enforce
+enforce.sha256=8ad0b562e6e9f03fea12d94b72696d379b270f227ad8a7bbf01449fedb3a4218
+enforce.objects=23
+
+# The inventory, by scope. Both stages carry the identical object set — stage 1
+# differs only in policy action fields — so one inventory governs both.
+#
+# The cluster-scoped names are the ones that matter for COLLISION: they are the
+# objects a failed apply leaves behind outside the namespace, and the ones an
+# existing installation would collide with. The installer proves each is absent
+# before applying.
+#
+# BOTH lists matter for ROLLBACK, and the namespaced one was missing.
+# `validate_journal` bound cluster-scoped journal rows to the list below and
+# accepted a namespaced row on nothing but a phase-known kind plus the `kyverno`
+# namespace — so a journal line naming `ServiceAccount|kyverno|default` or
+# `ConfigMap|kyverno|kube-root-ca.crt`, identities this transaction never
+# created, was accepted and deleted. The namespaced names are therefore
+# enumerated here in the same reviewed shape, as `Kind/namespace/name` to match
+# the journal's own `kind|namespace|name` triple, and the two counts above are
+# what make "the journal has N entries" equivalent to "the journal is the whole
+# reviewed inventory, once each".
+#
+# Re-derive both lists in the same pull request as anything that changes the
+# rendered object set; a list that disagrees with its count stops the installer
+# rather than shrinking the proof.
+inventory.cluster-scoped=12
+inventory.namespaced=11
+inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-services,ClusterPolicy/disallow-tenant-media-payloads,ClusterPolicy/disallow-undiscovered-storage,ClusterPolicy/require-approved-images,ClusterPolicy/require-exact-tenant-networking,ClusterPolicy/require-release-readiness,ClusterPolicy/require-replicaset-admission-identity,ClusterPolicy/require-restricted-workloads,ClusterPolicy/require-signed-lidersea-com,ClusterPolicy/require-signed-naranjo-online,ClusterPolicy/require-zero-site-capacity
+inventory.namespaced.names=ResourceQuota/kyverno/namespace-budget,ServiceAccount/kyverno/kyverno-admission-controller,ConfigMap/kyverno/kyverno,Service/kyverno/kyverno-svc,LimitRange/kyverno/container-defaults,Deployment/kyverno/kyverno-admission-controller,NetworkPolicy/kyverno/default-deny,NetworkPolicy/kyverno/kyverno-admission-webhook,NetworkPolicy/kyverno/kyverno-dns,NetworkPolicy/kyverno/kyverno-kube-apiserver,NetworkPolicy/kyverno/kyverno-public-https
+
+# The webhook configurations Kyverno registers for ITSELF at runtime. They are
+# not in the render and never will be — the controller writes them through its
+# own RBAC once it starts — so rollback and break-glass cannot find them by
+# inventory. They are enumerated here, and swept by label as well, because an
+# unremoved webhook configuration is the one piece of residue that can keep
+# refusing writes after the controller it points at is gone.
+# The names are the exact constants pkg/config/config.go defines at the pinned
+# v1.18.2 tag, transcribed in full rather than from memory: an omitted name is a
+# webhook configuration that break-glass and rollback never delete by name, and
+# `kyverno-cel-exception-validating-webhook-cfg` was missing from the first
+# transcription. The label sweep is the backstop, not the primary.
+runtime.webhooks.label=webhook.kyverno.io/managed-by=kyverno
+runtime.webhooks.validating=kyverno-policy-validating-webhook-cfg,kyverno-resource-validating-webhook-cfg,kyverno-exception-validating-webhook-cfg,kyverno-cel-exception-validating-webhook-cfg,kyverno-global-context-validating-webhook-cfg,kyverno-cleanup-validating-webhook-cfg,kyverno-ttl-validating-webhook-cfg
+runtime.webhooks.mutating=kyverno-policy-mutating-webhook-cfg,kyverno-resource-mutating-webhook-cfg,kyverno-verify-mutating-webhook-cfg
+
+# The component export the promotion must land, and the render parameters it
+# must be produced with. Recorded here so the reviewer of that pull request is
+# checking against a written expectation rather than a memory.
+#
+#   source        the pinned Kyverno chart, rendered offline with `helm template`
+#                 exactly as kubernetes/flux-system/controllers/gotk-components.yaml
+#                 is generated by the pinned Flux CLI
+#   config.create=false            these bytes own the engine configuration
+#                                  (admission-install/enforce/config.yaml)
+#   backgroundController.enabled=false
+#   cleanupController.enabled=false the reviewed policy set is validate-only;
+#                                  neither controller has work here, and both
+#                                  cost a Pod on a one-node cluster
+#   admissionController/reportsController replicas and resources must match a
+#                 separately reviewed, dated capacity/availability decision;
+#                 one replica is never a security invariant, and a future HA
+#                 control plane uses multiple replicas and failure domains
+#   reportsController.enabled=true report generation is stage 1's evidence
+#
+# Until that export exists, kubernetes/platform/admission/kyverno/controllers.yaml
+# remains the fail-closed sentinel it is today and the installer refuses every
+# apply. That refusal is the intended state of this branch.
+component.export.path=kubernetes/platform/admission/kyverno/controllers.yaml
+component.export.status=sentinel-all-zero-digest

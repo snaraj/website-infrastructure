@@ -2,8 +2,9 @@
 # self-consistent — its name, every instance label and its selector all agree —
 # so the identity-root binding alone would accept it. Denied because the
 # reviewed connector inventory is closed at the two per-site connectors
-# (ADR 0015): one Tunnel per website, no more. It mounts no Secret, so the
-# closed-inventory rule is the sole reason it is refused.
+# (ADR 0015): one Tunnel per website, no more. It also omits the required exact
+# instance-derived token reference, so the reviewed denial set records both
+# independent controls rather than pretending the inventory rule is sole.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

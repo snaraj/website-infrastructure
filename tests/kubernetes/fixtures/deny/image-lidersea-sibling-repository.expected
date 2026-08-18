@@ -1,0 +1,3 @@
+# Current-main's ImageReferenceGrammarTests pins this exact Conftest denial set:
+# the sibling repository violates lidersea's canonical publisher binding only.
+container image-lidersea-sibling-repository must use the canonical image repository for namespace lidersea-com

@@ -1,0 +1,23 @@
+# The admission namespace, restated here because the install ceremony creates
+# it by direct apply (safety invariant 8's bootstrap path) BEFORE any Flux
+# object exists to reconcile kubernetes/platform/prerequisites.
+#
+# These bytes are a deliberate twin of the `kyverno` Namespace declared in
+# kubernetes/platform/prerequisites/namespaces.yaml. tests/security/
+# test_kyverno_install_contract.py parses both and requires them to be equal,
+# so the operator-applied object and the object Flux will later adopt cannot
+# drift into two different desired states.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    platform.snaraj.dev/readiness: blocked-until-reviewed-controller-digests-and-runtime-evidence
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.36
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.36

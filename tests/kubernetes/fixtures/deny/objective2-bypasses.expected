@@ -1,0 +1,51 @@
+# The exact denial each document in objective2-bypasses.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+#
+# Two rows here came from bases that landed after this branch was cut, and both
+# were surfaced by this runner rather than missed by it.
+#
+# #87 appended the EDGE-DRIFT-001 document — the canonical site-ingress policy
+# with a name-only peer, the accepted shape before the double-pin — which is the
+# `cloudflared-to-naranjo-online` row.
+#
+# #96 replaced the blanket pre-discovery PVC refusal with the owner's
+# enumeration, so `PersistentVolumeClaim invented-media is forbidden until
+# storage discovery and restore evidence are approved` is GONE and two denials
+# take its place: the claim now fails on naming no enumerated class, and the
+# `azureFile` volume in the same file is now refused as an undiscovered source.
+# Read and accepted: the object is still refused, by a narrower and better-named
+# rule, and the second denial is a rule that started covering something it did
+# not cover before.
+ConfigMap lidersea-com/encoded-media-in-data contains a recognized encoded media/archive header
+ConfigMap lidersea-com/media-in-etcd key album.flac looks like a media payload
+ConfigMap lidersea-com/media-in-etcd must not store binary data in etcd
+Gateway API resource Gateway/unexpected-hostname is forbidden before an approved routing redesign
+GitRepository lidersea-com/lidersea-com-source is forbidden; site charts arrive as cosign-verified OCI artifacts
+GitRepository lidersea-com/lidersea-com-source is outside the exact source identity allowlist
+Ingress unexpected-hostname is forbidden; Cloudflare Tunnel routes directly to ClusterIP Services
+NetworkPolicy lidersea-com/endport-widening widens the exact cloudflare-public TCP 8080 ingress contract
+NetworkPolicy naranjo-online/ingress-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract
+NetworkPolicy lidersea-com/widened-ingress must not grant site egress
+NetworkPolicy lidersea-com/widened-ingress widens the exact cloudflare-public TCP 8080 ingress contract
+PersistentVolumeClaim invented-media must name an enumerated storageClassName
+Pod lidersea-bypass must not tolerate node DiskPressure
+Pod lidersea-bypass must not use hostNetwork
+Pod wildcard-disk-pressure must not use a wildcard toleration that includes node DiskPressure
+ResourceQuota lidersea-com/invented-capacity must be either the exact zero-Pod gate or a hash-bound reviewed namespace budget
+Role lidersea-com/helm-reconciler must not grant direct replicasets workload control
+Secret naranjo-online/media-in-etcd key clip.mp4 looks like a media payload
+Service public-bypass must be ClusterIP
+Service public-bypass must not declare externalIPs
+container lidersea-com image must use an approved registry and full digest
+container lidersea-com must not add capabilities after dropping ALL
+container lidersea-com must not declare a hostPort
+container lidersea-com must use the canonical image repository for namespace lidersea-com
+legacy ServiceAccount token Secret lidersea-com/helm-reconciler-token is forbidden
+raw tenant ReplicaSet lidersea-com/raw-replicaset is forbidden; only an exact Deployment may own replicas
+volume media is outside the exact ephemeral/credential volume allowlist for namespace lidersea-com
+volume media uses undiscovered storage source persistentVolumeClaim
+volume stolen-token is outside the exact ephemeral/credential volume allowlist for namespace lidersea-com
+volume tmp is outside the exact ephemeral/credential volume allowlist for namespace lidersea-com
+volume tmp uses undiscovered storage source azureFile

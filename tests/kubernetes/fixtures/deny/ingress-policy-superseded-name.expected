@@ -1,0 +1,3 @@
+# Current-main's SiteIngressPolicyNameTests pins this one-document fixture to
+# the retired provider-named prefix. Only the exact site-ingress rule denies it.
+NetworkPolicy naranjo-online/cloudflared-to-naranjo-online widens the exact cloudflare-public TCP 8080 ingress contract

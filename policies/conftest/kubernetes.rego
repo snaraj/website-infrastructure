@@ -8,6 +8,26 @@ tenant_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com"}
 
 restricted_role_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"}
 
+# The admission namespace. It is not a tenant namespace — it runs the controller
+# that judges the tenants — so it carries its own exact network contract rather
+# than the tenant one.
+admission_namespace := "kyverno"
+
+# Every private, loopback, link-local, carrier-grade-NAT, multicast, and
+# reserved block that a "public destinations only" egress rule must exclude.
+# One definition, used by every such rule: a shorter list is a wider allow, and
+# a set that exists twice is a set that gets widened once.
+private_and_reserved_ranges := {
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "224.0.0.0/4",
+  "240.0.0.0/4",
+}
+
 site_namespaces := {"naranjo-online", "lidersea-com"}
 
 gateway_kinds := {
@@ -363,16 +383,7 @@ valid_public_edge_rule(rule) if {
   ip_block := object.get(peer, "ipBlock", {})
   object.keys(peer) == {"ipBlock"}
   object.get(ip_block, "cidr", "") == "0.0.0.0/0"
-  {cidr | some cidr in object.get(ip_block, "except", [])} == {
-    "10.0.0.0/8",
-    "100.64.0.0/10",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "224.0.0.0/4",
-    "240.0.0.0/4",
-  }
+  {cidr | some cidr in object.get(ip_block, "except", [])} == private_and_reserved_ranges
   {port | some port in object.get(rule, "ports", [])} == {
     {"port": 7844, "protocol": "TCP"},
     {"port": 7844, "protocol": "UDP"},
@@ -526,6 +537,166 @@ flux_network_policy_allowlisted if {
 
 flux_network_policy_allowlisted if {
   valid_flux_egress_policy
+}
+
+# --- admission namespace network contract ------------------------------------
+#
+# The CI mirror of kubernetes/platform/admission-install/enforce/network-policies.yaml.
+# The admission namespace is closed by default and opened by exactly four
+# reviewed flows; a fifth policy, or one of these four in a wider shape, is a
+# path nobody reviewed into or out of the controller that judges every write.
+#
+# The committed API paths are exact fail-closed sentinels. At apply time the
+# installer substitutes a private, live-cross-checked contract rather than the
+# operator kubeconfig target: every control-plane webhook source plus either the
+# kubernetes.default Service VIP/TCP 443 or the complete API endpoint set/TCP
+# 6443, according to the selected CNI dataplane. CI proves both the sentinel and
+# the closed family of possible runtime SHAPES; private addresses stay out of
+# this index.
+admission_policy_names := {
+  "kyverno-admission-webhook",
+  "kyverno-dns",
+  "kyverno-kube-apiserver",
+  "kyverno-public-https",
+}
+
+# TWO SELECTORS, BY ROLE, AND THE DIFFERENCE IS LOAD-BEARING.
+#
+# `app.kubernetes.io/part-of: kyverno` selects EVERY controller in the
+# namespace, and the recorded render parameters install a reports controller
+# beside the admission controller carrying the same value. DNS and the
+# in-cluster API path are genuinely shared — both controllers need them — so
+# they keep the shared selector. Webhook ingress on 9443 and unrestricted
+# public TCP/443 are not shared: only the admission controller serves the
+# webhook, and only it evaluates `verifyImages` (the signature policies are
+# `background: false`). Requiring the shared selector on those two granted the
+# reports controller an inbound listener path and the single broadest egress in
+# the namespace. These rules now REQUIRE the component label there, so the
+# previously accepted shape is denied.
+admission_pod_selector if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/part-of": "kyverno",
+  }
+}
+
+admission_controller_pod_selector if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/component": "admission-controller",
+    "app.kubernetes.io/part-of": "kyverno",
+  }
+}
+
+# The single-egress SHAPE, with no selector claim of its own, so each policy
+# below binds the shape to the selector its role requires instead of inheriting
+# one silently.
+admission_egress_rule := rule if {
+  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
+  count(object.get(input.spec, "ingress", [])) == 0
+  egress := object.get(input.spec, "egress", [])
+  count(egress) == 1
+  rule := egress[0]
+}
+
+admission_single_egress_rule := rule if {
+  admission_pod_selector
+  rule := admission_egress_rule
+}
+
+admission_controller_single_egress_rule := rule if {
+  admission_controller_pod_selector
+  rule := admission_egress_rule
+}
+
+valid_admission_runtime_peer(peer) if {
+  object.keys(peer) == {"ipBlock"}
+  ip_block := object.get(peer, "ipBlock", {})
+  object.keys(ip_block) == {"cidr"}
+  cidr := object.get(ip_block, "cidr", "")
+  endswith(cidr, "/32")
+  cidr != "192.0.2.10/32"
+  cidr != "192.0.2.20/32"
+}
+
+valid_admission_runtime_peers(peers) if {
+  count(peers) >= 1
+  every peer in peers {
+    valid_admission_runtime_peer(peer)
+  }
+  cidrs := {peer.ipBlock.cidr | some peer in peers}
+  count(cidrs) == count(peers)
+}
+
+valid_admission_webhook_peers(peers) if {
+  peers == [{"ipBlock": {"cidr": "192.0.2.10/32"}}]
+}
+
+valid_admission_webhook_peers(peers) if {
+  valid_admission_runtime_peers(peers)
+}
+
+valid_admission_api_rule(rule) if {
+  object.get(rule, "to", []) == [{"ipBlock": {"cidr": "192.0.2.20/32"}}]
+  object.get(rule, "ports", []) == [{"port": 65535, "protocol": "TCP"}]
+}
+
+# Service-VIP dataplanes observe the one kubernetes.default Service address on
+# its declared HTTPS port before kube-proxy translation.
+valid_admission_api_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  valid_admission_runtime_peers(peers)
+  object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
+}
+
+# Endpoint dataplanes observe every API backend after translation. The private
+# contract proves this peer set is complete, sorted, and duplicate-free against
+# live Endpoints; this mirror pins one-or-more unique /32 peers and only 6443.
+valid_admission_api_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  valid_admission_runtime_peers(peers)
+  object.get(rule, "ports", []) == [{"port": 6443, "protocol": "TCP"}]
+}
+
+# Every API server may call the webhook. The committed sentinel is one exact
+# peer; substituted runtime bytes may carry one or more unique /32 HA sources.
+valid_admission_policy if {
+  input.metadata.name == "kyverno-admission-webhook"
+  admission_controller_pod_selector
+  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Ingress"}
+  count(object.get(input.spec, "egress", [])) == 0
+  ingress := object.get(input.spec, "ingress", [])
+  count(ingress) == 1
+  peers := object.get(ingress[0], "from", [])
+  valid_admission_webhook_peers(peers)
+  object.get(ingress[0], "ports", []) == [{"port": 9443, "protocol": "TCP"}]
+}
+
+# Cluster DNS: the same exact kube-dns peer the tunnel egress uses.
+valid_admission_policy if {
+  input.metadata.name == "kyverno-dns"
+  valid_public_dns_rule(admission_single_egress_rule)
+}
+
+# Pods' in-cluster API path: the exact fail-closed sentinel or one selected-CNI
+# runtime shape (one Service VIP/443 or one-or-more API endpoints/6443).
+valid_admission_policy if {
+  input.metadata.name == "kyverno-kube-apiserver"
+  valid_admission_api_rule(admission_single_egress_rule)
+}
+
+# Signature verification: public addresses only, TCP 443 only. Keyless
+# verification is not offline, and a NetworkPolicy cannot select by hostname, so
+# the reviewed rule is the excluded-ranges shape rather than an allowlist.
+valid_admission_policy if {
+  input.metadata.name == "kyverno-public-https"
+  peers := object.get(admission_controller_single_egress_rule, "to", [])
+  count(peers) == 1
+  object.keys(peers[0]) == {"ipBlock"}
+  object.get(peers[0].ipBlock, "cidr", "") == "0.0.0.0/0"
+  {cidr | some cidr in object.get(peers[0].ipBlock, "except", [])} == private_and_reserved_ranges
+  {port | some port in object.get(admission_controller_single_egress_rule, "ports", [])} == {
+    {"port": 443, "protocol": "TCP"},
+  }
 }
 
 valid_zero_capacity_quota if {
@@ -1688,6 +1859,30 @@ deny contains msg if {
   input.metadata.name != "default-deny"
   not valid_public_tunnel_policy
   msg := sprintf("NetworkPolicy cloudflare-public/%s is outside the exact DNS, edge, and site egress allowlist", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == admission_namespace
+  input.metadata.name == "default-deny"
+  not valid_default_deny_policy
+  msg := sprintf("NetworkPolicy %s/default-deny must isolate every Pod for ingress and egress", [admission_namespace])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == admission_namespace
+  input.metadata.name != "default-deny"
+  not input.metadata.name in admission_policy_names
+  msg := sprintf("NetworkPolicy %s/%s is outside the exact admission webhook, DNS, API-server, and signature-verification allowlist", [admission_namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == admission_namespace
+  input.metadata.name in admission_policy_names
+  not valid_admission_policy
+  msg := sprintf("NetworkPolicy %s/%s widens its exact reviewed admission flow", [admission_namespace, input.metadata.name])
 }
 
 deny contains msg if {
