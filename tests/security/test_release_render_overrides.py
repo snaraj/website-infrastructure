@@ -373,6 +373,55 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
                     scaffold,
                 )
 
+    def test_scaffold_accepts_the_enforcing_base_signature_policy_render(self):
+        """Report-only is an install overlay, not the desired-state base.
+
+        The base signature policies stay Enforce/Fail while reconciliation is
+        dormant. Scaffold mode must validate those rendered bytes positively;
+        expecting an Audit denial here would make the release gate demand a
+        weaker policy than the transaction source actually commits.
+        """
+
+        scaffold = self.script[self.script.index("if [[ \"$MODE\" == '--scaffold' ]]"):]
+        scaffold = scaffold[: scaffold.index("elif [[ \"$MODE\" == '--release' ]]")]
+        self.assertIn(
+            'conftest test --policy "${REPO_ROOT}/policies/release-conftest" \\\n'
+            '    "${ARTIFACT_ROOT}/policies-kyverno.yaml"',
+            scaffold,
+        )
+        self.assertNotIn(
+            "signature admission policy require-signed-naranjo-online is not enforced",
+            scaffold,
+        )
+        self.assertNotIn(
+            "signature admission policy require-signed-lidersea-com is not enforced",
+            scaffold,
+        )
+
+    def test_release_core_policy_inventory_matches_the_renderer(self):
+        """Every renderer-required core policy is release-gated by identity."""
+
+        policy = (RELEASE_POLICY / "deployment-readiness.rego").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"core_admission_policies := \{\n(?P<body>.*?)\n\}", policy, re.DOTALL
+        )
+        if match is None:
+            raise AssertionError("release core-policy inventory disappeared")
+        inventory = set(
+            re.findall(r'^\s+"([a-z0-9-]+)",?$', match.group("body"), re.MULTILINE)
+        )
+        expected = set(bash_array(self.script, "CORE_POLICY_FILES")) | {
+            "require-zero-site-capacity"
+        }
+        self.assertEqual(
+            inventory,
+            expected,
+            "release Conftest and the renderer disagree on the exact core "
+            "admission-policy inventory",
+        )
+
     def test_every_release_proof_requires_its_artifact_to_exist(self):
         """A missing artifact makes Conftest exit non-zero for a reason that
         is not a policy denial; both proof helpers refuse it explicitly."""
@@ -940,6 +989,67 @@ class PromotedRenderStateTests(unittest.TestCase):
             completed.returncode, 0, completed.stdout + completed.stderr
         )
         self.assertIn("static artifact(s) passed", completed.stdout)
+
+    def test_scaffold_render_that_downgrades_a_signature_policy_fails_closed(self):
+        """A post-validation render mutation cannot bypass the release gate.
+
+        The signature-policy Kustomization itself has an exact source-inventory
+        guard. Mutating that input would be refused before rendering and could
+        make this test pass for the wrong reason. Instead the disposable
+        renderer corrupts only its already source-validated artifact, after the
+        general Conftest pass and immediately before scaffold release proof.
+        The exact release-policy denial below is therefore the only satisfying
+        result.
+        """
+
+        root = self.checkout()
+        demote(root)
+        script = root / "scripts" / "render-manifests.sh"
+        source = script.read_text(encoding="utf-8")
+        marker = (
+            "if [[ \"$MODE\" == '--scaffold' ]]; then\n"
+            "  # These are negative controls, not readiness evidence. They "
+            "prove the checked-in\n"
+        )
+        self.assertEqual(source.count(marker), 1)
+        mutation = textwrap.dedent(
+            """\
+            mutated="${ARTIFACT_ROOT}/policies-kyverno.yaml.mutated"
+            awk '
+              $0 == "  name: require-signed-naranjo-online" { target = 1 }
+              target && !changed && $0 == "  validationFailureAction: Enforce" {
+                sub(/Enforce$/, "Audit")
+                changed = 1
+              }
+              { print }
+              END { if (changed != 1) exit 1 }
+            ' "${ARTIFACT_ROOT}/policies-kyverno.yaml" >"$mutated"
+            mv -- "$mutated" "${ARTIFACT_ROOT}/policies-kyverno.yaml"
+            """
+        )
+        script.write_text(
+            source.replace(marker, mutation + marker, 1), encoding="utf-8"
+        )
+        self.assertEqual(
+            (root / "policies" / "kyverno" / "kustomization.yaml").read_text(
+                encoding="utf-8"
+            ),
+            (REPO_ROOT / "policies" / "kyverno" / "kustomization.yaml").read_text(
+                encoding="utf-8"
+            ),
+            "the mutation must not trip the earlier source-inventory guard",
+        )
+        self.assertEqual(selected_mode(root), "scaffold")
+        completed = render(root, "scaffold")
+        self.assertNotEqual(
+            completed.returncode,
+            0,
+            "a rendered Audit signature policy bypassed the scaffold gate",
+        )
+        self.assertIn(
+            "signature admission policy require-signed-naranjo-online is not enforced",
+            completed.stdout + completed.stderr,
+        )
 
     def test_promoted_state_renders_and_passes_in_transition_mode(self):
         root = self.checkout()

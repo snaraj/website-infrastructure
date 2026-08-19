@@ -1,0 +1,28 @@
+# The exact denial each document in insecure.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+Pod denied must disable ServiceAccount token automount
+Pod denied must not use hostNetwork
+Pod denied must run as non-root
+Pod denied must use RuntimeDefault seccomp
+Pod denied must use only ServiceAccount naranjo-online
+Service denied must be ClusterIP
+Service denied must not declare externalIPs
+container denied image must use an approved registry and full digest
+container denied must declare a cpu limit
+container denied must declare a cpu request
+container denied must declare a memory limit
+container denied must declare a memory request
+container denied must disable privilege escalation
+container denied must drop ALL capabilities
+container denied must not be privileged
+container denied must not declare a hostPort
+container denied must use a read-only root filesystem
+container denied must use the canonical image repository for namespace naranjo-online
+container denied-init image must use an approved registry and full digest
+container denied-init must disable privilege escalation
+container denied-init must drop ALL capabilities
+container denied-init must not be privileged
+container denied-init must use a read-only root filesystem
+container denied-init must use the canonical image repository for namespace naranjo-online

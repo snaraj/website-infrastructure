@@ -1,0 +1,66 @@
+# The hole the staged shape must NOT open: `failurePolicy: Ignore` paired with
+# any other edit.
+#
+# Enumerating a second failure policy is only safe while every other byte stays
+# pinned. This document is the staged shape with the transparency-log check
+# removed from one attestor — a change that would be invisible if the staging
+# allowance had been written as "skip the equality check when Ignore".
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-naranjo-online
+  annotations:
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/description: Verify the exact GitHub workflow signature and SLSA provenance bundle.
+spec:
+  admission: true
+  background: false
+  validationFailureAction: Audit
+  webhookConfiguration:
+    failurePolicy: Ignore
+    timeoutSeconds: 30
+  rules:
+    - name: verify-naranjo-online-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [naranjo-online]
+      verifyImages:
+        - imageReferences: ["ghcr.io/snaraj/naranjo-online@sha256:*"]
+          mutateDigest: false
+          required: true
+          verifyDigest: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
+                    issuer: https://token.actions.githubusercontent.com
+    - name: verify-naranjo-online-provenance
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [naranjo-online]
+      verifyImages:
+        - imageReferences: ["ghcr.io/snaraj/naranjo-online@sha256:*"]
+          type: SigstoreBundle
+          mutateDigest: false
+          required: true
+          verifyDigest: true
+          attestations:
+            - type: https://slsa.dev/provenance/v1
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*
+                        issuer: https://token.actions.githubusercontent.com
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    - key: "{{ buildDefinition.buildType }}"
+                      operator: Equals
+                      value: https://actions.github.io/buildtypes/workflow/v1

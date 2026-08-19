@@ -262,7 +262,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                         MODULE.signature_policy_action(text, slug, workflow), action
                     )
 
-    def test_checked_in_policies_are_the_canonical_audit_variants(self):
+    def test_checked_in_policies_are_the_canonical_enforce_variants(self):
         for slug, workflow in MODULE.SIGNATURE_CONTRACTS.items():
             with self.subTest(slug=slug):
                 text = REPO_ROOT.joinpath(
@@ -272,7 +272,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
                     MODULE.signature_policy_errors(text, slug, workflow), []
                 )
                 self.assertEqual(
-                    MODULE.signature_policy_action(text, slug, workflow), "Audit"
+                    MODULE.signature_policy_action(text, slug, workflow), "Enforce"
                 )
 
     def test_action_specific_validation_cannot_confuse_audit_with_enforce(self):
@@ -571,16 +571,30 @@ class SignaturePolicyContractTests(unittest.TestCase):
                     "validate_signature_policy.py\" " + command, renderer
                 )
         self.assertIn("validate_signature_policy.py\" policy", renderer)
+        policy_call = renderer[renderer.index("validate_signature_policy.py\" policy"):]
+        policy_call = policy_call[: policy_call.index("done")]
+        self.assertIn("--action Enforce", policy_call)
+        self.assertNotIn("--action Audit", policy_call)
         self.assertLess(
             renderer.index("validate_signature_policy.py\" policy"),
             renderer.index("kustomize build \"${REPO_ROOT}/policies/kyverno\""),
         )
+        signature_rego = REPO_ROOT.joinpath(
+            "policies", "conftest", "signature-policy.rego"
+        ).read_text(encoding="utf-8")
         self.assertIn(
-            "input == expected_signature_policy(name, contract, action)",
-            REPO_ROOT.joinpath(
-                "policies", "conftest", "signature-policy.rego"
-            ).read_text(encoding="utf-8"),
+            "input == expected_signature_policy(name, contract, action, failure_policy)",
+            signature_rego,
         )
+        # The webhook failure policy is a parameter of the closed contract, not
+        # an escape from it: object equality still pins every other byte, and
+        # the parameter's domain is exactly two values. `Ignore` exists for the
+        # report-only install stage, where a fail-closed webhook would refuse
+        # Pod creation in the site namespaces whenever Kyverno was unreachable.
+        self.assertIn(
+            'signature_policy_failure_policies := {"Fail", "Ignore"}', signature_rego
+        )
+        self.assertIn("failure_policy in signature_policy_failure_policies", signature_rego)
 
     def test_fast_kubernetes_gate_rejects_a_weakened_audit_policy(self):
         with tempfile.TemporaryDirectory() as directory:

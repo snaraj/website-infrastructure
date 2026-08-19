@@ -1,0 +1,3 @@
+# Current-main's TOKEN_BINDING_DENY_CORPUS pins this file to cross-site envFrom.
+# Its sole reviewed Conftest attribution is the positive env binding.
+Pod cloudflare-public/connector-with-envfrom-cross-site may take its Tunnel token only from the Secret derived from its own app.kubernetes.io/instance, through env.valueFrom.secretKeyRef and never through envFrom

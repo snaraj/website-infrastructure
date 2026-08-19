@@ -370,6 +370,7 @@ required_policies = {
     "require-approved-images",
     "require-exact-tenant-networking",
     "require-release-readiness",
+    "require-replicaset-admission-identity",
     "require-restricted-workloads",
     "require-signed-naranjo-online",
     "require-signed-lidersea-com",

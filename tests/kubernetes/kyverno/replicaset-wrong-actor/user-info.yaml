@@ -1,0 +1,6 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: UserInfo
+metadata:
+  name: replicaset-wrong-actor-user-info
+userInfo:
+  username: system:serviceaccount:default:attacker

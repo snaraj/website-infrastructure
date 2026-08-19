@@ -51,6 +51,7 @@ resources:
   - require-zero-site-capacity.yaml
   - require-exact-tenant-networking.yaml
   - require-release-readiness.yaml
+  - require-replicaset-admission-identity.yaml
   - require-signed-naranjo-online.yaml
   - require-signed-lidersea-com.yaml
 """

@@ -1,0 +1,5 @@
+# The exact denial each document in connector-identity-root-naranjo-deployment.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+Deployment cloudflare-public/naranjo-online-tunnel must state its own name as app.kubernetes.io/instance in its metadata labels, selector, and pod template; the connector identity tuple is rooted in the Deployment name

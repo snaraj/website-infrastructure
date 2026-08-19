@@ -2447,6 +2447,20 @@ def _allowed_transition_release_errors(plan):
                 "{} HelmRelease override is not deploymentReady".format(domain),
             })
 
+    # The flux-system API-server allow points at RFC 5737 documentation space
+    # until an operator substitutes the real endpoint from private custody. The
+    # SAME validator mandates that sentinel (`check_kubernetes` fails when it is
+    # absent), so its presence cannot also disqualify a transition: one check
+    # requiring the exact bytes another refuses is a contract no tree satisfies.
+    # It is inert here for the same reason the pre-ceremony SOPS sentinels below
+    # are: nothing is being released, and the operator substitution happens at
+    # apply time, not in Git. A genuine release claim is unaffected — `mode ==
+    # "release"` returns `check_release` UNFILTERED, so a release while the
+    # sentinel is still committed still fails exactly as before.
+    allowed.add(
+        "flux-system API-server egress still carries the unresolved control-plane sentinel"
+    )
+
     if plan.cloudflare_public != "active":
         allowed.update({
             "HelmRelease remains suspended: cloudflare-public",

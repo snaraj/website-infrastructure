@@ -1,0 +1,5 @@
+# The exact denial each document in connector-token-cross-swap-naranjo.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+volume tunnel-token is outside the exact ephemeral/credential volume allowlist for namespace cloudflare-public

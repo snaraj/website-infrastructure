@@ -15,6 +15,7 @@ core_admission_policies := {
   "require-zero-site-capacity",
   "require-exact-tenant-networking",
   "require-release-readiness",
+  "require-replicaset-admission-identity",
 }
 
 signature_policies := {

@@ -2,25 +2,44 @@
 # Exercise Kubernetes admission policy with explicit positive and negative
 # controls before those rules become part of the Flux reconciliation boundary.
 #
-# Deny fixtures are asserted by REASON, not merely by rejection. A file-level
-# "conftest exited non-zero" assertion cannot tell a working deny arm from a
-# neutered one: with several bypass documents in one file, deleting or
-# disabling one rule still leaves the other documents failing the file, so the
+# WHY A DENY FIXTURE IS ASSERTED BY REASON, NOT MERELY BY REJECTION
+#
+# A deny fixture is a multi-document file: several plausible widenings of the
+# same reviewed contract, each of which must be refused. A file-level "conftest
+# exited non-zero" assertion cannot tell a working deny arm from a neutered
+# one: with several bypass documents in one file, deleting, disabling, or
+# widening one rule still leaves the other documents failing the file, so the
 # runner keeps printing PASS while a reviewed control is gone. That is not
-# hypothetical -- on this repository a one-token edit to the flux-system
-# egress rule (`count(...) > 0` -> `> 999`) left every gate green while
-# `allow-egress: egress: [{}]`, the cluster-wide allow-all posture the rule
-# exists to forbid, was accepted again.
+# hypothetical -- it was reproduced on this repository twice. A one-token edit
+# to the flux-system egress rule (`count(...) > 0` -> `> 999`) left every gate
+# green while `allow-egress: egress: [{}]`, the cluster-wide allow-all posture
+# the rule exists to forbid, was accepted again.
 #
-# So a deny fixture declares what it must be rejected FOR:
+# A deny fixture therefore declares what it must be rejected FOR, in one of two
+# reviewed forms, and this runner picks the stronger one the fixture supplies:
 #
-#     # expect-deny: NetworkPolicy flux-system/allow-egress must carry no egress rule
+# 1. An `.expected` SIDECAR naming exactly the denial messages the file must
+#    produce. The runner compares the whole set: a message that disappears is a
+#    weakened rule, a message that appears is a denial nobody reviewed, and both
+#    are failures that name the arm -- because the message names the rule and
+#    the object that tripped it. This is the strongest form and the default for
+#    new fixtures.
 #
-# One such line per YAML document in the file. The runner then requires the
-# rejection to quote each declared reason, so a rule that stops firing is a
-# failure even when some other rule still rejects the same bytes. Fixtures that
-# declare nothing keep the older file-level assertion and say so in their PASS
-# line, which is what makes the weaker mode visible rather than assumed.
+# 2. Inline `# expect-deny:` declarations, one per YAML document:
+#
+#        # expect-deny: NetworkPolicy flux-system/allow-egress must carry no egress rule
+#
+#    The runner requires the rejection to quote each declared reason, so a rule
+#    that stops firing is a failure even when some other rule still rejects the
+#    same bytes. The count must equal the document count, so a document cannot
+#    quietly go unasserted.
+#
+# A fixture that declares neither keeps the older file-level assertion and says
+# so in its PASS line, which is what makes the weaker mode visible rather than
+# assumed.
+#
+# `expect_release_rejection` in scripts/render-manifests.sh is the same pattern
+# on the release policy set; this is that discipline applied to deny fixtures.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -43,24 +62,43 @@ count_documents() {
   printf '%s' "$((separators + 1))"
 }
 
-# Allow fixtures detect over-broad rules; deny fixtures prove unsafe resources
-# still stop the build instead of being accepted as ordinary test output.
-for fixture in "${repo_root}"/tests/kubernetes/fixtures/allow/*.yaml; do
-  conftest test --policy "${policy}" "${fixture}"
-done
-for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
-  output=''
-  if output="$(conftest test --no-color --policy "${policy}" "${fixture}" 2>&1)"; then
-    printf 'deny fixture unexpectedly passed: %s\n' "${fixture}" >&2
-    printf '%s\n' "${output}" >&2
+# Conftest is invoked with `--no-color`, but its output is stripped as well so
+# the comparison is over messages rather than over presentation even if a future
+# release colours a stream the flag does not cover.
+strip_ansi() {
+  sed -E $'s/\x1b\\[[0-9;]*m//g'
+}
+
+# The exact-set form: the fixture's reviewed `.expected` sidecar must name every
+# denial the file produces, and no other.
+assert_reviewed_denial_set() {
+  local fixture="$1" expected_file="$2" output="$3"
+  local actual='' expected=''
+
+  actual="$(printf '%s\n' "$output" | strip_ansi |
+    sed -n 's/^FAIL - .* - main - //p' | LC_ALL=C sort)"
+  expected="$(grep -vE '^[[:space:]]*(#|$)' "$expected_file" | LC_ALL=C sort)"
+
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'deny fixture produced a different denial set than reviewed: %s\n' \
+      "${fixture}" >&2
+    printf -- '--- missing (a rule stopped denying) ---\n' >&2
+    comm -13 <(printf '%s\n' "$actual") <(printf '%s\n' "$expected") >&2
+    printf -- '--- unreviewed (a rule started denying) ---\n' >&2
+    comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$expected") >&2
     exit 1
   fi
-  expected_count=0
-  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
-  if ((expected_count == 0)); then
-    printf 'PASS rejected (file-level only, no expect-deny declared) %s\n' "${fixture}"
-    continue
-  fi
+
+  printf 'PASS rejected %s (%s reviewed denial(s))\n' "${fixture}" \
+    "$(printf '%s\n' "$expected" | grep -cE '.')"
+}
+
+# The per-document form: every declared reason must appear in the rejection, and
+# exactly one reason must be declared per document.
+assert_declared_denial_reasons() {
+  local fixture="$1" expected_count="$2" output="$3"
+  local documents='' expected=''
+
   documents="$(count_documents "${fixture}")"
   if ((expected_count != documents)); then
     printf 'deny fixture %s declares %s expect-deny reason(s) for %s document(s); declare exactly one per document\n' \
@@ -77,4 +115,38 @@ for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
     fi
   done < <(sed -n 's/^#[[:space:]]*expect-deny:[[:space:]]*//p' <"${fixture}")
   printf 'PASS rejected %s (%s declared reason(s) proven)\n' "${fixture}" "${expected_count}"
+}
+
+expect_fixture_denials() {
+  local fixture="$1"
+  local expected_file="${fixture%.yaml}.expected"
+  local output='' expected_count=0
+
+  if output="$(conftest test --no-color --policy "${policy}" "${fixture}" 2>&1)"; then
+    printf 'deny fixture unexpectedly passed: %s\n' "${fixture}" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+
+  if [[ -f "$expected_file" ]]; then
+    assert_reviewed_denial_set "${fixture}" "${expected_file}" "${output}"
+    return 0
+  fi
+
+  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
+  if ((expected_count > 0)); then
+    assert_declared_denial_reasons "${fixture}" "${expected_count}" "${output}"
+    return 0
+  fi
+
+  printf 'PASS rejected (file-level only, no reviewed denial list declared) %s\n' "${fixture}"
+}
+
+# Allow fixtures detect over-broad rules; deny fixtures prove unsafe resources
+# still stop the build instead of being accepted as ordinary test output.
+for fixture in "${repo_root}"/tests/kubernetes/fixtures/allow/*.yaml; do
+  conftest test --policy "${policy}" "${fixture}"
+done
+for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
+  expect_fixture_denials "$fixture"
 done

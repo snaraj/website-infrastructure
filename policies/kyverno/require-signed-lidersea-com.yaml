@@ -8,7 +8,7 @@ metadata:
 spec:
   admission: true
   background: false
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   webhookConfiguration:
     failurePolicy: Fail
     timeoutSeconds: 30

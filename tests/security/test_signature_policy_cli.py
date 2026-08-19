@@ -40,6 +40,8 @@ def policy_args(file_path):
         "naranjo-online",
         "--workflow",
         "release-publisher.yml",
+        "--action",
+        "Enforce",
     )
 
 
@@ -69,6 +71,8 @@ class SignaturePolicyCliTests(unittest.TestCase):
                     slug,
                     "--workflow",
                     "release-publisher.yml",
+                    "--action",
+                    "Enforce",
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn(PASS_LINE, completed.stdout)
@@ -94,8 +98,7 @@ class SignaturePolicyCliTests(unittest.TestCase):
         # let admission strength be weakened invisibly.
         text = POLICY.read_text(encoding="utf-8")
         for old, new, label in (
-            ("validationFailureAction: Enforce", "validationFailureAction: Ignore", "action-downgrade"),
-            ("validationFailureAction: Audit", "validationFailureAction: Ignore", "action-downgrade-audit"),
+            ("validationFailureAction: Enforce", "validationFailureAction: Audit", "action-downgrade"),
             ("failurePolicy: Fail", "failurePolicy: Ignore", "webhook-downgrade"),
             ("rekor:", "rekor_disabled:", "rekor-tamper"),
             ("@refs/tags/v*", "@refs/heads/*", "identity-widening"),
@@ -103,7 +106,7 @@ class SignaturePolicyCliTests(unittest.TestCase):
             if old not in text:
                 continue
             hostile = self.root / f"{label}.yaml"
-            hostile.write_text(text.replace(old, new, 1))
+            hostile.write_bytes(text.replace(old, new, 1).encode("utf-8"))
             with self.subTest(mutation=label):
                 self.assert_rejected(
                     run_validator(*policy_args(hostile)),
@@ -146,7 +149,7 @@ class SignaturePolicyCliTests(unittest.TestCase):
         reordered = "".join(lines[:-2] + [lines[-1], lines[-2]])
         self.assertNotEqual(text, reordered)
         hostile = self.root / "kustomization.yaml"
-        hostile.write_text(reordered)
+        hostile.write_bytes(reordered.encode("utf-8"))
         self.assert_rejected(
             run_validator("kustomization", "--file", str(hostile), "--inventory", "staging"),
             "must match the exact",
@@ -162,6 +165,7 @@ class SignaturePolicyCliTests(unittest.TestCase):
             "policy input must be one regular non-symlink file",
         )
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "mkfifo is unavailable")
     def test_fifo_policy_input_is_rejected(self):
         fifo = self.root / "fifo.yaml"
         os.mkfifo(fifo)

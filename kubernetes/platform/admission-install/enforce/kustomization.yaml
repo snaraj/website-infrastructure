@@ -1,0 +1,72 @@
+# STAGE 2 — the enforcing end state, and the reviewed desired state.
+#
+# This root is the committed target: the admission namespace and its bounds,
+# the engine configuration, the closed network, the pinned controller export,
+# and the policies exactly as `policies/kyverno/` commits them — Enforce, with
+# webhook failurePolicy Fail.
+#
+# It is NOT the first thing applied. ../report-only is an overlay of THIS root
+# that downgrades the policies to Audit/Ignore, which makes stage 1 a strict
+# superset relationship rather than a parallel copy: the two stages cannot
+# describe different controllers, different bounds, or different network. Stage
+# 2 is stage 1 with the downgrade removed, and nothing else changes.
+#
+# `../../admission` is the Flux-reconciled admission root
+# (kubernetes/reconciliation/admission.yaml, still suspended). Referencing it
+# rather than restating it means the operator applies the same bytes Flux will
+# later reconcile. That root's kustomization.yaml is byte-pinned by
+# scripts/validate_signature_policy.py, which is why the install-only objects
+# above live here instead of being added to it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - resource-controls.yaml
+  - network-policies.yaml
+  - config.yaml
+  - ../../admission
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      labelSelector: app.kubernetes.io/part-of=kyverno
+    path: patches/controller-runtime.yaml
+  # Remove the hand-written webhook configuration from the INSTALL path.
+  #
+  # Two independent reasons, and the second one is the architectural finding
+  # this transaction was asked to resolve:
+  #
+  # 1. Kyverno registers its own webhook configurations at runtime, from its own
+  #    RBAC, once it is running and its certificate is issued. A statically
+  #    applied webhook is registered by `kubectl` at a moment when nothing has
+  #    proven the backend answers — which is precisely the misregistration that
+  #    makes an admission install dangerous. Registration must be the
+  #    controller's act, after the ordered health wait, not the operator's.
+  #
+  # 2. That object's `namespaceSelector` is `In` [cloudflare-public,
+  #    naranjo-online, lidersea-com] — three hard-coded namespace NAMES. An
+  #    inclusion list is fail-OPEN by construction: a namespace created
+  #    tomorrow matches nothing, so nothing about it is ever validated, and the
+  #    gap is silent. The reviewed interception scope is therefore an exclusion,
+  #    not an inclusion — `NotIn` [kube-system, flux-system, kyverno] — and it
+  #    lives in the engine configuration (config.yaml), where Kyverno stamps it
+  #    onto every webhook it registers. A new namespace is intercepted by
+  #    default; only the three lockout-critical namespaces are exempt.
+  #
+  # The object itself is NOT removed from kubernetes/platform/admission — it
+  # stays exactly as committed, where it is the fail-closed staging contract for
+  # the suspended Flux path. This deletion is scoped to the direct-apply install
+  # root, and the suite asserts neither stage's render can carry a statically
+  # declared webhook configuration.
+  - target:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingWebhookConfiguration
+      name: kyverno-resource-validating-webhook-cfg
+    patch: |
+      $patch: delete
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingWebhookConfiguration
+      metadata:
+        name: kyverno-resource-validating-webhook-cfg

@@ -1,0 +1,10 @@
+# The exact denial each document in storage-local-source-null.yaml must produce.
+# scripts/test-policy-fixtures.sh compares this whole set: a message that
+# disappears is a weakened rule, a message that appears is an unreviewed
+# denial. File-level rejection alone hides both.
+# SR-4 by design, cross-checked against the fixture's own `# proves:`/
+# `# rego-message:` headers: a null, scalar or list `local` yields `{}` from
+# `storage_sub_object` (`else := {}`), so the path arm is what fires. Pinned as
+# the reviewed denial rather than given a shape-specific arm — a second arm
+# where one is load-bearing, and it would edit #96's semantics from this lane.
+PersistentVolume storage-local-null uses local path outside the enumerated local root

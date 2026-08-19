@@ -59,7 +59,7 @@ spec:
         any:
           - resources:
               kinds: [ReplicaSet]
-              namespaces: [cloudflare-public, naranjo-online, lidersea-com]
+              namespaces: [cloudflare-public, naranjo-online, lidersea-com, kyverno-validation]
       validate:
         failureAction: Enforce
         cel:
@@ -77,7 +77,7 @@ spec:
                 has(object.spec.template.metadata.labels) &&
                 'app.kubernetes.io/instance' in object.spec.template.metadata.labels &&
                 object.spec.template.metadata.labels['app.kubernetes.io/instance'] == owner.name) ||
-                (object.metadata.namespace in ['naranjo-online', 'lidersea-com'] &&
+                (object.metadata.namespace in ['naranjo-online', 'lidersea-com', 'kyverno-validation'] &&
                 owner.name == object.metadata.namespace)))
               message: Tenant ReplicaSets may be created only by their one exact reviewed Deployment, and a connector ReplicaSet must carry its own owner's instance.
     - name: require-site-deployment-readiness

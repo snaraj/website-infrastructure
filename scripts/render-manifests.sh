@@ -119,6 +119,7 @@ declare -a CORE_POLICY_FILES=(
   require-approved-images
   require-exact-tenant-networking
   require-release-readiness
+  require-replicaset-admission-identity
   require-restricted-workloads
 )
 declare -a SIGNATURE_POLICY_INVENTORY_ARGS=()
@@ -183,7 +184,6 @@ for signature_row in "${SIGNATURE_POLICY_ROWS[@]}"; do
     --file "$policy_file" \
     --site "$signature_site" \
     --workflow "$signature_workflow" \
-    --action Audit \
     --action Enforce
 done
 
@@ -196,6 +196,13 @@ declare -a KUSTOMIZE_TARGETS=(
   kubernetes/reconciliation
   kubernetes/platform/prerequisites
   kubernetes/platform/admission
+  # The two staged install roots. They are direct-apply roots, unreachable from
+  # any Flux Kustomization, but their bytes are exactly what an operator would
+  # put on the cluster during the admission ceremony — so they receive the same
+  # schema and policy validation as everything Flux reconciles, and the
+  # determinism gate covers them too.
+  kubernetes/platform/admission-install/report-only
+  kubernetes/platform/admission-install/enforce
   kubernetes/platform/cloudflare-public/release
   kubernetes/websites/naranjo-online
   kubernetes/websites/lidersea-com
@@ -391,8 +398,12 @@ if [[ "$MODE" == '--scaffold' ]]; then
   assert_site_release_phase "${ARTIFACT_ROOT}/kubernetes-websites-lidersea-com.yaml" \
     lidersea-com "$lidersea_phase"
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-cloudflare-public-release.yaml" 'HelmRelease cloudflare-public remains suspended'
-  expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-naranjo-online is not enforced'
-  expect_release_rejection "${ARTIFACT_ROOT}/policies-kyverno.yaml" 'signature admission policy require-signed-lidersea-com is not enforced'
+  # The dormant desired-state signature policies remain Enforce/Fail. Only the
+  # explicit admission-install/report-only overlay may downgrade their rendered
+  # transaction bytes to Audit/Ignore; the base policy render must therefore be
+  # accepted outright even while every workload/reconciler remains inert.
+  conftest test --policy "${REPO_ROOT}/policies/release-conftest" \
+    "${ARTIFACT_ROOT}/policies-kyverno.yaml"
 elif [[ "$MODE" == '--release' ]]; then
   for rendered in "${rendered_files[@]}"; do
     conftest test --policy "${REPO_ROOT}/policies/release-conftest" "$rendered"

@@ -25,6 +25,7 @@ they guard is a TEMPLATE-level coupling that no static read of values can see.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHART = REPO_ROOT / "kubernetes" / "platform" / "cloudflare-public" / "chart"
 HELM = shutil.which("helm")
+CONFTEST = shutil.which("conftest")
+CONFTEST_POLICY = REPO_ROOT / "policies" / "conftest"
 
 # The exact reviewed connector inventory: site key -> (instance, token Secret).
 # Token names are public logical identifiers; no token VALUE exists here.
@@ -99,6 +102,40 @@ def documents(rendered: str) -> dict[tuple[str, str], str]:
         if kind and name:
             parsed[(kind.group(1), name.group(1))] = document
     return parsed
+
+
+def conftest_denials(path: Path) -> list[str]:
+    """Return every denial, preserving duplicate messages per document."""
+
+    completed = subprocess.run(
+        [
+            str(CONFTEST),
+            "test",
+            "--policy",
+            str(CONFTEST_POLICY),
+            "--output",
+            "json",
+            "--no-color",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(REPO_ROOT),
+    )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            "conftest emitted unreadable JSON for {}: {}{}".format(
+                path.name, completed.stdout, completed.stderr
+            )
+        ) from error
+    return sorted(
+        failure.get("msg", "")
+        for document_result in result
+        for failure in document_result.get("failures", [])
+    )
 
 
 def document(parsed: dict[tuple[str, str], str], kind: str, name: str) -> str:
@@ -310,12 +347,19 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
     READINESS_POLICY = (
         REPO_ROOT / "policies" / "kyverno" / "require-release-readiness.yaml"
     )
+    REPLICASET_IDENTITY_POLICY = (
+        REPO_ROOT
+        / "policies"
+        / "kyverno"
+        / "require-replicaset-admission-identity.yaml"
+    )
     RELEASE_POLICY = (
         REPO_ROOT / "policies" / "release-conftest" / "deployment-readiness.rego"
     )
     STORAGE_POLICY = (
         REPO_ROOT / "policies" / "kyverno" / "disallow-undiscovered-storage.yaml"
     )
+    REPLICASET_IDENTITY_RULE = "require-replicaset-controller-and-live-owner-uid"
 
     # rule -> (policy attribute, exact reviewed match stanza). The connector
     # names are interpolated, never spelled twice, so a chart rename that
@@ -343,7 +387,7 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
             "        any:\n"
             "          - resources:\n"
             "              kinds: [ReplicaSet]\n"
-            "              namespaces: [cloudflare-public, naranjo-online, lidersea-com]",
+            "              namespaces: [cloudflare-public, naranjo-online, lidersea-com, kyverno-validation]",
         ),
         "allow-only-tunnel-token-volume": (
             "STORAGE_POLICY",
@@ -411,7 +455,11 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
                 )
 
     def test_both_connector_policies_fail_closed_at_the_policy_level(self):
-        for policy in (self.READINESS_POLICY, self.STORAGE_POLICY):
+        for policy in (
+            self.READINESS_POLICY,
+            self.REPLICASET_IDENTITY_POLICY,
+            self.STORAGE_POLICY,
+        ):
             with self.subTest(policy=policy.name):
                 lines = policy.read_text(encoding="utf-8").split("\n")
                 self.assertIn("  validationFailureAction: Enforce", lines)
@@ -525,6 +573,45 @@ class ConnectorAdmissionCoverageTests(unittest.TestCase):
             owners,
             set(CONNECTOR_INSTANCES),
             "connector rollout must be possible for every rendered connector",
+        )
+
+    def test_replicaset_admission_binds_controller_and_live_owner_uid(self):
+        sections = rule_sections(
+            self.REPLICASET_IDENTITY_POLICY, self.REPLICASET_IDENTITY_RULE
+        )
+        self.assertEqual(
+            list(sections),
+            ["name", "match", "context", "preconditions", "validate"],
+            "the ReplicaSet identity rule has an exact reviewed execution shape",
+        )
+        self.assertEqual(
+            sections["match"],
+            "        any:\n"
+            "          - resources:\n"
+            "              kinds: [ReplicaSet]\n"
+            "              namespaces: [cloudflare-public, naranjo-online, lidersea-com, kyverno-validation]\n"
+            "              operations: [CREATE, UPDATE]",
+        )
+        self.assertIn(
+            "/apis/apps/v1/namespaces/{{ request.namespace }}/deployments",
+            sections["context"],
+            "the owner lookup must remain in the ReplicaSet's own namespace",
+        )
+        self.assertNotIn(
+            "ownerReferences[0].name }}/",
+            sections["context"],
+            "untrusted owner metadata must not be interpolated into an API URL",
+        )
+        validate = sections["validate"]
+        self.assertIn("value: system:kube-controller-manager", validate)
+        self.assertIn("request.object.metadata.ownerReferences[0].uid", validate)
+        self.assertIn('value: "{{ ownerDeploymentUID }}"', validate)
+        self.assertIn("        failureAction: Enforce", validate.split("\n"))
+        self.assertIn(
+            "  background: false",
+            self.REPLICASET_IDENTITY_POLICY.read_text(encoding="utf-8").split("\n"),
+            "request.userInfo is admission-only and must never be evaluated "
+            "by a background scan",
         )
 
     def test_release_policy_covers_every_rendered_connector(self):
@@ -795,6 +882,24 @@ class SiteIngressPolicyNameTests(unittest.TestCase):
                         "guard it was written for is untested".format(name),
                     )
 
+    @unittest.skipUnless(CONFTEST, "conftest is required")
+    def test_each_token_binding_mutant_has_only_its_reviewed_attribution(self):
+        """No unrelated denial may keep a weakened token-binding arm green."""
+
+        for name in self.TOKEN_BINDING_DENY_CORPUS:
+            path = self.FIXTURES / "deny" / name
+            resource = re.search(
+                r"(?m)^  name: (\S+)$", path.read_text(encoding="utf-8")
+            )
+            self.assertIsNotNone(resource, name + " lost its resource name")
+            expected = (
+                "Pod cloudflare-public/{} may take its Tunnel token only from "
+                "the Secret derived from its own app.kubernetes.io/instance, "
+                "through env.valueFrom.secretKeyRef and never through envFrom"
+            ).format(resource.group(1))
+            with self.subTest(fixture=name):
+                self.assertEqual(conftest_denials(path), [expected])
+
     def test_the_superseded_name_is_still_exercised_as_a_denial(self):
         """A rename that merely ADDED the new name would pass without this."""
 
@@ -809,6 +914,27 @@ class SiteIngressPolicyNameTests(unittest.TestCase):
             "the deny fixture must not have been renamed along with the "
             "contract; it exists to prove the dead name is still refused",
         )
+
+    @unittest.skipUnless(CONFTEST, "conftest is required")
+    def test_each_site_ingress_mutant_has_only_its_reviewed_attribution(self):
+        """Name and peer mutants must reach the same exact ingress guard."""
+
+        for name in (
+            "ingress-peer-name-only.yaml",
+            "ingress-peer-wrong-instance.yaml",
+            "ingress-policy-superseded-name.yaml",
+        ):
+            path = self.FIXTURES / "deny" / name
+            resource = re.search(
+                r"(?m)^  name: (\S+)$", path.read_text(encoding="utf-8")
+            )
+            self.assertIsNotNone(resource, name + " lost its resource name")
+            expected = (
+                "NetworkPolicy naranjo-online/{} widens the exact "
+                "cloudflare-public TCP 8080 ingress contract"
+            ).format(resource.group(1))
+            with self.subTest(fixture=name):
+                self.assertEqual(conftest_denials(path), [expected])
 
 
 if __name__ == "__main__":
