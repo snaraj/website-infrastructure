@@ -6,6 +6,27 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-19
+
+### Changed
+
+- The two site-owned Cloudflare roots now complete the minimum-TLS update and
+  its provider readback before the plaintext-redirect update, so a zone never
+  accepts a redirect ahead of its own TLS floor.
+
+### Security
+
+- The Cloudflare plan policy binds the edge-hardening transaction to its
+  measured prestate: only the two existing HTTPS-redirect and minimum-TLS
+  owners may update, only from `off` and `1.0`, and every other resource in a
+  site plan — Tunnel, Tunnel configuration, apex record, and the four remaining
+  zone settings — must plan as a no-op.
+- Six hostile plan mutations now prove those denials on both site phases: a
+  duplicate setting owner, a Tunnel-configuration update, a falsified
+  pre-change value on each of the two target settings, an unrelated
+  zone-setting update, and a plan that claims `no-op` on the redirect owner
+  while its own recorded before value contradicts that target.
+
 ## [0.1.6] - 2026-08-18
 
 ### Added

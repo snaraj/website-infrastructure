@@ -119,6 +119,7 @@ for phase in site-naranjo-online site-lidersea-com; do
   assert_mutation_denied "${phase}" cross-site-ingress-value
   assert_mutation_denied "${phase}" cross-site-config-reference
   assert_mutation_denied "${phase}" recreate-adopted-tunnel
+  assert_mutation_denied "${phase}" tunnel-config-update
   assert_mutation_denied "${phase}" renamed-tunnel
   assert_mutation_denied "${phase}" extra-public-tunnel
   assert_mutation_denied "${phase}" wrong-account-variable
@@ -148,6 +149,11 @@ for phase in site-naranjo-online site-lidersea-com; do
   assert_mutation_denied "${phase}" rebound-zone-setting
   assert_mutation_denied "${phase}" missing-zone-setting
   assert_mutation_denied "${phase}" extra-zone-setting
+  assert_mutation_denied "${phase}" duplicate-setting-owner
+  assert_mutation_denied "${phase}" wrong-https-prestate
+  assert_mutation_denied "${phase}" wrong-min-tls-prestate
+  assert_mutation_denied "${phase}" unrelated-zone-setting-update
+  assert_mutation_denied "${phase}" lying-no-op-setting
   assert_mutation_denied "${phase}" missing-adoption-audit
   assert_mutation_denied "${phase}" zero-adoption-audit
 done

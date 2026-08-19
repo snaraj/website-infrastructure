@@ -92,12 +92,13 @@ def mutate(plan, name):
     def tunnel_address():
         return "cloudflare_zero_trust_tunnel_cloudflared.{}".format(site()["slug"])
 
+    def tunnel_config_address():
+        return "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
+            site()["slug"]
+        )
+
     def ingress():
-        return after(
-            "cloudflare_zero_trust_tunnel_cloudflared_config.{}".format(
-                site()["slug"]
-            )
-        )["config"]["ingress"]
+        return after(tunnel_config_address())["config"]["ingress"]
 
     def zone_setting(key):
         return "cloudflare_zone_setting.{}_{}".format(site()["slug"], key)
@@ -357,6 +358,12 @@ def mutate(plan, name):
     elif name == "recreate-adopted-tunnel":
         target = exactly_one(changes, tunnel_address())["change"]
         target["actions"] = ["update"]
+    elif name == "tunnel-config-update":
+        target = exactly_one(changes, tunnel_config_address())["change"]
+        target["actions"] = ["update"]
+        target["before"]["config"]["ingress"][0]["service"] = (
+            "http://unreviewed.invalid:8080"
+        )
     elif name == "renamed-tunnel":
         after(tunnel_address())["name"] = "pi-websites"
     elif name == "cross-site-hostname":
@@ -425,6 +432,39 @@ def mutate(plan, name):
         extra_config = copy.deepcopy(exactly_one(configured, zone_setting("ssl")))
         extra_config["address"] = address
         configured.append(extra_config)
+    elif name == "duplicate-setting-owner":
+        # Copy the managed Always Use HTTPS object under a second address while
+        # keeping the same zone and setting_id. Exact desired values are not
+        # enough: a second owner would create overlapping state custody.
+        source_address = zone_setting("always_use_https")
+        address = source_address + "_duplicate"
+        extra_change = copy.deepcopy(exactly_one(changes, source_address))
+        extra_change["address"] = address
+        changes.append(extra_change)
+        extra_config = copy.deepcopy(exactly_one(configured, source_address))
+        extra_config["address"] = address
+        configured.append(extra_config)
+    elif name == "wrong-https-prestate":
+        exactly_one(changes, zone_setting("always_use_https"))["change"][
+            "before"
+        ]["value"] = "on"
+    elif name == "wrong-min-tls-prestate":
+        exactly_one(changes, zone_setting("min_tls_version"))["change"][
+            "before"
+        ]["value"] = "1.1"
+    elif name == "unrelated-zone-setting-update":
+        target = exactly_one(changes, zone_setting("tls_1_3"))["change"]
+        target["actions"] = ["update"]
+        target["before"]["value"] = "off"
+    elif name == "lying-no-op-setting":
+        # A plan that claims "no-op" on the redirect owner while its own before
+        # and after disagree. Every deny rule for this transaction keys on the
+        # "update" action, so none of them fires; only the positive transition
+        # contract, which requires a no-op to already sit at its target value,
+        # can see the lie. This mutation exists to keep that contract provably
+        # load-bearing rather than redundant with the deny rules.
+        target = exactly_one(changes, zone_setting("always_use_https"))["change"]
+        target["actions"] = ["no-op"]
     elif name == "create-with-prior-object":
         # F1 isolation: a create action that KEEPS its prior object. The
         # before-null denial cannot see it and the adopted-identity rule does
