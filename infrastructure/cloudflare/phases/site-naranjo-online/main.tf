@@ -67,20 +67,6 @@ resource "cloudflare_dns_record" "naranjo_online_apex" {
 # control; none of them can bill. Strict origin pull is deliberately excluded:
 # the connector-to-origin leg is plain HTTP by accepted decision (ADR 0015), so
 # the SSL mode is "full" and must never be raised to a strict variant here.
-resource "cloudflare_zone_setting" "naranjo_online_always_use_https" {
-  zone_id    = var.cloudflare_naranjo_online_zone_id
-  setting_id = "always_use_https"
-  value      = "on"
-
-  lifecycle {
-    prevent_destroy = true
-    precondition {
-      condition     = var.approve_site_naranjo_online_phase
-      error_message = "Set approve_site_naranjo_online_phase=true only for an approved naranjo.online plan."
-    }
-  }
-}
-
 resource "cloudflare_zone_setting" "naranjo_online_min_tls_version" {
   zone_id    = var.cloudflare_naranjo_online_zone_id
   setting_id = "min_tls_version"
@@ -91,6 +77,32 @@ resource "cloudflare_zone_setting" "naranjo_online_min_tls_version" {
     precondition {
       condition     = var.approve_site_naranjo_online_phase
       error_message = "Set approve_site_naranjo_online_phase=true only for an approved naranjo.online plan."
+    }
+    postcondition {
+      condition     = self.setting_id == "min_tls_version" && self.value == "1.2"
+      error_message = "Cloudflare did not read back min_tls_version=1.2 for naranjo.online."
+    }
+  }
+}
+
+resource "cloudflare_zone_setting" "naranjo_online_always_use_https" {
+  zone_id    = var.cloudflare_naranjo_online_zone_id
+  setting_id = "always_use_https"
+  value      = "on"
+
+  # Finish the TLS-floor update and its provider readback before changing
+  # plaintext reachability. One site root is still applied as one saved plan.
+  depends_on = [cloudflare_zone_setting.naranjo_online_min_tls_version]
+
+  lifecycle {
+    prevent_destroy = true
+    precondition {
+      condition     = var.approve_site_naranjo_online_phase
+      error_message = "Set approve_site_naranjo_online_phase=true only for an approved naranjo.online plan."
+    }
+    postcondition {
+      condition     = self.setting_id == "always_use_https" && self.value == "on"
+      error_message = "Cloudflare did not read back always_use_https=on for naranjo.online."
     }
   }
 }

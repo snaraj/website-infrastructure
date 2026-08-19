@@ -221,12 +221,12 @@
       "type": "cloudflare_zone_setting",
       "change": {
         "actions": [
-          "update"
+          "no-op"
         ],
         "before": {
           "zone_id": "22222222222222222222222222222222",
           "setting_id": "ssl",
-          "value": "flexible"
+          "value": "full"
         },
         "after": {
           "zone_id": "22222222222222222222222222222222",

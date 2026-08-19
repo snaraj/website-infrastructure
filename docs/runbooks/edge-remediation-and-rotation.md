@@ -39,6 +39,27 @@ Two commands appear throughout:
 
 ## Ceremony A — the two-toggle edge remediation
 
+> **Read this before A.0.** Both settings this ceremony toggles now have
+> committed state owners in the two site-owned OpenTofu roots —
+> `infrastructure/cloudflare/phases/site-naranjo-online/main.tf` and
+> `infrastructure/cloudflare/phases/site-lidersea-com/main.tf`. Each root
+> orders Minimum TLS Version before Always Use HTTPS and requires the provider
+> to read the value back, and
+> `infrastructure/cloudflare/policy/cloudflare-plan.rego` admits only the
+> measured `off` → `on` and `1.0` → `1.2` transitions on exactly those two
+> addresses, with every other resource in the plan a no-op. A dashboard toggle
+> is therefore a **break-glass** action under safety invariant 9: it takes
+> custody away from that state, so it must be recorded and reconciled back into
+> the roots immediately, and the next plan re-read before anything else runs.
+>
+> The reviewed saved-plan ceremony that would replace this section — together
+> with the fixed legacy-capable acceptance client that proves TLS 1.0/1.1
+> rejection against the same edge — is **deferred to a tracked follow-up
+> issue** and is not in this tree. Until it lands, this section is the only
+> written procedure, and it is a break-glass one. Do not read the presence of
+> committed OpenTofu owners as authorization to apply them: no live Cloudflare
+> transaction is authorized by this repository.
+
 Two zone settings are below their target state on both zones: plaintext HTTP is
 served instead of redirected, and the minimum TLS version is 1.0. Everything
 else in the target state is already met, so this ceremony changes exactly two
