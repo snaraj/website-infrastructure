@@ -191,6 +191,8 @@ declare -a CHART_ROWS=(
   "cloudflare-public|cloudflare-public|kubernetes/platform/cloudflare-public/chart"
 )
 declare -a KUSTOMIZE_TARGETS=(
+  kubernetes/flux-system/canary
+  kubernetes/flux-system/egress
   kubernetes/reconciliation
   kubernetes/platform/prerequisites
   kubernetes/platform/admission

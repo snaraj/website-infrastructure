@@ -1129,6 +1129,331 @@ def flux_components_errors(root):
     return errors
 
 
+# The exact flux-system egress inventory. Conftest pins the shape of whichever
+# policies a render contains; this pins that they are all present and reachable
+# from the roots the install ceremony applies, because a policy file that no
+# Kustomization references is desired state nobody ever applies.
+FLUX_EGRESS_POLICIES = (
+    "default-deny",
+    "flux-controllers-dns",
+    "flux-controllers-artifacts",
+    "flux-controllers-public-https",
+    "flux-controllers-kube-apiserver",
+)
+FLUX_CONTROL_PLANE_SENTINEL = "sentinel-until-private-calico-api-endpoint-set"
+FLUX_API_CANARY_NAME = "flux-api-reachability-canary"
+
+
+def flux_egress_contract_errors(root):
+    """Require the fail-closed flux-system egress set and its wiring."""
+
+    errors = []
+    policies = root / "kubernetes/flux-system/egress/network-policies.yaml"
+    if not policies.is_file():
+        return ["fail-closed flux-system egress NetworkPolicies are missing"]
+    text = read(policies)
+    for name in FLUX_EGRESS_POLICIES:
+        if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(name)), text):
+            errors.append("required flux-system egress NetworkPolicy missing: " + name)
+    documents = re.split(r"(?m)^---\s*$", text)
+    exact_default_deny = [doc for doc in documents if (
+        re.search(r"(?m)^\s*name:\s*default-deny\s*$", doc) and
+        re.search(r"(?m)^\s*namespace:\s*flux-system\s*$", doc) and
+        re.search(r"(?ms)^\s*policyTypes:\s*\n\s*-\s*Ingress\s*\n\s*-\s*Egress\s*$", doc)
+    )]
+    if len(exact_default_deny) != 1:
+        errors.append("exact ingress+egress default-deny missing for flux-system")
+    if FLUX_CONTROL_PLANE_SENTINEL not in text:
+        errors.append("flux-system API-server egress must keep its unresolved control-plane sentinel")
+
+    # The blanket `egress: [{}]` the Flux CLI generates is removed by patch;
+    # an unreferenced patch file would leave the export unmodified while the
+    # repository still looked hardened.
+    patch = root / "kubernetes/flux-system/controllers/patches/allow-egress.yaml"
+    if not patch.is_file():
+        errors.append("generated allow-egress blanket rule is not patched away")
+    elif not re.search(r"(?m)^-\s*op:\s*remove\s*$", read(patch)) or (
+        "path: /spec/egress" not in read(patch)
+    ):
+        errors.append("allow-egress patch must remove /spec/egress and nothing else")
+    # Pod Security on flux-system: the generated export only warns, so the
+    # overlay's enforce labels are the control. A patch file that exists but is
+    # not wired into the install root is the same failure as no patch at all,
+    # which is why both halves are checked for both patches.
+    namespace_patch = root / "kubernetes/flux-system/controllers/patches/namespace.yaml"
+    if not namespace_patch.is_file():
+        errors.append("flux-system Pod Security enforcement patch is missing")
+    else:
+        namespace_text = read(namespace_patch)
+        for fragment in (
+            "pod-security.kubernetes.io~1enforce",
+            "value: restricted",
+            "value: v1.36",
+        ):
+            if fragment not in namespace_text:
+                errors.append(
+                    "flux-system Pod Security patch must enforce restricted at a pinned "
+                    "version: " + fragment
+                )
+    controllers_index = root / "kubernetes/flux-system/controllers/kustomization.yaml"
+    if not controllers_index.is_file():
+        errors.append("Flux controller install root is missing")
+    else:
+        controllers_text = read(controllers_index)
+        for referenced in ("patches/allow-egress.yaml", "patches/namespace.yaml"):
+            if referenced not in controllers_text:
+                errors.append(
+                    "Flux controller install root does not apply " + referenced
+                )
+    egress_index = root / "kubernetes/flux-system/egress/kustomization.yaml"
+    if not egress_index.is_file():
+        errors.append("Flux egress Kustomization root is missing")
+    elif not active_kustomization_resource(read(egress_index), "network-policies.yaml"):
+        errors.append("Flux egress resource is not reachable from its root")
+
+    # The executable API-path proof is a separately rendered, one-Pod target.
+    # Keeping it outside the bootstrap root makes it impossible for ordinary
+    # GitOps reconciliation to create the probe, while the installer can still
+    # bind and create its exact reviewed bytes immediately before controllers.
+    canary_root = root / "kubernetes/flux-system/canary"
+    canary_index = canary_root / "kustomization.yaml"
+    canary_pod = canary_root / "pod.yaml"
+    if not canary_index.is_file() or not canary_pod.is_file():
+        errors.append("Flux API-path canary root or Pod is missing")
+    else:
+        if not active_kustomization_resource(read(canary_index), "pod.yaml"):
+            errors.append("Flux API-path canary Pod is not reachable from its own root")
+        canary_text = read(canary_pod)
+        versions_path = root / "versions.env"
+        versions_text = read(versions_path) if versions_path.is_file() else ""
+        image = re.search(r"(?m)^FLUX_API_CANARY_IMAGE=(\S+)$", versions_text)
+        required_canary_fragments = (
+            "kind: Pod",
+            "name: " + FLUX_API_CANARY_NAME,
+            "namespace: flux-system",
+            "app: source-controller",
+            "app.kubernetes.io/part-of: flux",
+            "serviceAccountName: source-controller",
+            "value: kubernetes.default.svc",
+            "- --raw=/api",
+            "automountServiceAccountToken: true",
+            "readOnlyRootFilesystem: true",
+            "allowPrivilegeEscalation: false",
+        )
+        for fragment in required_canary_fragments:
+            if fragment not in canary_text:
+                errors.append("Flux API-path canary is missing: " + fragment)
+        if not image:
+            errors.append("versions.env is missing FLUX_API_CANARY_IMAGE")
+        elif "image: " + image.group(1) not in canary_text:
+            errors.append("Flux API-path canary image does not match versions.env")
+        if re.search(r"(?m)^\s*(hostNetwork|hostPID|hostIPC):\s*true\s*$", canary_text):
+            errors.append("Flux API-path canary must not enter a host namespace")
+
+    # The egress overlay is deliberately NOT a resource of
+    # kubernetes/flux-system: that root also carries gotk-sync.yaml, whose
+    # Kustomization is unsuspended, so applying it would start live
+    # reconciliation. Rendering the overlay as its own target is what keeps it
+    # schema- and policy-checked without making the dangerous root the only
+    # path to it.
+    renderer = root / "scripts/render-manifests.sh"
+    if not renderer.is_file():
+        errors.append("canonical renderer is missing")
+    else:
+        renderer_text = read(renderer)
+        if not re.search(r"(?m)^\s*kubernetes/flux-system/egress\s*$", renderer_text):
+            errors.append("flux-system egress overlay is not a rendered target")
+        if not re.search(r"(?m)^\s*kubernetes/flux-system/canary\s*$", renderer_text):
+            errors.append("flux-system API-path canary is not a rendered target")
+    root_index = root / "kubernetes/flux-system/kustomization.yaml"
+    if root_index.is_file() and active_kustomization_resource(read(root_index), "egress"):
+        errors.append(
+            "flux-system egress must not be reachable from the unsuspended bootstrap root"
+        )
+    if root_index.is_file() and active_kustomization_resource(read(root_index), "canary"):
+        errors.append(
+            "flux-system API-path canary must not be reachable from the bootstrap root"
+        )
+    return errors
+
+
+# The install's three cross-file properties, joined here because no single file
+# can hold them: the ORDER the controllers and their allows are applied in, the
+# BINDING of the tools and the target the apply runs against, and the
+# completeness of the documented REMOVAL. Each has an executable regression in
+# tests/security/test_flux_install_contract.py; these are the static coupling —
+# a constant edited on its own, a fail-closed refusal deleted, or a
+# cluster-scoped object dropped from the runbook's removal, all fail here.
+# Each entry is a fail-closed refusal that a commit must not be able to delete
+# quietly. A grep is NOT what pins them -- it only notices the deletion. What
+# proves each still WORKS is a behavioural test that feeds the installer the
+# input the refusal exists for, and
+# tests/security/test_flux_install_contract.py::RefusalCoverageTests requires
+# every entry here to name one. That coupling is deliberate: a refusal pinned
+# only by its own message string survived being replaced with a condition that
+# never matches, message intact -- which is how the phase-1 ordering guard was
+# found neutered with the whole suite green.
+FLUX_INSTALLER_REFUSALS = (
+    "--kubeconfig is required",
+    "--context is required",
+    "--server is required",
+    "--cni-provider is required",
+    "--api-endpoint is required",
+    "--expect-render-sha256 is required",
+    "--expect-egress-sha256 is required",
+    "--expect-canary-sha256 is required",
+    "--expect-commit is required",
+    "no reviewed API-destination contract",
+    "could not prove the selected Calico CNI identity",
+    "the installer and its guards are not the reviewed ones",
+    "the egress bytes this would apply are not the reviewed ones",
+    "the API endpoint-set substitution changed bytes outside",
+    "the in-Pod Kubernetes Service/API canary did not succeed",
+    "does not match versions.env KUSTOMIZE_LINUX_AMD64_SHA256",
+    "matches no versions.env kubectl digest pin",
+    "does not exactly match the complete live kubernetes.default EndpointSlice set",
+    "the install inputs carry uncommitted modifications",
+    "is not owned by this install",
+    "ROLLBACK INCOMPLETE",
+    "the ordering that prevents the egress deadlock is broken",
+    "--apply installs only onto a fresh cluster",
+    "API/RBAC/timeout failure keeps public egress shut",
+    "the controllers are reconciling, not idle",
+    "the live startup egress policies are not the reviewed shape",
+    "this absent-only transaction never adopts",
+    "poststate differs from the exact reviewed object",
+)
+FLUX_INSTALLER_PIN_KEYS = (
+    "KUSTOMIZE_VERSION",
+    "KUSTOMIZE_LINUX_AMD64_SHA256",
+    "KUBERNETES_VERSION",
+    "KUBECTL_LINUX_AMD64_SHA256",
+    "KUBECTL_ARM64_SHA256",
+    "FLUX_API_CANARY_IMAGE",
+)
+
+
+def cluster_scoped_flux_objects(root):
+    """Return the generated export's cluster-scoped object names.
+
+    These are the objects a `kubectl delete namespace flux-system` cannot
+    remove, so they are exactly the set the runbook's removal procedure and the
+    installer's rollback both have to cover.
+    """
+
+    export = root / "kubernetes/flux-system/controllers/gotk-components.yaml"
+    if not export.is_file():
+        return []
+    controllers = export.parent
+    deleted = set()
+    index = controllers / "kustomization.yaml"
+    if index.is_file():
+        for relative in re.findall(r"(?m)^\s*path:\s*(\S+)\s*$", read(index)):
+            candidate = Path(relative)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                continue
+            patch = controllers / candidate
+            if not patch.is_file():
+                continue
+            patch_text = read(patch)
+            if not re.search(r"(?m)^\$patch:\s*delete\s*$", patch_text):
+                continue
+            kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", patch_text)
+            name = re.search(r"(?m)^  name:\s*(\S+)\s*$", patch_text)
+            if kind and name:
+                deleted.add((kind.group(1), name.group(1)))
+
+    names = []
+    for document in re.split(r"(?m)^---\s*$", read(export)):
+        kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
+        name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+        if not kind or not name:
+            continue
+        identity = (kind.group(1), name.group(1))
+        if kind.group(1) in {
+            "CustomResourceDefinition",
+            "ClusterRole",
+            "ClusterRoleBinding",
+        } and identity not in deleted:
+            names.append(name.group(1))
+    return names
+
+
+def flux_install_ceremony_errors(root):
+    """Require the ordered, bound, reversible install ceremony to stay intact."""
+
+    errors = []
+    installer = root / "scripts/install-flux-controllers.sh"
+    runbook = root / "docs/runbooks/flux-install.md"
+    if not installer.is_file():
+        return ["the sanctioned Flux controller installer is missing"]
+    text = read(installer)
+
+    # The phase constants must partition the reviewed inventory. Editing one in
+    # isolation is the mistake that would silently drop an object out of a phase
+    # -- or move a Deployment back into the phase that runs before its allows.
+    constants = {}
+    for key in (
+        "EXPECTED_OBJECTS",
+        "EXPECTED_PREREQUISITES",
+        "EXPECTED_WORKLOADS",
+        "EXPECTED_EGRESS_POLICIES",
+        "EXPECTED_STARTUP_POLICIES",
+    ):
+        found = re.search(r"(?m)^{}=(\d+)\s*$".format(key), text)
+        if not found:
+            errors.append("Flux installer no longer declares " + key)
+        else:
+            constants[key] = int(found.group(1))
+    if len(constants) == 5:
+        if (
+            constants["EXPECTED_PREREQUISITES"] + constants["EXPECTED_WORKLOADS"]
+            != constants["EXPECTED_OBJECTS"]
+        ):
+            errors.append(
+                "Flux install phases do not partition the reviewed controller inventory"
+            )
+        if constants["EXPECTED_STARTUP_POLICIES"] + 1 != constants["EXPECTED_EGRESS_POLICIES"]:
+            errors.append(
+                "Flux egress phases do not partition the reviewed egress overlay"
+            )
+
+    for refusal in FLUX_INSTALLER_REFUSALS:
+        if refusal not in text:
+            errors.append("Flux installer no longer refuses: " + refusal)
+    for key in FLUX_INSTALLER_PIN_KEYS:
+        if key not in text:
+            errors.append("Flux installer no longer binds the versions.env pin " + key)
+        versions = root / "versions.env"
+        if versions.is_file() and not re.search(
+            r"(?m)^{}=\S+$".format(re.escape(key)), read(versions)
+        ):
+            errors.append("versions.env no longer carries the pin " + key)
+
+    if not runbook.is_file():
+        errors.append("the Flux install runbook is missing")
+        return errors
+    # Whitespace-normalized so a reflowed paragraph is not a false failure.
+    prose = " ".join(read(runbook).split())
+    for fragment in (
+        "--open-public-egress",
+        "--expect-render-sha256",
+        "--expect-egress-sha256",
+        "--expect-canary-sha256",
+        "--cni-provider",
+        "--api-endpoint",
+        "`kubectl delete namespace flux-system` is **not sufficient**",
+    ):
+        if fragment not in prose:
+            errors.append("the Flux install runbook no longer states: " + fragment)
+    for name in cluster_scoped_flux_objects(root):
+        if name not in prose:
+            errors.append(
+                "the Flux install runbook's removal omits the cluster-scoped object " + name
+            )
+    return errors
+
+
 # The three ServiceAccounts the reviewed component set actually creates. The
 # generated export binds seven, four of which name accounts that do not exist;
 # a dangling subject grants nothing today and everything the day its controller
@@ -1373,6 +1698,23 @@ def check_kubernetes(root):
         rel = relative(path, root)
         for label, pattern in forbidden.items():
             if pattern.search(text):
+                # This one executable pre-controller proof must authenticate
+                # as the exact source-controller identity whose API path it
+                # tests. The exception is identity- and purpose-bound here;
+                # flux_egress_contract_errors below independently pins its
+                # separate root, image, labels, ServiceAccount, command, and
+                # restricted security context. Every other authored token mount
+                # remains forbidden.
+                if label == "ServiceAccount token mount" and (
+                    rel == "kubernetes/flux-system/canary/pod.yaml"
+                    and text.count("automountServiceAccountToken: true") == 1
+                    and "kind: Pod" in text
+                    and "name: " + FLUX_API_CANARY_NAME in text
+                    and "namespace: flux-system" in text
+                    and "serviceAccountName: source-controller" in text
+                    and "- --raw=/api" in text
+                ):
+                    continue
                 errors.append("{} in {}".format(label, rel))
         # The generated Flux export is excluded from this file set, so this is a
         # ban on every hand-written manifest: nothing this repository authors
@@ -1388,7 +1730,7 @@ def check_kubernetes(root):
     if flux.exists():
         required_fragments = {
             "flux-system/controllers/patches/source-controller.yaml": [
-                "--no-cross-namespace-refs=true", "runAsNonRoot", "RuntimeDefault",
+                "runAsNonRoot", "RuntimeDefault",
                 "requests/ephemeral-storage", "limits/ephemeral-storage", "sizeLimit",
             ],
             "flux-system/controllers/patches/kustomize-controller.yaml": [
@@ -1398,6 +1740,9 @@ def check_kubernetes(root):
             "flux-system/controllers/patches/helm-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--default-service-account=default",
                 "runAsNonRoot", "RuntimeDefault",
+            ],
+            "flux-system/controllers/patches/allow-egress.yaml": [
+                "- op: remove", "path: /spec/egress",
             ],
             "flux-system/access.yaml": [
                 "namespace: cloudflare-public", "namespace: naranjo-online",
@@ -1449,6 +1794,8 @@ def check_kubernetes(root):
             for policy_name in policy_names:
                 if policy_name not in text:
                     errors.append("required scoped NetworkPolicy missing: " + policy_name)
+        errors.extend(flux_egress_contract_errors(root))
+        errors.extend(flux_install_ceremony_errors(root))
         errors.extend(flux_rbac_contract_errors(root))
     errors.extend(signature_policy_source_errors(root))
     return errors
@@ -1915,6 +2262,19 @@ def check_release(root):
     for name in required_generated:
         if not (root / name).is_file():
             errors.append("required reviewed/generated file missing: " + name)
+
+    # The committed API-server egress allow points at RFC 5737 documentation
+    # space until an operator substitutes the real endpoint from private
+    # custody at apply time. A release claim while that sentinel is still the
+    # committed desired state would claim a reachable control plane that the
+    # repository has never described.
+    flux_egress = root / "kubernetes/flux-system/egress/network-policies.yaml"
+    if not flux_egress.is_file():
+        errors.append("required reviewed file missing: " + flux_egress.name)
+    elif FLUX_CONTROL_PLANE_SENTINEL in read(flux_egress):
+        errors.append(
+            "flux-system API-server egress still carries the unresolved control-plane sentinel"
+        )
 
     sops_config = read(root / ".sops.yaml")
     if "REPLACE_WITH_PUBLIC_RECIPIENT" in sops_config:

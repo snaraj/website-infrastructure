@@ -1802,11 +1802,22 @@ class FluxRbacEnumerationStrictnessTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         self.assertTrue(model.leader_election_controllers(root))
-        patch = root / model.CONTROLLER_DEPLOYMENT_PATCH_FILES[0]
+        argument_add = (
+            "- op: add\n  path: /spec/template/spec/containers/0/args/-\n"
+            "  value: --no-cross-namespace-refs=true\n"
+        )
+        patch = next(
+            (
+                root / relative
+                for relative in model.CONTROLLER_DEPLOYMENT_PATCH_FILES
+                if argument_add in (root / relative).read_text(encoding="utf-8")
+            ),
+            None,
+        )
+        self.assertIsNotNone(patch, "no reviewed argument-add patch remains to mutate")
         patch.write_text(
             patch.read_text(encoding="utf-8").replace(
-                "- op: add\n  path: /spec/template/spec/containers/0/args/-\n"
-                "  value: --no-cross-namespace-refs=true\n",
+                argument_add,
                 "- op: replace\n  path: /spec/template/spec/containers/0/args\n"
                 "  value: [--log-level=info]\n",
                 1,

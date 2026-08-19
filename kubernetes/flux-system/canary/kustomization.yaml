@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Deliberately not reachable from kubernetes/flux-system. The guarded installer
+# creates this Pod only after the startup NetworkPolicies are in force, proves
+# its authenticated in-cluster API request, and deletes it before creating any
+# controller Deployment.
+resources:
+  - pod.yaml

@@ -428,6 +428,106 @@ valid_public_tunnel_policy if {
   target == namespace
 }
 
+# The Flux controller install ships three NetworkPolicies of its own. Two are
+# ingress-only as generated; `allow-egress` is generated with a blanket
+# `egress: [{}]` that this repository removes by patch, so accepting any of the
+# three with an egress rule would accept exactly the regression the patch
+# exists to prevent.
+flux_generated_network_policies := {"allow-egress", "allow-scraping", "allow-webhooks"}
+
+# Every deliberate flux-system egress allow selects the controller Pods by the
+# label the generated export puts on all three, grants Egress only, and carries
+# exactly one rule. One rule per policy is what keeps each allow separately
+# reviewable and separately revocable.
+flux_controller_egress_shape if {
+  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
+    "app.kubernetes.io/part-of": "flux",
+  }
+  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
+  count(object.get(input.spec, "ingress", [])) == 0
+  count(object.get(input.spec, "egress", [])) == 1
+}
+
+valid_flux_artifact_rule(rule) if {
+  object.get(rule, "to", []) == [{
+    "podSelector": {"matchLabels": {"app.kubernetes.io/part-of": "flux"}},
+  }]
+  {port | some port in object.get(rule, "ports", [])} == {
+    {"port": 80, "protocol": "TCP"},
+    {"port": 9090, "protocol": "TCP"},
+  }
+}
+
+valid_flux_public_https_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  peer := peers[0]
+  object.keys(peer) == {"ipBlock"}
+  ip_block := object.get(peer, "ipBlock", {})
+  object.get(ip_block, "cidr", "") == "0.0.0.0/0"
+  {cidr | some cidr in object.get(ip_block, "except", [])} == {
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+  }
+  object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
+}
+
+# The API-server destination is host inventory and never enters this index, so
+# the committed rule is pinned to the RFC 5737 documentation address that can
+# never match a real endpoint. Pinning it here also means a real control-plane
+# address committed by mistake is a policy failure, not just a privacy failure.
+valid_flux_apiserver_rule(rule) if {
+  peers := object.get(rule, "to", [])
+  count(peers) == 1
+  peer := peers[0]
+  object.keys(peer) == {"ipBlock"}
+  object.get(peer, "ipBlock", {}) == {"cidr": "192.0.2.0/32"}
+  object.get(rule, "ports", []) == [{"port": 6443, "protocol": "TCP"}]
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-dns"
+  valid_public_dns_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-artifacts"
+  valid_flux_artifact_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-public-https"
+  valid_flux_public_https_rule(input.spec.egress[0])
+}
+
+valid_flux_egress_policy if {
+  flux_controller_egress_shape
+  input.metadata.name == "flux-controllers-kube-apiserver"
+  object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/readiness", "") == "sentinel-until-private-calico-api-endpoint-set"
+  valid_flux_apiserver_rule(input.spec.egress[0])
+}
+
+flux_network_policy_allowlisted if {
+  input.metadata.name in flux_generated_network_policies
+}
+
+flux_network_policy_allowlisted if {
+  input.metadata.name == "default-deny"
+}
+
+flux_network_policy_allowlisted if {
+  valid_flux_egress_policy
+}
+
 valid_zero_capacity_quota if {
   input.metadata.name == "capacity-not-ready"
   object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/readiness", "") == "blocked-until-pi-capacity-evidence"
@@ -601,7 +701,23 @@ valid_source_controller_storage if {
   resources := object.get(manager, "resources", {})
   object.get(object.get(resources, "requests", {}), "ephemeral-storage", "") == "128Mi"
   object.get(object.get(resources, "limits", {}), "ephemeral-storage", "") == "1Gi"
-  "--no-cross-namespace-refs=true" in object.get(manager, "args", [])
+  # source-controller does not accept the reconciler-only flags. Requiring one
+  # here used to be the rule; the binary exits 2 on an unknown flag, so the
+  # requirement guaranteed a crashloop. Refusing them is the correct direction:
+  # the cross-namespace boundary is enforced on the controllers that own the
+  # referring kinds, and this keeps a well-meant copy-paste from landing here.
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--no-cross-namespace-refs")
+  ]) == 0
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--default-service-account")
+  ]) == 0
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--no-remote-bases")
+  ]) == 0
 
   volumes := object.get(input.spec.template.spec, "volumes", [])
   count(volumes) == 2
@@ -637,7 +753,7 @@ deny contains msg if {
   input.metadata.namespace == "flux-system"
   input.metadata.name == "source-controller"
   not valid_source_controller_storage
-  msg := "source-controller must bound /data and /tmp plus container ephemeral-storage and cross-namespace references"
+  msg := "source-controller must bound /data and /tmp plus container ephemeral-storage, and must carry no reconciler-only flag it cannot parse"
 }
 
 deny contains msg if {
@@ -1527,6 +1643,32 @@ deny contains msg if {
 
 deny contains msg if {
   input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name == "default-deny"
+  not valid_default_deny_policy
+  msg := "NetworkPolicy flux-system/default-deny must isolate every Pod for ingress and egress"
+}
+
+# The regression this rule exists for: regenerating gotk-components.yaml
+# without the allow-egress patch restores `egress: [{}]`, which would silently
+# reopen every flux-system Pod to every destination.
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name in flux_generated_network_policies
+  count(object.get(input.spec, "egress", [])) > 0
+  msg := sprintf("NetworkPolicy flux-system/%s must carry no egress rule; the generated blanket allow is removed by patch", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
+  input.metadata.namespace == "flux-system"
+  not flux_network_policy_allowlisted
+  msg := sprintf("NetworkPolicy flux-system/%s is outside the exact Flux controller DNS, artifact, public-HTTPS, and API-server egress allowlist", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "NetworkPolicy"
   input.metadata.namespace in site_namespaces
   count(object.get(input.spec, "ingress", [])) > 0
   not valid_site_ingress_policy
@@ -1664,10 +1806,22 @@ deny contains msg if {
 # here because the exact per-namespace tag shape is pinned by the canonical
 # repository rule above, and because the digest-only form must stay valid for
 # a rollback pin that names no release.
+approved_workload_image(image) if {
+  regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|reg[.]kyverno[.]io/kyverno/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", image)
+}
+
+# One exact registry.k8s.io identity is admitted for the ephemeral API canary.
+# Keeping it outside the coarse registry alternation means another Kubernetes
+# image, another kubectl release, or even a different digest of this tag is not
+# silently approved.
+approved_workload_image(image) if {
+  image == "registry.k8s.io/kubectl:v1.36.3@sha256:6e4fce3c83651edb91b74bc67701c5cd263dd8aa3cd4254b1798d6425a5ab789"
+}
+
 deny contains msg if {
   is_workload
   some container in containers
-  not regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|reg[.]kyverno[.]io/kyverno/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", container.image)
+  not approved_workload_image(container.image)
   msg := sprintf("container %s image must use an approved registry and full digest", [container.name])
 }
 

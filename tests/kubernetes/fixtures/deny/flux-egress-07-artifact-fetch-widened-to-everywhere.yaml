@@ -1,0 +1,29 @@
+# One reopening of the flux-system egress closure, alone in its own file.
+#
+# One document per file, and one `expect-deny` per file, is deliberate:
+# scripts/test-policy-fixtures.sh asserts that THIS fixture is rejected for THIS
+# reason. A multi-document deny fixture asserted at file level cannot do that --
+# the other documents keep failing the file while one deny arm is quietly
+# neutered, and the suite stays green.
+#
+# The intra-namespace artifact fetch widened to every destination: `to: []` means
+# everywhere, and the two ports then reach the whole cluster and the LAN.
+# expect-deny: NetworkPolicy flux-system/flux-controllers-artifacts is outside the exact Flux controller DNS, artifact, public-HTTPS, and API-server egress allowlist
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-artifacts
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to: []
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 9090
+          protocol: TCP

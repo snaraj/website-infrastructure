@@ -1,0 +1,30 @@
+# The generated export labels flux-system with Pod Security `warn: restricted`
+# only — a warning, not a control — while every application namespace in
+# kubernetes/platform/prerequisites/namespaces.yaml enforces `restricted` at a
+# pinned version. That asymmetry left the one namespace holding cluster-scoped
+# controllers as the least protected namespace in the cluster.
+#
+# The three controllers already satisfy `restricted` as generated and patched:
+# non-root, RuntimeDefault seccomp, all capabilities dropped, no privilege
+# escalation, read-only root filesystem, and emptyDir volumes only. Enforcing
+# it therefore changes no workload; it removes the gap between what the export
+# warns about and what the cluster refuses to admit.
+#
+# `warn-version: latest` is replaced with the same pinned version the other
+# namespaces use, so a future Kubernetes minor cannot silently change what this
+# namespace warns about.
+- op: add
+  path: /metadata/labels/pod-security.kubernetes.io~1audit
+  value: restricted
+- op: add
+  path: /metadata/labels/pod-security.kubernetes.io~1audit-version
+  value: v1.36
+- op: add
+  path: /metadata/labels/pod-security.kubernetes.io~1enforce
+  value: restricted
+- op: add
+  path: /metadata/labels/pod-security.kubernetes.io~1enforce-version
+  value: v1.36
+- op: replace
+  path: /metadata/labels/pod-security.kubernetes.io~1warn-version
+  value: v1.36

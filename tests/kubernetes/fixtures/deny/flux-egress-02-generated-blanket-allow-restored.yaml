@@ -1,0 +1,27 @@
+# One reopening of the flux-system egress closure, alone in its own file.
+#
+# One document per file, and one `expect-deny` per file, is deliberate:
+# scripts/test-policy-fixtures.sh asserts that THIS fixture is rejected for THIS
+# reason. A multi-document deny fixture asserted at file level cannot do that --
+# the other documents keep failing the file while one deny arm is quietly
+# neutered, and the suite stays green.
+#
+# The exact regression the allow-egress patch exists to prevent: regenerating
+# gotk-components.yaml without the patch restores `egress: [{}]` on the generated
+# policy and reopens every flux-system Pod to every destination (AUDIT NP5).
+# expect-deny: NetworkPolicy flux-system/allow-egress must carry no egress rule; the generated blanket allow is removed by patch
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: flux-system
+spec:
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - {}
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

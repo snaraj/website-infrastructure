@@ -1,0 +1,29 @@
+# One reopening of the flux-system egress closure, alone in its own file.
+#
+# One document per file, and one `expect-deny` per file, is deliberate:
+# scripts/test-policy-fixtures.sh asserts that THIS fixture is rejected for THIS
+# reason. A multi-document deny fixture asserted at file level cannot do that --
+# the other documents keep failing the file while one deny arm is quietly
+# neutered, and the suite stays green.
+#
+# An invented allow that no reviewed flow needs. The allowlist is exact, so a new
+# policy name is refused even when its own shape looks conservative.
+# expect-deny: NetworkPolicy flux-system/flux-controllers-node-ssh is outside the exact Flux controller DNS, artifact, public-HTTPS, and API-server egress allowlist
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flux-controllers-node-ssh
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.0/24
+      ports:
+        - port: 22
+          protocol: TCP

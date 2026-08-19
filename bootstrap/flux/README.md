@@ -3,24 +3,61 @@
 Flux reads public `main` anonymously. Never use `flux bootstrap github` or
 `flux bootstrap git`, and never create a Git authentication Secret.
 
-Nothing in this directory authorizes a live installation. Controller apply,
-the `sops-age` Secret, and sync are separate mutations. They remain blocked
-until independent physical/LAN recovery and two simultaneously working admin
-sessions have been proven immediately before the first mutation. Losing either
-session afterward is recoverable; claiming the proof before it happened is not.
+The `sops-age` Secret and the sync objects are separate mutations, and they
+remain blocked until independent physical/LAN recovery and two simultaneously
+working admin sessions have been proven immediately before the first mutation.
+Losing either session afterward is recoverable; claiming the proof before it
+happened is not.
 
-There is an earlier code-enforced blocker: no trusted stage-zero reviewed-blob
-launcher exists yet. `bootstrap.sh --apply-controllers`, `--apply-sync`, and
-`--verify`; `verify.sh`; both `install-sops-age-secret.sh` modes; both protected
-SOPS verifiers; and the raw-etcd canary all stop before reading a protected file
-or making a cluster request. Do not invoke them or supply secret-bearing
-environment variables. Their implementations remain in-tree for review only.
-Reopening them requires a separately installed immutable launcher that starts
-with a clean execution environment, extracts exact reviewed commit blobs into
-private custody with trusted absolute tools, and executes only those snapshots.
-The recovery and two-session gates are additional requirements after that
-control exists. Offline `bootstrap.sh --generate` remains available and does
-not consume protected credentials.
+**The controllers-only install is the one exception, and it is not performed
+from this directory.** Installing the three controllers creates no Secret,
+needs no age identity, and applies no Flux custom resource. Its live modes are
+not credential-free: they use the protected flattened kubeconfig and its client
+credential through a pinned kubectl. Kustomize and kubectl are copied into a
+private work directory and their exact executable bytes are SHA-256-bound
+before either copy is invoked. The install was separated into its own reviewed entry point,
+`scripts/install-flux-controllers.sh`, whose guardrails are executable rather
+than documentary: a constant install target that cannot be pointed at the
+unsuspended bootstrap root, refusal of any render containing a Flux custom
+resource or a Secret or a NetworkPolicy egress rule, an exact object count, and
+a server-side dry run whose reported inventory must stay inside `flux-system`.
+The ordered ceremony around it is [`docs/runbooks/flux-install.md`](../../docs/runbooks/flux-install.md).
+This section previously said no live installation was authorized at all; that
+statement stopped being true when the controllers-only install was authorized
+separately, and a control this repository asserts but does not hold is worse
+than no assertion.
+
+**The cluster already has Flux, and it is not this render.** A stock upstream
+v2.9.3 install was applied on 2026-08-12 outside this ceremony: it still binds
+`cluster-admin` through `cluster-reconciler-flux-system`, still ships the
+blanket `allow-egress` rule, and labels `flux-system` warn-only. The reviewed
+overlay and installer here are the desired state that install does not match.
+The installer is fresh-install-only and will refuse that cluster by design; the
+runbook's "Live prestate" and "Converging the existing install" sections carry
+the honest prestate and the two owner-gated convergence options. Nothing in
+this directory or that one converges the cluster.
+
+`bootstrap.sh --apply-controllers` remains blocked and is **not** the sanctioned
+path: it is the protected-custody variant, and it is code-blocked by the same
+missing launcher as everything else here. The two are not alternatives — the
+sanctioned installer performs an inert authenticated install with the explicit
+protected kubeconfig/context/server tuple, while this script's controller mode
+exists for the future protected ceremony that also verifies live state against
+reviewed expectations.
+
+The code-enforced blocker for everything else stands: no trusted stage-zero
+reviewed-blob launcher exists yet. `bootstrap.sh --apply-controllers`,
+`--apply-sync`, and `--verify`; `verify.sh`; both `install-sops-age-secret.sh`
+modes; both protected SOPS verifiers; and the raw-etcd canary all stop before
+reading a protected file or making a cluster request. Do not invoke them or
+supply secret-bearing environment variables. Their implementations remain
+in-tree for review only. Reopening them requires a separately installed
+immutable launcher that starts with a clean execution environment, extracts
+exact reviewed commit blobs into private custody with trusted absolute tools,
+and executes only those snapshots. The recovery and two-session gates are
+additional requirements after that control exists. Offline
+`bootstrap.sh --generate` remains available and does not consume protected
+credentials.
 
 ## Trusted operator platform and tools
 

@@ -6,6 +6,42 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-18
+
+### Added
+
+- A reproducible, reviewed Flux controller install surface: a controllers-only
+  Kustomize root whose build is exactly the bytes to apply, an ordered and
+  digest-bound installer, an ephemeral pre-controller Kubernetes Service/API
+  reachability canary, and an install/removal runbook that documents the
+  complete cluster-scoped inventory a namespace deletion cannot remove.
+- A fail-closed `flux-system` egress set: an explicit ingress+egress
+  `default-deny` plus enumerated DNS, intra-namespace artifact, Kubernetes
+  API-server, and separately deferred public-HTTPS allows, each with its own
+  single-document deny fixture whose expected rejection message is asserted.
+
+### Changed
+
+- The Flux install documentation now states the live prestate honestly: a stock
+  upstream v2.9.3 render is already installed on the cluster, so this reviewed
+  desired state is a convergence target rather than a description of the
+  cluster, and the runbook presents remediate-in-place and
+  teardown/reinstall as the two owner-authorized convergence options with
+  their blast radius.
+
+### Fixed
+
+- `source-controller` no longer receives `--no-cross-namespace-refs`; the
+  pinned v1.9.3 binary does not register that flag and exits non-zero on it,
+  so the reviewed desired state was an unstartable Deployment.
+
+### Security
+
+- `flux-system` carries enforced restricted Pod Security in the reviewed
+  overlay instead of the generated export's warn-only label, and the
+  generated blanket `egress: [{}]` allow is removed by a reviewed patch that
+  the repository validator refuses to let drift.
+
 ## [0.1.4] - 2026-08-18
 
 ### Fixed
