@@ -137,6 +137,10 @@ referenced from here, never restated or reworded.
 source).** Load-bearing surfaces the two lists above never named, each assigned
 once so the question stops being re-adjudicated per pull request:
 
+The owner's 2026-08-20 ruling for release fragments, GitHub intake templates,
+and dependency-governed Draft capacity is recorded durably in
+[issue #164 comment 5360347849](https://github.com/snaraj/website-infrastructure/issues/164#issuecomment-5360347849).
+
 - `skills/**` — SHARED AGENT GOVERNANCE (peer/platform ruling, 2026-08-13),
   not the exclusive property of either implementation lane. Either lane may
   author there under one-writer-per-branch, but review comes from a different
@@ -144,6 +148,15 @@ once so the question stops being re-adjudicated per pull request:
   the other lane. A skill never supersedes AGENTS.md and never grants
   credential, live-mutation, or merge authority; any change that expands
   permission requires an owner ruling.
+- `changelog.d/**` — SHARED RELEASE INPUT (owner ruling, 2026-08-20, source
+  above). Every implementation lane adds its own exactly one issue-namespaced
+  fragment under delivery-lane requirement 8. This mandatory shared write does
+  not transfer either lane's implementation paths or permit edits to another
+  fragment.
+- `.github/ISSUE_TEMPLATE/**` and `.github/PULL_REQUEST_TEMPLATE.md` — DELIVERY
+  GOVERNANCE (owner ruling, 2026-08-20, source above). These exact intake files
+  implement the issue-first and pull-request evidence contracts. The ruling is
+  not shorthand for any other path under `.github/**`.
 
 - `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
   docs. `bootstrap.sh` embeds the inventory and desired-state assertions
@@ -410,11 +423,13 @@ authority: the owner alone merges.
   authorship auditable with no owner relay. When a new model joins, its
   label — description "Authored by <model>" — is created in ALL THREE
   repositories before its first PR, per the one-taxonomy rule.
-- **Concurrent PR capacity.** There is no fixed count ceiling. Publish
-  independent and dependent work as Draft PRs when dependency edges, collision
-  paths, one-writer-per-branch ownership, and reviewer capacity are explicit.
-  Open work never broadens authority: the owner alone merges, and unresolved
-  sequencing or collision risk keeps each affected PR Draft.
+- **Concurrent PR capacity.** Per the owner's 2026-08-20 ruling recorded in
+  [issue #164 comment 5360347849](https://github.com/snaraj/website-infrastructure/issues/164#issuecomment-5360347849),
+  there is no fixed count ceiling. Publish independent and dependent work as
+  Draft PRs when dependency edges, collision paths, one-writer-per-branch
+  ownership, and reviewer capacity are explicit. Open work never broadens
+  authority: the owner alone merges, and unresolved sequencing or collision
+  risk keeps each affected PR Draft.
 - **Merge authority.** THE OWNER ALONE MERGES. Never merge, never
   self-approve, never treat a peer approval or a green check as
   authority, and never force-push a shared ref. Every PR opens as a
@@ -531,10 +546,15 @@ Keep dependent work Draft and publish a directed merge order using exact
 parallel PRs target `main` and add distinct fragments; a predecessor merge never
 forces a replacement merely because a shared version or changelog slot moved.
 Re-query the current base and composed merge, rerun the gates, and refresh review
-evidence whose claims changed. Re-cut onto a fresh branch only for a real code or
-semantic dependency, conflict, or required current-main repair; port only the
-residual diff and never rewrite published history. Every PR that eventually
-targets main independently adds one fragment and passes the release gate.
+evidence whose claims changed. The only in-place refresh after a base move is
+owner-operated: in GitHub's **Update branch** menu the owner selects **Update
+with rebase**. That server rewrite creates a new head and invalidates every old
+check and exact-head receipt; agents never invoke it, rebase the published branch,
+or force-push. If that owner action is unavailable, conflicts, or is declined,
+re-cut onto a fresh branch and replacement PR. A fresh branch is otherwise
+required only for a real code or semantic dependency, conflict, or current-main
+repair; port only the residual diff. Every PR that eventually targets main
+independently adds one fragment and passes the release gate.
 
 ## Quality gates — exact commands and patterns
 

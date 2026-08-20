@@ -386,23 +386,26 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
         def capacity_denial(repository_contract, portable_skill):
+            normalized_repository = " ".join(repository_contract.split())
+            normalized_skill = " ".join(portable_skill.split())
             required = (
-                ("open PR's dependency edges", repository_contract),
-                ("available\n   review capacity", repository_contract),
-                ("no fixed count ceiling", repository_contract),
-                ("dependency edges, collision\n  paths", repository_contract),
-                ("one-writer-per-branch ownership", repository_contract),
-                ("reviewer capacity", repository_contract),
-                ("keeps each affected PR Draft", repository_contract),
+                ("open PR's dependency edges", normalized_repository),
+                ("available review capacity", normalized_repository),
+                ("no fixed count ceiling", normalized_repository),
+                ("issue #164 comment 5360347849", normalized_repository),
+                ("dependency edges, collision paths", normalized_repository),
+                ("one-writer-per-branch ownership", normalized_repository),
+                ("reviewer capacity", normalized_repository),
+                ("keeps each affected PR Draft", normalized_repository),
                 (
                     "Open work never broadens authority: the owner alone merges",
-                    repository_contract,
+                    normalized_repository,
                 ),
-                ("there is no numeric PR quota", portable_skill),
-                ("Dependent Draft PRs may be published", portable_skill),
-                ("without a fixed count ceiling", portable_skill),
-                ("one-writer branch ownership", portable_skill),
-                ("owner-only merge gates", portable_skill),
+                ("there is no numeric PR quota", normalized_skill),
+                ("Dependent Draft PRs may be published", normalized_skill),
+                ("without a fixed count ceiling", normalized_skill),
+                ("one-writer branch ownership", normalized_skill),
+                ("owner-only merge gates", normalized_skill),
             )
             for fragment, document in required:
                 if fragment not in document:
@@ -417,22 +420,22 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
                 r"|[0-9]+\s+(?:agent[- ]authored\s+|agent\s+)?"
                 r"(?:open\s+)?PRs?\s+(?:cap|ceiling|quota|limit)"
                 r")",
-                repository_contract + "\n" + portable_skill,
+                normalized_repository + "\n" + normalized_skill,
             ):
                 return "fixed open-PR count ceiling returned"
             return None
 
         self.assertIsNone(capacity_denial(agents, skill))
         mutants = (
-            (agents.replace("There is no fixed count ceiling", "At most 3 agent PRs", 1), skill),
+            (agents.replace("there is no fixed count ceiling", "at most 3 agent PRs", 1), skill),
             (agents + "\nNo more than 3 open PRs.\n", skill),
             (agents + "\nPR quota: 3.\n", skill),
             (agents, skill + "\nDependent work is limited to 3 PRs.\n"),
             (agents.replace("keeps each affected PR Draft", "may leave Draft", 1), skill),
             (
                 agents.replace(
-                    "Open work never broadens authority: the owner alone merges",
-                    "Open work broadens authority: agents may merge",
+                    "Open work never broadens\n  authority: the owner alone merges",
+                    "Open work broadens\n  authority: agents may merge",
                     1,
                 ),
                 skill,
@@ -443,6 +446,100 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         for index, (mutant_agents, mutant_skill) in enumerate(mutants):
             with self.subTest(capacity_mutant=index):
                 self.assertIsNotNone(capacity_denial(mutant_agents, mutant_skill))
+
+    def test_owner_ruling_pins_shared_release_and_delivery_template_surfaces(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        source = (
+            "https://github.com/snaraj/website-infrastructure/issues/164"
+            "#issuecomment-5360347849"
+        )
+
+        def ruling_denial(contract):
+            normalized = " ".join(contract.split())
+            required = (
+                source,
+                "`changelog.d/**` — SHARED RELEASE INPUT",
+                "Every implementation lane adds its own exactly one issue-namespaced",
+                "does not transfer either lane's implementation paths",
+                "`.github/ISSUE_TEMPLATE/**` and `.github/PULL_REQUEST_TEMPLATE.md` — DELIVERY",
+                "not shorthand for any other path under `.github/**`",
+            )
+            for fragment in required:
+                if fragment not in normalized:
+                    return f"owner lane ruling lost: {fragment}"
+            if contract.count(source) < 2:
+                return "owner ruling must source both lane and capacity decisions"
+            return None
+
+        self.assertIsNone(ruling_denial(agents))
+        mutants = (
+            agents.replace(source, "issue #164", 2),
+            agents.replace(
+                "`changelog.d/**` — SHARED RELEASE INPUT",
+                "`changelog.d/**` — DELIVERY ONLY",
+                1,
+            ),
+            agents.replace(
+                "not transfer either lane's implementation paths",
+                "transfers both implementation lanes",
+                1,
+            ),
+            agents.replace(
+                "`.github/ISSUE_TEMPLATE/**` and `.github/PULL_REQUEST_TEMPLATE.md` — DELIVERY",
+                "`.github/**` — DELIVERY",
+                1,
+            ),
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(owner_ruling_mutant=index):
+                self.assertIsNotNone(ruling_denial(mutant))
+
+    def test_base_refresh_is_owner_rebase_only_and_invalidates_exact_head_evidence(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        governance = (SKILL / "references" / "governance.md").read_text(
+            encoding="utf-8"
+        )
+        releases = (SKILL / "references" / "releases.md").read_text(
+            encoding="utf-8"
+        )
+        runbook = (
+            ROOT / "docs" / "runbooks" / "platform-source-releases.md"
+        ).read_text(encoding="utf-8")
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+
+        def refresh_denial(repository_contract, governance_contract, release_contract, runbook_contract, portable_skill):
+            normalized_repository = " ".join(repository_contract.split())
+            normalized_governance = " ".join(governance_contract.split())
+            normalized_release = " ".join(release_contract.split())
+            normalized_runbook = " ".join(runbook_contract.split())
+            normalized_skill = " ".join(portable_skill.split())
+            required = (
+                ("the owner selects **Update with rebase**", normalized_repository),
+                ("invalidates every old check and exact-head receipt", normalized_repository),
+                ("agents do not invoke it", normalized_governance),
+                ("invalidates all old checks and receipts", normalized_release),
+                ("Update branch → Update with rebase", normalized_runbook),
+                ("Agents never invoke this owner action", normalized_runbook),
+                ("The owner may use the repository host's server-side rebase update", normalized_skill),
+            )
+            for fragment, document in required:
+                if fragment not in document:
+                    return f"owner rebase-update contract lost: {fragment}"
+            return None
+
+        self.assertIsNone(
+            refresh_denial(agents, governance, releases, runbook, skill)
+        )
+        mutants = (
+            (agents.replace("owner selects **Update\nwith rebase**", "agents select **Update\nwith rebase**", 1), governance, releases, runbook, skill),
+            (agents.replace("invalidates every old\ncheck and exact-head receipt", "preserves old evidence", 1), governance, releases, runbook, skill),
+            (agents, governance.replace("agents do\nnot invoke it", "agents invoke it", 1), releases, runbook, skill),
+            (agents, governance, releases, runbook.replace("Agents never invoke this owner action", "Agents invoke this action", 1), skill),
+            (agents, governance, releases, runbook, skill.replace("owner may use the repository host's server-side rebase update", "agents may rebase", 1)),
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(rebase_update_mutant=index):
+                self.assertIsNotNone(refresh_denial(*mutant))
 
     def test_agents_ci_map_matches_executable_workflow_trigger_topology(self):
         expected = {

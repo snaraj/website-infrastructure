@@ -29,6 +29,10 @@ release_json="${RUNNER_TEMP}/platform-predecessor-release.json"
 notes="${RUNNER_TEMP}/platform-predecessor-notes.md"
 tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
+have_cached_window=false
+cached_tag_snapshot=''
+cached_intent=''
+cached_status=1
 
 get_json() {
   local url="$1" output="$2"
@@ -77,12 +81,27 @@ for _attempt in {1..30}; do
   # Public tag refresh has no checkout credential. Only the REST reads below
   # receive the step-scoped contents-read token.
   git fetch --quiet --tags origin
-  intent=''
-  if intent="$(python3 -I -B "${contract}" release-window \
-    --repository . --head "${SOURCE_SHA}")"; then
-    :
-  else
-    status=$?
+  # The contract bounds the platform tag inventory. Cache its expensive
+  # adjacent-edge validation only while the complete ref/object snapshot is
+  # byte-identical; any created, retargeted, or replaced tag changes this key.
+  tag_snapshot="$(git for-each-ref \
+    --count=1025 \
+    --format='%(refname)%09%(objectname)%09%(*objectname)' 'refs/tags/v*')"
+  if [ "${have_cached_window}" != true ] || \
+     [ "${tag_snapshot}" != "${cached_tag_snapshot}" ]; then
+    cached_tag_snapshot="${tag_snapshot}"
+    cached_intent=''
+    if cached_intent="$(python3 -I -B "${contract}" release-window \
+      --repository . --head "${SOURCE_SHA}")"; then
+      cached_status=0
+    else
+      cached_status=$?
+    fi
+    have_cached_window=true
+  fi
+  intent="${cached_intent}"
+  status="${cached_status}"
+  if [ "${status}" -ne 0 ]; then
     test "${status}" -eq 3 || exit "${status}"
     sleep 10
     continue

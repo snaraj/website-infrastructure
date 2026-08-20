@@ -28,6 +28,11 @@ integration, so the fragment may appear anywhere in the linear range while the
 final SHA remains the release identity. Parallel PRs use distinct fragments and
 never reserve a patch number. A base move requires recomposed gates and review
 evidence, but does not by itself require a replacement branch or metadata recut.
+Only an owner-operated server-side **Update branch with rebase** may refresh an
+existing published branch in place; it creates a new head and invalidates all
+old checks and receipts. Agents never invoke that rewrite or force-push. If it
+is unavailable, conflicts, or is declined, the author uses a fresh branch and
+replacement PR.
 
 ## Success-only exact-SHA publication
 

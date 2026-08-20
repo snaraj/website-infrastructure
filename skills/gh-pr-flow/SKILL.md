@@ -123,8 +123,11 @@ post-transition verification changes, return to Draft. Never merge.
   gates and carry its own release consequence.
 - A dependent PR stays Draft and publishes exact `Depends on PR #N` edges until
   predecessors land. Recompose against current main and refresh affected review
-  evidence. Create a replacement branch only for a real semantic/code conflict
-  or required repair, never solely because release metadata advanced.
+  evidence. The owner may use the repository host's server-side rebase update;
+  that creates a new head and invalidates old checks/receipts, and agents never
+  invoke it or force-push. Otherwise create a replacement branch only for a real
+  semantic/code conflict or required repair, never solely because release
+  metadata advanced.
 - Dependabot follows the same release, changelog, metadata, CI, coverage,
   review, and freshness contract. Never merge merely because it is automated.
 - Report merge order with collision paths and rebase/version consequences. The

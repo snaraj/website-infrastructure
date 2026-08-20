@@ -3098,6 +3098,7 @@ class PredecessorWaitShellTests(unittest.TestCase):
         release_race: bool = False,
         script_override: str | None = None,
         window_status: int = 0,
+        tag_snapshot_changes: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str]:
         if release_state not in {"missing", "complete", "foreign", "partial"}:
             raise AssertionError("predecessor Release fixture state is not closed")
@@ -3160,6 +3161,7 @@ python3() {
     if [ -f "${MOCK_WINDOW_COUNT}" ]; then count="$(<"${MOCK_WINDOW_COUNT}")"; fi
     count=$((count + 1))
     printf '%s' "${count}" > "${MOCK_WINDOW_COUNT}"
+    printf 'WINDOW\n' >> "${MOCK_CALLS}"
     if [ "${count}" -le "${MOCK_PENDING_ATTEMPTS}" ]; then return 3; fi
     printf '{"base_sha":"%s","base_tag":"%s","source_sha":"%s"}\n' \
       "${BASE_SHA}" "${BASE_TAG}" "${SOURCE_SHA}"
@@ -3189,6 +3191,21 @@ git() {
     test "$2" = --quiet
     test "$3" = --tags
     test "$4" = origin
+    count=0
+    if [ -f "${MOCK_FETCH_COUNT}" ]; then count="$(<"${MOCK_FETCH_COUNT}")"; fi
+    count=$((count + 1))
+    printf '%s' "${count}" > "${MOCK_FETCH_COUNT}"
+    return 0
+  fi
+  if [ "$1" = for-each-ref ]; then
+    test "$2" = --count=1025
+    test "$3" = '--format=%(refname)%09%(objectname)%09%(*objectname)'
+    test "$4" = 'refs/tags/v*'
+    count="$(<"${MOCK_FETCH_COUNT}")"
+    printf 'refs/tags/%s\t%s\t%s\n' "${BASE_TAG}" "$(printf 'e%.0s' {1..40})" "${BASE_SHA}"
+    if [ "${MOCK_TAG_SNAPSHOT_CHANGES}" = true ] && [ "${count}" -gt 1 ]; then
+      printf 'refs/tags/v0.1.10\t%s\t%s\n' "$(printf 'd%.0s' {1..40})" "${SOURCE_SHA}"
+    fi
     return 0
   fi
   if [ "$1" = show ]; then printf '%s\n' "${MOCK_DATE}"; return 0; fi
@@ -3260,7 +3277,9 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
                     "MOCK_DATE": self.DATE,
                     "MOCK_PENDING_ATTEMPTS": str(pending_attempts),
                     "MOCK_WINDOW_COUNT": f"{relative}/window-count",
+                    "MOCK_FETCH_COUNT": f"{relative}/fetch-count",
                     "MOCK_WINDOW_STATUS": str(window_status),
+                    "MOCK_TAG_SNAPSHOT_CHANGES": str(tag_snapshot_changes).lower(),
                     "MOCK_BASE_NOTES": PublicationTransactionShellTests.legacy_notes(
                         self.BASE_TAG, self.BASE_SOURCE
                     ),
@@ -3317,7 +3336,9 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
             return completed, output, calls
 
     def test_exact_predecessor_emits_only_the_bound_attestation(self):
-        completed, output, calls = self.execute(pending_attempts=1)
+        completed, output, calls = self.execute(
+            pending_attempts=1, tag_snapshot_changes=True
+        )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertEqual(output, f"attestation=PASS:owner/platform:{self.SOURCE}\n")
         self.assertNotIn("token", output.lower())
@@ -3332,6 +3353,21 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
             raced_output, f"attestation=PASS:owner/platform:{self.SOURCE}\n"
         )
         self.assertEqual(raced_calls.count("/releases/tags/"), 3)
+
+    def test_unchanged_tag_snapshot_caches_the_validated_release_window(self):
+        completed, output, calls = self.execute(release_state="missing")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(calls.count("WINDOW\n"), 1)
+        self.assertEqual(calls.count("SLEEP 10\n"), 2)
+        self.assertEqual(calls.count("/releases/tags/"), 4)
+
+        changed, changed_output, changed_calls = self.execute(
+            pending_attempts=1, tag_snapshot_changes=True
+        )
+        self.assertEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+        self.assertNotEqual(changed_output, "")
+        self.assertEqual(changed_calls.count("WINDOW\n"), 2)
 
     def test_absent_foreign_and_mutable_predecessors_fail_closed(self):
         for release_state in ("missing", "foreign", "partial"):
@@ -3362,7 +3398,7 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
         completed, output, calls = self.execute(script_override=mutant)
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(output, "")
-        self.assertEqual(calls, "")
+        self.assertEqual(calls, "WINDOW\n")
 
     def test_unsafe_release_window_denies_without_wait_get_or_attestation(self):
         completed, output, calls = self.execute(window_status=1)
@@ -3589,7 +3625,7 @@ class GitTransitionTests(unittest.TestCase):
         invalid_payloads = (
             (b"", "empty", "non-empty"),
             (
-                b"### Security\n\n- " + b"a" * MODULE.MAX_FRAGMENT_BYTES + b"\n",
+                b"### Security\n\n- " + b"a" * 16_385 + b"\n",
                 "oversize",
                 "at most 16 KiB",
             ),
@@ -3670,8 +3706,31 @@ class GitTransitionTests(unittest.TestCase):
                 with (root / generated).open("a", encoding="utf-8") as handle:
                     handle.write("foreign generated edit\n")
                 head = self.commit(root, f"edit {generated}")
-                with self.assertRaises(MODULE.ContractError):
+                with self.assertRaises(MODULE.ContractError) as denied:
                     MODULE.validate_transition(root, base, head, first_parent=True)
+                self.assertEqual(
+                    str(denied.exception),
+                    f"retired generated release files changed: {generated}",
+                )
+
+    def test_fragment_size_bound_is_literal_and_exact(self):
+        self.assertEqual(MODULE.MAX_FRAGMENT_BYTES, 16_384)
+        prefix = b"### Security\n\n- "
+        valid = prefix + b"a" * (16_384 - len(prefix) - 1) + b"\n"
+        oversize = prefix + b"a" * (16_385 - len(prefix) - 1) + b"\n"
+        self.assertEqual(len(valid), 16_384)
+        self.assertEqual(len(oversize), 16_385)
+        self.assertTrue(
+            MODULE.validate_fragment_bytes("changelog.d/164-bound.md", valid).endswith(
+                "\n"
+            )
+        )
+        with self.assertRaises(MODULE.ContractError) as denied:
+            MODULE.validate_fragment_bytes("changelog.d/164-bound.md", oversize)
+        self.assertEqual(
+            str(denied.exception),
+            "fragment must be non-empty and at most 16 KiB",
+        )
 
     def test_existing_fragments_cannot_be_edited_deleted_or_renamed(self):
         for operation in ("edit", "delete", "rename"):
@@ -3833,6 +3892,60 @@ class GitTransitionTests(unittest.TestCase):
                 )
                 self.assertIn("See `CHANGELOG.md`", legacy)
 
+    def test_migration_floor_tag_and_source_are_both_exact(self):
+        first_tag = MODULE.next_version(
+            MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+        ).tag
+        for case in ("wrong-tag", "wrong-source"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                expected_floor = self.initialize(root)
+                self.git(root, "update-ref", "-d", f"refs/tags/{MODULE.TAG_LEDGER_FLOOR_TAG}")
+                if case == "wrong-tag":
+                    self.tag(root, first_tag, expected_floor)
+                else:
+                    wrong_source = self.commit(root, "wrong migration floor source")
+                    self.tag(root, MODULE.TAG_LEDGER_FLOOR_TAG, wrong_source)
+                with mock.patch.object(
+                    MODULE, "TAG_LEDGER_FLOOR_SHA", expected_floor
+                ), self.assertRaises(MODULE.ContractError) as denied:
+                    MODULE._platform_tag_boundaries(root)
+                self.assertEqual(
+                    str(denied.exception),
+                    "tag-derived release ledger floor is not exact",
+                )
+
+    def test_tag_ledger_inventory_has_a_literal_validation_bound(self):
+        self.assertEqual(MODULE.MAX_TAG_LEDGER_ENTRIES, 1024)
+        tags = "\n".join(f"v0.1.{patch}" for patch in range(1025))
+        with mock.patch.object(MODULE, "_git", return_value=tags), self.assertRaises(
+            MODULE.ContractError
+        ) as denied:
+            MODULE._platform_tag_boundaries(Path("unused-by-bounded-inventory"))
+        self.assertEqual(
+            str(denied.exception),
+            "tag-derived release ledger exceeds the 1024-entry validation bound",
+        )
+
+    def test_source_behind_later_exact_tag_uses_the_named_denial(self):
+        first_tag = MODULE.next_version(
+            MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+        ).tag
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            source = self.add_fragment(root, 164, "source", "Release source.")
+            tagged_source = self.commit(root, "content after release source")
+            self.tag(root, first_tag, tagged_source)
+            with mock.patch.object(
+                MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+            ), self.assertRaises(MODULE.ContractError) as denied:
+                MODULE.discover_transition_window(root, source)
+            self.assertEqual(
+                str(denied.exception),
+                "source SHA is behind a later tag but has no exact release tag",
+            )
+
     def test_a_misplaced_tag_cannot_swallow_an_earlier_fragment(self):
         first_tag = MODULE.next_version(
             MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
@@ -3931,6 +4044,24 @@ class GitTransitionTests(unittest.TestCase):
                     MODULE.validate_transition(
                         root, base, head, first_parent=first_parent
                     )
+
+    def test_base_move_denial_names_the_owner_rebase_or_fresh_branch_actions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initial = self.initialize(root)
+            self.git(root, "checkout", "-q", "-b", "topic", initial)
+            head = self.add_fragment(root, 164, "topic", "Topic release input.")
+            self.git(root, "checkout", "-q", "-b", "moved-main", initial)
+            moved_base = self.commit(root, "protected base moved")
+            with self.assertRaises(MODULE.ContractError) as denied:
+                MODULE.validate_transition(
+                    root, moved_base, head, first_parent=False
+                )
+            self.assertEqual(
+                str(denied.exception),
+                "release head does not descend from the exact current base; "
+                "request an owner-operated GitHub rebase update or create a fresh branch",
+            )
 
 
 class WorkflowStructureTests(unittest.TestCase):
@@ -4057,8 +4188,6 @@ class WorkflowStructureTests(unittest.TestCase):
             "release-window",
             "base_sha=\"$(jq -er '.base_sha'",
             "base_tag=\"$(jq -er '.base_tag'",
-            "fragment_path=\"$(jq -er '.fragment_path'",
-            "fragment_sha256=\"$(jq -er '.fragment_sha256'",
             "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
             "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
             "bash scripts/ci/publish-platform-release.sh",
@@ -4076,6 +4205,10 @@ class WorkflowStructureTests(unittest.TestCase):
             "permission-administration",
             "verify-platform-release-settings.sh",
             "verify-platform-release-main-jobs.sh",
+            "fragment_path=\"$(jq -er '.fragment_path'",
+            "fragment_sha256=\"$(jq -er '.fragment_sha256'",
+            "steps.release.outputs.fragment_path",
+            "steps.release.outputs.fragment_sha256",
         ):
             if forbidden in publish_job:
                 raise ValueError(f"App authority crossed into publish job: {forbidden}")
@@ -4162,6 +4295,11 @@ class WorkflowStructureTests(unittest.TestCase):
             '"Authorization: Bearer ${read_token}"',
             "git fetch --quiet --tags origin",
             "for _attempt in {1..30}",
+            'tag_snapshot="$(git for-each-ref',
+            "--count=1025",
+            "--format='%(refname)%09%(objectname)%09%(*objectname)'",
+            '[ "${have_cached_window}" != true ] ||',
+            '[ "${tag_snapshot}" != "${cached_tag_snapshot}" ]',
             'python3 -I -B "${contract}" release-window',
             'test "${status}" -eq 3 || exit "${status}"',
             'python3 -I -B "${contract}" release-notes',

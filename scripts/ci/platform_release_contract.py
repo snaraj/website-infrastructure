@@ -26,6 +26,7 @@ FRAGMENT_PATH_RE = re.compile(
 FRAGMENT_CATEGORIES = frozenset({"Added", "Changed", "Fixed", "Security"})
 GENERATED_RELEASE_PATHS = frozenset({"VERSION", "CHANGELOG.md"})
 MAX_FRAGMENT_BYTES = 16 * 1024
+MAX_TAG_LEDGER_ENTRIES = 1024
 WORKFLOW_NAME = "Pull request"
 WORKFLOW_PATH = ".github/workflows/pull-request.yml"
 GITHUB_API_VERSION = "2026-03-10"
@@ -366,7 +367,11 @@ def _release_surface_intents(
 
 def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]:
     """Return every commit in one contiguous, merge-free base..head range."""
-    _git(repository, "merge-base", "--is-ancestor", base_sha, head_sha)
+    if not _is_ancestor(repository, base_sha, head_sha):
+        raise ContractError(
+            "release head does not descend from the exact current base; "
+            "request an owner-operated GitHub rebase update or create a fresh branch"
+        )
     raw = _git(
         repository,
         "rev-list",
@@ -402,6 +407,10 @@ def validate_transition(
 def _platform_tag_boundaries(repository: Path) -> tuple[TagBoundary, ...]:
     raw = _git(repository, "tag", "--list", "v*")
     names = raw.splitlines() if raw else []
+    if len(names) > MAX_TAG_LEDGER_ENTRIES:
+        raise ContractError(
+            "tag-derived release ledger exceeds the 1024-entry validation bound"
+        )
     boundaries: list[TagBoundary] = []
     seen_versions: set[Version] = set()
     for name in names:
@@ -566,8 +575,6 @@ def render_release_notes(
         raise ContractError("release-notes predecessor is not the derived base")
     payload = _file_bytes(repository, head_sha, window.fragment_path)
     text = validate_fragment_bytes(window.fragment_path, payload)
-    if hashlib.sha256(payload).hexdigest() != window.fragment_sha256:
-        raise ContractError("release fragment changed after window derivation")
     return (
         f"## Platform {tag}\n\n"
         f"Immutable repository source: `{head_sha}`\n\n"
