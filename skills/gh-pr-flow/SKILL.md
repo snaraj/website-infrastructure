@@ -36,11 +36,13 @@ The executable branch/refspec deny rules live in
 
 1. Read every repository/model instruction and current skill. Fetch and inspect
    protected remote state, open PRs, labels, milestones, recent releases, and
-   collision surfaces. Do not touch a dirty ordinary worktree.
+   collision surfaces. Survey dependency edges, one-writer branch ownership,
+   and available review capacity; there is no numeric PR quota. Do not touch a
+   dirty ordinary worktree.
 2. File or claim one issue. State acceptance and constraints; add accurate
    scope labels, author labels, owner assignee, and milestone. Never put secrets
-   or private operational facts in public evidence. For a release-bearing
-   change, use the exact proposed `vX.Y.Z` milestone on both issue and PR.
+   or private operational facts in public evidence. For a tag-derived release,
+   use the repository's delivery arc milestone; no PR pre-allocates a patch.
 3. Create one isolated worktree/branch from the exact protected base. One writer
    owns the branch. No amend, rebase, cherry-pick onto published history, force,
    delete, or cross-branch push.
@@ -56,6 +58,9 @@ The executable branch/refspec deny rules live in
    exact standalone `Closes #N`, baseline, scope/exclusions, evidence, residuals,
    rollback, merge order, and release consequence. Mirror issue labels,
    milestone, owner assignee, and author identity labels.
+   Dependent Draft PRs may be published without a fixed count ceiling when
+   dependency order, collision paths, branch ownership, and review capacity are
+   explicit; quantity never relaxes Draft, review, or owner-only merge gates.
 8. Add `requires-review` only to a PR and only when its exact head, body,
    commits, and evidence are author-complete. Never apply or interpret it on an
    issue, which has no reviewable head. Its absence means an author PR is
@@ -116,10 +121,13 @@ post-transition verification changes, return to Draft. Never merge.
 
 - Every PR eventually targeting protected main must independently pass all
   gates and carry its own release consequence.
-- A dependent PR stays Draft until predecessors land. Then create a fresh
-  branch from current main, port only the residual diff without history
-  rewriting, allocate the new release patch, open a replacement Draft PR, and
-  obtain a new exact-head review.
+- A dependent PR stays Draft and publishes exact `Depends on PR #N` edges until
+  predecessors land. Recompose against current main and refresh affected review
+  evidence. The owner may use the repository host's server-side rebase update;
+  that creates a new head and invalidates old checks/receipts, and agents never
+  invoke it or force-push. Otherwise create a replacement branch only for a real
+  semantic/code conflict or required repair, never solely because release
+  metadata advanced.
 - Dependabot follows the same release, changelog, metadata, CI, coverage,
   review, and freshness contract. Never merge merely because it is automated.
 - Report merge order with collision paths and rebase/version consequences. The

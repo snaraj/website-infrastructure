@@ -7,11 +7,17 @@ set -euo pipefail
 : "${GH_TOKEN:?GH_TOKEN is required}"
 : "${SOURCE_SHA:?SOURCE_SHA is required}"
 : "${TAG:?TAG is required}"
+: "${BASE_SHA:?BASE_SHA is required}"
+: "${BASE_TAG:?BASE_TAG is required}"
 : "${GITHUB_API_URL:?GITHUB_API_URL is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 test -z "${IMMUTABLE_SETTINGS_TOKEN-}"
 test -z "${ACTIONS_READ_TOKEN-}"
+test -z "${CONTENTS_READ_TOKEN-}"
+test -z "${GITHUB_TOKEN-}"
+test -z "${GH_ENTERPRISE_TOKEN-}"
+test -z "${GITHUB_ENTERPRISE_TOKEN-}"
 
 # Keep the credential in a non-exported shell variable. Every external write
 # child receives only the ordinary per-job GITHUB_TOKEN.
@@ -65,7 +71,7 @@ classify_tag() {
     --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
 }
 
-write_notes() {
+write_recovery_notes() {
   local source_sha="$1" tag="$2"
   {
     printf '## Platform %s\n\n' "${tag}"
@@ -73,6 +79,17 @@ write_notes() {
     printf 'This release names platform source only. It does not deploy, promote, mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n'
     printf "See \`CHANGELOG.md\` at this tag for the human-readable change record.\n"
   } > "${notes}"
+}
+
+write_current_notes() {
+  python3 -I -B "${contract}" release-notes \
+    --repository . --head "${SOURCE_SHA}" --tag "${TAG}" \
+    --base-sha "${BASE_SHA}" --base-tag "${BASE_TAG}" > "${notes}"
+}
+
+write_predecessor_notes() {
+  python3 -I -B "${contract}" release-notes \
+    --repository . --head "${BASE_SHA}" --tag "${BASE_TAG}" > "${notes}"
 }
 
 classify_release() {
@@ -90,19 +107,30 @@ classify_release() {
 }
 
 preflight_publication_state() {
+  local predecessor_tagger_date predecessor_message
   local recovery_tagger_date recovery_message recovery_release_state
   local current_tagger_date current_message current_tag_state current_release_state
 
+  predecessor_tagger_date="$(git show -s --format=%cI "${BASE_SHA}")"
+  predecessor_message="Platform release ${BASE_TAG} from ${BASE_SHA}"
   recovery_tagger_date="$(git show -s --format=%cI "${recovery_source_sha}")"
   recovery_message="Platform release ${recovery_tag} from ${recovery_source_sha}"
   current_tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
   current_message="Platform release ${TAG} from ${SOURCE_SHA}"
 
-  # Close all four remote objects before any mutation. The recovery tag must
-  # already be the exact owner-prepared annotated tag. Both Releases and the
-  # current tag may be reused only when exact; every other present record is
-  # foreign, and a current Release without its exact tag is impossible state.
-  write_notes "${recovery_source_sha}" "${recovery_tag}"
+  # Close all six remote objects before any mutation. The predecessor tag and
+  # immutable Release are hard prerequisites for allocating the next patch.
+  # The recovery tag must already be the exact owner-prepared annotated tag.
+  # Both recovery/current Releases and the current tag may be reused only when
+  # exact; every other present record is foreign, and a current Release without
+  # its exact tag is impossible state.
+  write_predecessor_notes
+  classify_tag exact \
+    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
+    "${predecessor_tagger_date}" >/dev/null
+  classify_release exact "${BASE_TAG}" >/dev/null
+
+  write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
     "${recovery_tagger_date}" >/dev/null
@@ -113,7 +141,7 @@ preflight_publication_state() {
     recovery_release_state=absent
   fi
 
-  write_notes "${SOURCE_SHA}" "${TAG}"
+  write_current_notes
   if classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null 2>&1; then
@@ -137,12 +165,17 @@ preflight_publication_state() {
   # Repeat the same closed classification after the complete first pass. A
   # tag or Release that changes while its sibling is inspected cannot cross a
   # later mutation boundary on the strength of a stale observation.
-  write_notes "${recovery_source_sha}" "${recovery_tag}"
+  write_predecessor_notes
+  classify_tag exact \
+    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
+    "${predecessor_tagger_date}" >/dev/null
+  classify_release exact "${BASE_TAG}" >/dev/null
+  write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
     "${recovery_tagger_date}" >/dev/null
   classify_release "${recovery_release_state}" "${recovery_tag}" >/dev/null
-  write_notes "${SOURCE_SHA}" "${TAG}"
+  write_current_notes
   classify_tag "${current_tag_state}" \
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null
@@ -157,7 +190,7 @@ complete_recovery_release() {
   python3 -I -B "${contract}" recovery-release \
     --repository . --source-sha "${recovery_source_sha}" \
     --tag "${recovery_tag}" >/dev/null
-  write_notes "${recovery_source_sha}" "${recovery_tag}"
+  write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
 
   # The owner-prepared annotated tag is a hard prerequisite. This function has
   # no tag-create path: absence or foreign state fails before any remote write.
@@ -173,7 +206,7 @@ complete_recovery_release() {
       "${recovery_source_sha}" "${recovery_tag}" "${message}" \
       "${tagger_date}" >/dev/null
     preflight_publication_state
-    write_notes "${recovery_source_sha}" "${recovery_tag}"
+    write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
     classify_tag exact \
       "${recovery_source_sha}" "${recovery_tag}" "${message}" \
       "${tagger_date}" >/dev/null
@@ -249,7 +282,7 @@ publish_current_release() {
   classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
 
-  write_notes "${SOURCE_SHA}" "${TAG}"
+  write_current_notes
   if classify_release exact "${TAG}" >/dev/null 2>&1; then
     printf 'verified complete existing GitHub Release %s\n' "${TAG}"
   else
@@ -257,7 +290,7 @@ publish_current_release() {
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
     preflight_publication_state
-    write_notes "${SOURCE_SHA}" "${TAG}"
+    write_current_notes
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
     classify_release absent "${TAG}" >/dev/null
@@ -282,14 +315,12 @@ publish_current_release() {
 
 test "${SOURCE_SHA}" != "${recovery_source_sha}"
 test "${TAG}" != "${recovery_tag}"
-# Publish exactly the version the checked-out source declares. The publish job
-# checks out the exact completed main SHA and asserts `git rev-parse HEAD`
-# equals it, so VERSION here is that SHA's own patch — the same identity
-# `platform_release_contract.py release-window` already derived and asserted as
-# `v${version}` before this script runs. A frozen literal here instead of this
-# derivation silently refuses every later patch — the guard exits non-zero with
-# no output — so the first advance past the era it names strands publication.
-test "${TAG}" = "v$(tr -d '[:space:][:cntrl:]' < VERSION)"
+test "${SOURCE_SHA}" != "${BASE_SHA}"
+test "${TAG}" != "${BASE_TAG}"
+# Re-derive notes and the tag binding from the checked-out source and fetched
+# immutable tag ledger before the first REST observation. Every later mutation
+# boundary reaches the same derivation through the complete-state preflight.
+write_current_notes
 preflight_publication_state
 complete_recovery_release
 publish_current_release

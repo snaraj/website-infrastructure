@@ -12,10 +12,10 @@ labels, assignee, milestone, and the linked PR's standalone `Closes #N`. Apply:
 - owner assignee;
 - one milestone representing the delivery/release arc.
 
-For release-bearing work, make the issue and PR milestone exactly match the
-proposed `VERSION` as `vX.Y.Z`; do not park a patch release in a generic future
-major or upkeep milestone. The post-merge audit verifies the immutable Release
-before closing a completed milestone and moves every unresolved issue first.
+For tag-derived release work, use the exact delivery arc milestone because no
+PR pre-allocates a patch number. The post-merge audit records the publisher-
+assigned immutable tag before closing a completed milestone and moves every
+unresolved issue first.
 Audit acceptance evidence before closing or reclassifying stale issues; never
 infer completion from a title, age, or closed milestone alone.
 
@@ -66,8 +66,12 @@ make a PR pass, or call an unmeasured path covered.
 
 Validate branch/refspec with repository tooling. Push only the current
 same-name work branch. Never force, delete, wildcard, tag, push protected main,
-or write another author's branch. If base moves, create a fresh branch and
-replacement PR; do not rewrite the published one.
+or write another author's branch. If base moves, the owner may choose the
+repository host's server-side **Update branch with rebase** control. That owner
+action rewrites the PR head and invalidates all exact-head evidence; agents do
+not invoke it, rebase the published branch, or force-push. If the control is
+unavailable, conflicts, or the owner declines it, create a fresh branch and
+replacement PR.
 
 Rulesets are defense in depth. Audit required checks, approvals, signatures,
 linear history, bypass actors, and merge methods. Require checks to be bound to

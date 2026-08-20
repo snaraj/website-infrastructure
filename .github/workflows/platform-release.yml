@@ -54,6 +54,7 @@ jobs:
       github.event.workflow_run.head_branch == 'main'
     outputs:
       attestation: ${{ steps.immutable-settings.outputs.attestation }}
+      predecessor: ${{ steps.predecessor.outputs.attestation }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment:
@@ -68,8 +69,8 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Bind event, source, and exact patch
-        id: release
+      - name: Bind event and exact source
+        id: source
         env:
           COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -78,16 +79,15 @@ jobs:
             --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
           test "${event_sha}" = "${COMPLETED_SHA}"
           test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
-          intent="$(python3 -I -B scripts/ci/platform_release_contract.py release-window \
-            --repository . --head "${COMPLETED_SHA}")"
-          base_sha="$(jq -er '.base_sha' <<<"${intent}")"
-          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
-          version="$(jq -er '.version' <<<"${intent}")"
-          tag="$(jq -er '.tag' <<<"${intent}")"
-          test "${source_sha}" = "${COMPLETED_SHA}"
-          test "${tag}" = "v${version}"
-          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
-            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+          printf 'source_sha=%s\n' "${event_sha}" >> "${GITHUB_OUTPUT}"
+      - name: Await exact immutable predecessor release
+        id: predecessor
+        env:
+          CONTENTS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/wait-platform-release-predecessor.sh
       - name: Mint current-settings proof token
         id: immutable-settings-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -103,7 +103,7 @@ jobs:
         id: immutable-settings
         env:
           IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}
-          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
           bash scripts/ci/verify-platform-release-settings.sh
@@ -117,7 +117,10 @@ jobs:
       github.event.workflow_run.head_sha) &&
       needs.immutable-settings.outputs.attestation ==
       format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,
-      github.run_attempt, github.event.workflow_run.head_sha)
+      github.run_attempt, github.event.workflow_run.head_sha) &&
+      needs.immutable-settings.outputs.predecessor ==
+      format('PASS:{0}:{1}', github.repository,
+      github.event.workflow_run.head_sha)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -139,19 +142,26 @@ jobs:
             --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
           test "${event_sha}" = "${COMPLETED_SHA}"
           test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          # Ordering completed before the fresh immutable-settings proof. Rebind
+          # once here; any renewed pending or unsafe state fails before writes.
+          git fetch --quiet --tags origin
           intent="$(python3 -I -B scripts/ci/platform_release_contract.py release-window \
             --repository . --head "${COMPLETED_SHA}")"
           base_sha="$(jq -er '.base_sha' <<<"${intent}")"
+          base_tag="$(jq -er '.base_tag' <<<"${intent}")"
           source_sha="$(jq -er '.source_sha' <<<"${intent}")"
           version="$(jq -er '.version' <<<"${intent}")"
           tag="$(jq -er '.tag' <<<"${intent}")"
           test "${source_sha}" = "${COMPLETED_SHA}"
           test "${tag}" = "v${version}"
-          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
-            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+          printf 'base_sha=%s\nbase_tag=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
+            "${base_sha}" "${base_tag}" "${source_sha}" "${version}" \
+            "${tag}" >> "${GITHUB_OUTPUT}"
       - name: Publish or verify exact immutable source release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ steps.release.outputs.base_sha }}
+          BASE_TAG: ${{ steps.release.outputs.base_tag }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
