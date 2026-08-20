@@ -476,16 +476,7 @@ valid_flux_public_https_rule(rule) if {
   object.keys(peer) == {"ipBlock"}
   ip_block := object.get(peer, "ipBlock", {})
   object.get(ip_block, "cidr", "") == "0.0.0.0/0"
-  {cidr | some cidr in object.get(ip_block, "except", [])} == {
-    "10.0.0.0/8",
-    "100.64.0.0/10",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "224.0.0.0/4",
-    "240.0.0.0/4",
-  }
+  {cidr | some cidr in object.get(ip_block, "except", [])} == private_and_reserved_ranges
   object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
 }
 

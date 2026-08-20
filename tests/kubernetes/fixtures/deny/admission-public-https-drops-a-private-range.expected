@@ -1,0 +1,12 @@
+# The exact denial admission-public-https-drops-a-private-range.yaml must
+# produce. One document, one reason: the signature-verification egress rule
+# refusing an exclusion set that is one range short.
+#
+# admission-install-network-bypasses.expected already names this same message,
+# which is precisely why that fixture cannot stand in for this one: its
+# shortened-exclusion document ALSO carries the shared `part-of` selector
+# instead of the admission-controller component, so it stays denied for the
+# selector when the exclusion comparison is removed, its message set never
+# changes, and the removal survives. Here the message IS the exclusion
+# comparison: this document is the reviewed shape in every other respect.
+NetworkPolicy kyverno/kyverno-public-https widens its exact reviewed admission flow

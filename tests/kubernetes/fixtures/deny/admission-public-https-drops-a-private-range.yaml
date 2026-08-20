@@ -1,0 +1,43 @@
+# The admission signature-verification egress, one range short, alone in its
+# own file.
+#
+# `valid_admission_policy`'s `kyverno-public-https` branch is the third rule
+# comparing an `ipBlock.except` set against `private_and_reserved_ranges`, and
+# the second that had no behavioural killer: disabling its comparison left the
+# whole fixture suite green. This is the broadest allow in the admission
+# namespace — every public address on TCP/443, for keyless verification that
+# cannot be done offline — so a shortened exclusion list here hands the
+# controller the LAN, the node, and every neighbouring namespace.
+#
+# One document per file, and a reviewed `.expected` sidecar naming the exact
+# denial set, so the kill is attributable to THIS rule and to THIS reason.
+#
+# 192.168.0.0/16 is dropped, matching the shape the Flux and tunnel-edge
+# fixtures use for the same widening.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kyverno-public-https
+  namespace: kyverno
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: admission-controller
+      app.kubernetes.io/part-of: kyverno
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP
