@@ -6,6 +6,40 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-20
+
+### Added
+
+- A deny-fixture inventory battery: every committed deny fixture declares one
+  of the two reviewed forms, no reviewed denial list is empty or orphaned, and
+  the scan names a reference fixture so it cannot pass by finding nothing.
+- An excluded-range parity battery holding the Kyverno CEL exclusion list and
+  both installer batteries equal to the one Conftest definition, so a set no
+  engine can share still cannot drift between engines unnoticed.
+
+### Changed
+
+- The Kubernetes deny-fixture runner refuses a fixture that declares neither a
+  reviewed `.expected` sidecar nor per-document `# expect-deny:` reasons,
+  instead of downgrading it to a file-level "rejected" pass. The declaration is
+  a precondition checked before the policy engine runs, so an undeclared
+  fixture fails for what it did not declare.
+- The Conftest Flux public-HTTPS rule compares against the named
+  `private_and_reserved_ranges` set instead of retyping its eight literals, so
+  the policy states each private, loopback, link-local, CGNAT, multicast, and
+  reserved range exactly once.
+
+### Security
+
+- Retroactive disclosure for 0.1.6: that release also flipped both site
+  signature-verification policies — `require-signed-naranjo-online` and
+  `require-signed-lidersea-com` — from `validationFailureAction: Audit` to
+  `Enforce`, which its changelog entry did not name. The flip enforces nothing
+  today: both admission-install stages remain `authorized=no` in the render
+  lock, so no controller, webhook, or policy is installed. What changed is the
+  committed intent, from recording an unsigned or wrongly signed workload to
+  refusing it, and the changelog is where a reader learns that.
+
 ## [0.1.7] - 2026-08-19
 
 ### Changed
