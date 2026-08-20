@@ -2157,7 +2157,12 @@ case "$args" in
       echo 'timed out waiting for canary' >&2
       exit 1
     fi
-    if [[ "$args" == *"--for=condition=Established crd/clusterpolicies.kyverno.io"* ]]; then
+    # The CRD phase is what teaches discovery the Kyverno kinds, and this marker
+    # is the stub's discovery table. `crd-discovery-stale` lets the wait SUCCEED
+    # without refreshing it: the counterfactual #101/C3 needs, where every phase
+    # runs in the reviewed order and only the refresh is missing.
+    if [[ "$args" == *"--for=condition=Established crd/clusterpolicies.kyverno.io"* &&
+          "$scenario" != crd-discovery-stale ]]; then
       : >"${KYVERNO_STUB_CRD_READY}"
     fi
     exit 0 ;;
@@ -2786,6 +2791,210 @@ class InstallerGuardTests(unittest.TestCase):
         )
         self.assertLess(crd_wait, policy_validation)
         self.assertLess(policy_validation, policies)
+        journal.unlink()
+
+    # --- #101/C3: a genuinely fresh cluster has no Kyverno discovery ---------
+    #
+    # The finding had two halves. The installer validated ClusterPolicy
+    # documents through discovery before installing the CRD that teaches
+    # discovery about them, so the measured zero-CRD starting state could not
+    # pass the gate meant to authorize it; and the harness accepted every
+    # `--dry-run=client` unconditionally, so no test could reproduce that. Both
+    # halves are fixed. The three tests below are the named negative artifacts
+    # that keep them fixed: the harness gate proved to exist, the fresh-cluster
+    # failure proved to fire, and the built-in/policy split proved by the
+    # refusal it does not provoke. The whole-order contract stays in
+    # `test_an_apply_runs_the_phases_in_the_reviewed_order` above; these isolate
+    # the one property C3 is about.
+
+    def test_the_stub_can_fail_a_client_dry_run_for_an_undiscovered_kind(self):
+        """The harness's own discovery gate, driven in both directions.
+
+        A stub that accepts every client dry-run cannot reproduce a fresh
+        cluster, and every installer test that relies on it would then be green
+        against a kubectl physically unable to fail. This drives the stub
+        directly — no installer involved — so the gate is shown to exist before
+        anything depends on it. The built-in leg keeps it from being a blanket
+        refusal: it must refuse the kind discovery does not know and accept the
+        kinds every cluster already has.
+        """
+
+        marker = self.base / "discovery-gate-marker"
+        policy = self.base / "discovery-gate-policy.yaml"
+        builtin = self.base / "discovery-gate-builtin.yaml"
+        # Derived from the render the installer actually classifies rather than
+        # transcribed beside it: a hand-written document could drift out of the
+        # shape the installer produces and take this proof with it.
+        write_exact(
+            policy,
+            next(
+                document
+                for document in SYNTHETIC_DOCUMENTS
+                if "\nkind: ClusterPolicy\n" in document
+            ),
+        )
+        write_exact(
+            builtin,
+            next(
+                document
+                for document in SYNTHETIC_DOCUMENTS
+                if "\nkind: Namespace\n" in document
+            ),
+        )
+
+        def dry_run(target):
+            return subprocess.run(
+                [
+                    required_tool(BASH, BASH_REQUIRED),
+                    str(self.bin / "kubectl"),
+                    "apply",
+                    "-f",
+                    str(target),
+                    "--dry-run=client",
+                    "--validate=strict",
+                ],
+                capture_output=True,
+                text=True,
+                env=dict(
+                    os.environ,
+                    KYVERNO_STUB_CRD_READY=str(marker),
+                    KYVERNO_STUB_LOG=str(self.base / "discovery-gate.log"),
+                ),
+            )
+
+        marker.unlink(missing_ok=True)
+        refused = dry_run(policy)
+        self.assertNotEqual(
+            refused.returncode,
+            0,
+            "the stub accepted a ClusterPolicy with no CRD installed; every "
+            "fresh-cluster assertion built on it would be vacuous:\n"
+            + refused.stdout,
+        )
+        self.assertIn('no matches for kind "ClusterPolicy"', refused.stderr)
+        accepted_builtin = dry_run(builtin)
+        self.assertEqual(accepted_builtin.returncode, 0, accepted_builtin.stderr)
+        # The CRD phase's one effect, and nothing else, flips the same document.
+        marker.write_bytes(b"")
+        accepted_policy = dry_run(policy)
+        self.assertEqual(accepted_policy.returncode, 0, accepted_policy.stderr)
+        marker.unlink()
+
+    def test_a_policy_dry_run_without_refreshed_crd_discovery_fails_the_apply(self):
+        """The fresh-cluster negative, paired with its own positive control.
+
+        Two runs differing in exactly one fact: whether the CRD phase's
+        ``Established`` wait teaches discovery the Kyverno kinds. The reviewed
+        run validates the policies and applies them; the run where that refresh
+        never happens fails the SAME dry-run and rolls the transaction back.
+        The pair is what makes the ordering load-bearing rather than
+        incidental — the policy validation is shown to DEPEND on the CRD phase,
+        not merely to follow it, which is the property a reordering would break
+        and a sequence assertion alone cannot see.
+        """
+
+        accepted_journal = self.base / "c3-discovery-refreshed.journal"
+        accepted = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(accepted_journal)
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr + accepted.stdout)
+        self.assertIn(
+            "policy validation clean after refreshed CRD discovery", accepted.stdout
+        )
+        accepted_log = self._invocations()
+        accepted_journal.unlink()
+
+        refused_journal = self.base / "c3-discovery-stale.journal"
+        refused = self._run(
+            "--stage",
+            "report-only",
+            "--apply",
+            "--journal",
+            str(refused_journal),
+            KYVERNO_STUB_SCENARIO="crd-discovery-stale",
+        )
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        # The built-in prefix still validated offline against a cluster with
+        # zero Kyverno CRDs. That is the half of the fix the failure below must
+        # not be allowed to hide: the transaction reached its own transaction.
+        self.assertIn(
+            "client-side strict validation clean for built-in install objects",
+            refused.stdout,
+        )
+        self.assertIn('no matches for kind "ClusterPolicy"', refused.stderr)
+        self.assertIn(
+            "phase policies (strict validation after CRD establishment) failed; "
+            "rolling back",
+            refused.stderr,
+        )
+        refused_log = self._invocations()
+        # The reviewed ORDER is not what failed here: the CRD phase and its wait
+        # both ran, in order, before the dry-run that failed. Only their effect
+        # was withheld, so the failure is attributable to discovery alone.
+        crds = first_index(refused_log, "phase-crds.yaml", "the CRD phase")
+        crd_wait = first_index(refused_log, "--for=condition=Established", "the CRD wait")
+        validation = first_index(
+            refused_log,
+            "phase-policies.yaml --dry-run=client",
+            "the policy validation",
+        )
+        self.assertLess(crds, crd_wait)
+        self.assertLess(crd_wait, validation)
+        self.assertEqual(
+            [
+                line
+                for line in refused_log
+                if "phase-policies.yaml" in line and "--dry-run=client" not in line
+            ],
+            [],
+            "a failed policy validation must not be followed by the apply it gates",
+        )
+        self.assertTrue(
+            any(
+                "phase-policies.yaml" in line and "--dry-run=client" not in line
+                for line in accepted_log
+            ),
+            "the control run must reach the policy apply the negative run never does",
+        )
+        self.assertTrue(
+            any("delete ClusterPolicy alpha" in line for line in refused_log),
+            "the refused attempt must still roll its journal back",
+        )
+        refused_journal.unlink()
+
+    def test_the_builtin_validation_precedes_the_crds_and_carries_no_policy(self):
+        """Built-ins validated offline, proved by the refusal that never fires.
+
+        The stub refuses any client dry-run whose target declares
+        ``kind: ClusterPolicy`` while the CRD phase has not completed. The
+        installer's pre-transaction validation runs in exactly that state, so a
+        run that gets PAST it is direct evidence that the built-in prefix
+        excludes the policy documents — the contents of the file the installer
+        assembled are proved by a gate, not by re-reading the file. The count is
+        pinned too: a third client dry-run would be an unreviewed validation
+        step on the same discovery-sensitive path.
+        """
+
+        journal = self.base / "c3-builtin-split.journal"
+        completed = self._run(
+            "--stage", "report-only", "--apply", "--journal", str(journal)
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        log = self._invocations()
+        dry_runs = [line for line in log if "--dry-run=client" in line]
+        self.assertEqual(
+            len(dry_runs),
+            2,
+            "an apply performs exactly two client dry-runs — the built-in "
+            "prefix before the transaction and the policies after the CRD "
+            "wait; recorded: {!r}".format(dry_runs),
+        )
+        self.assertIn("builtins.yaml", dry_runs[0])
+        self.assertIn("phase-policies.yaml", dry_runs[1])
+        self.assertLess(
+            first_index(log, "builtins.yaml", "the built-in validation"),
+            first_index(log, "phase-crds.yaml", "the CRD phase"),
+        )
         journal.unlink()
 
     def test_precontroller_canary_uses_exact_identity_and_precedes_deployment(self):
