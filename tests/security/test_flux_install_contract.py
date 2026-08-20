@@ -909,22 +909,35 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
             "NetworkPolicy flux-system/allow-egress must carry no egress rule; "
             "the generated blanket allow is removed by patch\\n'; exit 1"
         )
-        for stub, expected, second_document in (
+        for stub, expected, second_document, undeclared in (
             # Rejected, but for a reason the fixture did not declare.
             (
                 "printf 'FAIL - fixture - main - some other rule fired\\n'; exit 1",
                 "not for the declared reason",
                 False,
+                False,
             ),
             # Not rejected at all.
-            ("exit 0", "deny fixture unexpectedly passed", False),
+            ("exit 0", "deny fixture unexpectedly passed", False, False),
             # Rejected for its one declared reason -- but the file carries TWO
             # documents, so one reason cannot speak for both. Without this the
             # split could be undone by concatenating files back together while
             # the runner kept printing PASS, which is the original defect.
-            (rejecting, "declare exactly one per document", True),
+            (rejecting, "declare exactly one per document", True, False),
+            # Declares NOTHING: no reviewed sidecar, no inline reason. It is
+            # rejected by the engine, so the retired file-level fallback printed
+            # PASS and exited 0 for exactly this shape -- an undeclared fixture
+            # entering the tree was one line among a hundred rather than a
+            # failure. Zero such fixtures exist today; this is what keeps that
+            # number from decaying (issue #138 F1).
+            (rejecting, "declares no reviewed denial mechanism", False, True),
+            # The same undeclared fixture, with the engine ACCEPTING it. The
+            # message proves the declaration is a precondition rather than a
+            # fallback: it is refused for what it failed to declare, before the
+            # engine's verdict is consulted at all.
+            ("exit 0", "declares no reviewed denial mechanism", False, True),
         ):
-            with self.subTest(stub=expected):
+            with self.subTest(stub=stub, expected=expected):
                 base = Path(
                     tempfile.mkdtemp(
                         prefix="policy-runner.", dir=os.environ.get("TMPDIR")
@@ -955,6 +968,18 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
                         if not line.startswith("# expect-deny:")
                     )
                     deny.write_text(read(deny) + "---\n" + extra, encoding="utf-8")
+                if undeclared:
+                    # Strip the inline declarations; no `.expected` sidecar is
+                    # ever copied into the harness, so the copy now carries
+                    # neither reviewed form.
+                    deny.write_text(
+                        "".join(
+                            line + "\n"
+                            for line in read(deny).splitlines()
+                            if not line.startswith("# expect-deny:")
+                        ),
+                        encoding="utf-8",
+                    )
                 (base / "policies" / "conftest").mkdir(parents=True)
                 environment = dict(os.environ)
                 environment["PATH"] = os.pathsep.join(
