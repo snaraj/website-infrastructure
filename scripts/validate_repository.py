@@ -182,7 +182,14 @@ SITE_RELEASE_CONTRACTS = (
 # rule, and subject in access.yaml. Update it only after reviewing that
 # complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "8fdf2c116ac116bbb4e174867ef4d268a83b8103a90aa125d359912903487a71"
+    "7691522dceb6efabae497f9e2422640b72dcb3540c478d5e041458da2271d9b9"
+)
+
+# The same coupling for the six cluster-scoped per-controller objects, which
+# live in the install root rather than access.yaml (issue #98). Cluster-wide
+# authority does not get a weaker review gate than namespaced authority.
+FLUX_PER_CONTROLLER_CONTRACT_SHA256 = (
+    "f1eb46073d17f69a5f388f692bb8916b6d793e6673e396c0db6eb6bf6abe2aea"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -680,17 +687,27 @@ def active_kustomization_resource(text, name):
     ) is not None
 
 
-def flux_access_contract_errors(text):
-    """Require review of every byte in the accepted Flux authorization file."""
+def flux_access_contract_errors(text, expected=None, label="Flux access authorization"):
+    """Require review of every byte in an accepted Flux authorization file.
+
+    Parameterized over the digest because the authorization is now in TWO files
+    (issue #98): the namespaced grants in access.yaml, and the six cluster-scoped
+    per-controller objects that had to move into the install root so the
+    transaction that removes the authority they replace also creates them.
+    Moving them must not cost them their byte-level review coupling — an
+    unpinned ClusterRole is a worse place to keep cluster-wide authority than a
+    pinned Role.
+    """
 
     # read_text already normalizes platform newlines; the explicit replacement
     # also makes direct unit-test input behave identically on Windows and Linux.
     normalized = text.replace("\r\n", "\n")
     observed = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    if observed != FLUX_ACCESS_CONTRACT_SHA256:
+    if observed != (FLUX_ACCESS_CONTRACT_SHA256 if expected is None else expected):
         return [
-            "Flux access authorization changed; review every ServiceAccount, "
-            "Role, RoleBinding, rule, and subject before updating its digest"
+            "{} changed; review every ServiceAccount, Role, RoleBinding, "
+            "ClusterRole, ClusterRoleBinding, rule, and subject before updating "
+            "its digest".format(label)
         ]
     return []
 
@@ -1335,11 +1352,17 @@ FLUX_INSTALLER_PIN_KEYS = (
 
 
 def cluster_scoped_flux_objects(root):
-    """Return the generated export's cluster-scoped object names.
+    """Return the install root's cluster-scoped object names.
 
     These are the objects a `kubectl delete namespace flux-system` cannot
     remove, so they are exactly the set the runbook's removal procedure and the
     installer's rollback both have to cover.
+
+    That set is NOT just the generated export any more. The six per-controller
+    objects (issue #98) are authored, are created by the same install, and are
+    cluster scoped for the same reason the shared role is — so leaving them out
+    here would let a rollback report success while three ClusterRoles and three
+    ClusterRoleBindings stayed behind on the cluster.
     """
 
     export = root / "kubernetes/flux-system/controllers/gotk-components.yaml"
@@ -1364,19 +1387,25 @@ def cluster_scoped_flux_objects(root):
             if kind and name:
                 deleted.add((kind.group(1), name.group(1)))
 
+    sources = [read(export)]
+    authored = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+    if authored.is_file():
+        sources.append(read(authored))
+
     names = []
-    for document in re.split(r"(?m)^---\s*$", read(export)):
-        kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
-        name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
-        if not kind or not name:
-            continue
-        identity = (kind.group(1), name.group(1))
-        if kind.group(1) in {
-            "CustomResourceDefinition",
-            "ClusterRole",
-            "ClusterRoleBinding",
-        } and identity not in deleted:
-            names.append(name.group(1))
+    for text in sources:
+        for document in re.split(r"(?m)^---\s*$", text):
+            kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
+            name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+            if not kind or not name:
+                continue
+            identity = (kind.group(1), name.group(1))
+            if kind.group(1) in {
+                "CustomResourceDefinition",
+                "ClusterRole",
+                "ClusterRoleBinding",
+            } and identity not in deleted:
+                names.append(name.group(1))
     return names
 
 
@@ -1478,6 +1507,16 @@ FLUX_RBAC_PATCHES = {
 FLUX_AUTHORED_RBAC_FILES = (
     "kubernetes/flux-system/access.yaml",
     "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+)
+
+# The per-controller replacement authority, and the one thing about it that is
+# not negotiable: it is a RESOURCE OF THE INSTALL ROOT. The installer applies
+# `kubernetes/flux-system/controllers` and nothing else, while access.yaml is
+# reconciled later by Flux, so authority that replaces authority removed by the
+# install transaction has to be created by that same transaction.
+FLUX_PER_CONTROLLER_RBAC_RELATIVE = (
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
 )
 
 # The per-controller split (issue #98). `crd-controller-flux-system` is ONE
@@ -1686,7 +1725,13 @@ def flux_rbac_contract_errors(root):
             errors.append("Flux RBAC patch {} must target kind {}".format(name, kind))
         if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(target)), patch_text):
             errors.append("Flux RBAC patch {} must name {}".format(name, target))
-        if "patches/" + name not in index_text:
+        # Anchored to the `path:` entry that actually wires the patch in, not to
+        # the filename appearing anywhere in the file. A substring test was
+        # satisfied by any COMMENT naming the patch, so a root that mentioned a
+        # narrowing patch while no longer applying it read as compliant.
+        if not re.search(
+            r"(?m)^\s*path:\s*patches/{}\s*$".format(re.escape(name)), index_text
+        ):
             errors.append("Flux controller install root does not apply patches/" + name)
 
     # The cluster-admin binding is deleted rather than repointed: `roleRef` is
@@ -1788,9 +1833,29 @@ def flux_rbac_contract_errors(root):
     # well as the role's presence, because a role bound to a second controller
     # is the shared role again under a different name — and that is the exact
     # failure this split exists to remove.
+    #
+    # These six live in the INSTALL ROOT, not in access.yaml, and that placement
+    # is itself the check below it: the same transaction that strips the Flux
+    # API groups off the shared ClusterRole has to create the replacements, or a
+    # fresh install brings up three controllers that cannot watch their own
+    # custom resources and can never reach readiness.
+    per_controller_path = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+    if not per_controller_path.is_file():
+        errors.append("per-controller RBAC missing: " + FLUX_PER_CONTROLLER_RBAC_RELATIVE)
+        return errors
+    install_root = root / "kubernetes/flux-system/controllers/kustomization.yaml"
+    if install_root.is_file():
+        resource = "- " + Path(FLUX_PER_CONTROLLER_RBAC_RELATIVE).name
+        if not re.search(r"(?m)^\s*{}\s*$".format(re.escape(resource)), read(install_root)):
+            errors.append(
+                "per-controller RBAC must be a resource of the install root: "
+                "controllers/kustomization.yaml does not list {}".format(
+                    Path(FLUX_PER_CONTROLLER_RBAC_RELATIVE).name
+                )
+            )
     seen_cluster_roles = set()
     seen_cluster_bindings = {}
-    for document in documents:
+    for document in _yaml_documents(read(per_controller_path)):
         kind_match = re.search(r"(?m)^kind:\s*(ClusterRole|ClusterRoleBinding)\s*$", document)
         name_match = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
         if kind_match is None or name_match is None:
@@ -1808,10 +1873,12 @@ def flux_rbac_contract_errors(root):
         )
     for name, owner in sorted(FLUX_PER_CONTROLLER_CLUSTER_ROLES.items()):
         if name not in seen_cluster_roles:
-            errors.append("per-controller ClusterRole missing from access.yaml: " + name)
+            errors.append(
+                "per-controller ClusterRole missing from the install root: " + name
+            )
         if name not in seen_cluster_bindings:
             errors.append(
-                "per-controller ClusterRoleBinding missing from access.yaml: " + name
+                "per-controller ClusterRoleBinding missing from the install root: " + name
             )
             continue
         role_ref, subjects = seen_cluster_bindings[name]
@@ -1913,6 +1980,15 @@ def check_kubernetes(root):
         access = flux / "access.yaml"
         if access.is_file():
             errors.extend(flux_access_contract_errors(read(access)))
+        per_controller = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+        if per_controller.is_file():
+            errors.extend(
+                flux_access_contract_errors(
+                    read(per_controller),
+                    FLUX_PER_CONTROLLER_CONTRACT_SHA256,
+                    "Flux per-controller authorization",
+                )
+            )
         default_denies = root / "kubernetes/platform/prerequisites/network-policies.yaml"
         if not default_denies.is_file():
             errors.append("bootstrap-owned default-deny NetworkPolicies are missing")

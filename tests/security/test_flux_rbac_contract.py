@@ -1329,18 +1329,14 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 )
             )
         }
+        # `controller_root_rbac` IS the model's account of this root — generated
+        # export, plus the narrowing patches, plus the authored per-controller
+        # resource (issue #98). Comparing against it rather than re-composing
+        # inline means a resource added to the root but not to the model, or the
+        # reverse, fails here instead of silently splitting the two.
         composed = {
             self._identity(document): document
-            for document in model.apply_patches(
-                model.load_rbac_documents(
-                    ROOT / "kubernetes/flux-system/controllers/gotk-components.yaml"
-                ),
-                [
-                    document
-                    for relative in model.FLUX_RBAC_PATCH_FILES
-                    for document in model.load_documents(ROOT / relative)
-                ],
-            )
+            for document in model.controller_root_rbac(ROOT)
         }
         self.assertEqual(sorted(composed), sorted(actual))
         for key in sorted(actual):
@@ -2135,6 +2131,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         "kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml",
         "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
         "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
+        "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
     )
 
     @classmethod
@@ -2167,7 +2164,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
 
     def test_a_wildcard_is_refused_in_both_yaml_styles(self):
         # Applied to BOTH authored RBAC files: the shared role patch, and
-        # access.yaml where the per-controller roles now live (issue #98). A
+        # the install root where the per-controller roles now live (issue #98). A
         # wildcard smuggled into a split role must fail exactly like one in the
         # shared role, or the split would have moved the rules somewhere the
         # check does not look.
@@ -2177,7 +2174,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                 "    resources: [namespaces, serviceaccounts, configmaps]\n",
             ),
             (
-                "kubernetes/flux-system/access.yaml",
+                "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
                 "    resources: [kustomizations]\n",
             ),
         ):
@@ -2213,7 +2210,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                 "    resources: [namespaces, serviceaccounts, configmaps]\n",
             ),
             (
-                "kubernetes/flux-system/access.yaml",
+                "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
                 "    resources: [kustomizations]\n",
             ),
         ):
@@ -2263,7 +2260,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         """A split role bound twice is the shared role under a new name."""
 
         errors = self.mutate(
-            "kubernetes/flux-system/access.yaml",
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
             "  name: crd-controller-source-flux-system\nsubjects:\n"
             "  - kind: ServiceAccount\n    name: source-controller\n",
             "  name: crd-controller-source-flux-system\nsubjects:\n"
@@ -2276,13 +2273,13 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
 
     def test_a_missing_per_controller_role_is_refused(self):
         errors = self.mutate(
-            "kubernetes/flux-system/access.yaml",
-            "kind: ClusterRole\nmetadata:\n  name: crd-controller-helm-flux-system\n",
-            "kind: ClusterRole\nmetadata:\n  name: crd-controller-renamed\n",
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+            "  name: crd-controller-helm-flux-system\nrules:\n",
+            "  name: crd-controller-renamed\nrules:\n",
         )
         self.assertTrue(
             any(
-                "per-controller ClusterRole missing from access.yaml: "
+                "per-controller ClusterRole missing from the install root: "
                 "crd-controller-helm-flux-system" in error
                 for error in errors
             ),
@@ -2291,7 +2288,7 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
 
     def test_a_repointed_per_controller_binding_is_refused(self):
         errors = self.mutate(
-            "kubernetes/flux-system/access.yaml",
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
             "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
             "  name: crd-controller-kustomize-flux-system\n",
             "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
@@ -2793,6 +2790,127 @@ class FluxRbacRunbookDiscoveryPreconditionTests(unittest.TestCase):
         self.assertIn("Status: `DO NOT APPLY`", self.text)
 
 
+class FluxRbacControllerRootSufficiencyTests(unittest.TestCase):
+    """The INSTALL ROOT alone must already authorize every registered informer.
+
+    The rest of this file proves the reviewed desired state is sufficient using
+    the full composition — install root PLUS `access.yaml`. That composition is
+    the steady state, and it hid a real defect: `access.yaml` is reconciled by
+    Flux from `./kubernetes/reconciliation`, so it does not exist yet at the
+    moment `scripts/install-flux-controllers.sh` applies the controllers root.
+
+    While the six per-controller objects lived in `access.yaml`, a fresh
+    `--apply` therefore created three controllers whose shared ClusterRole had
+    just had every Flux API group stripped out of it and whose replacements were
+    nowhere in the transaction. All fourteen registered-kind `list`/`watch`
+    probes denied; `--watch-all-namespaces=true` makes each of those a
+    cluster-wide informer the controller cannot start, so the install could
+    never reach readiness. Nothing in the sufficiency proof noticed, because the
+    proof was reading a composition the installer does not apply.
+
+    So this battery builds its authorizer from `controller_root_rbac` — the
+    install transaction and nothing else — and root-composition drift of that
+    class goes red here, by name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.authorizer = Authorizer.from_documents(model.controller_root_rbac(ROOT))
+        cls.full = Authorizer.from_documents(model.effective_flux_rbac(ROOT))
+
+    def informer_probes(self):
+        """Every registered kind's cluster-wide list/watch, derived not restated."""
+
+        for controller, kinds in sorted(model.REGISTERED_CONTROLLERS.items()):
+            for kind in kinds:
+                group, resource = model.KIND_RESOURCES[kind][:2]
+                for verb in ("list", "watch"):
+                    yield controller, kind, group, resource, verb
+
+    def test_every_registered_informer_is_authorized_by_the_install_alone(self):
+        probes = list(self.informer_probes())
+        # 5 source kinds + 1 Kustomization + 1 HelmRelease, list and watch each.
+        self.assertEqual(len(probes), 14, "the registered informer set changed shape")
+        denied = [
+            "{} cannot {} {}".format(controller, verb, kind)
+            for controller, kind, group, resource, verb in probes
+            if not self.authorizer.allows(
+                Subject("flux-system", controller), verb, group, resource, namespace=None
+            )
+        ]
+        self.assertEqual(denied, [], "the install root does not authorize its own controllers")
+
+    def test_the_informer_authority_is_cluster_wide_not_namespaced(self):
+        """A Role in flux-system cannot satisfy a `--watch-all-namespaces` informer.
+
+        Asserting the probes pass with `namespace=None` above is only meaningful
+        if that genuinely means cluster scope, so this pins the flag that makes
+        it so: were it dropped, namespaced authority would suffice and the roles
+        could be narrowed — a change that must be made deliberately, not drift
+        into place.
+        """
+
+        arguments = model.controller_arguments(ROOT)
+        for controller in model.REGISTERED_CONTROLLERS:
+            with self.subTest(controller=controller):
+                self.assertIn(
+                    model.WATCH_ALL_NAMESPACES_FLAG,
+                    arguments[Subject("flux-system", controller)],
+                )
+
+    def test_the_six_objects_are_rendered_by_the_install_root(self):
+        """Placement, not just presence: they must be IN the applied transaction.
+
+        `controller_root_rbac` reads the file the install root names. If the six
+        objects were moved back to `access.yaml`, or the resource entry were
+        dropped from `controllers/kustomization.yaml`, the authority would still
+        exist in the repository and the full-composition proofs would still
+        pass — and the install would still be broken.
+        """
+
+        kustomization = (
+            ROOT / "kubernetes/flux-system/controllers/kustomization.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("- per-controller-rbac.yaml", kustomization)
+        names = {
+            (document.get("kind"), (document.get("metadata") or {}).get("name"))
+            for document in model.load_documents(
+                ROOT / "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+            )
+        }
+        for role, owner in sorted(PER_CONTROLLER_CLUSTER_ROLES.items()):
+            with self.subTest(role=role):
+                self.assertIn(("ClusterRole", role), names)
+                self.assertIn(("ClusterRoleBinding", role), names)
+
+    def test_access_yaml_no_longer_carries_cluster_scoped_controller_authority(self):
+        """The move was a MOVE. A copy would drift, and drift silently."""
+
+        access = model.load_documents(ROOT / "kubernetes/flux-system/access.yaml")
+        offenders = [
+            (document.get("kind"), (document.get("metadata") or {}).get("name"))
+            for document in access
+            if document.get("kind") in ("ClusterRole", "ClusterRoleBinding")
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_the_install_root_grants_no_more_than_the_full_model(self):
+        """Moving authority earlier must not have widened it.
+
+        Everything the install root allows, the reviewed full composition must
+        allow too. If the two disagree the narrowness proof — which reads the
+        full composition — is no longer covering what the installer creates.
+        """
+
+        for controller, kind, group, resource, verb in self.informer_probes():
+            subject = Subject("flux-system", controller)
+            with self.subTest(controller=controller, kind=kind, verb=verb):
+                if self.authorizer.allows(subject, verb, group, resource, namespace=None):
+                    self.assertTrue(
+                        self.full.allows(subject, verb, group, resource, namespace=None)
+                    )
+
+
 class FluxRoleRefScanCostTests(unittest.TestCase):
     """The roleRef reader must not be stallable by the content it reads.
 
@@ -2857,11 +2975,19 @@ class FluxRoleRefScanCostTests(unittest.TestCase):
         """No behaviour change on the input the validator actually reads."""
 
         # Split with the validator's OWN splitter, so the corpus is exactly the
-        # text `flux_rbac_contract_errors` hands to the reader.
-        text = (ROOT / "kubernetes/flux-system/access.yaml").read_text(encoding="utf-8")
+        # text `flux_rbac_contract_errors` hands to the reader — both authored
+        # files it parses, since the six cluster-scoped bindings moved into the
+        # install root (issue #98) and those are precisely the documents whose
+        # roleRef this reader resolves.
         documents = [
             document
-            for document in self.validator._yaml_documents(text)
+            for relative in (
+                "kubernetes/flux-system/access.yaml",
+                "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+            )
+            for document in self.validator._yaml_documents(
+                (ROOT / relative).read_text(encoding="utf-8")
+            )
             if re.search(r"(?m)^roleRef:", document)
         ]
         self.assertGreaterEqual(len(documents), 20, "the roleRef corpus vanished")

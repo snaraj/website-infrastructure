@@ -27,7 +27,8 @@ repository now:
    single ServiceAccount, carrying that controller's own custom-resource
    authority — `crd-controller-source-flux-system`,
    `crd-controller-kustomize-flux-system`, `crd-controller-helm-flux-system`
-   (`kubernetes/flux-system/access.yaml`);
+   (`kubernetes/flux-system/controllers/per-controller-rbac.yaml`, which is part of
+   the controller INSTALL ROOT, not `access.yaml` — see below);
 5. adds the namespaced authority the controllers still need — leader election,
    controller-owned ConfigMaps, the SOPS age key read, and one name-restricted
    impersonation Role per namespace holding reconciler accounts
@@ -345,8 +346,17 @@ the shared role loses every Flux API group as well, and the authority it used to
 carry arrives instead as six NEW objects — three ClusterRoles and three
 ClusterRoleBindings — that must be applied in the same boundary. Applying the
 shared-role patch without them leaves all three controllers unable to reconcile
-anything, so the order inside step 3 is not optional: `access.yaml` first, the
-shared role and its binding second.
+anything, so the order inside step 3 is not optional: the per-controller objects
+first, the shared role and its binding second.
+
+That same reasoning is why those six objects live in
+`kubernetes/flux-system/controllers/per-controller-rbac.yaml` — a resource of
+the install root — and NOT in `access.yaml`. A fresh install applies the
+controllers root alone; `access.yaml` is reconciled later, by Flux, from
+`./kubernetes/reconciliation`. Authority that replaces authority removed by the
+install transaction has to be created by that transaction, or a fresh cluster
+gets three controllers whose fourteen registered-kind `list`/`watch` probes all
+deny and whose readiness gate can never pass.
 
 For **kustomize-controller and helm-controller** the loss is masked: they still
 hold `cluster-admin` through `cluster-reconciler-flux-system` until step 4.
@@ -405,10 +415,11 @@ granting authority nobody reviewed at that point in the sequence.
    the name, and creating it here would adopt or overwrite it.
 3. **Apply the narrowed authority — additive for the Roles and the three
    per-controller ClusterRoles, REPLACING for the shared ClusterRole and its
-   binding.** Apply `access.yaml` first: it is purely additive, it creates the
-   namespaced Roles and RoleBindings and the three per-controller ClusterRoles
-   and ClusterRoleBindings that carry the replacement authority, and applying it
-   alone changes no controller's effective permissions downward. Then apply the
+   binding.** Apply `per-controller-rbac.yaml` and `access.yaml` first: both are
+   purely additive — the first creates the three per-controller ClusterRoles and
+   ClusterRoleBindings that carry the replacement authority, the second the
+   namespaced Roles and RoleBindings — and applying them alone changes no
+   controller's effective permissions downward. Then apply the
    narrowed `crd-controller-flux-system` ClusterRole and its subject-pinned
    binding, which is where authority is removed (see the section above).
 

@@ -57,7 +57,7 @@
 #   An apply over an EXISTING install would instead rewrite objects as
 #   `configured` -- a mutation with no recorded prestate, which no ledger of
 #   creations can undo and which would make the rollback report "the cluster is
-#   unchanged" after rewriting 21 objects. Rather than claim a restore this
+#   unchanged" after rewriting 27 objects. Rather than claim a restore this
 #   script cannot perform, the existing-install path is refused for --apply and
 #   stays available read-only through --plan. A signal (INT/TERM/HUP) takes the
 #   same rollback path a failed phase takes, because a Ctrl-C between phases
@@ -116,21 +116,28 @@ CANARY_TARGET='kubernetes/flux-system/canary'
 VERSIONS_FILE="${REPO_ROOT}/versions.env"
 INSTALL_NAMESPACE='flux-system'
 # The reviewed inventory after the least-privilege RBAC patches: 1 Namespace,
-# 8 CRDs, 3 ClusterRoles, 1 ClusterRoleBinding, 3 NetworkPolicies,
+# 8 CRDs, 6 ClusterRoles, 4 ClusterRoleBindings, 3 NetworkPolicies,
 # 1 ResourceQuota, 3 ServiceAccounts,
 # 1 Service, 3 Deployments. A render of a different size is not the reviewed
 # install no matter what its digest says.
-EXPECTED_OBJECTS=24
+#
+# The ClusterRole count went 3 -> 6 and the binding count 1 -> 4 with issue #98:
+# the shared crd-controller ClusterRole no longer carries any Flux API group,
+# and the three per-controller replacements are created HERE, by this
+# transaction, because this transaction is what removes the authority they
+# replace. Rendering them from kubernetes/flux-system/access.yaml instead would
+# install three controllers that cannot watch their own custom resources.
+EXPECTED_OBJECTS=30
 # The inventory splits by scope, which is what the fresh-cluster dry run below
-# turns on: 13 cluster-scoped objects (the Namespace, 8 CRDs, 3 ClusterRoles,
-# 1 ClusterRoleBinding) plus 11 objects that live IN flux-system (1
+# turns on: 19 cluster-scoped objects (the Namespace, 8 CRDs, 6 ClusterRoles,
+# 4 ClusterRoleBindings) plus 11 objects that live IN flux-system (1
 # ResourceQuota, 3 ServiceAccounts, 1 Service, 3 Deployments, 3 NetworkPolicies).
-EXPECTED_CLUSTER_SCOPED=13
+EXPECTED_CLUSTER_SCOPED=19
 EXPECTED_NAMESPACED=11
 # ... and it splits again by creation phase: the 3 controller Deployments are held
-# back until their egress allows and canary proof exist, so 21 objects go first.
+# back until their egress allows and canary proof exist, so 27 objects go first.
 EXPECTED_WORKLOADS=3
-EXPECTED_PREREQUISITES=21
+EXPECTED_PREREQUISITES=27
 # The egress overlay: 5 policies, of which 4 must be in force before any
 # controller Pod is created and 1 (public HTTPS) is deliberately deferred.
 EXPECTED_EGRESS_POLICIES=5
@@ -157,10 +164,26 @@ FLUX_CRDS=(
   kustomizations.kustomize.toolkit.fluxcd.io
   ocirepositories.source.toolkit.fluxcd.io
 )
-FLUX_CLUSTER_ROLES=(crd-controller-flux-system flux-edit-flux-system flux-view-flux-system)
-FLUX_CLUSTER_ROLE_BINDINGS=(crd-controller-flux-system)
+# The three per-controller entries are authored (issue #98), not generated: they
+# replace the Flux-group authority the crd-controller-role patch removes, and
+# they are listed here so the absence probe, the ownership check and the
+# rollback contract all cover them exactly like the generated three.
+FLUX_CLUSTER_ROLES=(
+  crd-controller-flux-system
+  crd-controller-helm-flux-system
+  crd-controller-kustomize-flux-system
+  crd-controller-source-flux-system
+  flux-edit-flux-system
+  flux-view-flux-system
+)
+FLUX_CLUSTER_ROLE_BINDINGS=(
+  crd-controller-flux-system
+  crd-controller-helm-flux-system
+  crd-controller-kustomize-flux-system
+  crd-controller-source-flux-system
+)
 CONTROLLER_DEPLOYMENTS=(source-controller kustomize-controller helm-controller)
-# The least-privilege render labels every one of its 24 objects with both of these.
+# The least-privilege render labels every one of its 30 objects with both of these.
 # They are this install's ownership marker: an object that already exists and
 # carries them is a previous run of THIS install; one that exists without them
 # belongs to something else and is never adopted, reconfigured, or deleted.
@@ -1053,7 +1076,7 @@ fi
 
 # (1) The bytes are valid to apply at all, independent of any namespace.
 # Client-side strict validation rejects unknown/duplicated fields and needs no
-# flux-system to exist, so it validates all 24 objects even on a fresh cluster.
+# flux-system to exist, so it validates all 30 objects even on a fresh cluster.
 client_dry_run="${work}/dry-run-client.txt"
 if ! kube apply -f "$rendered" --dry-run=client --validate=strict \
     >"$client_dry_run" 2>&1; then

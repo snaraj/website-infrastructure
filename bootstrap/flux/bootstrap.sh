@@ -1073,12 +1073,16 @@ def cluster_role_rules():
 
 
 # Cluster-scoped RBAC this repository AUTHORS rather than receives from the
-# generated export (issue #98). The export labels its own objects with the Flux
-# instance and version; these carry no label at all, deliberately — pinning a
-# Flux version label onto authorization this repository derived itself would
-# make a Flux bump rewrite it. The expectation is exact in both directions, so a
-# stray label on one of these fails the verifier just as a missing label on a
-# generated object does.
+# generated export (issue #98). These are created BY the controller install --
+# they replace authority the same transaction removes -- so they carry that
+# install's two ownership labels, without which the installer could not tell its
+# own objects from a stranger's and its rollback would refuse to remove them.
+#
+# They deliberately do NOT carry `app.kubernetes.io/version`. That label tracks
+# the Flux release the export came from, and stamping it onto authorization this
+# repository derived itself would make a Flux bump rewrite it. The expectation is
+# exact in both directions, so a version label appearing on one of these fails
+# the verifier just as a missing ownership label does.
 AUTHORED_CLUSTER_RBAC = {
     "crd-controller-source-flux-system",
     "crd-controller-kustomize-flux-system",
@@ -1086,9 +1090,16 @@ AUTHORED_CLUSTER_RBAC = {
 }
 
 
+def authored_ownership_labels():
+    return {
+        "app.kubernetes.io/instance": "flux-system",
+        "app.kubernetes.io/part-of": "flux",
+    }
+
+
 def expected_cluster_role_labels(name):
     if name in AUTHORED_CLUSTER_RBAC:
-        return {}
+        return authored_ownership_labels()
     labels = flux_labels()
     if name in {"flux-edit-flux-system", "flux-view-flux-system"}:
         labels["rbac.authorization.k8s.io/aggregate-to-admin"] = "true"
@@ -1099,7 +1110,9 @@ def expected_cluster_role_labels(name):
 
 
 def expected_cluster_binding_labels(name):
-    return {} if name in AUTHORED_CLUSTER_RBAC else flux_labels()
+    if name in AUTHORED_CLUSTER_RBAC:
+        return authored_ownership_labels()
+    return flux_labels()
 
 
 def access_role_rules():

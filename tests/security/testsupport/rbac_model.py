@@ -308,6 +308,14 @@ FLUX_RBAC_PATCH_FILES = (
     "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
 )
 
+# Authored RBAC that is a RESOURCE of the install root rather than a patch of
+# the generated export: the six per-controller objects (issue #98). They live in
+# the install root because the patch above removes the authority they replace in
+# the same transaction — see `controller_root_rbac`.
+FLUX_CONTROLLER_ROOT_RBAC_FILES = (
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+)
+
 
 def _identity(document):
     metadata = document.get("metadata") or {}
@@ -341,8 +349,23 @@ def apply_patches(base, patches):
     return list(composed.values())
 
 
-def effective_flux_rbac(root=REPO_ROOT):
-    """The RBAC the cluster would hold: generated export + patches + access.yaml."""
+def controller_root_rbac(root=REPO_ROOT):
+    """The RBAC the INSTALLER alone creates: the `controllers` root, rendered.
+
+    Modelled separately from `effective_flux_rbac` because the two are applied
+    by different actors at different times. `scripts/install-flux-controllers.sh`
+    applies THIS root and nothing else; `access.yaml` arrives later, reconciled
+    by Flux from `./kubernetes/reconciliation`, and cannot help a controller that
+    has to start an informer before Flux is running at all.
+
+    That distinction is not academic. The narrowing patch strips every Flux API
+    group from the shared `crd-controller-flux-system` ClusterRole, so while the
+    six per-controller replacements sat in access.yaml this composition denied
+    all fourteen registered-kind list/watch probes and a fresh install could
+    never reach readiness. The replacements are part of this root now, and
+    `FluxRbacControllerRootSufficiencyTests` builds an authorizer from exactly
+    this function so that regression is caught by name.
+    """
 
     root = Path(root)
     base = load_rbac_documents(root / "kubernetes/flux-system/controllers/gotk-components.yaml")
@@ -350,7 +373,16 @@ def effective_flux_rbac(root=REPO_ROOT):
     for relative in FLUX_RBAC_PATCH_FILES:
         patches.extend(load_documents(root / relative))
     documents = apply_patches(base, patches)
-    documents.extend(load_documents(root / "kubernetes/flux-system/access.yaml"))
+    for relative in FLUX_CONTROLLER_ROOT_RBAC_FILES:
+        documents.extend(load_documents(root / relative))
+    return documents
+
+
+def effective_flux_rbac(root=REPO_ROOT):
+    """The RBAC the cluster would hold: the install root, then access.yaml."""
+
+    documents = controller_root_rbac(root)
+    documents.extend(load_documents(Path(root) / "kubernetes/flux-system/access.yaml"))
     return documents
 
 
