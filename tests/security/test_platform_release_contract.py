@@ -3096,6 +3096,8 @@ class PredecessorWaitShellTests(unittest.TestCase):
         pending_attempts: int = 0,
         gh_token: str | None = None,
         release_race: bool = False,
+        script_override: str | None = None,
+        window_status: int = 0,
     ) -> tuple[subprocess.CompletedProcess[str], str, str]:
         if release_state not in {"missing", "complete", "foreign", "partial"}:
             raise AssertionError("predecessor Release fixture state is not closed")
@@ -3140,7 +3142,7 @@ class PredecessorWaitShellTests(unittest.TestCase):
 
             # Two attempts keep the hostile absent-state fixture fast while the
             # structural gate below freezes the production bound at 30.
-            script = self.script()
+            script = script_override or self.script()
             self.assertIn("for _attempt in {1..30}", script)
             transaction = runner / "wait.sh"
             transaction.write_text(
@@ -3151,6 +3153,9 @@ class PredecessorWaitShellTests(unittest.TestCase):
             prelude = r'''
 python3() {
   if [ "${4-}" = release-window ]; then
+    if [ "${MOCK_WINDOW_STATUS}" -ne 0 ]; then
+      return "${MOCK_WINDOW_STATUS}"
+    fi
     count=0
     if [ -f "${MOCK_WINDOW_COUNT}" ]; then count="$(<"${MOCK_WINDOW_COUNT}")"; fi
     count=$((count + 1))
@@ -3200,14 +3205,14 @@ jq() {
 }
 
 curl() {
-  local output='' authorization='' url='' token=''
+  local output='' authorization='' method='' url='' token=''
   if [ -n "${CONTENTS_READ_TOKEN-}" ] || [ -n "${GH_TOKEN-}" ] || \
      [ -n "${GITHUB_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
      [ -n "${ACTIONS_READ_TOKEN-}" ]; then return 93; fi
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --output) output="$2"; shift 2 ;;
-      --request) test "$2" = GET; shift 2 ;;
+      --request) method="$2"; shift 2 ;;
       --header)
         if [[ "$2" == Authorization:\ Bearer\ * ]]; then authorization="$2"; fi
         shift 2
@@ -3216,6 +3221,7 @@ curl() {
       *) shift ;;
     esac
   done
+  test "${method}" = GET || return 94
   token="${authorization#Authorization: Bearer }"
   test "${token}" = "${MOCK_READ_TOKEN}"
   printf 'GET %s\n' "${url}" >> "${MOCK_CALLS}"
@@ -3236,7 +3242,7 @@ curl() {
   esac
 }
 
-sleep() { :; }
+sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
 '''
             harness = runner / "harness.sh"
             harness.write_text(
@@ -3254,6 +3260,7 @@ sleep() { :; }
                     "MOCK_DATE": self.DATE,
                     "MOCK_PENDING_ATTEMPTS": str(pending_attempts),
                     "MOCK_WINDOW_COUNT": f"{relative}/window-count",
+                    "MOCK_WINDOW_STATUS": str(window_status),
                     "MOCK_BASE_NOTES": PublicationTransactionShellTests.legacy_notes(
                         self.BASE_TAG, self.BASE_SOURCE
                     ),
@@ -3344,6 +3351,26 @@ sleep() { :; }
         self.assertEqual(output, "")
         self.assertEqual(calls, "")
 
+    def test_non_get_mutation_fails_when_literal_get_survives_only_in_comment(self):
+        script = self.script()
+        mutant = script.replace(
+            '  local url="$1" output="$2"\n',
+            '  local method=POST url="$1" output="$2" # --request GET\n',
+            1,
+        ).replace('    --request GET \\\n', '    --request "${method}" \\\n', 1)
+        self.assertNotEqual(mutant, script)
+        completed, output, calls = self.execute(script_override=mutant)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(calls, "")
+
+    def test_unsafe_release_window_denies_without_wait_get_or_attestation(self):
+        completed, output, calls = self.execute(window_status=1)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(calls, "")
+        self.assertNotIn("bounded wait", completed.stderr)
+
 
 class GitTransitionTests(unittest.TestCase):
     def git(self, root: Path, *args: str) -> str:
@@ -3370,6 +3397,37 @@ class GitTransitionTests(unittest.TestCase):
             marker,
         )
         return self.git(root, "rev-parse", "HEAD")
+
+    def commit_staged(self, root: Path, marker: str) -> str:
+        self.git(
+            root,
+            "-c",
+            "user.name=Release Test",
+            "-c",
+            "user.email=release@example.invalid",
+            "commit",
+            "-m",
+            marker,
+        )
+        return self.git(root, "rev-parse", "HEAD")
+
+    def stage_fragment_mode(
+        self, root: Path, path: str, payload: bytes, mode: str
+    ) -> None:
+        created = subprocess.run(
+            ["git", "-C", str(root), "hash-object", "-w", "--stdin"],
+            check=True,
+            input=payload,
+            stdout=subprocess.PIPE,
+        )
+        object_id = created.stdout.decode("ascii").strip()
+        self.git(
+            root,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"{mode},{object_id},{path}",
+        )
 
     def add_fragment(
         self,
@@ -3529,22 +3587,62 @@ class GitTransitionTests(unittest.TestCase):
 
     def test_fragment_grammar_and_generated_files_fail_closed(self):
         invalid_payloads = (
-            ("### Other\n\n- item\n", "category"),
-            ("### Security\n\nplain text\n", "not-a-bullet"),
-            ("### Security\r\n\r\n- item\r\n", "crlf"),
-            ("### Security\n\n- ${{ github.token }}\n", "expression"),
-            ("### Security\n\n- trailing \n", "trailing"),
+            (b"", "empty", "non-empty"),
+            (
+                b"### Security\n\n- " + b"a" * MODULE.MAX_FRAGMENT_BYTES + b"\n",
+                "oversize",
+                "at most 16 KiB",
+            ),
+            (
+                b"\xef\xbb\xbf### Security\n\n- item\n",
+                "bom",
+                "BOM-free UTF-8",
+            ),
+            (
+                b"### Security\n\n- item\x00\n",
+                "embedded-nul",
+                "BOM-free UTF-8",
+            ),
+            (b"### Security\n\n- item \xff\n", "invalid-utf8", "not UTF-8"),
+            (
+                b"### Security\n\n- missing final newline",
+                "missing-final-newline",
+                "exactly one newline",
+            ),
+            (
+                b"### Security\n\n- double final newline\n\n",
+                "double-final-newline",
+                "exactly one newline",
+            ),
+            (b"### Other\n\n- item\n", "category", "fragment category"),
+            (
+                b"### Security\n\nplain text\n",
+                "not-a-bullet",
+                "every fragment body line",
+            ),
+            (b"### Security\r\n\r\n- item\r\n", "crlf", "LF line endings"),
+            (
+                b"### Security\n\n- ${{ github.token }}\n",
+                "expression",
+                "workflow expression opener",
+            ),
+            (
+                b"### Security\n\n- trailing \n",
+                "trailing",
+                "trailing whitespace",
+            ),
         )
-        for payload, label in invalid_payloads:
+        for payload, label, reason in invalid_payloads:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 base = self.initialize(root)
                 path = root / "changelog.d" / "164-invalid.md"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(payload.encode("utf-8"))
+                path.write_bytes(payload)
                 head = self.commit(root, label)
-                with self.assertRaises(MODULE.ContractError):
+                with self.assertRaises(MODULE.ContractError) as denied:
                     MODULE.validate_transition(root, base, head, first_parent=True)
+                self.assertIn(reason, str(denied.exception))
 
         for filename in (
             "release-fragments.md",
@@ -3598,6 +3696,22 @@ class GitTransitionTests(unittest.TestCase):
                 head = self.commit(root, operation + " an existing fragment")
                 with self.assertRaises(MODULE.ContractError):
                     MODULE.validate_transition(root, base, head, first_parent=True)
+
+    def test_fragment_tree_entry_must_be_a_regular_non_executable_blob(self):
+        payload = b"### Security\n\n- Exact tree entry.\n"
+        for mode in ("120000", "100755"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base = self.initialize(root)
+                self.stage_fragment_mode(
+                    root, "changelog.d/164-tree-mode.md", payload, mode
+                )
+                head = self.commit_staged(root, f"hostile fragment mode {mode}")
+                with self.assertRaises(MODULE.ContractError) as denied:
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+                self.assertIn(
+                    "regular non-executable 100644 blob", str(denied.exception)
+                )
 
     def test_squash_and_arbitrary_position_rebase_ranges_bind_the_final_sha(self):
         with tempfile.TemporaryDirectory() as temporary:

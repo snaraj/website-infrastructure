@@ -18,7 +18,7 @@ merges independently."). Delete nothing; write "none" where empty. -->
 
 Closes #<!-- same-repository issue number -->
 
-- Platform source release: `vX.Y.Z`
+- Platform source release: tag-derived after protected-main merge; no patch is pre-allocated by this PR
 - Adds exactly one new `changelog.d/<issue>-<lowercase-slug>.md`: yes/no
 - `VERSION` and `CHANGELOG.md` remain unchanged: yes/no
 - Derived patch is exactly one after the immutable predecessor tag: yes/no
@@ -63,5 +63,5 @@ make check-fast / make check / make coverage / make pre-push-security -->
 ## Merge order and collision paths
 
 - Predecessors: none
-- Successors that must resync their base and platform patch: none
+- Successors that must refresh their current base and dependent evidence: none
 - Collision paths: none

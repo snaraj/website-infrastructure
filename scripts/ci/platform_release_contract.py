@@ -228,6 +228,29 @@ def _file_bytes(repository: Path, revision: str, path: str) -> bytes:
     return _git_bytes(repository, "show", f"{revision}:{path}")
 
 
+def _require_regular_fragment_entry(
+    repository: Path, revision: str, path: str
+) -> None:
+    raw = _git_bytes(
+        repository, "ls-tree", "-z", "--full-tree", revision, "--", path
+    )
+    if not raw.endswith(b"\0") or raw.count(b"\0") != 1:
+        raise ContractError("fragment tree entry is absent or duplicated")
+    try:
+        metadata, encoded_path = raw[:-1].split(b"\t", 1)
+        mode, object_type, object_id = metadata.split(b" ", 2)
+        decoded_path = encoded_path.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ContractError("fragment tree entry is malformed") from exc
+    if (
+        decoded_path != path
+        or mode != b"100644"
+        or object_type != b"blob"
+        or not re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", object_id)
+    ):
+        raise ContractError("fragment must be one regular non-executable 100644 blob")
+
+
 def _exact_commit(repository: Path, revision: str, field: str) -> str:
     revision = require_sha(revision, field)
     if _git(repository, "rev-parse", "--verify", f"{revision}^{{commit}}") != revision:
@@ -332,6 +355,7 @@ def _release_surface_intents(
         raise ContractError("release fragments may only be newly added, never edited or removed")
     intents: list[FragmentIntent] = []
     for path in added:
+        _require_regular_fragment_entry(repository, head_sha, path)
         payload = _file_bytes(repository, head_sha, path)
         validate_fragment_bytes(path, payload)
         intents.append(

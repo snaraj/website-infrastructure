@@ -224,6 +224,8 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "Exact base",
             "Exact head",
             "Platform source release",
+            "tag-derived after protected-main merge",
+            "no patch is pre-allocated by this PR",
             "Adds exactly one new `changelog.d/<issue>-<lowercase-slug>.md`",
             "`VERSION` and `CHANGELOG.md` remain unchanged",
             "Derived patch is exactly one after the immutable predecessor tag",
@@ -237,8 +239,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, template)
         for retired in (
+            "Platform source release: `vX.Y.Z`",
             "`VERSION` is exactly one patch after the protected base",
             "`CHANGELOG.md` records this exact release",
+            "Successors that must resync their base and platform patch",
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, template)
@@ -394,8 +398,15 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
                 if fragment not in document:
                     return f"open-PR capacity contract lost: {fragment}"
             if re.search(
-                r"(?i)(?:at most|maximum|max)\s+[0-9]+\s+"
-                r"(?:agent[- ]authored\s+|agent\s+)?(?:open\s+)?PRs?",
+                r"(?ix)(?:"
+                r"(?:at\s+most|max(?:imum)?(?:\s+of)?|no\s+more\s+than|"
+                r"limit(?:ed)?\s+to|cap(?:ped)?\s+at)\s+[0-9]+\s+"
+                r"(?:agent[- ]authored\s+|agent\s+)?(?:open\s+)?PRs?"
+                r"|(?:PRs?\s+)?(?:cap|ceiling|quota|limit)\s*"
+                r"(?:of|:|=|is|to|at)?\s*[0-9]+"
+                r"|[0-9]+\s+(?:agent[- ]authored\s+|agent\s+)?"
+                r"(?:open\s+)?PRs?\s+(?:cap|ceiling|quota|limit)"
+                r")",
                 repository_contract + "\n" + portable_skill,
             ):
                 return "fixed open-PR count ceiling returned"
@@ -404,6 +415,9 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         self.assertIsNone(capacity_denial(agents, skill))
         mutants = (
             (agents.replace("There is no fixed count ceiling", "At most 3 agent PRs", 1), skill),
+            (agents + "\nNo more than 3 open PRs.\n", skill),
+            (agents + "\nPR quota: 3.\n", skill),
+            (agents, skill + "\nDependent work is limited to 3 PRs.\n"),
             (agents.replace("keeps each affected PR Draft", "may leave Draft", 1), skill),
             (
                 agents.replace(
