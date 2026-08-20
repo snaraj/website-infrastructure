@@ -121,6 +121,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stderr)
         self.assertIn("cannot read", completed.stderr)
 
+    def test_cli_denies_a_deeply_nested_document_instead_of_a_traceback(self):
+        # Before the fix, a document nested well past any real schema need
+        # raised an uncaught RecursionError: a Python traceback on stderr
+        # and exit 1 (the interpreter's default for an unhandled
+        # exception), not this CLI's documented 0/2 contract. `Popen`
+        # captures stderr as text either way, so a traceback would show up
+        # here as ordinary (non-"FAIL") stderr content with returncode 1.
+        with temp_config(deeply_nested_document()) as path:
+            completed = run_script(REPO_ROOT / "scripts" / "dependabot_contract.py", path)
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("FAIL", completed.stderr)
+        self.assertIn("nesting exceeds the maximum supported depth", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertNotIn("RecursionError", completed.stderr)
+
 
 class RichFixtureTests(unittest.TestCase):
     """Every optional field the schema supports, none of which the real
@@ -186,6 +201,29 @@ MINIMAL = (
 )
 
 
+def deeply_nested_document(depth=2000):
+    """Build a document nested far past `_MAX_NESTING_DEPTH` (20).
+
+    Before the fix, parsing this raised an uncaught `RecursionError` from
+    inside `document_errors` -- a traceback and (via the CLI's default
+    handling of an unhandled exception) exit 1, not the contract's
+    documented exit 0/2. `depth=2000` is chosen to stay comfortably under
+    CPython's default ~1000-frame recursion limit even before this fix
+    (so the module-level probe reliably reproduces the *documented* bug,
+    a fail-open false accept, rather than incidentally already crashing
+    for an unrelated reason) while sitting 100x past the explicit cap
+    this fix adds.
+    """
+
+    text = "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+    indent = 4
+    for index in range(depth):
+        text += " " * indent + "k{}:\n".format(index)
+        indent += 2
+    text += " " * indent + "directory: /\n"
+    return text
+
+
 class GrammarHostileTests(unittest.TestCase):
     """Every YAML feature this restricted subset deliberately refuses."""
 
@@ -228,14 +266,62 @@ class GrammarHostileTests(unittest.TestCase):
         self.assertTrue(MODULE.document_errors(text))
 
     def test_full_line_leading_comment_is_accepted(self):
-        # The real file opens with a six-line rationale comment; a parser
-        # that could not tolerate this would fail its own primary input.
+        # A comment block before the document's first key is the easier,
+        # more commonly special-cased case; kept as a distinct scenario
+        # from the interior-comment test below, which pins what the real
+        # file actually needs.
         text = "# rationale\n# more rationale\n" + MINIMAL
         self.assertEqual(MODULE.document_errors(text), [])
 
-    def test_anchor_marker_is_rejected_as_an_unsupported_scalar(self):
-        text = mutate(MINIMAL, "directory: /\n", "directory: &anchor /\n")
-        self.assertTrue(MODULE.document_errors(text))
+    def test_interior_comment_between_sibling_keys_is_accepted(self):
+        # This is the real file's actual shape: its six-line rationale
+        # comment sits on lines 2-7, between `version: 2` (line 1) and
+        # `updates:` (line 8) -- interior to the top-level mapping, not a
+        # leading block before the document starts. A parser that only
+        # special-cased leading comments would fail this (and would fail
+        # the real file), so this is pinned as its own case rather than
+        # left to `RealConfigTests` alone to prove.
+        text = mutate(
+            MINIMAL,
+            "version: 2\n",
+            "version: 2\n# interior rationale, line 1 of 2\n# interior rationale, line 2 of 2\n",
+        )
+        self.assertEqual(MODULE.document_errors(text), [])
+
+    def test_alias_marker_is_rejected(self):
+        # `*name` is a YAML alias reference; this parser tracks no
+        # anchors, so an alias is unresolvable and must be refused, not
+        # silently treated as the literal text "*name".
+        text = mutate(MINIMAL, "directory: /\n", "directory: *somealias\n")
+        self.assert_denied(text, "alias")
+
+    def test_alias_in_a_patterns_list_item_is_rejected(self):
+        # The silent-acceptance path the adversarial review actually
+        # found: an alias as a bare sequence-item scalar had no
+        # downstream field-format check to coincidentally catch it,
+        # unlike `directory`'s '/'-prefix check -- proving the parser
+        # itself refuses it, not a lucky schema-layer side effect.
+        text = MINIMAL + "    groups:\n      g:\n        patterns:\n          - *anchor\n"
+        self.assert_denied(text, "alias")
+
+    def test_quoted_scalar_containing_asterisk_is_still_accepted(self):
+        # The other direction, at the exact same position as
+        # test_alias_in_a_patterns_list_item_is_rejected above: a
+        # *quoted* value starting with `*` is ordinary text (this
+        # repository's real glob patterns end in an unquoted `*`, but a
+        # leading one is plausible too), not an alias reference, and
+        # must still parse -- proving the fix denies only the unquoted
+        # alias shape, not every value containing `*`.
+        text = MINIMAL + "    groups:\n      g:\n        patterns:\n          - \"*not-an-alias\"\n"
+        self.assertEqual(MODULE.document_errors(text), [])
+
+    def test_anchor_marker_is_rejected(self):
+        text = mutate(MINIMAL, "directory: /\n", "directory: &anchor\n")
+        self.assert_denied(text, "anchor")
+
+    def test_tag_marker_is_rejected(self):
+        text = mutate(MINIMAL, "directory: /\n", "directory: !!str /\n")
+        self.assert_denied(text, "tag")
 
     def test_block_scalar_indicator_is_rejected(self):
         text = mutate(MINIMAL, "      interval: weekly\n", "      interval: |\n        weekly\n")
@@ -256,6 +342,24 @@ class GrammarHostileTests(unittest.TestCase):
     def test_unparseable_line_is_rejected(self):
         text = MINIMAL + "this is not a mapping entry at all\n"
         self.assertTrue(MODULE.document_errors(text))
+
+    def test_deeply_nested_document_is_denied_not_a_traceback(self):
+        errors = MODULE.document_errors(deeply_nested_document())
+        self.assertTrue(errors)
+        self.assertTrue(any("nesting exceeds the maximum supported depth" in e for e in errors), errors)
+
+    def test_nesting_exactly_at_the_cap_is_still_accepted(self):
+        # The cap must reject only past its stated bound, not one level
+        # early -- proving `_MAX_NESTING_DEPTH` itself, not merely "deep
+        # nesting is denied somewhere". Checked at the *parser* layer
+        # (`parse_document` must not raise) rather than through
+        # `document_errors`: the synthetic `k0`/`k1`/... keys this
+        # fixture nests through are not real Dependabot fields, so
+        # schema validation would correctly flag them as unknown keys
+        # regardless of depth -- noise this test must not confuse with
+        # the depth cap itself.
+        text = deeply_nested_document(depth=MODULE._MAX_NESTING_DEPTH - 2)
+        MODULE.parse_document(text)  # must not raise
 
     def test_quoted_and_plain_scalars_are_both_accepted(self):
         quoted = mutate(MINIMAL, "directory: /", 'directory: "/"')
@@ -306,6 +410,18 @@ class SchemaHostileTests(unittest.TestCase):
 
     def test_unknown_ecosystem_is_rejected(self):
         self.assert_denied(mutate(MINIMAL, "npm", "not-a-real-ecosystem"), "unknown package-ecosystem")
+
+    def test_hex_is_not_a_valid_package_ecosystem_value(self):
+        # "Hex" is Elixir's package host and the display name in GitHub's
+        # own docs table (data/reusables/dependabot/supported-package-
+        # managers.md); the `package-ecosystem` value that table maps it
+        # to is `mix`. `hex` is refused like any other typo, converging
+        # with the mix-only sibling gates in naranjo.online (#59) and
+        # lidersea.com (#56) -- see KNOWN_ECOSYSTEMS's provenance comment.
+        self.assert_denied(mutate(MINIMAL, "npm", "hex"), "unknown package-ecosystem")
+
+    def test_mix_is_the_accepted_elixir_ecosystem_value(self):
+        self.assertEqual(MODULE.document_errors(mutate(MINIMAL, "npm", "mix")), [])
 
     def test_package_ecosystem_must_be_a_plain_scalar(self):
         errors = MODULE.contract_errors(

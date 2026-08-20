@@ -17,12 +17,19 @@ indentation-based block subset every real ``dependabot.yml`` in this
 repository family actually uses -- two-space nesting, block mappings,
 block sequences, plain and single/double-quoted scalars -- and fails
 closed on everything outside that subset: tabs, flow collections
-(``[...]``/``{...}``), duplicate keys, anchors/aliases/tags, block
-scalars, document markers, and inline trailing comments. Only full-line
-``#`` comments are accepted (this repository's real file opens with a
-six-line rationale comment for omitting the ``terraform`` ecosystem;
-rejecting all comments outright, as the sibling repositories' gate does,
-would fail that real file).
+(``[...]``/``{...}``), duplicate keys, anchors (``&name``), aliases
+(``*name``), tags (``!tag``), block scalars, document markers, and
+inline trailing comments. Every scalar is checked for a leading
+``&``/``*``/``!`` before anything else, so an alias or anchor is refused
+outright rather than silently accepted as its own literal text (an
+unresolved ``*name`` has no defined meaning without the anchor it would
+reference, and this parser does not track anchors at all). Only
+full-line ``#`` comments are accepted: this repository's real file
+carries a six-line rationale comment for omitting the ``terraform``
+ecosystem, interior to the top-level mapping between ``version: 2`` and
+``updates:`` (lines 2-7, not a leading block before the document
+starts) -- rejecting all comments outright, as the sibling repositories'
+gate does, would fail that real file.
 
 Two-phase design: ``parse_document`` reads the restricted grammar into
 plain ``dict``/``list``/``str`` nodes, raising ``DependabotContractError``
@@ -95,13 +102,24 @@ class DependabotContractError(ValueError):
     """The document is outside the supported dependabot.yml contract subset."""
 
 
-# Mirrors GitHub's documented `package-ecosystem` enum, cross-checked against
-# two independent sources on 2026-08-20 (the Dependabot configuration-options
-# reference and the community-maintained schemastore.org/dependabot-2.0.json
-# JSON Schema) and against the sibling gates landing in naranjo.online #59 and
-# lidersea.com #56. Keep sorted; revalidate against upstream docs before
-# adding an entry -- this allowlist, not actionlint, is now this repository's
-# only defense against a typo'd ecosystem silently never running.
+# Mirrors GitHub's documented `package-ecosystem` enum -- the exact string
+# each `updates[].package-ecosystem` value must be, which is NOT always the
+# same as the ecosystem's display name. Ground truth per naranjo.online
+# issue #84's adversarial review: github/docs' own source table
+# (`data/reusables/dependabot/supported-package-managers.md`) maps
+# Hex/Elixir to the YAML value `mix` -- "Hex" is Elixir's package host and
+# the display name in GitHub's docs table, never a `package-ecosystem`
+# value -- and the community-maintained schemastore.org/dependabot-2.0.json
+# JSON Schema's enum carries `mix` and not `hex` either. An earlier revision
+# of this set carried both as a deliberate "union of two sources that
+# disagreed" hedge; that hedge itself admitted one undocumented value (a
+# fail-open sliver in an allowlist whose entire job is precision), and the
+# sibling gates in naranjo.online (#59) and lidersea.com (#56) are mix-only,
+# so this repository converges with them: `hex` is not a valid
+# `package-ecosystem` value and is refused like any other typo. Keep
+# sorted; revalidate against upstream docs before adding an entry -- this
+# allowlist, not actionlint, is now this repository's only defense against
+# a typo'd ecosystem silently never running.
 KNOWN_ECOSYSTEMS = frozenset(
     {
         "bazel",
@@ -121,7 +139,6 @@ KNOWN_ECOSYSTEMS = frozenset(
         "gomod",
         "gradle",
         "helm",
-        "hex",
         "julia",
         "maven",
         "mix",
@@ -184,6 +201,17 @@ _DQUOTE_RE = re.compile(r'"[^"\\]*"\Z')
 _SQUOTE_RE = re.compile(r"'[^']*'\Z")
 _DOC_MARKER_RE = re.compile(r"(?:---|\.\.\.)[ ]*\Z")
 
+# The deepest real structure any of the three repositories' dependabot.yml
+# files need is six levels (updates[] -> entry -> groups -> group-name ->
+# patterns -> list item); 20 is generous headroom for a legitimate future
+# variant while stopping a maliciously or accidentally deep document (a
+# "recursion bomb" of thousands of nested mapping keys) with a clean,
+# deterministic DependabotContractError long before Python's own recursion
+# limit is anywhere close -- this recursive-descent parser adds roughly two
+# stack frames per nesting level, so the default ~1000-frame limit would
+# otherwise only be reached, uncontrolled, past roughly 400-500 levels.
+_MAX_NESTING_DEPTH = 20
+
 
 def _tokenize(text):
     """Reduce raw text to ``(line_no, indent, content)`` structural lines.
@@ -232,6 +260,22 @@ def _parse_scalar(value_text, line_no):
         raise DependabotContractError(
             "line {}: flow-style collections ('{{...}}'/'[...]') are not supported".format(line_no)
         )
+    # An unquoted `*name` (alias) was previously indistinguishable from
+    # plain text: `_PLAIN_SCALAR_RE` admits `*` anywhere, including as the
+    # leading character, so an alias reference like `*anchor` parsed as the
+    # literal string "*anchor" -- a false PASS on unparseable YAML, since
+    # this module never defines or resolves anchors and an alias without
+    # one is meaningless. `&name` (anchor) and `!tag` (tag) already failed
+    # for an incidental reason (their characters sit outside every scalar
+    # regex below), which this makes an explicit, deliberate rejection
+    # instead. Checked before the quoted/plain branches so a quoted
+    # `"*anchor"` (a genuine, harmless literal string) is unaffected --
+    # only an *unquoted* leading `&`/`*`/`!` is refused.
+    if value_text[:1] in ("*", "&", "!"):
+        kind = {"*": "alias ('*name')", "&": "anchor ('&name')", "!": "tag ('!tag')"}[value_text[0]]
+        raise DependabotContractError(
+            "line {}: YAML {} is not supported".format(line_no, kind)
+        )
     if _DQUOTE_RE.fullmatch(value_text):
         return value_text[1:-1]
     if _SQUOTE_RE.fullmatch(value_text):
@@ -266,20 +310,30 @@ def _is_mapping_entry(content):
     return bool(_MAPPING_START_RE.match(content))
 
 
-def _parse_node(entries, pos, indent):
+def _parse_node(entries, pos, indent, depth):
     """Parse whichever node sits at exactly ``indent`` starting at ``pos``.
 
     The caller always verifies ``entries[pos]`` is present at exactly
     this indent before recursing (either it is the document's first
     line, or a parent's own child-indent check already confirmed it), so
     the three-way dispatch below never needs to re-derive indentation.
+
+    ``depth`` counts nesting levels from the document root (0); it is
+    checked here, the one entry point every recursive descent into a
+    child block passes through, so neither a deeply nested mapping nor a
+    deeply nested sequence can bypass the cap.
     """
 
+    if depth > _MAX_NESTING_DEPTH:
+        raise DependabotContractError(
+            "line {}: nesting exceeds the maximum supported depth ({})"
+            .format(entries[pos][0], _MAX_NESTING_DEPTH)
+        )
     line_no, _, content = entries[pos]
     if content == "-":
-        return _parse_sequence(entries, pos, indent)
+        return _parse_sequence(entries, pos, indent, depth)
     if _is_mapping_entry(content):
-        return _parse_mapping(entries, pos, indent)
+        return _parse_mapping(entries, pos, indent, depth)
     # A bare scalar occupying its own line: only reachable as a sequence
     # item's content (patterns: / - "github/codeql-action*"), since a
     # mapping value is always written inline after "key: ".
@@ -290,7 +344,7 @@ def _parse_node(entries, pos, indent):
     return _parse_scalar(content, line_no), pos + 1
 
 
-def _parse_mapping(entries, pos, indent):
+def _parse_mapping(entries, pos, indent, depth):
     mapping = {}
     while pos < len(entries):
         line_no, line_indent, content = entries[pos]
@@ -312,7 +366,7 @@ def _parse_mapping(entries, pos, indent):
                         "line {}: nested content must be indented exactly 2 spaces past its key"
                         .format(entries[pos][0])
                     )
-                node, pos = _parse_node(entries, pos, child_indent)
+                node, pos = _parse_node(entries, pos, child_indent, depth + 1)
                 mapping[key] = node
             else:
                 raise DependabotContractError(
@@ -328,7 +382,7 @@ def _parse_mapping(entries, pos, indent):
     return mapping, pos
 
 
-def _parse_sequence(entries, pos, indent):
+def _parse_sequence(entries, pos, indent, depth):
     items = []
     while pos < len(entries):
         line_no, line_indent, content = entries[pos]
@@ -343,7 +397,7 @@ def _parse_sequence(entries, pos, indent):
                 "line {}: sequence item must be indented exactly 2 spaces past its '-'"
                 .format(entries[pos][0])
             )
-        node, pos = _parse_node(entries, pos, child_indent)
+        node, pos = _parse_node(entries, pos, child_indent, depth + 1)
         items.append(node)
     return items, pos
 
@@ -364,7 +418,7 @@ def parse_document(text):
     entries = _tokenize(text)
     if not entries:
         raise DependabotContractError("document is empty")
-    node, pos = _parse_node(entries, 0, entries[0][1])
+    node, pos = _parse_node(entries, 0, entries[0][1], 0)
     if entries[0][1] != 0:
         raise DependabotContractError(
             "line {}: the document must start at column 0".format(entries[0][0])
@@ -534,12 +588,22 @@ def _validate_group(spec):
 
 
 def document_errors(text):
-    """Parse and validate ``text``, collapsing a parse failure to one message."""
+    """Parse and validate ``text``, collapsing a parse failure to one message.
+
+    ``_MAX_NESTING_DEPTH`` in the parser is the primary, deterministic
+    defense against a deeply nested document; catching ``RecursionError``
+    here is the belt-and-suspenders backstop, so that if any path were
+    ever found to bypass the explicit cap, the caller still gets one
+    clean fail-closed message and exit 2 instead of an uncaught traceback
+    and exit 1 (the exact class of gap the depth cap closes).
+    """
 
     try:
         document = parse_document(text)
     except DependabotContractError as error:
         return [str(error)]
+    except RecursionError:
+        return ["document nesting is too deep to parse safely"]
     return contract_errors(document)
 
 
