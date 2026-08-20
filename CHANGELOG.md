@@ -6,6 +6,14 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-20
+
+### Security
+
+- Shared kubeadm parser diagnostics now identify duplicate keys, valueless
+  keys, and duplicate document kinds by structure and source line without
+  reproducing file-derived keys or scalar values in validator output.
+
 ## [0.1.9] - 2026-08-20
 
 ### Security
