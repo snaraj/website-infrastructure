@@ -7,6 +7,7 @@ import concurrent.futures
 import copy
 import datetime as dt
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -3731,6 +3732,11 @@ class GitTransitionTests(unittest.TestCase):
             str(denied.exception),
             "fragment must be non-empty and at most 16 KiB",
         )
+
+    def test_release_notes_do_not_rehash_the_same_immutable_blob(self):
+        source = inspect.getsource(MODULE.render_release_notes)
+        self.assertNotIn("hashlib.sha256(payload)", source)
+        self.assertNotIn("release fragment changed after window derivation", source)
 
     def test_existing_fragments_cannot_be_edited_deleted_or_renamed(self):
         for operation in ("edit", "delete", "rename"):
