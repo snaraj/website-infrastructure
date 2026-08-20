@@ -116,7 +116,7 @@ class EncryptionConfigCliTests(unittest.TestCase):
     def test_duplicate_document_is_rejected(self):
         self.assert_rejected(
             VALID_CONFIG + "---\n" + VALID_CONFIG,
-            "duplicate EncryptionConfiguration document",
+            "duplicate document kind at line",
         )
 
     def test_tab_indentation_is_rejected(self):
