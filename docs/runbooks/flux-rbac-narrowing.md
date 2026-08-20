@@ -157,6 +157,80 @@ the second block must all answer `no`. While the broad binding is still present
 the second block will answer `yes` — that is the point of running the sweep
 again after the deletion.
 
+### Discovery precondition — run this BEFORE the sweep
+
+**`kubectl auth can-i` is not an RBAC oracle on its own.** It resolves the
+resource name through API DISCOVERY before it issues the SubjectAccessReview.
+When the queried type is absent from discovery — the CRD is not installed, the
+discovery cache is stale, or the served version differs — the pinned kubectl
+minor (v1.36) prints
+
+    Warning: the server doesn't have a resource type 'kustomizations'
+
+on stderr, answers `no`, and exits 1. That is byte-identical to a genuine RBAC
+denial, so an operator replaying the sweep below against a cluster without the
+Flux CRDs reads a fully green all-deny matrix in which the authorizer was never
+consulted for a single row. The live validation appended to pull request #152
+measured this directly: the same probe code reported 84 mismatches before the
+CRDs were installed, and became informative only once the eight reviewed CRDs
+had been applied. Issue #157 tracks the closed fix.
+
+**1. Prove the exact reviewed CRDs exist.** These eight are the set this
+repository's controller install creates; a ninth, a missing one, or a foreign
+name is a DIFFERENT API surface from the one these manifests review.
+
+    kubectl get crd \
+      buckets.source.toolkit.fluxcd.io \
+      externalartifacts.source.toolkit.fluxcd.io \
+      gitrepositories.source.toolkit.fluxcd.io \
+      helmcharts.source.toolkit.fluxcd.io \
+      helmreleases.helm.toolkit.fluxcd.io \
+      helmrepositories.source.toolkit.fluxcd.io \
+      kustomizations.kustomize.toolkit.fluxcd.io \
+      ocirepositories.source.toolkit.fluxcd.io
+
+**2. Prove they are Established**, so discovery actually serves them rather than
+merely holding the object:
+
+    kubectl wait --for=condition=Established --timeout=60s \
+      crd/buckets.source.toolkit.fluxcd.io \
+      crd/externalartifacts.source.toolkit.fluxcd.io \
+      crd/gitrepositories.source.toolkit.fluxcd.io \
+      crd/helmcharts.source.toolkit.fluxcd.io \
+      crd/helmreleases.helm.toolkit.fluxcd.io \
+      crd/helmrepositories.source.toolkit.fluxcd.io \
+      crd/kustomizations.kustomize.toolkit.fluxcd.io \
+      crd/ocirepositories.source.toolkit.fluxcd.io
+
+All eight must report `condition met`. If any row of either command fails, STOP:
+the sweep below is unresolved, not green.
+
+**3. The reading rule, absolute.** A `no` carrying the `the server doesn't have
+a resource type` warning — and any `auth can-i` answer for a resource identity
+that is not in discovery — is **UNRESOLVED**, never **DENIED**. Record it as
+unresolved and stop. Never copy such a row into a receipt, a PR body, or an
+evidence comment as a denial: an exit status of 1 there means "I could not name
+the resource", not "the authorizer refused".
+
+**4. Disambiguate with a discovery-independent read.** `kubectl auth can-i
+--list` is a server-side SelfSubjectRulesReview: it returns the rules the
+authorizer holds for the identity without first resolving a resource name
+through discovery, so it answers even when the CRD is absent.
+
+    kubectl auth can-i --list -n flux-system \
+      --as=system:serviceaccount:flux-system:source-controller
+
+Use it whenever a `no` is ambiguous. Keep any published excerpt bounded to the
+reviewed request identities this runbook already names.
+
+**5. Status of this matrix as evidence.** Until the fail-closed oracle tracked
+in issue #157 lands — discovery and authorization recorded as separate
+dimensions with closed values, a hostile absent-CRD test, and positive controls
+proving a built-in resource reaches the authorizer — the two blocks below are an
+operator aid, NOT promotion evidence on their own. This subsection is
+deliberately the narrow interpretive fix; the closed mechanism is #157's scope
+and is not implemented here.
+
     # must be yes
     auth can-i impersonate serviceaccounts/root-reconciler -n flux-system \
       --as=system:serviceaccount:flux-system:kustomize-controller

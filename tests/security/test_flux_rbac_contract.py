@@ -2671,5 +2671,126 @@ class FluxRbacAuthorizerSemanticsTests(unittest.TestCase):
         )
 
 
+class FluxRbacRunbookDiscoveryPreconditionTests(unittest.TestCase):
+    """The live sweep must never be read as an oracle it is not (issue #157).
+
+    `kubectl auth can-i` resolves the resource name through API DISCOVERY before
+    it issues the SubjectAccessReview. With the Flux CRDs absent, the pinned
+    kubectl minor warns that the server has no such resource type, answers `no`,
+    and exits 1 — byte-identical to an RBAC denial. Live validation of this
+    branch read 84 false denials that way, so the entire "must be no" block was
+    green while the authorizer had never been consulted.
+
+    The runbook now carries the interpretive fix, and this class is what stops
+    it from being edited away: a sweep whose precondition has quietly vanished
+    is worse than one that never had it, because the receipt still looks the
+    same. The CLOSED oracle — discovery and authorization as separate recorded
+    dimensions, a hostile absent-CRD test, positive controls — is issue #157's
+    scope and is deliberately NOT asserted here.
+    """
+
+    RUNBOOK = ROOT / "docs" / "runbooks" / "flux-rbac-narrowing.md"
+    INSTALLER = ROOT / "scripts" / "install-flux-controllers.sh"
+    HEADING = "### Discovery precondition — run this BEFORE the sweep"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.RUNBOOK.read_text(encoding="utf-8")
+
+    def _precondition(self):
+        """The subsection's own text, so a fragment elsewhere cannot satisfy it.
+
+        Every assertion below is scoped here rather than to the whole runbook:
+        the file already discusses denials at length, and a phrase that happens
+        to appear three sections away is not a warning the sweep's reader sees.
+        """
+
+        return self.text[
+            self.text.index(self.HEADING) : self.text.index("    # must be yes")
+        ]
+
+    def _reviewed_crds(self):
+        """The CRD set the reviewed controller install creates, read from it.
+
+        Derived rather than restated: adding a ninth CRD to the install must
+        make this test demand it in the runbook too, or the precondition would
+        prove a smaller discovery surface than the sweep actually queries.
+        """
+
+        source = self.INSTALLER.read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^FLUX_CRDS=\(\n(?P<body>.*?)^\)$", source)
+        self.assertIsNotNone(match, "the installer no longer declares FLUX_CRDS")
+        names = re.findall(r"(?m)^\s*(\S+\.fluxcd\.io)\s*$", match.group("body"))
+        self.assertEqual(len(names), 8, "the reviewed CRD set changed shape")
+        return names
+
+    def test_the_precondition_comes_before_the_first_sweep_command(self):
+        """Order is the whole point: an operator reads top to bottom.
+
+        A correct warning printed AFTER the matrix is a warning the reader
+        reaches once the vacuous receipt is already written.
+        """
+
+        heading = self.text.find(self.HEADING)
+        self.assertNotEqual(heading, -1, "the discovery precondition subsection is gone")
+        sweep = self.text.find("    # must be yes")
+        self.assertNotEqual(sweep, -1, "the sweep's first block is gone")
+        self.assertLess(
+            heading, sweep, "the precondition must precede the sweep it qualifies"
+        )
+        # And it sits inside the live-proof section rather than somewhere the
+        # sweep's reader never passes.
+        live_proof = self.text.find("## Live proof, before the deletion")
+        self.assertNotEqual(live_proof, -1)
+        self.assertLess(live_proof, heading)
+
+    def test_every_reviewed_crd_is_named_in_both_precondition_commands(self):
+        """Each name in the existence check AND in the Established check.
+
+        Asserted per command block rather than once over the whole subsection.
+        A name present only in `kubectl get crd` leaves that CRD's readiness
+        unproven while the section still mentions it, and existence is not
+        discoverability: the API server serves a CRD only once it is
+        Established, so a merely-created one produces exactly the absent-type
+        `no` this subsection exists to disqualify. Dropping one name from the
+        wait list survived a single whole-section assertion.
+        """
+
+        precondition = self._precondition()
+        self.assertIn("kubectl get crd", precondition)
+        wait_at = precondition.index("kubectl wait --for=condition=Established")
+        existence, established = precondition[:wait_at], precondition[wait_at:]
+        for name in self._reviewed_crds():
+            with self.subTest(crd=name, block="get"):
+                self.assertIn(name, existence)
+            with self.subTest(crd=name, block="wait"):
+                self.assertIn("crd/" + name, established)
+
+    def test_an_absent_resource_type_is_unresolved_and_never_denied(self):
+        precondition = self._precondition()
+        for fragment in (
+            "the server doesn't have a resource type",
+            "**UNRESOLVED**, never **DENIED**",
+            "exits 1",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, precondition)
+
+    def test_a_discovery_independent_read_is_offered(self):
+        precondition = self._precondition()
+        self.assertIn("auth can-i --list", precondition)
+        self.assertIn("SelfSubjectRulesReview", precondition)
+
+    def test_the_matrix_is_not_promotion_evidence_until_the_oracle_lands(self):
+        precondition = self._precondition()
+        self.assertIn("#157", precondition)
+        self.assertIn("NOT promotion evidence", precondition)
+
+    def test_the_runbook_keeps_its_no_live_apply_posture(self):
+        """This change is interpretive only; it must not have relaxed the gate."""
+
+        self.assertIn("Status: `DO NOT APPLY`", self.text)
+
+
 if __name__ == "__main__":
     unittest.main()
