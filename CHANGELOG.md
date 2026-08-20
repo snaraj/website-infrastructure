@@ -6,6 +6,24 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-20
+
+### Security
+
+- The Kyverno install harness now proves its own fresh-cluster discovery gate
+  before any test relies on it: a client dry-run over a `ClusterPolicy` is
+  refused while the CRD phase has not completed, a built-in kind is accepted in
+  that same state, and the CRD phase's one effect flips the identical document.
+- A fresh-cluster negative pairs the reviewed apply with a run in which the
+  `Established` wait succeeds without refreshing discovery. The same policy
+  dry-run then fails, the transaction rolls back, and no policy is ever
+  applied — so the policy validation is shown to depend on the CRD phase rather
+  than merely to follow it.
+- The built-in validation prefix is pinned to exactly two client dry-runs, in
+  order, with the built-in one preceding the CRD phase; because the harness
+  refuses undiscovered kinds in that state, a passing run is itself the
+  evidence that the prefix excludes the policy documents.
+
 ## [0.1.7] - 2026-08-19
 
 ### Changed
