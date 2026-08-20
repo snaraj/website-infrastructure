@@ -99,6 +99,64 @@ class EncryptionConfigTests(unittest.TestCase):
         errors = MODULE.validate(VALID.replace("              secret: ", "              zzz: "))
         self.assertTrue(any("missing secret" in error for error in errors), errors)
 
+    def test_shared_parser_diagnostics_never_echo_file_derived_content(self):
+        """All syntax failures retain an exact line without returning input bytes."""
+
+        marker = "zz" + "parserdiagnosticmarker" + "zz"
+        duplicate_key = VALID.replace(
+            "kind: EncryptionConfiguration",
+            "kind: EncryptionConfiguration\n{}: first\n{}: second".format(marker, marker),
+        )
+        missing_value = VALID.rstrip() + "\n{}:\n".format(marker)
+        marker_document = VALID.replace(
+            "kind: EncryptionConfiguration", "kind: {}".format(marker)
+        ).rstrip()
+        duplicate_document = (
+            marker_document
+            + "\n---\napiVersion: apiserver.config.k8s.io/v1\nkind: {}\nresources: []\n".format(marker)
+        )
+
+        cases = (
+            (
+                "duplicate-key",
+                duplicate_key,
+                "duplicate mapping key",
+                max(
+                    number
+                    for number, line in enumerate(duplicate_key.splitlines(), 1)
+                    if line == "{}: second".format(marker)
+                ),
+            ),
+            (
+                "missing-value",
+                missing_value,
+                "mapping key has no value",
+                max(
+                    number
+                    for number, line in enumerate(missing_value.splitlines(), 1)
+                    if line == "{}:".format(marker)
+                ),
+            ),
+            (
+                "duplicate-kind",
+                duplicate_document,
+                "duplicate document kind",
+                max(
+                    number
+                    for number, line in enumerate(duplicate_document.splitlines(), 1)
+                    if line == "apiVersion: apiserver.config.k8s.io/v1"
+                ),
+            ),
+        )
+        for label, config, structural_label, expected_line in cases:
+            with self.subTest(shape=label):
+                errors = MODULE.validate(config)
+                self.assertNotEqual(errors, [])
+                self.assertFalse(any(marker in error for error in errors), errors)
+                self.assertIn(
+                    "{} at line {}".format(structural_label, expected_line), errors
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

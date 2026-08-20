@@ -163,6 +163,9 @@ def _split_pair(content, line_number):
 
 # _parse_mapping builds one indentation level while treating duplicate keys as a
 # syntax failure rather than applying YAML's inconsistent last-value behavior.
+# Diagnostics identify the structural failure and source line without echoing a
+# key read from the inspected file. The same parser handles the API server's
+# EncryptionConfiguration, whose neighboring values include the secretbox key.
 def _parse_mapping(tokens, index, indent, initial=None):
     result = {} if initial is None else dict(initial)
     while index < len(tokens):
@@ -175,13 +178,13 @@ def _parse_mapping(tokens, index, indent, initial=None):
             break
         key, raw = _split_pair(content, line_number)
         if key in result:
-            raise ConfigSyntaxError("duplicate key {} at line {}".format(key, line_number))
+            raise ConfigSyntaxError("duplicate mapping key at line {}".format(line_number))
         index += 1
         if raw:
             result[key] = _strip_scalar(raw, line_number)
             continue
         if index >= len(tokens) or tokens[index][0] <= indent:
-            raise ConfigSyntaxError("key {} has no value at line {}".format(key, line_number))
+            raise ConfigSyntaxError("mapping key has no value at line {}".format(line_number))
         result[key], index = _parse_block(tokens, index, indent + 2)
     return result, index
 
@@ -265,7 +268,10 @@ def parse_documents(text):
         if not isinstance(kind, str):
             raise ConfigSyntaxError("document at line {} has no scalar kind".format(start))
         if kind in documents:
-            raise ConfigSyntaxError("duplicate {} document".format(kind))
+            # A kind is an unrestricted scalar from the inspected file. Keep
+            # the diagnostic actionable with the duplicate document's line,
+            # but never reproduce that scalar in logs.
+            raise ConfigSyntaxError("duplicate document kind at line {}".format(start))
         documents[kind] = parsed
     return documents
 
