@@ -1,0 +1,7 @@
+# The exact denial public-edge-egress-drops-a-private-range.yaml must produce.
+# One document, one reason: the tunnel-edge rule refusing an exclusion set that
+# is one range short. Exactly one line, so a denial that arrives from any other
+# arm is an unreviewed denial and fails, and a denial that disappears -- the
+# comparison against private_and_reserved_ranges removed from
+# valid_public_edge_rule -- fails as a weakened rule.
+NetworkPolicy cloudflare-public/cloudflared-edge is outside the exact DNS, edge, and site egress allowlist
