@@ -1600,6 +1600,63 @@ def _rbac_rule_list(block, field):
     ]
 
 
+def _mapping_scalar(document, block, key):
+    """Return ``key``'s single-token value inside top-level ``block:``, or None.
+
+    A LINE SCAN, deliberately, and not the pattern it replaced. That pattern —
+    ``(?ms)^roleRef:\\n(?:  .*\\n)*?  name:\\s*(\\S+)\\s*$`` — carried DOTALL, so
+    its ``.`` crossed line boundaries and the repetition could partition the
+    same text exponentially many ways. Against a ``roleRef:`` block containing
+    no ``name:`` key the engine had to explore every partition before it could
+    report failure: 22 continuation lines cost 103 ms and each further PAIR of
+    lines multiplied that by four, so a ~40-line crafted block stalls the scan
+    for hours (CodeQL py/redos, HIGH).
+
+    This module is a fail-closed CI gate that reads repository content, which
+    makes its latency a security property in its own right: an input that makes
+    the gate hang is an input that stops it reporting, and a hang is a far
+    quieter failure than a finding. Python's ``re`` offers no atomic groups or
+    possessive quantifiers to bound the search, so the fix is structural —
+    scanning lines removes the ambiguity rather than tuning it, runs in time
+    linear in the document, and cannot backtrack at all.
+
+    The accepted shape is the one the reviewed manifests use and the one the old
+    pattern accepted: ``block:`` alone on its own line at column zero, followed
+    by two-space-indented entries, with ``key`` at exactly that indent and a
+    value of one non-whitespace token. A deeper indent is a nested mapping and a
+    dedent ends the block, so neither can supply the value.
+
+    Not merely faster — CORRECT where the old pattern was not. That ``.*`` was
+    greedy under DOTALL, so a single repetition swallowed to end of document and
+    backtracked from there: the first match found was the LAST two-space-indented
+    ``name:`` line, not the first. In the sequence style ``kustomize build``
+    emits (dash at column zero, fields at two spaces) that line belongs to
+    ``subjects:``, so a binding was compared against its own subject's name
+    instead of the role it grants — a binding to ``cluster-admin`` read back as
+    ``helm-controller`` and passed. The reviewed manifests indent the dash, which
+    is the only reason the bug stayed latent; reformatting them would have armed
+    it. Both readings are pinned by test.
+    """
+
+    prefix = "  " + key + ":"
+    lines = document.splitlines()
+    try:
+        start = lines.index(block + ":")
+    except ValueError:
+        return None
+    for line in lines[start + 1:]:
+        if not line.startswith("  "):
+            break
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix):].strip()
+        # One token, matching the old pattern's `(\S+)\s*$`: a value with
+        # internal whitespace is not the exact object reference this checks.
+        if value and not any(character.isspace() for character in value):
+            return value
+    return None
+
+
 def flux_rbac_contract_errors(root):
     """Require the narrowed Flux controller authorization (AUDIT S12).
 
@@ -1741,12 +1798,12 @@ def flux_rbac_contract_errors(root):
         if kind_match.group(1) == "ClusterRole":
             seen_cluster_roles.add(name_match.group(1))
             continue
-        role_ref = re.search(r"(?ms)^roleRef:\n(?:  .*\n)*?  name:\s*(\S+)\s*$", document)
+        role_ref = _mapping_scalar(document, "roleRef", "name")
         subjects = re.findall(
             r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", document
         )
         seen_cluster_bindings[name_match.group(1)] = (
-            role_ref.group(1) if role_ref else None,
+            role_ref,
             tuple(sorted(subjects)),
         )
     for name, owner in sorted(FLUX_PER_CONTROLLER_CLUSTER_ROLES.items()):

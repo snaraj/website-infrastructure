@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import NamedTuple
@@ -2790,6 +2791,118 @@ class FluxRbacRunbookDiscoveryPreconditionTests(unittest.TestCase):
         """This change is interpretive only; it must not have relaxed the gate."""
 
         self.assertIn("Status: `DO NOT APPLY`", self.text)
+
+
+class FluxRoleRefScanCostTests(unittest.TestCase):
+    """The roleRef reader must not be stallable by the content it reads.
+
+    `flux_rbac_contract_errors` is a fail-closed CI gate, so its running time is
+    a security property: an input that makes the gate hang is an input that
+    stops it reporting, and a hang is a quieter failure than a finding. The
+    reader this battery covers replaced a regular expression that could be
+    stalled for hours by a crafted block (CodeQL py/redos, HIGH), so the cost is
+    pinned here rather than left to reviewers to notice.
+    """
+
+    # The retired pattern, kept ONLY as the differential oracle below. It carried
+    # DOTALL, so its `.` crossed line boundaries and `(?:  .*\n)*?` could
+    # partition the same text exponentially many ways.
+    RETIRED = re.compile(r"(?ms)^roleRef:\n(?:  .*\n)*?  name:\s*(\S+)\s*$")
+
+    # Large enough that no exponential scan could finish, small enough that a
+    # linear one is imperceptible: the replacement reads this in single-digit
+    # milliseconds, while the retired pattern needed 103 ms at TWENTY-TWO lines
+    # and quadrupled every two lines after that.
+    HOSTILE_LINES = 50_000
+    # Deliberately loose in absolute terms. It is not a performance target; it
+    # is the widest bound that still separates linear from exponential, so a
+    # loaded machine cannot make it flaky and a reintroduced backtracking scan
+    # cannot slip under it.
+    BUDGET_SECONDS = 2.0
+
+    @classmethod
+    def setUpClass(cls):
+        cls.validator = load_script("validate_repository.py", module_name="rbac_validator")
+
+    def scan(self, document):
+        started = time.perf_counter()
+        value = self.validator._mapping_scalar(document, "roleRef", "name")
+        return value, time.perf_counter() - started
+
+    def test_a_hostile_block_with_no_name_key_is_refused_within_budget(self):
+        """The worst case: the key is absent, so the whole block must be read.
+
+        This is the shape that made the retired pattern explode — it could only
+        report failure after exploring every partition of the block.
+        """
+
+        document = "roleRef:\n" + "  a: b\n" * self.HOSTILE_LINES
+        value, elapsed = self.scan(document)
+        self.assertIsNone(value)
+        self.assertLess(elapsed, self.BUDGET_SECONDS, f"{self.HOSTILE_LINES} lines took {elapsed:.3f}s")
+
+    def test_a_hostile_block_still_parses_the_real_value(self):
+        """Speed is worthless if the answer is wrong: assert BOTH."""
+
+        document = (
+            "roleRef:\n"
+            + "  a: b\n" * self.HOSTILE_LINES
+            + "  name: crd-controller-helm-flux-system\n"
+        )
+        value, elapsed = self.scan(document)
+        self.assertEqual(value, "crd-controller-helm-flux-system")
+        self.assertLess(elapsed, self.BUDGET_SECONDS, f"{self.HOSTILE_LINES} lines took {elapsed:.3f}s")
+
+    def test_the_scan_agrees_with_the_retired_pattern_on_the_reviewed_manifests(self):
+        """No behaviour change on the input the validator actually reads."""
+
+        # Split with the validator's OWN splitter, so the corpus is exactly the
+        # text `flux_rbac_contract_errors` hands to the reader.
+        text = (ROOT / "kubernetes/flux-system/access.yaml").read_text(encoding="utf-8")
+        documents = [
+            document
+            for document in self.validator._yaml_documents(text)
+            if re.search(r"(?m)^roleRef:", document)
+        ]
+        self.assertGreaterEqual(len(documents), 20, "the roleRef corpus vanished")
+        for document in documents:
+            retired = self.RETIRED.search(document)
+            with self.subTest(name=self.validator._mapping_scalar(document, "metadata", "name")):
+                self.assertEqual(
+                    self.validator._mapping_scalar(document, "roleRef", "name"),
+                    retired.group(1) if retired else None,
+                )
+
+    def test_the_scan_reads_the_role_ref_where_the_retired_pattern_read_the_subject(self):
+        """The retired pattern was also WRONG, not merely slow.
+
+        Its inner `.*` was greedy under DOTALL, so one repetition swallowed to
+        the end of the document and backtracked from there — the first match it
+        found was the LAST two-space-indented `name:` line, not the first. In
+        the sequence style `kustomize build` emits (dash at column zero, fields
+        at two spaces) that line belongs to `subjects:`, so the check compared a
+        binding against its own subject's name instead of the role it grants. A
+        binding to `cluster-admin` would have read back as its ServiceAccount
+        name and passed. The reviewed manifests indent the dash, which is the
+        only reason the bug was latent; reformatting them would have armed it.
+        """
+
+        document = (
+            "roleRef:\n"
+            "  apiGroup: rbac.authorization.k8s.io\n"
+            "  kind: ClusterRole\n"
+            "  name: cluster-admin\n"
+            "subjects:\n"
+            "- kind: ServiceAccount\n"
+            "  name: helm-controller\n"
+            "  namespace: flux-system\n"
+        )
+        self.assertEqual(self.RETIRED.search(document).group(1), "helm-controller")
+        self.assertEqual(self.validator._mapping_scalar(document, "roleRef", "name"), "cluster-admin")
+
+    def test_the_retired_pattern_is_not_back_in_the_validator(self):
+        source = (ROOT / "scripts" / "validate_repository.py").read_text(encoding="utf-8")
+        self.assertNotIn(r'r"(?ms)^roleRef:\n(?:  .*\n)*?  name:', source)
 
 
 if __name__ == "__main__":
