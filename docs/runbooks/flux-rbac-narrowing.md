@@ -15,16 +15,24 @@ repository now:
 1. deletes the `cluster-reconciler-flux-system` binding
    (`kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml`);
 2. replaces the shared `crd-controller-flux-system` rules with an enumerated set
-   that carries no wildcard, no cluster-wide Secret read, and no
-   `serviceaccounts/token` creation
+   that carries no wildcard, no cluster-wide Secret read, no
+   `serviceaccounts/token` creation, and — since the per-controller split
+   (issue #98) — **no Flux API group at all**: what remains is the cluster
+   metadata reads, event reporting, and the `/livez/ping` probe that are
+   identical for all three controllers
    (`.../patches/crd-controller-role.yaml`);
 3. pins that binding's subjects to the three installed controllers
    (`.../patches/crd-controller-binding.yaml`);
-4. adds the namespaced authority the controllers still need — leader election,
+4. adds one ClusterRole and ClusterRoleBinding PER CONTROLLER, each bound to a
+   single ServiceAccount, carrying that controller's own custom-resource
+   authority — `crd-controller-source-flux-system`,
+   `crd-controller-kustomize-flux-system`, `crd-controller-helm-flux-system`
+   (`kubernetes/flux-system/access.yaml`);
+5. adds the namespaced authority the controllers still need — leader election,
    controller-owned ConfigMaps, the SOPS age key read, and one name-restricted
    impersonation Role per namespace holding reconciler accounts
    (`kubernetes/flux-system/access.yaml`);
-5. corrects both site release reconcilers from `gitrepositories` to
+6. corrects both site release reconcilers from `gitrepositories` to
    `ocirepositories`, the kind their own source objects declare.
 
 **The live cluster still carries the broad binding.** The Flux controllers were
@@ -71,14 +79,34 @@ justification fail identically. Without it "narrow" meant only "passes a
 deny-list", and a `batch/jobs` write or a cluster-wide `pods/exec` read could be
 added with every gate green.
 
-The largest entry in that inventory is the one residual worth an operator's
-attention: `crd-controller-flux-system` is a single ClusterRole bound to all
-three controllers, so each holds the other two's write authority over
-Kustomizations, HelmReleases, and source objects. Impersonation does not contain
-it — the victim controller performs the reconciliation. Splitting the role per
-controller is tracked separately; until then the residual is enumerated row by
-row rather than described in prose, and it cannot grow without the suite
-failing.
+That inventory used to be dominated by one residual: `crd-controller-flux-system`
+was a single ClusterRole bound to all three controllers, so each held the other
+two's write authority over Kustomizations, HelmReleases, and source objects, and
+impersonation did not contain it — the victim controller performs the
+reconciliation. **That residual is gone (issue #98).** 135 declared-slack rows
+described it; 134 of those grants no longer exist, and the one that remains —
+helm-controller's `watch` on the HelmChart it creates itself — is re-attributed
+to the controller that owns the object rather than to a shared role.
+`test_the_declared_slack_is_bounded_and_attributed` now asserts that count is
+ZERO and keeps the retired reason string alive precisely so a re-broadened
+shared role has to declare itself and fail.
+
+Three properties replace it, each independently enforced:
+
+- the shared role names no Flux API group — checked by
+  `scripts/validate_repository.py`, by the Conftest rule over the rendered
+  output, and by `test_the_shared_controller_role_grants_no_flux_api_group`;
+- each per-controller ClusterRoleBinding names exactly one ServiceAccount and
+  binds the role it is named for — same three places;
+- every write one controller could make to another's object, including
+  `/status` and `/finalizers`, is asserted DENIED, exhaustively from the
+  registered-kind matrix rather than by example.
+
+The one kind two controllers legitimately touch is HelmChart, from opposite ends
+of one handoff: helm-controller creates and deletes the intermediate chart,
+source-controller reconciles it into an artifact. That exemption is declared in
+exactly one place in the suite and its size is asserted, so it cannot quietly
+grow into a second shared role.
 
 ### The declared gaps, and what they block
 
@@ -205,6 +233,27 @@ again after the deletion.
     auth can-i '*' '*' -A \
       --as=system:serviceaccount:flux-system:kustomize-controller
 
+    # THE CONFUSED DEPUTY (issue #98), live. Each row is authority one
+    # controller held over another controller's execution objects until the
+    # per-controller split. Unlike the rows above, these turn `no` at step 3
+    # rather than step 4 — the shared role is where they lived, and step 3 is
+    # what replaces it — so run this block at BOTH boundaries: every row answers
+    # `yes` before step 3 and `no` after it.
+    auth can-i patch kustomizations.kustomize.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:source-controller
+    auth can-i patch helmreleases.helm.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:source-controller
+    auth can-i create helmcharts.source.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:source-controller
+    auth can-i patch helmreleases.helm.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:kustomize-controller
+    auth can-i patch ocirepositories.source.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:kustomize-controller
+    auth can-i patch kustomizations.kustomize.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:helm-controller
+    auth can-i patch gitrepositories.source.toolkit.fluxcd.io -A \
+      --as=system:serviceaccount:flux-system:helm-controller
+
 ## What each step removes — read this before the procedure
 
 Only one step in this migration is a deletion, but TWO of them remove
@@ -216,6 +265,14 @@ live shared ClusterRole loses its wildcard rules, its cluster-wide Secret read,
 and `serviceaccounts/token` creation, and the live binding loses four of its
 seven subjects. That is a removal, not an addition, and it happens before the
 "destructive" step.
+
+Since the per-controller split (issue #98) that replacement patch removes MORE:
+the shared role loses every Flux API group as well, and the authority it used to
+carry arrives instead as six NEW objects — three ClusterRoles and three
+ClusterRoleBindings — that must be applied in the same boundary. Applying the
+shared-role patch without them leaves all three controllers unable to reconcile
+anything, so the order inside step 3 is not optional: `access.yaml` first, the
+shared role and its binding second.
 
 For **kustomize-controller and helm-controller** the loss is masked: they still
 hold `cluster-admin` through `cluster-reconciler-flux-system` until step 4.
@@ -231,17 +288,24 @@ object rather than the parts someone judged load-bearing.
 
 ## Procedure
 
-Three objects change across this migration, at two boundaries. Each boundary has
-its own verification and its own rollback, and the rollback payload is frozen
-before anything is applied.
+NINE objects change across this migration, at two boundaries: three that exist
+today and are modified or deleted, and six the split creates (issue #98). Each
+boundary has its own verification and its own rollback, and the rollback payload
+is frozen before anything is applied.
+
+The asymmetry matters for rollback. The three EXISTING objects are restored from
+the frozen capture; the six NEW ones did not exist before the migration, so
+rolling back means DELETING them, not restoring them. A rollback that only
+re-applies the frozen file leaves six live ClusterRoles and ClusterRoleBindings
+granting authority nobody reviewed at that point in the sequence.
 
 1. **Confirm the gate below is fully satisfied and the owner has said go.**
    Confirm the controllers are the reviewed digests and the reconciliation is
    still inert: every Flux object suspended, and the ones that are not
    (`flux-system`, `platform-prerequisites`) reconciling only objects this
    change has already proven authorized.
-2. **Freeze the pre-change authorization.** Capture all three objects as they
-   exist live, with a digest, into operator-held storage — not into this
+2. **Freeze the pre-change authorization.** Capture all three EXISTING objects
+   as they exist live, with a digest, into operator-held storage — not into this
    repository, which describes the target state and therefore cannot describe
    what to roll back to:
 
@@ -254,14 +318,31 @@ before anything is applied.
    the source for the deleted binding only; the pre-change ClusterRole rules
    exist nowhere else once step 3 has run, so without this file the migration is
    one-way.
-3. **Apply the narrowed authority — additive for the Roles, REPLACING for the
-   shared ClusterRole and its binding.** Apply `access.yaml` first: it is purely
-   additive, it creates the namespaced Roles and RoleBindings that carry the
-   replacement authority, and applying it alone changes no controller's
-   effective permissions downward. Then apply the narrowed
-   `crd-controller-flux-system` ClusterRole and its subject-pinned binding,
-   which is where authority is removed (see the section above). Then, at this
-   boundary:
+
+   Then confirm the six objects the split CREATES are absent, so that a later
+   rollback deleting them cannot destroy something that was already there:
+
+       kubectl get clusterrole crd-controller-source-flux-system \
+         crd-controller-kustomize-flux-system crd-controller-helm-flux-system
+       kubectl get clusterrolebinding crd-controller-source-flux-system \
+         crd-controller-kustomize-flux-system crd-controller-helm-flux-system
+
+   Every one must report `NotFound`. If any exists, stop: something else owns
+   the name, and creating it here would adopt or overwrite it.
+3. **Apply the narrowed authority — additive for the Roles and the three
+   per-controller ClusterRoles, REPLACING for the shared ClusterRole and its
+   binding.** Apply `access.yaml` first: it is purely additive, it creates the
+   namespaced Roles and RoleBindings and the three per-controller ClusterRoles
+   and ClusterRoleBindings that carry the replacement authority, and applying it
+   alone changes no controller's effective permissions downward. Then apply the
+   narrowed `crd-controller-flux-system` ClusterRole and its subject-pinned
+   binding, which is where authority is removed (see the section above).
+
+   **The order within this step is load-bearing now.** The shared role no longer
+   carries any Flux API group, so applying its patch before the per-controller
+   roles exist leaves all three controllers unable to list their own custom
+   resources — every reconciliation stops, and source-controller has nothing
+   masking the loss. Then, at this boundary:
    - run the "must be yes" block; every row must answer `yes`;
    - confirm all three controller Pods are Ready and have not restarted —
      `kubectl -n flux-system get pods` — because a controller that lost leader
@@ -272,7 +353,12 @@ before anything is applied.
      `status.observedGeneration` current and its artifact revision advancing.
 
    **Rollback at this boundary:** re-apply the frozen ClusterRole and
-   ClusterRoleBinding from step 2. Nothing else has changed yet.
+   ClusterRoleBinding from step 2, AND delete the six objects the split created
+   (`clusterrole` and `clusterrolebinding`
+   `crd-controller-{source,kustomize,helm}-flux-system`). Nothing else has
+   changed yet. Restoring the frozen pair without deleting the six leaves the
+   pre-change shared authority and the new per-controller authority live at the
+   same time — a superset of both, which is not the state anyone reviewed.
 4. **Delete the broad binding.** Remove the `cluster-reconciler-flux-system`
    ClusterRoleBinding. It removes no object the controllers own and interrupts
    no workload: the connectors, both sites, and every Pod on the cluster are
@@ -297,18 +383,27 @@ Rollback is per boundary, and it restores **objects**, not just the deletion.
 RBAC is evaluated per request, so every direction below takes effect
 immediately: no restart, no drain, no workload impact.
 
+Every row restores the three frozen objects **and** deletes the six the split
+created. `SPLIT` below is shorthand for those six:
+`clusterrole` and `clusterrolebinding`
+`crd-controller-source-flux-system`, `crd-controller-kustomize-flux-system`,
+`crd-controller-helm-flux-system`.
+
 | Failed at | Restore |
 |---|---|
-| step 3 (narrowed authority applied) | re-apply the frozen `crd-controller-flux-system` ClusterRole **and** its ClusterRoleBinding from step 2 |
-| step 4 or later (broad binding deleted) | re-create `cluster-reconciler-flux-system` from the frozen capture, **then** re-apply the frozen ClusterRole and its binding |
-| interrupted anywhere, state unknown | re-apply all three frozen objects; they are the complete pre-change authorization, and applying them is idempotent |
+| step 3 (narrowed authority applied) | re-apply the frozen `crd-controller-flux-system` ClusterRole **and** its ClusterRoleBinding from step 2, **then** delete SPLIT |
+| step 4 or later (broad binding deleted) | re-create `cluster-reconciler-flux-system` from the frozen capture, **then** re-apply the frozen ClusterRole and its binding, **then** delete SPLIT |
+| interrupted anywhere, state unknown | re-apply all three frozen objects and delete SPLIT; together they are the complete pre-change authorization, and both halves are idempotent |
 
 Re-creating the deleted binding alone is **not** a full rollback: it restores
 `cluster-admin` for kustomize-controller and helm-controller, and nothing at all
 for source-controller, whose pre-change authority lived only in the shared
-ClusterRole this migration replaced. Roll back all three objects, then re-run
-the "must be yes" block plus the source-controller check from step 3 to confirm
-the cluster is back where it started.
+ClusterRole this migration replaced. Nor is restoring the three frozen objects
+without deleting SPLIT: that leaves the pre-change authority and the
+per-controller authority live together, a superset of both. Roll back all three
+objects and remove all six, then re-run the "must be yes" block plus the
+source-controller check from step 3 to confirm the cluster is back where it
+started.
 
 Leave the narrowed namespaced Roles from `access.yaml` in place while rolling
 back — they grant a subset of what the broad binding grants, so their presence

@@ -506,8 +506,26 @@ These commands are not live authorization; they document complete inventory so a
 future reviewed rollback cannot mistake Namespace deletion for full removal.
 
 The reviewed render contains no `cluster-reconciler-flux-system` binding, so the
-list above is complete **for an install this repository created**. It is NOT
-complete for the cluster as it stands: the live stock install still carries
+list above is complete **for the controller install root this repository
+renders**. Two things are outside it and are named here so the inventory is not
+mistaken for the whole cluster-scoped surface.
+
+First, `kubernetes/flux-system/access.yaml` — applied by the separate
+authorization ceremony in `flux-rbac-narrowing.md`, not by this install — adds
+six more non-namespaced objects since the per-controller RBAC split (issue #98).
+If that ceremony has run, removal also requires
+
+```sh
+kubectl delete clusterrolebinding crd-controller-source-flux-system \
+  crd-controller-kustomize-flux-system crd-controller-helm-flux-system
+kubectl delete clusterrole crd-controller-source-flux-system \
+  crd-controller-kustomize-flux-system crd-controller-helm-flux-system
+```
+
+Read that as inventory too. `flux-rbac-narrowing.md` owns the authorization for
+creating and removing them, including its own rollback.
+
+Second, the cluster as it stands: the live stock install still carries
 `cluster-reconciler-flux-system`, and removing the live install therefore also
 requires
 

@@ -977,26 +977,43 @@ def normalize_rules(rules):
 
 
 def cluster_role_rules():
-    # The narrowed shared ClusterRole (AUDIT S12). This mirrors
-    # kubernetes/flux-system/controllers/patches/crd-controller-role.yaml rule
-    # for rule: the generated wildcards, the cluster-wide Secret read, and
-    # `serviceaccounts/token` creation are gone, and what remains is the
-    # authority the three controllers exercise under their own identity. A live
-    # cluster still carrying the generated rules fails this verifier.
-    source_kinds = [
+    # The narrowed shared ClusterRole (AUDIT S12) and the per-controller roles
+    # that replaced its Flux authority (issue #98). This mirrors
+    # kubernetes/flux-system/controllers/patches/crd-controller-role.yaml and the
+    # per-controller ClusterRoles in kubernetes/flux-system/access.yaml rule for
+    # rule. A live cluster still carrying the generated rules fails this
+    # verifier; so does one where the shared role still names a Flux API group,
+    # because `crd-controller-flux-system` below no longer contains one.
+    all_source_kinds = sorted([
         "buckets",
         "externalartifacts",
         "gitrepositories",
+        "helmcharts",
         "helmrepositories",
         "ocirepositories",
-    ]
-    all_source_kinds = sorted(source_kinds + ["helmcharts"])
+    ])
+    # Shared by all three controllers, and safe to share: cluster metadata,
+    # event reporting, and the liveness probe name no controller's execution
+    # objects, so no controller can reach another one's reconciliation through
+    # them.
     crd = [
-        rule(["source.toolkit.fluxcd.io"], source_kinds, ["get", "list", "watch", "update", "patch"]),
+        rule([""], ["namespaces", "serviceaccounts", "configmaps"], ["get", "list", "watch"]),
+        rule([""], ["events"], ["create", "patch"]),
+        rule(verbs=["head"], non_resource_urls=["/livez/ping"]),
+    ]
+    # source-controller: the five kinds it registers a reconciler for, plus
+    # ExternalArtifact. No `create` and no `delete` on helmcharts — the
+    # intermediate chart is helm-controller's to create and remove.
+    source_owned = [
         rule(
             ["source.toolkit.fluxcd.io"],
-            ["helmcharts"],
-            ["get", "list", "watch", "create", "update", "patch", "delete"],
+            ["buckets", "gitrepositories", "helmcharts", "helmrepositories", "ocirepositories"],
+            ["get", "list", "watch", "update", "patch"],
+        ),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            ["externalartifacts"],
+            ["get", "list", "watch", "update", "patch"],
         ),
         rule(
             ["source.toolkit.fluxcd.io"],
@@ -1008,15 +1025,32 @@ def cluster_role_rules():
             [name + "/finalizers" for name in all_source_kinds],
             ["update"],
         ),
+    ]
+    # kustomize-controller: its own kind, plus a READ of the source kind its
+    # Kustomizations reference. Resolving a source happens under the
+    # controller's own identity before impersonation; writing one never does.
+    kustomize_owned = [
         rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations"], ["get", "list", "watch", "update", "patch"]),
         rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations/status"], ["get", "patch", "update"]),
         rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations/finalizers"], ["update"]),
+        rule(["source.toolkit.fluxcd.io"], ["gitrepositories"], ["get", "list", "watch"]),
+    ]
+    # helm-controller: its own kind, the intermediate HelmChart it creates and
+    # deletes, and a READ of the two source kinds its releases reference.
+    helm_owned = [
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], ["get", "list", "watch", "update", "patch"]),
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases/status"], ["get", "patch", "update"]),
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases/finalizers"], ["update"]),
-        rule([""], ["namespaces", "serviceaccounts", "configmaps"], ["get", "list", "watch"]),
-        rule([""], ["events"], ["create", "patch"]),
-        rule(verbs=["head"], non_resource_urls=["/livez/ping"]),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            ["helmcharts"],
+            ["get", "list", "watch", "create", "update", "patch", "delete"],
+        ),
+        rule(
+            ["source.toolkit.fluxcd.io"],
+            ["gitrepositories", "ocirepositories"],
+            ["get", "list", "watch"],
+        ),
     ]
     aggregate_groups = [
         "notification.toolkit.fluxcd.io",
@@ -1028,6 +1062,9 @@ def cluster_role_rules():
     ]
     return {
         "crd-controller-flux-system": crd,
+        "crd-controller-source-flux-system": source_owned,
+        "crd-controller-kustomize-flux-system": kustomize_owned,
+        "crd-controller-helm-flux-system": helm_owned,
         "flux-edit-flux-system": [
             rule(aggregate_groups, ["*"], ["create", "delete", "deletecollection", "patch", "update"])
         ],
@@ -1035,7 +1072,23 @@ def cluster_role_rules():
     }
 
 
+# Cluster-scoped RBAC this repository AUTHORS rather than receives from the
+# generated export (issue #98). The export labels its own objects with the Flux
+# instance and version; these carry no label at all, deliberately — pinning a
+# Flux version label onto authorization this repository derived itself would
+# make a Flux bump rewrite it. The expectation is exact in both directions, so a
+# stray label on one of these fails the verifier just as a missing label on a
+# generated object does.
+AUTHORED_CLUSTER_RBAC = {
+    "crd-controller-source-flux-system",
+    "crd-controller-kustomize-flux-system",
+    "crd-controller-helm-flux-system",
+}
+
+
 def expected_cluster_role_labels(name):
+    if name in AUTHORED_CLUSTER_RBAC:
+        return {}
     labels = flux_labels()
     if name in {"flux-edit-flux-system", "flux-view-flux-system"}:
         labels["rbac.authorization.k8s.io/aggregate-to-admin"] = "true"
@@ -1043,6 +1096,10 @@ def expected_cluster_role_labels(name):
     if name == "flux-view-flux-system":
         labels["rbac.authorization.k8s.io/aggregate-to-view"] = "true"
     return labels
+
+
+def expected_cluster_binding_labels(name):
+    return {} if name in AUTHORED_CLUSTER_RBAC else flux_labels()
 
 
 def access_role_rules():
@@ -1196,10 +1253,28 @@ def expected_cluster_bindings():
     # binding_reaches_protected_account and this verifier fails — which is what
     # makes `--verify` the proof that the narrowing actually landed, not just
     # that the new authority was added beside the old.
+    #
+    # Four bindings, not one (issue #98). The shared binding still names all
+    # three controllers because the role it points at is now metadata-only; each
+    # per-controller binding names ONE account, and the single-subject list is
+    # pinned here so a live cluster whose binding grew a second subject fails
+    # `--verify` even though every rule still matches.
     return {
         "crd-controller-flux-system": (
             cluster_role("crd-controller-flux-system"),
             [sa_subject("flux-system", name) for name in sorted(CONTROLLER_NAMES)],
+        ),
+        "crd-controller-source-flux-system": (
+            cluster_role("crd-controller-source-flux-system"),
+            [sa_subject("flux-system", "source-controller")],
+        ),
+        "crd-controller-kustomize-flux-system": (
+            cluster_role("crd-controller-kustomize-flux-system"),
+            [sa_subject("flux-system", "kustomize-controller")],
+        ),
+        "crd-controller-helm-flux-system": (
+            cluster_role("crd-controller-helm-flux-system"),
+            [sa_subject("flux-system", "helm-controller")],
         ),
     }
 
@@ -1229,7 +1304,7 @@ def check_binding(value, key, expected, cluster=False):
         value.get("metadata"),
         name,
         namespace,
-        flux_labels() if cluster else {},
+        expected_cluster_binding_labels(name) if cluster else {},
     )
     require(value.get("roleRef") == expected[0])
     require(normalized_subjects(value.get("subjects")) == normalized_subjects(expected[1]))

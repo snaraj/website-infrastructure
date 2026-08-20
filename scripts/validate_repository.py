@@ -178,10 +178,11 @@ SITE_RELEASE_CONTRACTS = (
 )
 
 # This literal digest couples Trivy's path-scoped AVD-KSV-0056 acceptance to
-# every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
-# Update it only after reviewing that complete authorization file.
+# every ServiceAccount, Role, RoleBinding, ClusterRole, ClusterRoleBinding,
+# rule, and subject in access.yaml. Update it only after reviewing that
+# complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "4ad6b3fcfc80b1cfa12418215f5747d05aced7e5846467930fc7206750692ea6"
+    "8fdf2c116ac116bbb4e174867ef4d268a83b8103a90aa125d359912903487a71"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -1479,6 +1480,31 @@ FLUX_AUTHORED_RBAC_FILES = (
     "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
 )
 
+# The per-controller split (issue #98). `crd-controller-flux-system` is ONE
+# ClusterRole bound to all three controller ServiceAccounts, so every Flux-group
+# verb it granted was a verb each controller held over the OTHER two's
+# reconciliation specifications — and impersonation does not contain that,
+# because the victim controller performs the resulting reconciliation. These
+# three ClusterRoles carry that authority instead, one ServiceAccount each.
+#
+# Required by name and by subject count: a missing role is a controller that
+# cannot reconcile at all, and a second subject on one of these bindings would
+# rebuild the shared role under a new name while every rule still read correctly.
+FLUX_PER_CONTROLLER_CLUSTER_ROLES = {
+    "crd-controller-source-flux-system": "source-controller",
+    "crd-controller-kustomize-flux-system": "kustomize-controller",
+    "crd-controller-helm-flux-system": "helm-controller",
+}
+
+# The API groups whose objects ARE a controller's reconciliation specification.
+# A verb over cluster metadata may be shared by all three controllers; a verb
+# over one of these groups may not, so the shared role names none of them.
+FLUX_EXECUTION_API_GROUPS = (
+    "source.toolkit.fluxcd.io",
+    "kustomize.toolkit.fluxcd.io",
+    "helm.toolkit.fluxcd.io",
+)
+
 # Controller-identity Roles that carry the authority the deleted cluster-admin
 # binding used to supply. Absence of any one of them is a reconciliation that
 # cannot start, so they are required by name rather than inferred.
@@ -1528,7 +1554,17 @@ def _rbac_rule_blocks(document):
         if item.match(line):
             if current:
                 blocks.append("\n".join(current))
-            current = [line]
+            # The `- ` item marker is replaced by the two spaces it occupies, so
+            # the rule's FIRST field lines up with the rest and `_rbac_rule_list`
+            # can see it. Without this the first field of every rule was
+            # invisible to every check built on this helper: a rule written
+            # `- resources: [secrets]` with `verbs:` below it evaded the
+            # flux-system Secret-write check entirely, and the shared-role
+            # apiGroups check below would have been decorative for the same
+            # reason. Column alignment is preserved exactly — two characters for
+            # two characters — so the indentation this helper derives is
+            # unchanged.
+            current = [item.sub(indent + "  ", line, count=1)]
         elif current:
             current.append(line)
     if current:
@@ -1616,6 +1652,20 @@ def flux_rbac_contract_errors(root):
                 + ", ".join(sorted(FLUX_CONTROLLER_ACCOUNTS))
             )
 
+    # The shared role names no Flux API group. It is the only ClusterRole bound
+    # to all three controllers, so a rule here reaches every controller: the
+    # split is only real while this file carries none.
+    role_patch = controllers / "patches/crd-controller-role.yaml"
+    if role_patch.is_file():
+        shared_text = read(role_patch)
+        for block in _rbac_rule_blocks(shared_text):
+            for group in _rbac_rule_list(block, "apiGroups"):
+                if group in FLUX_EXECUTION_API_GROUPS:
+                    errors.append(
+                        "the shared crd-controller ClusterRole is bound to all three "
+                        "controllers and must not name " + group
+                    )
+
     for relative in FLUX_AUTHORED_RBAC_FILES:
         path = root / relative
         if not path.is_file():
@@ -1676,6 +1726,48 @@ def flux_rbac_contract_errors(root):
                         namespace, name
                     )
                 )
+
+    # The per-controller split's own objects. The subject list is checked as
+    # well as the role's presence, because a role bound to a second controller
+    # is the shared role again under a different name — and that is the exact
+    # failure this split exists to remove.
+    seen_cluster_roles = set()
+    seen_cluster_bindings = {}
+    for document in documents:
+        kind_match = re.search(r"(?m)^kind:\s*(ClusterRole|ClusterRoleBinding)\s*$", document)
+        name_match = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+        if kind_match is None or name_match is None:
+            continue
+        if kind_match.group(1) == "ClusterRole":
+            seen_cluster_roles.add(name_match.group(1))
+            continue
+        role_ref = re.search(r"(?ms)^roleRef:\n(?:  .*\n)*?  name:\s*(\S+)\s*$", document)
+        subjects = re.findall(
+            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", document
+        )
+        seen_cluster_bindings[name_match.group(1)] = (
+            role_ref.group(1) if role_ref else None,
+            tuple(sorted(subjects)),
+        )
+    for name, owner in sorted(FLUX_PER_CONTROLLER_CLUSTER_ROLES.items()):
+        if name not in seen_cluster_roles:
+            errors.append("per-controller ClusterRole missing from access.yaml: " + name)
+        if name not in seen_cluster_bindings:
+            errors.append(
+                "per-controller ClusterRoleBinding missing from access.yaml: " + name
+            )
+            continue
+        role_ref, subjects = seen_cluster_bindings[name]
+        if role_ref != name:
+            errors.append(
+                "per-controller ClusterRoleBinding {} must bind ClusterRole {}".format(
+                    name, name
+                )
+            )
+        if subjects != (owner,):
+            errors.append(
+                "per-controller ClusterRoleBinding {} must name only {}".format(name, owner)
+            )
     return errors
 
 

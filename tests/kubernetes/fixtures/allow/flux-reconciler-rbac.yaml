@@ -1,8 +1,11 @@
-# Positive control for the narrowed Flux controller authorization (AUDIT S12).
-# These are the shapes the rendered desired state actually produces: an
-# enumerated shared ClusterRole, a binding naming only the three installed
-# controllers, name-restricted impersonation Roles, and a read-only Secret grant
-# in flux-system. If a rule added to policies/conftest/kubernetes.rego is broader
+# Positive control for the narrowed Flux controller authorization (AUDIT S12)
+# and its per-controller split (issue #98). These are the shapes the rendered
+# desired state actually produces: a shared ClusterRole carrying only cluster
+# metadata, event reporting, and the liveness probe; a binding naming only the
+# three installed controllers; one ClusterRole per controller bound to exactly
+# one ServiceAccount and carrying that controller's own Flux authority;
+# name-restricted impersonation Roles; and a read-only Secret grant in
+# flux-system. If a rule added to policies/conftest/kubernetes.rego is broader
 # than the property it is meant to enforce, it fails here rather than silently
 # rejecting the real manifests at render time.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -10,12 +13,6 @@ kind: ClusterRole
 metadata:
   name: crd-controller-flux-system
 rules:
-  - apiGroups: [source.toolkit.fluxcd.io]
-    resources: [gitrepositories, ocirepositories]
-    verbs: [get, list, watch, update, patch]
-  - apiGroups: [kustomize.toolkit.fluxcd.io]
-    resources: [kustomizations]
-    verbs: [get, list, watch, update, patch]
   - apiGroups: [""]
     resources: [namespaces, serviceaccounts, configmaps]
     verbs: [get, list, watch]
@@ -42,6 +39,36 @@ subjects:
     namespace: flux-system
   - kind: ServiceAccount
     name: helm-controller
+    namespace: flux-system
+---
+# One controller's own authority, bound to one ServiceAccount. The Flux API
+# groups the shared role above may no longer name are exactly what belongs here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-kustomize-flux-system
+rules:
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/status]
+    verbs: [get, patch, update]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-kustomize-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-kustomize-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
     namespace: flux-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1

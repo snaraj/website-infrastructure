@@ -2144,3 +2144,56 @@ deny contains msg if {
   subjects != {"flux-system/source-controller", "flux-system/kustomize-controller", "flux-system/helm-controller"}
   msg := "crd-controller-flux-system must bind exactly the three installed controllers"
 }
+
+# THE PER-CONTROLLER SPLIT (issue #98), enforced over the rendered output.
+#
+# `crd-controller-flux-system` is the one ClusterRole bound to all three
+# controllers, so any Flux API group it names is authority each controller holds
+# over the OTHER two's reconciliation specifications: rewriting or unsuspending
+# another controller's execution object gets it applied BY that controller,
+# under whichever account it impersonates, which impersonation cannot contain.
+# The rule is verb-agnostic on purpose — a read shared this way is harmless, but
+# the shared role has no reason to carry one now that each controller's own role
+# does, and a verb-scoped rule would need updating the day a new verb mattered.
+flux_execution_api_groups := {
+  "source.toolkit.fluxcd.io",
+  "kustomize.toolkit.fluxcd.io",
+  "helm.toolkit.fluxcd.io",
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  input.metadata.name == "crd-controller-flux-system"
+  some rule in object.get(input, "rules", [])
+  some group in object.get(rule, "apiGroups", [])
+  group in flux_execution_api_groups
+  msg := sprintf("ClusterRole crd-controller-flux-system is bound to all three controllers and must not grant %s", [group])
+}
+
+# Each controller's own authority lives in its own ClusterRole, bound to exactly
+# one ServiceAccount. A second subject on one of these rebuilds the shared role
+# under a new name with every rule still reading correctly, so the subject set is
+# pinned rather than merely required to contain its owner.
+per_controller_cluster_roles := {
+  "crd-controller-source-flux-system": "source-controller",
+  "crd-controller-kustomize-flux-system": "kustomize-controller",
+  "crd-controller-helm-flux-system": "helm-controller",
+}
+
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  owner := per_controller_cluster_roles[input.metadata.name]
+  subjects := {sprintf("%s/%s", [subject.namespace, subject.name]) | some subject in object.get(input, "subjects", [])}
+  subjects != {sprintf("flux-system/%s", [owner])}
+  msg := sprintf("ClusterRoleBinding %s must bind only flux-system/%s", [input.metadata.name, owner])
+}
+
+# And it must bind the role it is named for. A per-controller binding repointed
+# at another controller's role passes the subject check above while handing that
+# controller the other one's authority.
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  per_controller_cluster_roles[input.metadata.name]
+  object.get(input, "roleRef", {}).name != input.metadata.name
+  msg := sprintf("ClusterRoleBinding %s must bind ClusterRole %s", [input.metadata.name, input.metadata.name])
+}

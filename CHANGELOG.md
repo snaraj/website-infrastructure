@@ -6,6 +6,50 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-20
+
+### Security
+
+- The shared `crd-controller-flux-system` ClusterRole no longer grants any Flux
+  API group. It is bound to all three controller ServiceAccounts, so every
+  `update`, `patch`, `/status`, `/finalizers`, and HelmChart `create`/`delete`
+  verb it carried was authority each controller held over the other two's
+  reconciliation specifications — and impersonation does not contain that,
+  because the victim controller performs the resulting reconciliation. What
+  remains shared is the cluster metadata reads, event reporting, and the
+  `/livez/ping` probe, none of which name a controller's execution objects.
+- That authority now lives in three new ClusterRoles, each bound to exactly one
+  ServiceAccount: `crd-controller-source-flux-system`,
+  `crd-controller-kustomize-flux-system`, and
+  `crd-controller-helm-flux-system`. source-controller loses HelmChart
+  `create`/`delete` entirely, kustomize-controller keeps a read of
+  `gitrepositories` alone, and helm-controller keeps reads of
+  `gitrepositories` and `ocirepositories` plus the intermediate HelmChart it
+  creates itself.
+- The 135 declared-slack rows that enumerated the residual are gone: 134 of
+  those grants no longer exist, and the one retained — helm-controller's
+  `watch` on its own HelmChart — is re-attributed to the controller that owns
+  the object. The suite now asserts that count is zero.
+
+### Added
+
+- Eighteen explicit deny rows for cross-controller writes and source-controller
+  HelmChart creation, an exhaustive denial matrix derived from the registered
+  kinds rather than from the manifests, and per-grant two-sided evidence that
+  each split grant reaches its owner and no other controller.
+- Rendered-output and fast-gate refusals for the same shape: a Flux API group
+  in the shared role, a per-controller binding with a second subject, and a
+  per-controller binding repointed at another controller's role — each with an
+  allow and a deny fixture.
+
+### Fixed
+
+- `_rbac_rule_blocks` returned each RBAC rule with its `- ` item marker still in
+  front of the first field, so that field was invisible to every check built on
+  it: a rule written `- resources: [secrets]` with its verbs below evaded the
+  flux-system Secret-write refusal entirely. The marker is now replaced by the
+  two spaces it occupied, and a reordered-rule fixture proves the refusal.
+
 ## [0.1.7] - 2026-08-19
 
 ### Changed
