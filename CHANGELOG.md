@@ -6,6 +6,22 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-20
+
+### Added
+
+- `scripts/dependabot_contract.py` is a standard-library-only fail-closed
+  structural gate for `.github/dependabot.yml` (issue #131): a corrupted
+  `groups` stanza, an unknown `package-ecosystem`, or a malformed
+  `schedule` previously passed every repository check, since
+  `check_workflows` only globs `.github/workflows/*.yml` and actionlint
+  does not know the Dependabot config schema. Wired into
+  `validate_repository.py`'s existing `CHECKS` registry as the new
+  `dependabot` check, so it runs automatically inside `make check-fast`
+  and the pull-request workflow's existing `validate_repository.py all`
+  step with no new CI job. Converges with the same contract landing in
+  `naranjo.online` (issue #59) and `lidersea.com` (issue #56).
+
 ## [0.1.7] - 2026-08-19
 
 ### Changed
