@@ -34,9 +34,16 @@
 #    same bytes. The count must equal the document count, so a document cannot
 #    quietly go unasserted.
 #
-# A fixture that declares neither keeps the older file-level assertion and says
-# so in its PASS line, which is what makes the weaker mode visible rather than
-# assumed.
+# A fixture that declares NEITHER is refused. Until v0.1.5 it kept the older
+# file-level assertion and said so in its PASS line: that was a MIGRATION
+# affordance, not a tier -- fixtures predating the discipline kept passing while
+# the incomplete migration stayed visible instead of assumed. The migration is
+# finished (every deny fixture in the tree declares one of the two forms above),
+# so the only thing the affordance can still do is admit the NEXT undeclared
+# fixture, silently, as one PASS line among a hundred. The declaration is
+# therefore a precondition, checked BEFORE conftest runs: an undeclared fixture
+# fails for what it did not declare rather than for whatever the engine happened
+# to print, and no engine verdict can route around the check.
 #
 # `expect_release_rejection` in scripts/render-manifests.sh is the same pattern
 # on the release policy set; this is that discipline applied to deny fixtures.
@@ -122,6 +129,17 @@ expect_fixture_denials() {
   local expected_file="${fixture%.yaml}.expected"
   local output='' expected_count=0
 
+  # The precondition, established before the engine is consulted: a fixture
+  # that names no reviewed denial cannot be asserted by reason at all, so it is
+  # refused here rather than downgraded to a file-level PASS.
+  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
+  if [[ ! -f "$expected_file" ]] && ((expected_count == 0)); then
+    printf 'deny fixture declares no reviewed denial mechanism: %s\n' "${fixture}" >&2
+    printf 'add a reviewed %s naming every denial message the file must produce, or one "# expect-deny:" line per YAML document\n' \
+      "${expected_file##*/}" >&2
+    exit 1
+  fi
+
   if output="$(conftest test --no-color --policy "${policy}" "${fixture}" 2>&1)"; then
     printf 'deny fixture unexpectedly passed: %s\n' "${fixture}" >&2
     printf '%s\n' "${output}" >&2
@@ -133,13 +151,7 @@ expect_fixture_denials() {
     return 0
   fi
 
-  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
-  if ((expected_count > 0)); then
-    assert_declared_denial_reasons "${fixture}" "${expected_count}" "${output}"
-    return 0
-  fi
-
-  printf 'PASS rejected (file-level only, no reviewed denial list declared) %s\n' "${fixture}"
+  assert_declared_denial_reasons "${fixture}" "${expected_count}" "${output}"
 }
 
 # Allow fixtures detect over-broad rules; deny fixtures prove unsafe resources

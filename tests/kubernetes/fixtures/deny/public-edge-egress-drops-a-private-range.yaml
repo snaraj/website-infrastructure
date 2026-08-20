@@ -1,0 +1,42 @@
+# The tunnel edge's exclusion set, one range short, alone in its own file.
+#
+# `valid_public_edge_rule` is one of three rules that compare an `ipBlock.except`
+# set against `private_and_reserved_ranges`. Until this fixture existed, only the
+# Flux one had a behavioural killer: disabling the tunnel-edge comparison left
+# every allow fixture, every deny fixture, and the whole suite green, because
+# nothing ever asked this rule to refuse a shortened exclusion list. A rule with
+# no fixture that violates it is a rule the fixtures cannot prove.
+#
+# One document per file, and a reviewed `.expected` sidecar naming the exact
+# denial set, so the kill is attributable to THIS rule and to THIS reason rather
+# than to some other arm that also rejects the same bytes.
+#
+# 192.168.0.0/16 is dropped: the home LAN, handed to the connector whose only
+# reason to leave the cluster is the provider edge on 7844.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-edge
+  namespace: cloudflare-public
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflare-public
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 7844
+          protocol: TCP
+        - port: 7844
+          protocol: UDP
