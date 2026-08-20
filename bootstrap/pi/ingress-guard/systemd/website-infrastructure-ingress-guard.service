@@ -36,6 +36,7 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
 ReadOnlyPaths=/etc/website-infrastructure /usr/local/lib/website-infrastructure
+ReadWritePaths=/var/lib/website-infrastructure/ingress-guard
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

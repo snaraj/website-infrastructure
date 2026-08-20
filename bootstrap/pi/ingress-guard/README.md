@@ -1,112 +1,289 @@
 # SSH-only admin-ingress guard (PLAT-DEC-001)
 
-Owner decision: administration of the Pi is SSH-only. From every reviewed
-administrative VPN ingress interface, the guard keeps TCP 22 reachable and
-terminally denies the cluster control plane — TCP 2379 and 2380 (stacked
-etcd), 6443 (Kubernetes API), and 10250 (kubelet) — for new and established
-flows. A compromised admin-peer credential must yield at most a key-gated SSH
-attempt, never direct control-plane reachability. Nothing in this directory
-contacts the Pi from CI; every file here is inert until an operator runs the
-installer on the host during an authorized window.
+This directory defines one additive nftables guard. On every reviewed
+administrative VPN ingress interface it preserves TCP 22 and terminally drops
+TCP 2379, 2380, 6443, and 10250. It never owns UFW, Calico, kube-proxy,
+WireGuard, routes, foreign nftables identities, or unrelated traffic.
 
-## Exact enforced model
+Nothing here authorizes Pi access or a live mutation. A merged revision is a
+procedure only. Live use still needs separately reviewed exact-main hashes,
+two retained sessions, tested physical/LAN recovery, a fresh-login canary, an
+exclusive mutation window, and direct owner authorization.
 
-One nftables table `inet website_infrastructure_ingress_guard` with one base
-chain `admin_ingress` (`type filter hook input priority -10; policy accept`),
-containing, per reviewed interface and in this order:
+## Exact model
 
-| Rule | Verdict |
+The sole owned identity is
+`table inet website_infrastructure_ingress_guard`, containing one base chain
+`admin_ingress` (`type filter hook input priority -10; policy accept`). For
+each reviewed interface, rules occur in this literal order:
+
+| Port | Verdict |
 | --- | --- |
-| `iifname <admin-vpn> tcp dport 22 counter` | `accept` (chain-local; later base chains such as the reviewed UFW policy still evaluate) |
-| `iifname <admin-vpn> tcp dport 2379 counter` | `drop` (terminal across all chains) |
-| `iifname <admin-vpn> tcp dport 2380 counter` | `drop` |
-| `iifname <admin-vpn> tcp dport 6443 counter` | `drop` |
-| `iifname <admin-vpn> tcp dport 10250 counter` | `drop` |
+| 22 | `accept` with counter |
+| 2379 | `drop` with counter |
+| 2380 | `drop` with counter |
+| 6443 | `drop` with counter |
+| 10250 | `drop` with counter |
 
-The `inet` family covers IPv4 and IPv6 in one table; the verifier rejects
-single-family variants. Matching by ingress interface (never destination
-address) means every host address a tunnel peer can route to — tunnel-local
-or LAN/control-plane — is covered, while loopback, LAN, and CNI paths that
-local `kubectl` and the cluster itself use are untouched. Rules are
-deliberately not conntrack-gated so established flows are dropped too, and
-`drop` verdicts are final across every base chain, so no other table can
-resurrect a denied packet. Counters exist so the later live proof can show
-this guard, not some other rule, absorbed each blocked probe.
+The `inet` family covers IPv4 and IPv6. Interface matching covers every host
+address routed through the reviewed tunnel while leaving loopback, LAN, and
+CNI traffic alone. The verifier rejects sets, maps, jumps, wildcard matches,
+single-family variants, unknown grammar, extra objects, missing counters, and
+same-name decoys. Diagnostics are fixed tokens and never contain an interface,
+address, peer, ruleset, private count, or a hash of the private contract.
 
-## Fail-closed properties
+## Why custody is a separate stage
 
-- No contract, unreviewed contract, malformed contract, missing library,
-  failed render, failed apply, or failed post-load verification ⇒ the loader
-  exits non-zero ⇒ `kubelet.service` cannot start (drop-in `Requires=`).
-- With the guard absent no control-plane listener can exist (kubelet never
-  started), so cluster ports are unreachable from the VPN — closed, not open.
-- The unit has no `Condition*` line: a skipped condition would still satisfy
-  `Requires=`, which is the one silent-open path systemd offers. Absence of
-  the contract fails the unit instead.
-- Pre-existing owned-name state that is not the exact healthy model is
-  `PREEXISTING_STATE`: never repaired, never deleted, always a stop.
-- Rollback deletes exactly `table inet website_infrastructure_ingress_guard`
-  and re-proves absence; ambiguity is fatal and mutates nothing further.
-- No flag, environment variable, or config file disables the guard or any
-  check; diagnostics are fixed value-free tokens.
+No privileged script executes or installs bytes by reopening a mutable
+checkout path. `source-manifest.v1` is a closed SHA-256/mode inventory of all
+public privileged artifacts. Stage zero is the only manual bridge:
 
-## Files
+1. the operator checks out one exact protected-main revision and proves it is
+   clean;
+2. the operator opens `custody-ingress-guard.sh` on a held file descriptor and
+   checks that descriptor against the hash from the exact Git object;
+3. `/usr/bin/install` copies that descriptor, not its pathname, to the fixed
+   root-owned bootstrap path;
+4. only after the root-owned copy is re-hashed may it execute;
+5. its copier opens the source-root directory and every component with
+   `O_NOFOLLOW`, hashes bytes read from each held descriptor, and writes those
+   same bytes into a new mode-0700 root-owned custody directory;
+6. each file and directory is fsynced before the custody directory is renamed
+   into place and an immutable v2 custody receipt is made durable;
+7. the receipt labels the revision as operator-attested (the script does not
+   query Git), while binding that assertion to the exact manifest and fixed
+   launcher hashes;
+8. every later entrypoint and library is opened from custody with `O_NOFOLLOW`,
+   re-hashed, copied into a write-sealed memfd, and only then parsed by Bash.
 
-| File | Installed as | Purpose |
-| --- | --- | --- |
-| `admin-ingress.env.example` | `/etc/website-infrastructure/admin-ingress.env` (from the gitignored `.local` copy) | private-input contract: reviewed admin VPN ingress interfaces |
-| `load-ingress-guard.sh` | `/usr/local/sbin/website-infrastructure-ingress-guard-load` | transactional render → check → atomic apply → verify → bounded rollback |
-| `verify-ingress-guard.sh` | `/usr/local/sbin/website-infrastructure-ingress-guard-verify` | read-only semantic + persistence + ordering proof (preflight hook) |
-| `systemd/website-infrastructure-ingress-guard.service` | `/etc/systemd/system/…` | boot persistence, ordered `Before=network-pre.target kubelet.service` |
-| `systemd/kubelet.service.d/50-website-infrastructure-ingress-guard.conf` | `/etc/systemd/system/kubelet.service.d/…` | additive `Requires=`+`After=` so kubelet cannot start unguarded |
-| `install-ingress-guard.sh` | run in place with sudo | conflict-refusing installer with bounded this-run-only rollback |
+If power is lost after the directory rename but before its receipt commits, a
+repeat invocation does not reopen the checkout: it no-follows and re-hashes the
+closed root-owned tree, rejects every extra/type/mode/owner/link deviation, and
+then recreates the deterministic receipt. It never overwrites an existing
+custody directory or treats an unverified directory as success.
 
-The semantic engine lives in `scripts/validate_ingress_guard.py` and the
-contract schema in `scripts/validate_admin_ingress_contract.py`; the
-installer copies both to `/usr/local/lib/website-infrastructure/ingress-guard/`
-so root units never execute from a user-owned checkout.
+Replacement, symlink, hard-link, in-place edit, partial write, wrong mode,
+missing file, foreign file, or manifest drift is a hard stop before a custody
+artifact executes. The private contract is never part of this public manifest.
 
-## Operator flow (authorized window only)
+Use the following as a shape, not authorization. Substitute only exact values
+reviewed for the merged protected-main revision. Keep the shell holding
+`custody_fd` alive through `/usr/bin/install`.
 
-1. Copy `admin-ingress.env.example` to `admin-ingress.env.local` in this
-   directory ON THE PI; declare each reviewed admin VPN ingress interface;
-   set `root:root` mode `0600`; flip `ADMIN_INGRESS_REVIEWED=yes` after human
-   review. The `.local` file is gitignored and layout-gated; never commit it.
-2. `sudo CONFIRM_INGRESS_GUARD_INSTALL=install-reviewed-ssh-only-ingress-guard \
-   ./install-ingress-guard.sh`
-3. `sudo /usr/local/sbin/website-infrastructure-ingress-guard-verify`
-4. Re-run reviewed discovery so `decisions.env.local` firewall fingerprints
-   are regenerated AFTER guard activation (see integration note 3).
+```bash
+revision=<40-lowercase-hex-protected-main>
+test "$(git rev-parse HEAD)" = "${revision}"
+test -z "$(git status --porcelain=v1)"
 
-## Integration note for the platform integrator (Codex) — additive only
+manifest_sha256="$({ git show "${revision}:bootstrap/pi/ingress-guard/source-manifest.v1"; } | sha256sum | awk '{print $1}')"
+custody_sha256="$({ git show "${revision}:bootstrap/pi/ingress-guard/custody-ingress-guard.sh"; } | sha256sum | awk '{print $1}')"
+exec {custody_fd}<bootstrap/pi/ingress-guard/custody-ingress-guard.sh
+test "$(sha256sum "/proc/self/fd/${custody_fd}" | awk '{print $1}')" = "${custody_sha256}"
+operator_pid="${BASHPID}"
 
-No Codex-owned file is edited by this change. Systemd-level enforcement
-(`Requires=` drop-in) already blocks an unguarded kubelet start regardless of
-script flow. Three declared integration points remain for the integrator:
+sudo /usr/bin/test ! -e \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody
+sudo /usr/bin/install -o root -g root -m 0700 \
+  "/proc/${operator_pid}/fd/${custody_fd}" \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody
+sudo /usr/bin/sha256sum \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody
+# Compare the public result locally with custody_sha256 before continuing.
 
-1. **Init preflight** (`bootstrap/pi/preflight.sh --phase init`): add a call
-   to `/usr/local/sbin/website-infrastructure-ingress-guard-verify` alongside
-   the protected-host live checks, so `--check` mode reports guard health
-   before any apply attempt.
-2. **Immediately before kubelet starts** (`bootstrap/pi/init-control-plane.sh`
-   runs `systemctl start kubelet.service` after its second
-   `preflight.sh --phase init` pass): the verifier must run at that boundary,
-   and again after kubeadm's listeners exist and after CNI installation.
-   Exact overlap declared per the handoff: the single line starting kubelet
-   is the integration point; this change does not edit that file.
-3. **Fingerprint ordering**: guard activation intentionally changes the
-   `nft`/`iptables-save` state that `scripts/fingerprint_pi_state.sh` hashes.
-   The reviewed live-input capture that feeds `decisions.env.local`
-   fingerprints must therefore occur AFTER guard activation (fresh discovery
-   → review → fingerprints → init), or preflight will correctly refuse to
-   proceed. Guard drift after that capture is a hard stop, never auto-repair.
-4. **One-shot local files**: this lane never reads or writes
-   `decisions.env.local` or `kubeadm-config.yaml.local`; the installer
-   refuses to run while kubelet is active and touches no Codex `.local`
-   artifact.
+INGRESS_GUARD_SOURCE_ROOT="${PWD}" \
+INGRESS_GUARD_SOURCE_REVISION="${revision}" \
+INGRESS_GUARD_MANIFEST_SHA256="${manifest_sha256}" \
+INGRESS_GUARD_CUSTODY_SHA256="${custody_sha256}" \
+CONFIRM_INGRESS_GUARD_CUSTODY="custody-reviewed-ingress-guard-${revision}-${manifest_sha256}" \
+sudo --preserve-env=SSH_CONNECTION,INGRESS_GUARD_SOURCE_ROOT,INGRESS_GUARD_SOURCE_REVISION,INGRESS_GUARD_MANIFEST_SHA256,INGRESS_GUARD_CUSTODY_SHA256,CONFIRM_INGRESS_GUARD_CUSTODY \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody --stage
+```
 
-The live reachability proof (bounded probes over the admin tunnel) is
-designed in `docs/assurance/phase-h-ssh-only-ingress-guard.md` and is triple
-gated: exact `CODEX_PLATFORM_STABLE` signal, explicit owner authorization of
-the exact probe list, and integrator coordination. Nothing in this
-repository executes it automatically.
+The command must run from a direct TTY. Piping the bootstrap, invoking it from
+the checkout as root, or allowing root SSH is refused.
+
+## Private inputs
+
+Private values exist only on the Pi under the root-owned mode-0700 input
+directory. Create and review them locally; do not place them in the checkout,
+Git, CI, issues, PRs, or command output.
+
+- `input/admin-ingress.env`: root:root 0600, one link, exact contract described
+  by `admin-ingress.env.example`. Its raw value, count, and content hash are
+  never recorded.
+- `input/retrofit-attestation.env`: root:root 0600, one link, at most 4096
+  bytes, strict UTF-8. It contains only reviewed hashes and fixed acknowledgments:
+
+```text
+SCHEMA=ingress-guard-retrofit-attestation-v1
+SOURCE_REVISION=<exact-protected-main-sha>
+MANIFEST_SHA256=<exact-source-manifest-sha256>
+BOOT_ID_SHA256=<current-boot-id-sha256>
+CLUSTER_CA_SHA256=<current-cluster-ca-public-certificate-sha256>
+OWNED_TABLE_PRESTATE=absent
+GUARD_UNIT_PRESTATE=absent
+DROPIN_PRESTATE=absent
+KUBELET_PRESTATE=active
+TWO_RETAINED_SESSIONS=yes
+PHYSICAL_LAN_RECOVERY=yes
+FRESH_LOGIN_CANARY=yes
+MUTATION_WINDOW_AUTHORIZED=yes
+```
+
+The attestation validator rejects missing, duplicate, foreign, mismatched,
+stale-boot, stale-cluster, symlink, hard-link, ownership, mode, encoding, and
+metacharacter states. It emits only PASS/FAIL tokens. Do not rewrite this
+attestation after activation: its descriptor hash and pre-reboot boot binding
+are journaled. Closure reopens the same bytes, requires a different current
+boot, and requires cluster CA custody to remain unchanged.
+
+## Offline install (kubelet must be inactive)
+
+`install-ingress-guard.sh` is the pre-kubeadm path. It intentionally exits
+`KUBELET_ALREADY_ACTIVE`; there is no flag or environment bypass. Use only the
+fixed root-owned launcher with a direct-TTY confirmation bound to the reviewed
+revision and manifest. No checkout or custody-path entrypoint is parsed
+directly. The transaction:
+
+1. validates custody, tool identities, the exact closed systemd sandbox and
+   drop-in contract from custodied bytes, private contract, inactive kubelet,
+   owned-table absence, effective systemd state, destination files, and
+   directory metadata;
+2. durably writes the complete prestate journal before creating a directory or
+   system artifact;
+3. installs only exact root-owned files and never chmods/chowns a pre-existing
+   directory;
+4. reloads systemd, enables and starts only the guard unit;
+5. proves the semantic table, persistence, and effective kubelet dependency;
+6. fsyncs a closed receipt before committing the journal.
+
+Any ordinary failure or catchable signal enters the same recovery transaction.
+Power loss or `SIGKILL` leaves the prepared journal for
+the fixed custody launcher's `--recover` action.
+
+The direct-TTY invocation shape is:
+
+```bash
+INGRESS_GUARD_SOURCE_REVISION="${revision}" \
+INGRESS_GUARD_MANIFEST_SHA256="${manifest_sha256}" \
+INGRESS_GUARD_CUSTODY_SHA256="${custody_sha256}" \
+CONFIRM_INGRESS_GUARD_INSTALL="install-reviewed-ssh-only-ingress-guard-${revision}-${manifest_sha256}" \
+sudo --preserve-env=SSH_CONNECTION,INGRESS_GUARD_SOURCE_REVISION,INGRESS_GUARD_MANIFEST_SHA256,INGRESS_GUARD_CUSTODY_SHA256,CONFIRM_INGRESS_GUARD_INSTALL \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody --install
+```
+
+## Running-cluster retrofit
+
+`retrofit-ingress-guard.sh` is the only active-kubelet path. It requires the
+strict attestation above and refuses an inactive kubelet. Its phase order is:
+
+```text
+prepared
+  -> artifacts-installed
+  -> guard-start-intent
+  -> guard-active (semantic proof complete)
+  -> dropin-installed (effective Requires/After proof complete)
+  -> kubelet-restart-intent
+  -> awaiting-reboot-intent
+  -> awaiting-reboot
+  -> commit-intent
+  -> committed
+```
+
+The drop-in is not installed until the additive table has loaded and passed the
+closed semantic model. Only then does the transaction restart kubelet once to
+establish the effective dependency, prove both services and the live table,
+and verify API readiness, every node Ready, Calico, the applicable three Flux
+controllers, the Tunnel pair, and each present site workload. It then writes a
+durable `pending-reboot` receipt. It prints `PENDING`, never `PASS`, at that
+boundary.
+
+Reboot is a separate owner-authorized action, not performed by repository
+code. Keep both sessions and physical/LAN recovery until the new boot is
+observed. Keep the original attestation bytes unchanged, repeat the fresh-login
+and recovery checks, then use `--close-after-reboot`. Closure requires a
+different current boot, the same original attestation/source/manifest and
+cluster binding, active kubelet, enabled/active guard, effective dependency,
+the exact live model, and the same applicable cluster-health canaries. Only
+then is the final receipt fsynced and `PASS` emitted.
+The pending receipt remains immutable at its result-specific path; closure
+validates its journal-bound hash and writes a separate final receipt.
+
+Activation and closure entrypoint shapes (still not live authorization) are:
+
+```bash
+INGRESS_GUARD_SOURCE_REVISION="${revision}" \
+INGRESS_GUARD_MANIFEST_SHA256="${manifest_sha256}" \
+INGRESS_GUARD_CUSTODY_SHA256="${custody_sha256}" \
+CONFIRM_INGRESS_GUARD_RETROFIT="retrofit-reviewed-running-cluster-${revision}-${manifest_sha256}" \
+sudo --preserve-env=SSH_CONNECTION,INGRESS_GUARD_SOURCE_REVISION,INGRESS_GUARD_MANIFEST_SHA256,INGRESS_GUARD_CUSTODY_SHA256,CONFIRM_INGRESS_GUARD_RETROFIT \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody --retrofit-activate
+
+# Only after a separately authorized reboot and refreshed attestation:
+INGRESS_GUARD_SOURCE_REVISION="${revision}" \
+INGRESS_GUARD_MANIFEST_SHA256="${manifest_sha256}" \
+INGRESS_GUARD_CUSTODY_SHA256="${custody_sha256}" \
+CONFIRM_INGRESS_GUARD_RETROFIT_CLOSE="close-reviewed-ingress-guard-retrofit-${revision}-${manifest_sha256}" \
+sudo --preserve-env=SSH_CONNECTION,INGRESS_GUARD_SOURCE_REVISION,INGRESS_GUARD_MANIFEST_SHA256,INGRESS_GUARD_CUSTODY_SHA256,CONFIRM_INGRESS_GUARD_RETROFIT_CLOSE \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody --retrofit-close
+```
+
+## Rollback and interruption recovery
+
+All custody/install/load/retrofit operations share one root-only global lock.
+The v2 journals and receipts use closed fixed schemas, mode 0600, exclusive
+temp files, fsync, no-replace immutable result documents, and atomic journal
+rename. A durable intent precedes every result receipt; recovery either rolls
+back before publication or reconciles the exact immutable result before
+claiming closure. Legacy v1 journal names are an explicit hard stop requiring
+manual disposition. Records contain public source hashes and opaque
+host bindings only—never raw inventory, private paths, interface counts,
+addresses, peers, routes, rules, tokens, or a private-contract digest.
+
+The loader writes `apply-intent` before `nft -f`. Once apply returns success it
+arms rollback in memory before attempting the post-apply capture. Capture,
+semantic verification, receipt, or journal failure therefore deletes exactly
+`table inet website_infrastructure_ingress_guard` and re-proves absence. After
+power loss, an exact model following absent prestate can be removed; a foreign
+or unclassifiable identity is left untouched and becomes
+`MANUAL_RECOVERY_REQUIRED`.
+
+Transaction recovery removes the new drop-in before service rollback. If a
+retrofit interruption left kubelet inactive, recovery restores active kubelet
+while the verified guard remains active; only then may it stop the guard and
+delete the exact owned table. Every created file is removed only when it still
+matches its custody source; every pre-existing exact file and directory is
+left untouched. Drift, failed absence proof, failed kubelet restore, or
+unavailable capture preserves a fail-closed recovery journal instead of
+guessing.
+
+Manual recovery requires a direct TTY and exact fixed confirmation. It first
+validates the journal-bound custody tree, then either proves the transaction
+already closed or executes the same exact-prestate rollback used automatically:
+
+```bash
+CONFIRM_INGRESS_GUARD_RECOVERY=recover-reviewed-ingress-guard \
+INGRESS_GUARD_SOURCE_REVISION="${revision}" \
+INGRESS_GUARD_MANIFEST_SHA256="${manifest_sha256}" \
+INGRESS_GUARD_CUSTODY_SHA256="${custody_sha256}" \
+sudo --preserve-env=SSH_CONNECTION,INGRESS_GUARD_SOURCE_REVISION,INGRESS_GUARD_MANIFEST_SHA256,INGRESS_GUARD_CUSTODY_SHA256,CONFIRM_INGRESS_GUARD_RECOVERY \
+  /usr/local/sbin/website-infrastructure-ingress-guard-custody --recover
+```
+
+## Receipts and declared limits
+
+Successful custody, load, offline install, pending retrofit, reboot closure,
+rollback, and recovery each have a distinct fixed receipt under
+`/var/lib/website-infrastructure/ingress-guard/receipts`. Console output is a
+single fixed token. Receipts are local protected evidence and are not copied to
+GitHub.
+
+Offline tests include a hermetic Linux namespace fixture that executes the real
+shell transactions through ledgered synthetic nft/systemd/kubectl boundaries.
+It covers every forward phase with failure, TERM, and SIGKILL; receipt/journal
+splits; stale/tampered bindings; source symlink/hard-link/race attacks; exact
+rollback; and zero temporary residue. It does not prove the Pi kernel,
+nft/systemd versions, SSH survival, counters, reboot behavior, or application
+reachability. Those remain separately
+authorized live acceptance steps in
+`docs/assurance/phase-h-ssh-only-ingress-guard.md`.

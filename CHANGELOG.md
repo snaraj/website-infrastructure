@@ -6,6 +6,37 @@ implies deployment or promotion.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-20
+
+### Added
+
+- A distinct running-cluster ingress-guard retrofit transaction now proves the
+  additive nftables model before installing the kubelet dependency, records a
+  reboot-pending state, and closes only after a different-boot persistence
+  proof. The offline installer continues to refuse an active kubelet.
+- Root-owned held-inode custody, a global transaction lock, durable phase
+  journals, result-specific receipts, and an exact-prestate recovery entrypoint
+  cover custody, install, load, retrofit, reboot closure, and rollback.
+
+### Fixed
+
+- Failures after the owned table applies — including post-apply capture,
+  semantic verification, systemd activation, dependency installation, and
+  kubelet restart — now enter a phase-complete rollback or preserve an explicit
+  recovery-required state instead of stranding an unverified table or
+  dependency.
+
+### Security
+
+- Privileged execution records an operator-attested protected-main revision and
+  is cryptographically bound to the closed SHA-256/mode manifest and fixed
+  launcher; mutable checkout bytes are copied from no-follow held descriptors
+  and never executed or installed directly.
+- The root-private retrofit attestation binds boot and cluster identities,
+  exact owned prestate, two retained sessions, physical/LAN recovery, a fresh
+  login canary, and separately reviewed mutation authority without recording
+  interface, address, peer, ruleset, or private-contract values.
+
 ## [0.1.9] - 2026-08-20
 
 ### Security

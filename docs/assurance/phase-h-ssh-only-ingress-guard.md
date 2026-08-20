@@ -1,9 +1,9 @@
 # Phase H implementation: SSH-only host-ingress guard and its gated live proof
 
-Status: offline implementation + live-proof DESIGN. Nothing here authorizes a
-live probe, firewall mutation, deployment, or Pi access. Owner (final
-authority): Samuel. Integrator lane: Codex (live Pi bootstrap). This lane:
-tracked implementation, verification, and tests only.
+Status: repository implementation + live-proof DESIGN. Nothing here authorizes
+a live probe, firewall mutation, deployment, reboot, or Pi access. Owner (final
+authority): Samuel. This lane contains tracked custody, offline installation,
+running-cluster retrofit, recovery, verification, and tests only.
 
 ## The decision this implements
 
@@ -20,7 +20,8 @@ Components delivered offline (see `bootstrap/pi/ingress-guard/README.md` for
 the exact model): private-input contract
 (`scripts/validate_admin_ingress_contract.py`), semantic verifier and
 renderer (`scripts/validate_ingress_guard.py`), transactional loader,
-read-only verify wrapper, boot-persistent unit ordered
+root-owned held-inode custody, crash journal/recovery, a distinct
+running-cluster retrofit, read-only verify wrapper, boot-persistent unit ordered
 `Before=network-pre.target kubelet.service`, and the additive kubelet
 `Requires=` drop-in that makes an unguarded kubelet start unrepresentable at
 the service-manager level.
@@ -40,8 +41,9 @@ the service-manager level.
    storage protection during bootstrap; their semantics are not "network
    ingress plane", so overloading them would prove the wrong property.
    `ADMIN_INGRESS_REVIEWED` + repeated `ADMIN_INGRESS_INTERFACE` is a
-   deliberate minimal new schema in a new ignored file; no migration of any
-   existing schema is required, so no importer/checkpoint lane is triggered.
+   deliberate minimal new schema stored only in the Pi's root-owned mode-0700
+   input directory; no private value or private-content hash enters a checkout,
+   receipt, CI log, issue, or PR.
 3. **`policy accept` chain with terminal per-port drops, not `policy drop`.**
    The guard must not take over unrelated admin-plane traffic decisions
    (handoff: no change to routing, LAN, egress, CNI, or unrelated traffic).
@@ -54,7 +56,7 @@ the service-manager level.
    tunnel peer may route to the tunnel-local address or the LAN/control-plane
    address; matching the ingress interface covers both without recording any
    address, and leaves loopback/LAN/CNI paths untouched.
-5. **Four explicit rules per interface, not an anonymous port set.** The
+5. **Five explicit rules per interface, not an anonymous port set.** The
    verifier's closed grammar refuses every set/map/verdict-map indirection;
    explicit rules keep the proof a literal sequence equality and give each
    port its own live counter.
@@ -64,17 +66,48 @@ the service-manager level.
 
 ## Transaction and rollback model
 
+The public artifact inventory is transferred from no-follow held descriptors
+into root-owned custody and bound to an operator-attested protected-main
+revision plus the exact manifest and fixed-launcher hashes before any artifact
+entrypoint executes. The fixed launcher reopens the selected entrypoint and
+library with `O_NOFOLLOW`, hashes them, and executes write-sealed memfd snapshots;
+no checkout or custody pathname byte is parsed first. Private input starts in a
+separate root-owned directory. Neither installer reopens a reviewed checkout
+path or mutates the metadata of a pre-existing directory. A custody commit
+interrupted before its receipt is reconciled only by revalidating the complete
+root-owned tree; it never falls back to the mutable source. Before host
+mutation, the custodied verifier re-runs the closed artifact, unit-sandbox, and
+drop-in contract against those same manifest-bound bytes.
+
 Loader (`website-infrastructure-ingress-guard.service` → `…-load`): validate
-contract → capture `nft -j` → require owned identity ABSENT (a same-named
-decoy anywhere is `PREEXISTING_STATE`; an exact healthy model is idempotent
-success) → render from the validated contract → `nft -c` syntax proof →
-single atomic `nft -f` transaction → re-capture → full semantic verify → on
-any failure delete exactly the owned table and re-prove absence
-(`ROLLBACK_AMBIGUOUS` stops everything). The installer refuses divergent
-pre-existing files (`TARGET_CONFLICT`), rolls back only artifacts that run
-created, and refuses to run while kubelet is active. No step restarts
-NetworkManager, WireGuard, sshd, UFW, kubelet, containerd, or the machine;
-root SSH is refused.
+contract → capture `nft -j` → require owned identity ABSENT (a same-named decoy
+is `PREEXISTING_STATE`; an exact healthy model is boot-idempotent) → render →
+`nft -c` → durably record `apply-intent` → single atomic `nft -f` → arm
+in-memory rollback → durably record `applied` → re-capture → semantic verify →
+durable `commit-intent` → immutable receipt → committed journal. Capture
+failure after apply is inside the
+armed rollback window. A normal failure deletes exactly the owned table and
+re-proves absence; a kill/power loss is classified from the durable absent
+prestate on the next run. Foreign or unclassifiable state is never deleted.
+
+The offline installer still refuses an active kubelet. Its post-start verifier
+failure, daemon-reload failure, signals, and interruption all re-enter the same
+exact-prestate recovery. The distinct retrofit requires active kubelet and a
+boot/cluster/prestate/recovery attestation. It proves the guard before adding
+the drop-in, proves the effective dependency before one controlled kubelet
+restart, and records `awaiting-reboot`. Repository code never reboots the host.
+After a separately authorized reboot, a new-boot proof closes the transaction.
+Closure must match the activation's source/manifest/cluster bindings and first
+validate the durable pending receipt; it preserves that receipt and writes a
+separate result-specific final receipt. Receipt or binding replay cannot close
+a different attempt. Activation, restart, closure, and rollback also require
+API readiness, all nodes Ready, Calico, the applicable three Flux controllers,
+the Tunnel pair, and each present site workload to retain the exact closed
+health scope observed before mutation. The original attestation bytes remain
+unchanged across the reboot; closure proves the current boot differs.
+If recovery finds kubelet inactive, it restores kubelet while the guard remains
+active before it may remove the guard. No path restarts NetworkManager,
+WireGuard, sshd, UFW, or containerd; root SSH is refused.
 
 ## Boot-order proof
 
@@ -85,7 +118,11 @@ still satisfy `Requires=`); the tracked drop-in pins
 `validate_ingress_guard.py repo` and the unit suite enforce both. Live: the
 verify wrapper proves `is-enabled`, `ActiveState=active`, and that kubelet's
 effective `After=` and `Requires=` contain the guard unit before init may
-start kubelet; reboot survival is item L3 of the live proof.
+start kubelet. Retrofit success is not emitted until the same proof succeeds on
+a different boot; counter/reachability attribution remains item L3 below.
+The active-cluster prestate also requires the exact owned unit/drop-in files,
+unit identity, and effective kubelet dependency to be absent before the first
+journaled mutation.
 
 ## Semantic verifier grammar (closed)
 
@@ -112,15 +149,21 @@ attack-surface manifest already encodes `admin-peer → kubernetes-api =
 denied` (PLAT-EXP-007); this phase turns it from expectation into enforced,
 verifiable host state.
 
-## Gated live proof (design only — triple-gated, never automatic)
+## Gated live proof (design only — independently gated, never automatic)
 
-Live execution requires ALL THREE, independently:
+Live execution requires ALL of the following, independently:
 
 1. the exact five-line `CODEX_PLATFORM_STABLE` signal (sanitized form per the
    assurance charter);
 2. Samuel's direct authorization of the exact probe list below (verbatim);
 3. explicit Codex/Fable coordination confirming no overlapping Pi mutation
-   window.
+   window;
+4. two retained working sessions and a fresh-login canary;
+5. separately tested physical/LAN recovery;
+6. exact protected-main, custody-manifest, current-boot, and cluster-CA
+   bindings in the root-private attestation; and
+7. a separately reviewed mutation authorization for the exact phase. A read,
+   merge, prior authorization, or pending receipt does not satisfy it.
 
 Probe list (bounded, non-destructive, rate-limited ≤1 attempt/second,
 timeout ≤5 s each, no credential guessing, no scanning beyond the owner's
@@ -168,7 +211,12 @@ mechanism.
 
 - Kernel-level packet behavior, reboot persistence, sandbox viability of the
   hardened unit, and counter attribution are proven only by the gated live
-  items above; offline proof covers model, grammar, ordering, and artifacts.
+  items above. Offline proof covers manifest closure, held-inode copy logic,
+   state/receipt schemas, model grammar, ordering, and artifacts. A hermetic
+   Linux namespace fixture runs the real shell across every forward phase with
+   failure, TERM, and SIGKILL, plus receipt/journal splits, hostile filesystem
+   states, rollback, and zero-temporary-residue proofs; it still does not claim
+   those live outcomes.
 - The verifier proves the guard's own model and refuses ambiguity; it does
   not audit the full reviewed firewall baseline (that remains the
   fingerprint + discovery lane's job).
@@ -176,9 +224,10 @@ mechanism.
   declared, not wired, to avoid editing integrator-owned files; until Codex
   lands it, enforcement rests on the systemd `Requires=` ordering alone
   (which already blocks an unguarded start).
-- The coordination-board pre-edit file list could not be published from this
-  offline lane (single allowed Pi read only); the PR body carries the exact
-  file list and hotspot assessment instead.
+- A merged retrofit procedure remains inert. Exact hashes, attestation, two
+  retained sessions, physical/LAN recovery, fresh-login proof, exclusive
+  mutation window, and direct owner authorization must all be refreshed before
+  a live phase. A prior observation or green CI run grants none of them.
 
 ## Reconciliation hotspots
 
