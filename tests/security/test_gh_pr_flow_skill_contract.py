@@ -224,6 +224,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "Exact base",
             "Exact head",
             "Platform source release",
+            "Adds exactly one new `changelog.d/<issue>-<lowercase-slug>.md`",
+            "`VERSION` and `CHANGELOG.md` remain unchanged",
+            "Derived patch is exactly one after the immutable predecessor tag",
+            "Predecessor tag and immutable Release GET receipt",
             "requires-review",
             "Independent normal-comment verdict",
             "ROLE: MAIN-WORKER",
@@ -232,6 +236,12 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, template)
+        for retired in (
+            "`VERSION` is exactly one patch after the protected base",
+            "`CHANGELOG.md` records this exact release",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, template)
 
     def test_main_worker_is_an_executable_exact_head_ready_gate(self):
         main = (SKILL / "SKILL.md").read_text(encoding="utf-8")

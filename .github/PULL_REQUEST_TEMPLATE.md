@@ -19,9 +19,10 @@ merges independently."). Delete nothing; write "none" where empty. -->
 Closes #<!-- same-repository issue number -->
 
 - Platform source release: `vX.Y.Z`
-- `VERSION` is exactly one patch after the protected base: yes/no
-- `CHANGELOG.md` records this exact release: yes/no
-- Immutable-release/protected-main GET receipt passes before Ready: pending/yes
+- Adds exactly one new `changelog.d/<issue>-<lowercase-slug>.md`: yes/no
+- `VERSION` and `CHANGELOG.md` remain unchanged: yes/no
+- Derived patch is exactly one after the immutable predecessor tag: yes/no
+- Predecessor tag and immutable Release GET receipt pass before Ready: pending/yes
 - Publication is source-only and performs no deployment/promotion: confirm
 
 ## Files owned / files excluded
