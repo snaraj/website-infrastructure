@@ -197,7 +197,66 @@ class KubeadmConfigTests(unittest.TestCase):
         self.assert_rejected(VALID_CONFIG.replace("  taints: []", "  taints: []\n  ignorePreflightErrors: []"),
                              "preflight")
         duplicate = VALID_CONFIG + "---\napiVersion: kubeadm.k8s.io/v1beta4\nkind: InitConfiguration\n"
-        self.assert_rejected(duplicate, "duplicate InitConfiguration")
+        self.assert_rejected(duplicate, "duplicate document kind at line")
+
+    def test_shared_parser_diagnostics_never_echo_file_derived_content(self):
+        """The kubeadm consumer enforces the same exact-line redaction contract."""
+
+        marker = "zz" + "parserdiagnosticmarker" + "zz"
+        duplicate_key = VALID_CONFIG.replace(
+            "kind: InitConfiguration",
+            "kind: InitConfiguration\n{}: first\n{}: second".format(marker, marker),
+            1,
+        )
+        missing_value = VALID_CONFIG.rstrip() + "\n{}:\n".format(marker)
+        marker_config = VALID_CONFIG.replace(
+            "kind: InitConfiguration", "kind: {}".format(marker), 1
+        ).rstrip()
+        duplicate_document = (
+            marker_config
+            + "\n---\napiVersion: kubeadm.k8s.io/v1beta4\nkind: {}\n".format(marker)
+        )
+
+        cases = (
+            (
+                "duplicate-key",
+                duplicate_key,
+                "duplicate mapping key",
+                max(
+                    number
+                    for number, line in enumerate(duplicate_key.splitlines(), 1)
+                    if line == "{}: second".format(marker)
+                ),
+            ),
+            (
+                "missing-value",
+                missing_value,
+                "mapping key has no value",
+                max(
+                    number
+                    for number, line in enumerate(missing_value.splitlines(), 1)
+                    if line == "{}:".format(marker)
+                ),
+            ),
+            (
+                "duplicate-kind",
+                duplicate_document,
+                "duplicate document kind",
+                max(
+                    number
+                    for number, line in enumerate(duplicate_document.splitlines(), 1)
+                    if line == "apiVersion: kubeadm.k8s.io/v1beta4"
+                ),
+            ),
+        )
+        for label, config, structural_label, expected_line in cases:
+            with self.subTest(shape=label):
+                errors = MODULE.validate(config)
+                self.assertNotEqual(errors, [])
+                self.assertFalse(any(marker in error for error in errors), errors)
+                self.assertIn(
+                    "{} at line {}".format(structural_label, expected_line), errors
+                )
 
 
 if __name__ == "__main__":
