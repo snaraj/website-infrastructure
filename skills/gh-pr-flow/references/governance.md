@@ -12,10 +12,10 @@ labels, assignee, milestone, and the linked PR's standalone `Closes #N`. Apply:
 - owner assignee;
 - one milestone representing the delivery/release arc.
 
-For release-bearing work, make the issue and PR milestone exactly match the
-proposed `VERSION` as `vX.Y.Z`; do not park a patch release in a generic future
-major or upkeep milestone. The post-merge audit verifies the immutable Release
-before closing a completed milestone and moves every unresolved issue first.
+For tag-derived release work, use the exact delivery arc milestone because no
+PR pre-allocates a patch number. The post-merge audit records the publisher-
+assigned immutable tag before closing a completed milestone and moves every
+unresolved issue first.
 Audit acceptance evidence before closing or reclassifying stale issues; never
 infer completion from a title, age, or closed milestone alone.
 

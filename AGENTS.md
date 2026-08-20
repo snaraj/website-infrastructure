@@ -18,8 +18,9 @@ the owner. In order:
    account; commits carry the noreply identity per "Commit identity
    mechanics"; `make check-fast` needs only Python and Git, and the full
    `make check` needs the pinned toolchain from `versions.env`.
-4. Survey the live state yourself: `gh issue list`, `gh pr list` —
-   including the open-agent-PR count against the PR budget below.
+4. Survey the live state yourself: `gh issue list`, `gh pr list` — map every
+   open PR's dependency edges, collision paths, writer ownership, and available
+   review capacity before choosing or publishing work.
 5. Establish which lane your task lives in (Delivery lane section) and
    confirm every path you intend to touch belongs to it.
 6. Claim work through an issue, branch from `origin/main`, and follow
@@ -239,16 +240,19 @@ Delivery-lane requirements, explicit and numbered:
    shared code and checks keep capability names generic so the binding
    could change without rewriting this lane.
 8. Every protected-main merge has a platform release consequence. Every PR,
-   including docs and Dependabot, advances `VERSION` and a dated changelog by
-   exactly one patch from its current base. One-commit squash and merge-free
-   multi-commit rebase integrations are both supported only when every
-   intermediate `VERSION` state is monotonic and the range has exactly one
-   patch boundary; publisher recovery proves that same complete-history state
-   machine. The complete final SHA is the one release identity. Successful main
-   CI publishes an immutable,
-   policy-tagger annotated plain `vX.Y.Z` tag and exact zero-asset GitHub
-   Release at that SHA. This source release never deploys or promotes platform
-   or site workloads. The authoritative GET-only protected-main settings
+   including docs and Dependabot, adds exactly one new immutable
+   `changelog.d/<issue>-<lowercase-slug>.md` fragment and never edits another
+   fragment, the frozen legacy `VERSION`, or the frozen legacy `CHANGELOG.md`.
+   The PR and protected-main gate enforce the same exact-base diff for both
+   one-commit squash and merge-free multi-commit rebase integrations. After
+   successful main CI, the publisher validates the immutable tag ledger anchored
+   at `v0.1.9`, requires one fragment across every adjacent ledger edge, waits
+   until an earlier main SHA has both its exact tag and exact immutable Release,
+   derives exactly one next patch, and publishes an annotated plain `vX.Y.Z` tag
+   plus exact zero-asset GitHub Release at the complete final SHA. Release notes bind the
+   fragment path, SHA-256, and bytes; fragments and immutable Releases are the
+   permanent post-migration changelog. This source release never deploys or
+   promotes platform or site workloads. The authoritative GET-only protected-main settings
    receipt in the GitHub controls runbook must prove immutable releases,
    Private Vulnerability Reporting,
    strict current-base required checks bound to GitHub Actions, required signed
@@ -406,8 +410,11 @@ authority: the owner alone merges.
   authorship auditable with no owner relay. When a new model joins, its
   label — description "Authored by <model>" — is created in ALL THREE
   repositories before its first PR, per the one-taxonomy rule.
-- **PR budget.** At most 3 agent PRs open in this repository by default;
-  parallel pushes beyond that need explicit owner authorization first.
+- **Concurrent PR capacity.** There is no fixed count ceiling. Publish
+  independent and dependent work as Draft PRs when dependency edges, collision
+  paths, one-writer-per-branch ownership, and reviewer capacity are explicit.
+  Open work never broadens authority: the owner alone merges, and unresolved
+  sequencing or collision risk keeps each affected PR Draft.
 - **Merge authority.** THE OWNER ALONE MERGES. Never merge, never
   self-approve, never treat a peer approval or a green check as
   authority, and never force-push a shared ref. Every PR opens as a
@@ -423,7 +430,7 @@ authority: the owner alone merges.
 - **Commits.** Detailed bodies to the review protocol's evidence standard —
   problem, mechanism, enumerated changes, evidence — signed per lane.
 - **Dependabot.** Dependency PRs obey the same issue/milestone/assignee,
-  next-patch/changelog, exact-head review, CI/coverage, and base freshness
+  one-fragment release consequence, exact-head review, CI/coverage, and base freshness
   controls. Tool or runner outages are reported as infrastructure failures;
   they never waive a real product failure.
 - **Merge readiness.** Keep Draft until the exact head has a fresh independent
@@ -450,9 +457,9 @@ The complete delivery loop, each step gated by the sections around it:
    on an issue; request issue-spec review through an explicit normal comment.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
-   a branch that is not yours is a branch you never push to. Reserve the next
-   patch from that exact base. If main moves first, use a fresh branch and
-   replacement Draft PR with a new patch; never rewrite the published branch.
+   a branch that is not yours is a branch you never push to. Add one unique
+   issue-namespaced changelog fragment; never reserve a patch number or edit
+   generated release files. Never rewrite a published branch.
 4. **Build the change** inside the invariants, the Change workflow, and
    the delivery-lane requirements above. Docs-only diffs still run the
    gates.
@@ -519,11 +526,15 @@ with unaddressed owner comments.
 
 ## Dependent pull requests
 
-Keep dependent work Draft and publish a merge order. After a predecessor lands,
-fetch current main, create a fresh branch, port only the residual diff without
-rewriting history, allocate the new exact patch, open a replacement Draft PR,
-and obtain a fresh exact-head review. Every PR that eventually targets main
-must independently carry its release consequence.
+Keep dependent work Draft and publish a directed merge order using exact
+`Depends on PR #N` lines plus the corresponding issue relationships. Independent
+parallel PRs target `main` and add distinct fragments; a predecessor merge never
+forces a replacement merely because a shared version or changelog slot moved.
+Re-query the current base and composed merge, rerun the gates, and refresh review
+evidence whose claims changed. Re-cut onto a fresh branch only for a real code or
+semantic dependency, conflict, or required current-main repair; port only the
+residual diff and never rewrite published history. Every PR that eventually
+targets main independently adds one fragment and passes the release gate.
 
 ## Quality gates — exact commands and patterns
 
@@ -587,7 +598,7 @@ is the consolidated command view:
   tests, and credential-free OpenTofu validation — plus a separate
   `dependency-review` job (pull requests only; fails on high severity). Main
   pushes run the same repository/infrastructure battery plus the exact
-  base-to-final-SHA release transition; manual dispatch runs the battery but
+  base-to-final-SHA one-fragment release transition; manual dispatch runs the battery but
   deliberately skips event-bound transition/history checks.
 - **codeql.yml** — pull requests, `main` pushes, weekly cron, and manual
   dispatch.
@@ -622,10 +633,12 @@ is the consolidated command view:
   never claims otherwise. Badge honesty is enforced: the coverage badge
   is regenerated byte-exact by the gate and cannot claim what CI did
   not measure.
-- **Platform source changelog.** `VERSION` and `CHANGELOG.md` name immutable
-  repository source releases. They are deliberately separate from
-  `make release-check`, which still rejects deployment sentinels; publishing a
-  source release never claims the platform is deployed or promoted.
+- **Platform source changelog.** `VERSION` and `CHANGELOG.md` are frozen legacy
+  history through `v0.1.9` and are not release inputs after issue #164. Each PR
+  adds one `changelog.d/` fragment; the tag-derived publisher binds its exact
+  bytes into immutable Release notes. Publishing source never claims the
+  platform is deployed or promoted, and `make release-check` still rejects
+  deployment sentinels independently.
 - **Lane discipline in docs.** The platform ADRs and the capacity documents
   are platform-lane: cite them by number, never edit, restate, or reword
   them from the delivery lane. The Cloudflare ADRs (0006–0008, 0015, and

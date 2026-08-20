@@ -9,9 +9,11 @@ This folder is where we make “prove it first” real: none of these files is p
 standard-library-only policy shared by pull-request CI and the success-only
 main publisher: it binds the exact workflow-run identity and final SHA,
 accepts either one squash commit or one merge-free multi-commit rebase range
-whose every intermediate `VERSION` state is monotonic and contains exactly one
-patch boundary, discovers publisher recovery from that same complete-history
-state machine, verifies annotated tag and immutable zero-asset GitHub-Actions
+that adds exactly one immutable `changelog.d/` fragment while leaving frozen
+aggregate release files untouched, derives the next patch from the contiguous
+annotated-tag ledger anchored at `v0.1.9`, returns a distinct pending state for
+later rapid merges, requires exactly one fragment across every adjacent ledger
+edge, renders fragment-hash-bound notes, verifies annotated tag and immutable zero-asset GitHub-Actions
 Release records through authoritative REST state, and derives a closed
 value-only protected-main, immutable-release, and private-reporting receipt
 through GET-only GitHub queries without deploying or changing repository
@@ -22,11 +24,18 @@ and step inventory plus the sole exact-SHA CodeQL run, while
 uses only the short-lived Administration-read App token to prove the current
 immutable-release setting. Each emits a value-only, run-bound attestation; no
 read credential crosses into the publisher.
+[`ci/wait-platform-release-predecessor.sh`](./ci/wait-platform-release-predecessor.sh)
+is the bounded GET-only ordering step: before the Administration-read token is
+minted, it waits for the derived predecessor's exact annotated tag and exact
+immutable zero-asset Release and emits only a source-bound attestation. Clean
+absence retries; foreign, mutable, or partial state fails immediately.
 [`ci/publish-platform-release.sh`](./ci/publish-platform-release.sh) is the
 directly executable, transaction-tested tag/Release implementation used by the
 success-only write job. It completes the frozen v0.1.0 Release only after the
 owner has prepared its exact annotated tag, then converges the current release
-and both create races only onto exact REST records.
+and both create races only onto exact REST records after re-deriving notes from
+the checked-out source, tag ledger, and fragment. It also revalidates the exact
+predecessor tag and Release before every mutation boundary.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
 validates the portable exact-PR-head adversarial-review receipt and distinct
 bounded Main Worker Ready-receipt shapes and rejects issue resources, while

@@ -19,18 +19,15 @@ it never permits numeric Git/image tags or calling `tag@digest` a tag.
 
 ## Per-PR transition
 
-Each PR—including docs and dependency automation—moves exactly one patch from
-its current protected base, or uses an equally strong repository automation
-that keeps committed source truthful. When rebase integration is enabled, the
-entire reviewed base..head chain must be merge-free and every intermediate
-`VERSION` state must either retain the prior value or advance exactly one patch;
-there must be exactly one boundary in the range. Reject skips, reversions,
-transient future values, and merge-bearing topics whose rebase outcome cannot
-obey the same state machine. Squash remains valid because its installed single
-commit preserves the exact final boundary. A base move invalidates the
-transition. Concurrent PRs may propose the same next patch only while Draft;
-after one lands, every survivor resyncs on a fresh branch and takes the new
-patch.
+Each PR—including docs and dependency automation—carries exactly one immutable
+release input. In this platform repository that input is one newly added,
+issue-namespaced `changelog.d/` fragment; the range may not edit or delete an
+existing fragment or touch frozen/generated aggregate release files. The same
+exact-base gate runs for one-commit squash and merge-free multi-commit rebase
+integration, so the fragment may appear anywhere in the linear range while the
+final SHA remains the release identity. Parallel PRs use distinct fragments and
+never reserve a patch number. A base move requires recomposed gates and review
+evidence, but does not by itself require a replacement branch or metadata recut.
 
 ## Success-only exact-SHA publication
 
@@ -41,13 +38,22 @@ push workflows; use an explicit supported dispatch when chaining is required.
 context, so verify conclusion/event/branch/repository/workflow and explicitly
 checkout payload `head_sha`.
 
-Use the same complete-history monotonic state machine for main validation and
-publisher recovery. Discover the latest retained patch boundary only after
-proving every earlier state; never infer an expected version from transient
-endpoints alone. Test no-version initialization, the bump at every position in
-a multi-commit rebase, squash, skips, reversions, transient future versions,
-and post-boundary commits. Any main SHA that passes must map to exactly one
-publisher-recoverable release intent.
+Use one anchored immutable tag ledger for publisher recovery. Validate every
+post-migration tag as annotated, contiguous by one patch, ancestral, and bound
+to exactly one fragment across every adjacent ledger edge before
+deriving exactly one patch as `next = latest + one patch`; never infer a version from mutable source
+files or transient endpoints. A later main SHA with multiple unreleased
+fragments is a bounded pending transaction, not permission to claim the same
+tag: a GET-only ordering step retries only until each earlier SHA has both its
+exact tag and exact immutable Release. Run that bounded wait before minting the
+settings-proof token, prove the immutable-release setting afterward, then
+rebind the window and predecessor without waiting immediately before mutation.
+Test one- and multi-commit
+integration, missing/multiple/edited fragments, generated-file edits, skips,
+reversions, lightweight/foreign/misplaced tags, tag-without-Release state, two
+and three rapid merges, duplicate
+same-SHA events, and deterministic fragment-backed notes. Any main SHA that
+passes must map to exactly one publisher-recoverable release intent.
 
 Do not use generic concurrency ordering as a release ledger. Distinct main SHAs
 must have independent paths and unique immutable versions. Deduplicate only the

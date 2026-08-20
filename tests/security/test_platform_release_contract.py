@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import concurrent.futures
 import copy
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -31,10 +32,13 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
-# The publisher binds the tag it publishes to the version the checked-out
-# source declares, never to a frozen literal. Several independent gates below
-# pin this exact line, so it is spelled once here and they cannot drift apart.
-PUBLISHER_TAG_GUARD = "test \"${TAG}\" = \"v$(tr -d '[:space:][:cntrl:]' < VERSION)\""
+# The publisher re-derives the exact tag and notes from the checked-out source,
+# fetched immutable tag ledger, and one fragment before every write boundary.
+PUBLISHER_TAG_GUARD = (
+    'python3 -I -B "${contract}" release-notes \\\n'
+    '    --repository . --head "${SOURCE_SHA}" --tag "${TAG}" \\\n'
+    '    --base-sha "${BASE_SHA}" --base-tag "${BASE_TAG}" > "${notes}"'
+)
 
 # Every shape a frozen version can take in the publisher, including the
 # un-prefixed one. The `v` is OPTIONAL on purpose: the guard above builds its
@@ -2283,14 +2287,14 @@ curl() {
 
 
 class PublicationTransactionShellTests(unittest.TestCase):
-    # The publisher accepts only the tag the checked-out VERSION declares, and
-    # this harness executes it from the repository root, so the fixture tag is
-    # derived the same way. A literal here would go stale every patch exactly
-    # as the script constant it replaces did.
-    TAG = f"v{(ROOT / 'VERSION').read_text(encoding='utf-8').strip()}"
+    TAG = MODULE.next_version(
+        MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+    ).tag
     SOURCE = "a" * 40
     RECOVERY_TAG = MODULE.RECOVERY_TAG
     RECOVERY_SOURCE = MODULE.RECOVERY_SOURCE_SHA
+    BASE_TAG = MODULE.TAG_LEDGER_FLOOR_TAG
+    BASE_SOURCE = MODULE.TAG_LEDGER_FLOOR_SHA
     DATE = "2026-08-13T15:21:32Z"
 
     @staticmethod
@@ -2323,13 +2327,27 @@ class PublicationTransactionShellTests(unittest.TestCase):
         return normalized
 
     @staticmethod
-    def notes(tag: str, source: str) -> str:
+    def legacy_notes(tag: str, source: str) -> str:
         return (
             f"## Platform {tag}\n\n"
             f"Immutable repository source: `{source}`\n\n"
             "This release names platform source only. It does not deploy, promote, "
             "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
             "See `CHANGELOG.md` at this tag for the human-readable change record.\n"
+        )
+
+    @staticmethod
+    def notes(tag: str, source: str) -> str:
+        digest = "d" * 64
+        return (
+            f"## Platform {tag}\n\n"
+            f"Immutable repository source: `{source}`\n\n"
+            "This release names platform source only. It does not deploy, promote, "
+            "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
+            "Fragment: `changelog.d/164-release-fragments.md` "
+            f"(`sha256:{digest}`)\n\n"
+            "### Changed\n\n"
+            "- Replace shared release files with one immutable fragment.\n"
         )
 
     def exact_records(
@@ -2346,7 +2364,11 @@ class PublicationTransactionShellTests(unittest.TestCase):
         release = {
             "tag_name": tag_name,
             "name": f"Platform {tag_name}",
-            "body": self.notes(tag_name, source),
+            "body": (
+                self.legacy_notes(tag_name, source)
+                if tag_name in {self.RECOVERY_TAG, self.BASE_TAG}
+                else self.notes(tag_name, source)
+            ),
             "draft": False,
             "prerelease": False,
             "immutable": True,
@@ -2368,8 +2390,10 @@ class PublicationTransactionShellTests(unittest.TestCase):
         settings_fail_call: int = 0,
         settings_env: str | None = None,
         actions_env: str | None = None,
+        contents_env: str | None = None,
         write_env: str | None = "write-token",
         recovery_state: str = "tag",
+        predecessor_state: str = "complete",
         event_tag: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, dict[str, object]]:
         with tempfile.TemporaryDirectory(
@@ -2381,6 +2405,39 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 handle.write(script)
             state_root = runner / "state"
             state_root.mkdir()
+            if predecessor_state not in {
+                "missing",
+                "tag",
+                "complete",
+                "foreign-tag",
+                "foreign-release",
+                "partial-release",
+            }:
+                raise AssertionError("predecessor fixture state is not closed")
+            if predecessor_state != "missing":
+                ref, tag, release = self.exact_records(
+                    self.BASE_TAG, self.BASE_SOURCE, "e" * 40
+                )
+                if predecessor_state == "foreign-tag":
+                    tag["object"]["sha"] = "0" * 40
+                (state_root / f"ref-{self.BASE_TAG}.json").write_text(
+                    json.dumps(ref), encoding="utf-8"
+                )
+                (state_root / f"tag-{'e' * 40}.json").write_text(
+                    json.dumps(tag), encoding="utf-8"
+                )
+                if predecessor_state in {
+                    "complete",
+                    "foreign-release",
+                    "partial-release",
+                }:
+                    if predecessor_state == "foreign-release":
+                        release["author"] = {"login": "owner", "id": 1}
+                    if predecessor_state == "partial-release":
+                        release["immutable"] = False
+                    (state_root / f"release-{self.BASE_TAG}.json").write_text(
+                        json.dumps(release), encoding="utf-8"
+                    )
             if recovery_state not in {"missing", "tag", "complete", "foreign"}:
                 raise AssertionError("recovery fixture state is not closed")
             if recovery_state != "missing":
@@ -2437,6 +2494,34 @@ class PublicationTransactionShellTests(unittest.TestCase):
                     )
             prelude = r'''
 python3() {
+  if [ "${4-}" = release-notes ]; then
+    local head='' tag='' base_sha='' base_tag=''
+    shift 4
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --repository) test "$2" = .; shift 2 ;;
+        --head) head="$2"; shift 2 ;;
+        --tag) tag="$2"; shift 2 ;;
+        --base-sha) base_sha="$2"; shift 2 ;;
+        --base-tag) base_tag="$2"; shift 2 ;;
+        *) return 2 ;;
+      esac
+    done
+    if [ "${head}" = "${SOURCE_SHA}" ] && \
+       [ "${tag}" = "${MOCK_CURRENT_TAG}" ]; then
+      test "${base_sha}" = "${BASE_SHA}"
+      test "${base_tag}" = "${BASE_TAG}"
+      printf '%s' "${MOCK_CURRENT_NOTES}"
+      return 0
+    fi
+    if [ "${head}" = "${BASE_SHA}" ] && [ "${tag}" = "${BASE_TAG}" ]; then
+      test -z "${base_sha}"
+      test -z "${base_tag}"
+      printf '%s' "${MOCK_BASE_NOTES}"
+      return 0
+    fi
+    return 2
+  fi
   "${TEST_PYTHON}" "$@"
 }
 
@@ -2457,7 +2542,9 @@ jq() {
 curl() {
   local output='' url='' authorization='' token='' tag='' object_sha='' path=''
   if [ -n "${GH_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
-     [ -n "${ACTIONS_READ_TOKEN-}" ]; then
+     [ -n "${ACTIONS_READ_TOKEN-}" ] || [ -n "${CONTENTS_READ_TOKEN-}" ] || \
+     [ -n "${GITHUB_TOKEN-}" ] || [ -n "${GH_ENTERPRISE_TOKEN-}" ] || \
+     [ -n "${GITHUB_ENTERPRISE_TOKEN-}" ]; then
     return 93
   fi
   while [ "$#" -gt 0 ]; do
@@ -2549,7 +2636,9 @@ curl() {
 gh() {
   if [ "${GH_TOKEN}" != "${MOCK_WRITE_TOKEN}" ] || \
     [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
-    [ -n "${ACTIONS_READ_TOKEN-}" ]; then
+    [ -n "${ACTIONS_READ_TOKEN-}" ] || [ -n "${CONTENTS_READ_TOKEN-}" ] || \
+    [ -n "${GITHUB_TOKEN-}" ] || [ -n "${GH_ENTERPRISE_TOKEN-}" ] || \
+    [ -n "${GITHUB_ENTERPRISE_TOKEN-}" ]; then
     return 91
   fi
   printf 'CALL\n' >> "${MOCK_CALLS}"
@@ -2628,6 +2717,9 @@ gh() {
 
 sleep() { :; }
 '''
+            harness_path = runner / "harness.sh"
+            with harness_path.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(prelude + '\nsource "${MOCK_SCRIPT}"\n')
             relative = runner.relative_to(ROOT).as_posix()
             environment = os.environ.copy()
             environment.update(
@@ -2640,6 +2732,10 @@ sleep() { :; }
                     "MOCK_DRIFT_DURING_RELEASE": "true" if drift_during_release else "false",
                     "MOCK_CURRENT_RELEASE_RACE": "true" if current_release_race else "false",
                     "MOCK_CURRENT_TAG": self.TAG,
+                    "MOCK_CURRENT_NOTES": self.notes(self.TAG, self.SOURCE),
+                    "MOCK_BASE_NOTES": self.legacy_notes(
+                        self.BASE_TAG, self.BASE_SOURCE
+                    ),
                     "MOCK_CURRENT_REF_READS": f"{relative}/current-ref-reads",
                     "MOCK_DRIFT_MARKER": f"{relative}/drift.marker",
                     "MOCK_SETTINGS_FAIL_CALL": str(settings_fail_call),
@@ -2651,6 +2747,8 @@ sleep() { :; }
                     "MOCK_SCRIPT": f"{relative}/transaction.sh",
                     "SOURCE_SHA": self.SOURCE,
                     "TAG": event_tag if event_tag is not None else self.TAG,
+                    "BASE_SHA": self.BASE_SOURCE,
+                    "BASE_TAG": self.BASE_TAG,
                     "GITHUB_API_URL": "https://api.github.test",
                     "GITHUB_REPOSITORY": "owner/platform",
                     "RUNNER_TEMP": relative,
@@ -2664,15 +2762,24 @@ sleep() { :; }
                 environment.pop("ACTIONS_READ_TOKEN", None)
             else:
                 environment["ACTIONS_READ_TOKEN"] = actions_env
+            if contents_env is None:
+                environment.pop("CONTENTS_READ_TOKEN", None)
+            else:
+                environment["CONTENTS_READ_TOKEN"] = contents_env
             if write_env is None:
                 environment.pop("GH_TOKEN", None)
             else:
                 environment["GH_TOKEN"] = write_env
+            for name in (
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ):
+                environment.pop(name, None)
             completed = subprocess.run(
                 [
                     self.bash_executable(),
-                    "-c",
-                    prelude + '\nsource "${MOCK_SCRIPT}"\n',
+                    self.bash_path(harness_path),
                 ],
                 cwd=ROOT,
                 env=environment,
@@ -2787,6 +2894,23 @@ sleep() { :; }
         self.assertNotEqual(deleted_guard.returncode, 0)
         self.assertEqual(mutant_calls, "")
 
+    def test_contents_token_crossover_denies_before_any_publication_call(self):
+        script = self.script()
+        completed, calls, state = self.execute(
+            script, contents_env="contents-token"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, "")
+        self.assertNotIn(self.TAG, state)
+        self.assertNotIn("release", state[self.RECOVERY_TAG])
+        guard = 'test -z "${CONTENTS_READ_TOKEN-}"'
+        self.assertIn(guard, script)
+        deleted_guard, mutant_calls, _state = self.execute(
+            script.replace(guard, ":", 1), contents_env="contents-token"
+        )
+        self.assertNotEqual(deleted_guard.returncode, 0)
+        self.assertEqual(mutant_calls, "")
+
     def test_missing_or_foreign_recovery_tag_denies_before_every_write(self):
         script = self.script()
         for recovery_state in ("missing", "foreign"):
@@ -2797,6 +2921,34 @@ sleep() { :; }
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(calls, "")
                 self.assertNotIn(self.TAG, state)
+
+    def test_incomplete_or_foreign_predecessor_denies_before_every_write(self):
+        script = self.script()
+        for predecessor_state in (
+            "missing",
+            "tag",
+            "foreign-tag",
+            "foreign-release",
+            "partial-release",
+        ):
+            with self.subTest(predecessor_state=predecessor_state):
+                completed, calls, state = self.execute(
+                    script,
+                    predecessor_state=predecessor_state,
+                    recovery_state="complete",
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(calls, "")
+                self.assertNotIn(self.TAG, state)
+
+        predecessor_guard = (
+            'write_predecessor_notes\n'
+            '  classify_tag exact \\\n'
+            '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
+            '    "${predecessor_tagger_date}" >/dev/null\n'
+            '  classify_release exact "${BASE_TAG}" >/dev/null'
+        )
+        self.assertEqual(script.count(predecessor_guard), 2)
 
     def test_foreign_partial_current_states_and_races_deny_before_every_write(self):
         script = self.script()
@@ -2826,12 +2978,10 @@ sleep() { :; }
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertEqual(calls, "")
 
-    def test_event_tag_that_is_not_the_checked_out_version_is_refused(self):
-        version = MODULE.Version.parse((ROOT / "VERSION").read_text(encoding="utf-8"))
-        # An event tag ahead of the source, the stranded era constant, and a
-        # plainly foreign tag must all deny before any write. Each candidate is
-        # asserted distinct from the derived tag, so this can never pass by
-        # accidentally naming the version the publisher would rightly accept.
+    def test_event_tag_that_is_not_tag_ledger_derived_is_refused(self):
+        version = MODULE.Version.parse(self.TAG.removeprefix("v"))
+        # An event tag ahead of the ledger, the stranded era constant, and a
+        # plainly foreign tag all make release-notes fail before any write.
         for event_tag in (MODULE.next_version(version).tag, "v0.1.1", "v9.9.9"):
             with self.subTest(event_tag=event_tag):
                 self.assertNotEqual(event_tag, self.TAG)
@@ -2842,7 +2992,7 @@ sleep() { :; }
                 self.assertEqual(calls, "")
                 self.assertNotIn(event_tag, state)
 
-    def test_publisher_derives_the_tag_and_pins_no_current_version_literal(self):
+    def test_publisher_rederives_tag_notes_and_pins_no_current_version_literal(self):
         script = self.script()
         # Run 32174376337 (the #123 merge, TAG=v0.1.2) died on this guard:
         # `current_tag='v0.1.1'`, written for the #122 recovery era, made the
@@ -2852,6 +3002,7 @@ sleep() { :; }
         # because they name immutable history; nothing else may name a version.
         self.assertIn(PUBLISHER_TAG_GUARD, script)
         self.assertNotIn("current_tag=", script)
+        self.assertNotIn("< VERSION", script)
         self.assertIn(f"recovery_tag='{self.RECOVERY_TAG}'", script)
         self.assertIn(f"recovery_source_sha='{self.RECOVERY_SOURCE}'", script)
         stale_pins = set(re.findall(VERSION_LITERAL, script)) - {
@@ -2860,11 +3011,10 @@ sleep() { :; }
         }
         self.assertEqual(stale_pins, set())
 
-        # Executable proof, not merely textual: a publisher frozen to any one
-        # patch refuses the tag its own checked-out source declares, and does
-        # it with no output at all — the exact signature of the failed run.
+        # Executable proof, not merely textual: deleting the checked-out
+        # source/tag/fragment re-derivation stops before any REST write.
         stranded = script.replace(
-            PUBLISHER_TAG_GUARD, "test \"${TAG}\" = 'v0.1.1'", 1
+            PUBLISHER_TAG_GUARD, "false", 1
         )
         self.assertNotIn(PUBLISHER_TAG_GUARD, stranded)
         completed, calls, state = self.execute(stranded, recovery_state="complete")
@@ -2927,6 +3077,274 @@ sleep() { :; }
                 )
 
 
+class PredecessorWaitShellTests(unittest.TestCase):
+    SOURCE = "a" * 40
+    BASE_TAG = MODULE.TAG_LEDGER_FLOOR_TAG
+    BASE_SOURCE = MODULE.TAG_LEDGER_FLOOR_SHA
+    DATE = "2026-08-13T15:21:32Z"
+
+    @staticmethod
+    def script() -> str:
+        return (
+            ROOT / "scripts" / "ci" / "wait-platform-release-predecessor.sh"
+        ).read_text(encoding="utf-8")
+
+    def execute(
+        self,
+        *,
+        release_state: str = "complete",
+        pending_attempts: int = 0,
+        gh_token: str | None = None,
+        release_race: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str]:
+        if release_state not in {"missing", "complete", "foreign", "partial"}:
+            raise AssertionError("predecessor Release fixture state is not closed")
+        with tempfile.TemporaryDirectory(
+            dir=ROOT, prefix=".platform-predecessor-shell-"
+        ) as temporary:
+            runner = Path(temporary)
+            ref, tag = exact_tag_records(
+                self.BASE_TAG,
+                self.BASE_SOURCE,
+                f"Platform release {self.BASE_TAG} from {self.BASE_SOURCE}",
+                self.DATE,
+            )
+            ref["object"]["sha"] = "e" * 40
+            tag["sha"] = "e" * 40
+            release = {
+                "tag_name": self.BASE_TAG,
+                "name": f"Platform {self.BASE_TAG}",
+                "body": PublicationTransactionShellTests.legacy_notes(
+                    self.BASE_TAG, self.BASE_SOURCE
+                ),
+                "draft": False,
+                "prerelease": False,
+                "immutable": release_state != "partial",
+                "author": {"login": "github-actions[bot]", "id": 41898282},
+                "assets": [],
+            }
+            if release_state == "foreign":
+                release["author"] = {"login": "owner", "id": 1}
+            records = runner / "records"
+            records.mkdir()
+            (records / "ref.json").write_text(json.dumps(ref), encoding="utf-8")
+            (records / "tag.json").write_text(json.dumps(tag), encoding="utf-8")
+            if release_state != "missing":
+                (records / "release.json").write_text(
+                    json.dumps(release), encoding="utf-8"
+                )
+            elif release_race:
+                (records / "race-release.json").write_text(
+                    json.dumps(release), encoding="utf-8"
+                )
+
+            # Two attempts keep the hostile absent-state fixture fast while the
+            # structural gate below freezes the production bound at 30.
+            script = self.script()
+            self.assertIn("for _attempt in {1..30}", script)
+            transaction = runner / "wait.sh"
+            transaction.write_text(
+                script.replace("for _attempt in {1..30}", "for _attempt in {1..2}"),
+                encoding="utf-8",
+                newline="\n",
+            )
+            prelude = r'''
+python3() {
+  if [ "${4-}" = release-window ]; then
+    count=0
+    if [ -f "${MOCK_WINDOW_COUNT}" ]; then count="$(<"${MOCK_WINDOW_COUNT}")"; fi
+    count=$((count + 1))
+    printf '%s' "${count}" > "${MOCK_WINDOW_COUNT}"
+    if [ "${count}" -le "${MOCK_PENDING_ATTEMPTS}" ]; then return 3; fi
+    printf '{"base_sha":"%s","base_tag":"%s","source_sha":"%s"}\n' \
+      "${BASE_SHA}" "${BASE_TAG}" "${SOURCE_SHA}"
+    return 0
+  fi
+  if [ "${4-}" = release-notes ]; then
+    local head='' tag=''
+    shift 4
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --repository) test "$2" = .; shift 2 ;;
+        --head) head="$2"; shift 2 ;;
+        --tag) tag="$2"; shift 2 ;;
+        *) return 2 ;;
+      esac
+    done
+    test "${head}" = "${BASE_SHA}"
+    test "${tag}" = "${BASE_TAG}"
+    printf '%s' "${MOCK_BASE_NOTES}"
+    return 0
+  fi
+  "${TEST_PYTHON}" "$@"
+}
+
+git() {
+  if [ "$1" = fetch ]; then
+    test "$2" = --quiet
+    test "$3" = --tags
+    test "$4" = origin
+    return 0
+  fi
+  if [ "$1" = show ]; then printf '%s\n' "${MOCK_DATE}"; return 0; fi
+  return 2
+}
+
+jq() {
+  test "$1" = -er
+  if [ "$2" = '.object.sha' ]; then
+    "${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "$3"
+    return
+  fi
+  "${TEST_PYTHON}" -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1][1:]])' "$2"
+}
+
+curl() {
+  local output='' authorization='' url='' token=''
+  if [ -n "${CONTENTS_READ_TOKEN-}" ] || [ -n "${GH_TOKEN-}" ] || \
+     [ -n "${GITHUB_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
+     [ -n "${ACTIONS_READ_TOKEN-}" ]; then return 93; fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --request) test "$2" = GET; shift 2 ;;
+      --header)
+        if [[ "$2" == Authorization:\ Bearer\ * ]]; then authorization="$2"; fi
+        shift 2
+        ;;
+      http*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  token="${authorization#Authorization: Bearer }"
+  test "${token}" = "${MOCK_READ_TOKEN}"
+  printf 'GET %s\n' "${url}" >> "${MOCK_CALLS}"
+  case "${url}" in
+    */git/ref/tags/*) cp "${MOCK_RECORDS}/ref.json" "${output}"; printf '200' ;;
+    */git/tags/*) cp "${MOCK_RECORDS}/tag.json" "${output}"; printf '200' ;;
+    */releases/tags/*)
+      if [ -f "${MOCK_RECORDS}/release.json" ]; then
+        cp "${MOCK_RECORDS}/release.json" "${output}"; printf '200'
+      else
+        printf '{}' > "${output}"; printf '404'
+        if [ -f "${MOCK_RECORDS}/race-release.json" ]; then
+          mv "${MOCK_RECORDS}/race-release.json" "${MOCK_RECORDS}/release.json"
+        fi
+      fi
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+sleep() { :; }
+'''
+            harness = runner / "harness.sh"
+            harness.write_text(
+                prelude + '\nsource "${MOCK_SCRIPT}"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            relative = runner.relative_to(ROOT).as_posix()
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "TEST_PYTHON": PublicationTransactionShellTests.bash_path(
+                        sys.executable
+                    ),
+                    "MOCK_DATE": self.DATE,
+                    "MOCK_PENDING_ATTEMPTS": str(pending_attempts),
+                    "MOCK_WINDOW_COUNT": f"{relative}/window-count",
+                    "MOCK_BASE_NOTES": PublicationTransactionShellTests.legacy_notes(
+                        self.BASE_TAG, self.BASE_SOURCE
+                    ),
+                    "MOCK_READ_TOKEN": "read-token",
+                    "MOCK_RECORDS": f"{relative}/records",
+                    "MOCK_CALLS": f"{relative}/calls.log",
+                    "MOCK_SCRIPT": f"{relative}/wait.sh",
+                    "CONTENTS_READ_TOKEN": "read-token",
+                    "SOURCE_SHA": self.SOURCE,
+                    "BASE_SHA": self.BASE_SOURCE,
+                    "BASE_TAG": self.BASE_TAG,
+                    "GITHUB_API_URL": "https://api.github.test",
+                    "GITHUB_REPOSITORY": "owner/platform",
+                    "GITHUB_OUTPUT": f"{relative}/output",
+                    "RUNNER_TEMP": relative,
+                }
+            )
+            for name in (
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+                "IMMUTABLE_SETTINGS_TOKEN",
+                "ACTIONS_READ_TOKEN",
+            ):
+                environment.pop(name, None)
+            if gh_token is None:
+                environment.pop("GH_TOKEN", None)
+            else:
+                environment["GH_TOKEN"] = gh_token
+            completed = subprocess.run(
+                [
+                    PublicationTransactionShellTests.bash_executable(),
+                    PublicationTransactionShellTests.bash_path(harness),
+                ],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+            output = (
+                (runner / "output").read_text(encoding="utf-8")
+                if (runner / "output").exists()
+                else ""
+            )
+            calls = (
+                (runner / "calls.log").read_text(encoding="utf-8")
+                if (runner / "calls.log").exists()
+                else ""
+            )
+            return completed, output, calls
+
+    def test_exact_predecessor_emits_only_the_bound_attestation(self):
+        completed, output, calls = self.execute(pending_attempts=1)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(output, f"attestation=PASS:owner/platform:{self.SOURCE}\n")
+        self.assertNotIn("token", output.lower())
+        self.assertEqual(calls.count("/git/ref/tags/"), 1)
+        self.assertEqual(calls.count("/releases/tags/"), 1)
+
+        raced, raced_output, raced_calls = self.execute(
+            release_state="missing", release_race=True
+        )
+        self.assertEqual(raced.returncode, 0, raced.stdout + raced.stderr)
+        self.assertEqual(
+            raced_output, f"attestation=PASS:owner/platform:{self.SOURCE}\n"
+        )
+        self.assertEqual(raced_calls.count("/releases/tags/"), 3)
+
+    def test_absent_foreign_and_mutable_predecessors_fail_closed(self):
+        for release_state in ("missing", "foreign", "partial"):
+            with self.subTest(release_state=release_state):
+                completed, output, calls = self.execute(release_state=release_state)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(output, "")
+                self.assertNotEqual(calls, "")
+                if release_state == "missing":
+                    self.assertIn("bounded wait", completed.stderr)
+                else:
+                    self.assertNotIn("bounded wait", completed.stderr)
+
+    def test_publication_token_crossover_fails_before_any_get(self):
+        completed, output, calls = self.execute(gh_token="write-token")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(calls, "")
+
+
 class GitTransitionTests(unittest.TestCase):
     def git(self, root: Path, *args: str) -> str:
         return subprocess.run(
@@ -2936,13 +3354,7 @@ class GitTransitionTests(unittest.TestCase):
             stdout=subprocess.PIPE,
         ).stdout.strip()
 
-    def commit(self, root: Path, version: str | None, marker: str) -> str:
-        if version is not None:
-            (root / "VERSION").write_text(version + "\n", encoding="utf-8")
-            (root / "CHANGELOG.md").write_text(
-                f"# Changelog\n\n## [Unreleased]\n\n## [{version}] - 2026-08-13\n\n- release\n",
-                encoding="utf-8",
-            )
+    def commit(self, root: Path, marker: str) -> str:
         marker_path = root / "markers" / (re.sub(r"[^a-z0-9]+", "-", marker.lower()).strip("-") + ".txt")
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(marker + "\n", encoding="utf-8")
@@ -2959,6 +3371,57 @@ class GitTransitionTests(unittest.TestCase):
         )
         return self.git(root, "rev-parse", "HEAD")
 
+    def add_fragment(
+        self,
+        root: Path,
+        issue: int,
+        slug: str,
+        marker: str,
+        *,
+        category: str = "Security",
+    ) -> str:
+        path = root / "changelog.d" / f"{issue}-{slug}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"### {category}\n\n- {marker}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return self.commit(root, marker)
+
+    def tag(
+        self,
+        root: Path,
+        name: str,
+        target: str,
+        *,
+        message: str | None = None,
+        tagger_name: str = MODULE.RELEASE_TAGGER_NAME,
+        tagger_email: str = MODULE.RELEASE_TAGGER_EMAIL,
+        tagger_date: str | None = None,
+    ) -> None:
+        resolved_date = tagger_date or self.git(
+            root, "show", "-s", "--format=%cI", target
+        )
+        parsed_date = dt.datetime.fromisoformat(resolved_date)
+        offset = parsed_date.strftime("%z")
+        payload = (
+            f"object {target}\n"
+            "type commit\n"
+            f"tag {name}\n"
+            f"tagger {tagger_name} <{tagger_email}> "
+            f"{int(parsed_date.timestamp())} {offset}\n\n"
+            f"{message or f'Platform release {name} from {target}'}"
+        ).encode("utf-8")
+        created = subprocess.run(
+            ["git", "-C", str(root), "hash-object", "-t", "tag", "-w", "--stdin"],
+            check=True,
+            input=payload,
+            stdout=subprocess.PIPE,
+        )
+        tag_object = created.stdout.decode("ascii").strip()
+        self.git(root, "update-ref", f"refs/tags/{name}", tag_object)
+
     def initialize(self, root: Path) -> str:
         self.git(root, "init", "-q")
         # Writing Git commands may otherwise launch detached automatic
@@ -2973,15 +3436,23 @@ class GitTransitionTests(unittest.TestCase):
             ("maintenance.autoDetach", "false"),
             ("gc.auto", "0"),
             ("gc.autoDetach", "false"),
+            ("core.autocrlf", "false"),
         ):
             self.git(root, "config", "--local", key, value)
         self.git(root, "branch", "-m", "main")
-        return self.commit(root, None, "initial")
-
-    def remove_version(self, root: Path, marker: str) -> str:
-        for name in ("VERSION", "CHANGELOG.md"):
-            (root / name).unlink()
-        return self.commit(root, None, marker)
+        floor_version = MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v")
+        (root / "VERSION").write_text(
+            floor_version + "\n", encoding="utf-8", newline="\n"
+        )
+        (root / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [Unreleased]\n\n"
+            f"## [{floor_version}] - 2026-08-20\n\n- Legacy floor.\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        floor = self.commit(root, "legacy migration floor")
+        self.tag(root, MODULE.TAG_LEDGER_FLOOR_TAG, floor)
+        return floor
 
     def assert_fixture_git_is_quiescent(self, root: Path) -> None:
         expected = {
@@ -2989,6 +3460,7 @@ class GitTransitionTests(unittest.TestCase):
             "maintenance.autoDetach": "false",
             "gc.auto": "0",
             "gc.autoDetach": "false",
+            "core.autocrlf": "false",
         }
         actual = {
             key: self.git(root, "config", "--local", "--get", key)
@@ -3003,15 +3475,18 @@ class GitTransitionTests(unittest.TestCase):
                 initial = self.initialize(root)
                 self.assert_fixture_git_is_quiescent(root)
                 barrier.wait(timeout=30)
-                head = self.commit(
+                head = self.add_fragment(
                     root,
-                    "0.1.0",
+                    100 + worker_index,
+                    f"round-{round_index}",
                     f"concurrent release {round_index}-{worker_index}",
                 )
                 intent = MODULE.validate_transition(
                     root, initial, head, first_parent=True
                 )
-                self.assertEqual(intent, MODULE.Intent(head, MODULE.Version(0, 1, 0)))
+                self.assertEqual(intent.source_sha, head)
+                self.assertEqual(intent.fragment_path, f"changelog.d/{100 + worker_index}-round-{round_index}.md")
+                self.assertRegex(intent.fragment_sha256, r"^[0-9a-f]{64}$")
                 return temporary
 
         cleaned: list[str] = []
@@ -3026,137 +3501,303 @@ class GitTransitionTests(unittest.TestCase):
         for temporary in cleaned:
             self.assertFalse(Path(temporary).exists())
 
-    def test_initial_rapid_and_out_of_order_patch_releases_are_unique(self):
+    def test_one_fragment_is_the_only_valid_pr_and_main_release_surface(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            initial = self.initialize(root)
-            commits = [initial]
-            for version in ("0.1.0", "0.1.1", "0.1.2"):
-                commits.append(self.commit(root, version, version))
-            intents = [
-                MODULE.validate_transition(
-                    root, commits[index - 1], commits[index], first_parent=True
+            base = self.initialize(root)
+            head = self.add_fragment(root, 164, "release-fragments", "one release input")
+            for first_parent in (False, True):
+                intent = MODULE.validate_transition(
+                    root, base, head, first_parent=first_parent
                 )
-                for index in range(1, len(commits))
-            ]
-            self.assertEqual(
-                [intent.tag for intent in (intents[2], intents[0], intents[1])],
-                ["v0.1.2", "v0.1.0", "v0.1.1"],
-            )
-            self.assertEqual(len({intent.source_sha for intent in intents}), 3)
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.validate_transition(root, commits[1], commits[3], first_parent=True)
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.validate_transition(root, commits[2], commits[1], first_parent=True)
+                self.assertEqual(intent.source_sha, head)
+                self.assertEqual(intent.fragment_path, "changelog.d/164-release-fragments.md")
 
-    def test_squash_and_arbitrary_position_rebase_ranges_release_final_sha_once(self):
+            no_fragment = self.commit(root, "content without release input")
+            with self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, head, no_fragment, first_parent=True)
+
+            self.git(root, "checkout", "-q", "-b", "two-fragments", base)
+            first = root / "changelog.d" / "165-first.md"
+            second = root / "changelog.d" / "166-second.md"
+            first.parent.mkdir(parents=True, exist_ok=True)
+            first.write_text("### Added\n\n- First.\n", encoding="utf-8")
+            second.write_text("### Fixed\n\n- Second.\n", encoding="utf-8")
+            two = self.commit(root, "two release inputs")
+            with self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, base, two, first_parent=True)
+
+    def test_fragment_grammar_and_generated_files_fail_closed(self):
+        invalid_payloads = (
+            ("### Other\n\n- item\n", "category"),
+            ("### Security\n\nplain text\n", "not-a-bullet"),
+            ("### Security\r\n\r\n- item\r\n", "crlf"),
+            ("### Security\n\n- ${{ github.token }}\n", "expression"),
+            ("### Security\n\n- trailing \n", "trailing"),
+        )
+        for payload, label in invalid_payloads:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base = self.initialize(root)
+                path = root / "changelog.d" / "164-invalid.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload.encode("utf-8"))
+                head = self.commit(root, label)
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
+        for filename in (
+            "release-fragments.md",
+            "0164-release-fragments.md",
+            "164-Release-Fragments.md",
+            "164_release_fragments.md",
+            "164-release-fragments.txt",
+            "164-release/fragments.md",
+        ):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base = self.initialize(root)
+                path = root / "changelog.d" / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("### Security\n\n- Invalid filename.\n", encoding="utf-8")
+                head = self.commit(root, "invalid fragment filename")
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
+        for generated in ("VERSION", "CHANGELOG.md"):
+            with self.subTest(generated=generated), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                base = self.initialize(root)
+                self.add_fragment(root, 164, "valid", "valid fragment")
+                with (root / generated).open("a", encoding="utf-8") as handle:
+                    handle.write("foreign generated edit\n")
+                head = self.commit(root, f"edit {generated}")
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
+    def test_existing_fragments_cannot_be_edited_deleted_or_renamed(self):
+        for operation in ("edit", "delete", "rename"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.initialize(root)
+                base = self.add_fragment(root, 100, "existing", "Existing release.")
+                existing = root / "changelog.d" / "100-existing.md"
+                if operation == "edit":
+                    existing.write_text(
+                        "### Security\n\n- Edited historical release.\n",
+                        encoding="utf-8",
+                    )
+                elif operation == "delete":
+                    existing.unlink()
+                else:
+                    existing.rename(root / "changelog.d" / "100-renamed.md")
+                new_fragment = root / "changelog.d" / "164-current.md"
+                new_fragment.write_text(
+                    "### Changed\n\n- Current release.\n", encoding="utf-8"
+                )
+                head = self.commit(root, operation + " an existing fragment")
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
+    def test_squash_and_arbitrary_position_rebase_ranges_bind_the_final_sha(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             initial = self.initialize(root)
-            pre_bump = self.commit(root, None, "rebased content before bump")
-            bump = self.commit(root, "0.1.0", "rebased bump")
-            final_head = self.commit(root, None, "rebased content after bump")
+            self.commit(root, "rebased content before fragment")
+            fragment_commit = self.add_fragment(root, 164, "rebased", "rebased fragment")
+            final_head = self.commit(root, "rebased content after fragment")
             intent = MODULE.validate_transition(
                 root, initial, final_head, first_parent=True
             )
-            self.assertEqual(intent, MODULE.Intent(final_head, MODULE.Version(0, 1, 0)))
-            window = MODULE.discover_transition_window(root, final_head)
-            self.assertEqual(window.base_sha, pre_bump)
-            self.assertEqual(window.intent, intent)
-            self.assertNotEqual(bump, final_head)
+            self.assertEqual(intent.source_sha, final_head)
+            self.assertEqual(intent.fragment_path, "changelog.d/164-rebased.md")
+            self.assertNotEqual(fragment_commit, final_head)
 
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                status = MODULE.main(
-                    [
-                        "release-window",
-                        "--repository",
-                        str(root),
-                        "--head",
-                        final_head,
-                    ]
-                )
-            self.assertEqual(status, 0)
-            self.assertEqual(json.loads(output.getvalue())["source_sha"], final_head)
-
-            self.git(root, "checkout", "-q", "-b", "double-bump", initial)
-            self.commit(root, "0.1.0", "first bump")
-            double_head = self.commit(root, "0.1.1", "second bump")
+            self.git(root, "checkout", "-q", "-b", "double-fragment", initial)
+            self.add_fragment(root, 165, "first", "first fragment")
+            double_head = self.add_fragment(root, 166, "second", "second fragment")
             with self.assertRaises(MODULE.ContractError):
                 MODULE.validate_transition(root, initial, double_head, first_parent=True)
 
-    def test_squash_and_every_rebase_bump_position_share_window_semantics(self):
+    def test_squash_and_every_rebase_fragment_position_share_semantics(self):
         for before, after in ((0, 0), (0, 2), (2, 0), (2, 2)):
             with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 initial = self.initialize(root)
                 for index in range(before):
-                    self.commit(root, None, f"content before {index}")
-                boundary_parent = self.git(root, "rev-parse", "HEAD")
-                self.commit(root, "0.1.0", "exact patch boundary")
+                    self.commit(root, f"content before {index}")
+                self.add_fragment(root, 164, "position", "exact fragment boundary")
                 for index in range(after):
-                    self.commit(root, None, f"content after {index}")
+                    self.commit(root, f"content after {index}")
                 head = self.git(root, "rev-parse", "HEAD")
                 for first_parent in (False, True):
-                    self.assertEqual(
-                        MODULE.validate_transition(
-                            root, initial, head, first_parent=first_parent
-                        ),
-                        MODULE.Intent(head, MODULE.Version(0, 1, 0)),
+                    intent = MODULE.validate_transition(
+                        root, initial, head, first_parent=first_parent
                     )
-                window = MODULE.discover_transition_window(root, head)
-                self.assertEqual(window.base_sha, boundary_parent)
-                self.assertEqual(window.intent.source_sha, head)
-                self.assertEqual(window.intent.tag, "v0.1.0")
+                    self.assertEqual(intent.source_sha, head)
+                    self.assertEqual(intent.fragment_path, "changelog.d/164-position.md")
 
-    def test_skip_and_reversion_histories_fail_main_pr_and_window_together(self):
-        builders = (
-            lambda root: (
-                self.commit(root, "0.1.1", "skip transient required patch"),
-                self.commit(root, "0.1.0", "revert skip to final endpoint"),
-            )[-1],
-            lambda root: (
-                self.commit(root, "0.1.0", "premature required patch"),
-                self.remove_version(root, "revert VERSION and changelog"),
-                self.commit(root, "0.1.0", "reintroduce endpoint patch"),
-            )[-1],
+    def test_tag_ledger_derives_ready_complete_notes_and_rapid_merge_waits(self):
+        floor_version = MODULE.Version.parse(
+            MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v")
         )
-        for index, build in enumerate(builders):
-            with self.subTest(history_mutant=index), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                initial = self.initialize(root)
-                head = build(root)
-                for first_parent in (False, True):
-                    with self.assertRaises(MODULE.ContractError):
-                        MODULE.validate_transition(
-                            root, initial, head, first_parent=first_parent
-                        )
-                with self.assertRaises(MODULE.ContractError):
-                    MODULE.discover_transition_window(root, head)
-
-    def test_clean_range_on_poisoned_prefix_cannot_pass_main_before_publisher_fails(self):
+        first_tag = MODULE.next_version(floor_version).tag
+        second_tag = MODULE.next_version(MODULE.next_version(floor_version)).tag
+        third_tag = MODULE.next_version(
+            MODULE.next_version(MODULE.next_version(floor_version))
+        ).tag
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.initialize(root)
-            self.commit(root, "0.1.0", "historical premature patch")
-            base = self.remove_version(root, "historical VERSION reversion")
-            head = self.commit(root, "0.1.0", "locally clean endpoint patch")
-            for first_parent in (False, True):
-                with self.assertRaises(MODULE.ContractError):
-                    MODULE.validate_transition(
-                        root, base, head, first_parent=first_parent
+            floor = self.initialize(root)
+            first = self.add_fragment(root, 164, "first", "First release.")
+            second = self.add_fragment(root, 165, "second", "Second release.")
+            third = self.add_fragment(root, 166, "third", "Third release.")
+            with mock.patch.object(MODULE, "TAG_LEDGER_FLOOR_SHA", floor):
+                first_window = MODULE.discover_transition_window(root, first)
+                self.assertEqual(first_window.base_sha, floor)
+                self.assertEqual(first_window.base_tag, MODULE.TAG_LEDGER_FLOOR_TAG)
+                self.assertEqual(first_window.intent.tag, first_tag)
+                with self.assertRaises(MODULE.PendingRelease):
+                    MODULE.discover_transition_window(root, second)
+                with self.assertRaises(MODULE.PendingRelease):
+                    MODULE.discover_transition_window(root, third)
+                with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(
+                    io.StringIO()
+                ) as errors:
+                    status = MODULE.main(
+                        [
+                            "release-window",
+                            "--repository",
+                            str(root),
+                            "--head",
+                            second,
+                        ]
                     )
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.discover_transition_window(root, head)
+                self.assertEqual(status, 3)
+                self.assertEqual(output.getvalue(), "")
+                self.assertIn("PENDING:", errors.getvalue())
+
+                self.tag(root, first_tag, first)
+                complete = MODULE.discover_transition_window(root, first)
+                self.assertEqual(complete.base_tag, MODULE.TAG_LEDGER_FLOOR_TAG)
+                self.assertEqual(complete.intent.tag, first_tag)
+                second_window = MODULE.discover_transition_window(root, second)
+                self.assertEqual(second_window.base_tag, first_tag)
+                self.assertEqual(second_window.intent.tag, second_tag)
+                notes = MODULE.render_release_notes(
+                    root,
+                    second,
+                    second_tag,
+                    expected_base_sha=first,
+                    expected_base_tag=first_tag,
+                )
+                self.assertIn("`changelog.d/165-second.md`", notes)
+                self.assertIn("### Security\n\n- Second release.\n", notes)
+                self.assertNotIn("CHANGELOG.md", notes)
+                for wrong_base in (
+                    {
+                        "expected_base_sha": floor,
+                        "expected_base_tag": MODULE.TAG_LEDGER_FLOOR_TAG,
+                    },
+                    {"expected_base_sha": first},
+                ):
+                    with self.subTest(wrong_base=wrong_base), self.assertRaises(
+                        MODULE.ContractError
+                    ):
+                        MODULE.render_release_notes(
+                            root, second, second_tag, **wrong_base
+                        )
+                with self.assertRaises(MODULE.PendingRelease):
+                    MODULE.discover_transition_window(root, third)
+
+                self.tag(root, second_tag, second)
+                third_window = MODULE.discover_transition_window(root, third)
+                self.assertEqual(third_window.intent.tag, third_tag)
+
+                legacy = MODULE.render_release_notes(
+                    root, floor, MODULE.TAG_LEDGER_FLOOR_TAG
+                )
+                self.assertIn("See `CHANGELOG.md`", legacy)
+
+    def test_a_misplaced_tag_cannot_swallow_an_earlier_fragment(self):
+        first_tag = MODULE.next_version(
+            MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+        ).tag
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            first = self.add_fragment(root, 164, "first", "First release.")
+            second = self.add_fragment(root, 165, "second", "Second release.")
+            third = self.add_fragment(root, 166, "third", "Third release.")
+            self.tag(root, first_tag, second)
+            with mock.patch.object(MODULE, "TAG_LEDGER_FLOOR_SHA", floor):
+                for source in (first, second, third):
+                    with self.subTest(source=source), self.assertRaises(
+                        MODULE.ContractError
+                    ):
+                        MODULE.discover_transition_window(root, source)
+
+    def test_tag_skip_lightweight_foreign_target_and_missing_earlier_tag_deny(self):
+        first_version = MODULE.next_version(
+            MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+        )
+        first_tag = first_version.tag
+        skipped_tag = MODULE.next_version(first_version).tag
+        cases = (
+            "skip",
+            "lightweight",
+            "foreign",
+            "missing-earlier",
+            "foreign-message",
+            "foreign-tagger",
+            "foreign-date",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                floor = self.initialize(root)
+                first = self.add_fragment(root, 164, "first", "First release.")
+                if case == "skip":
+                    self.tag(root, skipped_tag, first)
+                elif case == "lightweight":
+                    self.git(root, "tag", first_tag, first)
+                elif case == "foreign":
+                    self.git(root, "checkout", "-q", "-b", "foreign", floor)
+                    foreign = self.commit(root, "foreign release target")
+                    self.tag(root, first_tag, foreign)
+                    self.git(root, "checkout", "-q", "main")
+                elif case == "missing-earlier":
+                    second = self.add_fragment(root, 165, "second", "Second release.")
+                    self.tag(root, first_tag, second)
+                elif case == "foreign-message":
+                    self.tag(root, first_tag, first, message="Foreign message")
+                elif case == "foreign-tagger":
+                    self.tag(
+                        root,
+                        first_tag,
+                        first,
+                        tagger_name="Foreign Tagger",
+                        tagger_email="foreign@example.invalid",
+                    )
+                else:
+                    self.tag(
+                        root,
+                        first_tag,
+                        first,
+                        tagger_date="2026-08-20T00:00:00+00:00",
+                    )
+                with mock.patch.object(MODULE, "TAG_LEDGER_FLOOR_SHA", floor):
+                    with self.assertRaises(MODULE.ContractError):
+                        MODULE.discover_transition_window(root, first)
 
     def test_pr_and_main_reject_merge_ranges_that_cannot_guarantee_rebase_liveness(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            initial = self.initialize(root)
-            base = self.commit(root, "0.1.0", "base")
+            base = self.initialize(root)
             self.git(root, "checkout", "-q", "-b", "topic", base)
-            self.commit(root, None, "topic content")
+            self.commit(root, "topic content")
             self.git(root, "checkout", "-q", "-b", "side", base)
-            self.commit(root, None, "side content")
+            self.commit(root, "side content")
             self.git(root, "checkout", "-q", "topic")
             self.git(
                 root,
@@ -3170,17 +3811,12 @@ class GitTransitionTests(unittest.TestCase):
                 "-m",
                 "merge side",
             )
-            head = self.commit(root, "0.1.1", "final bump")
+            head = self.add_fragment(root, 164, "merged", "final fragment")
             for first_parent in (False, True):
                 with self.assertRaises(MODULE.ContractError):
                     MODULE.validate_transition(
                         root, base, head, first_parent=first_parent
                     )
-
-            self.git(root, "checkout", "-q", "-b", "stale", initial)
-            stale = self.commit(root, "0.1.2", "stale")
-            with self.assertRaises(MODULE.ContractError):
-                MODULE.validate_transition(root, base, stale, first_parent=False)
 
 
 class WorkflowStructureTests(unittest.TestCase):
@@ -3190,6 +3826,7 @@ class WorkflowStructureTests(unittest.TestCase):
     def require_exact_wiring(
         workflow: str,
         jobs_verifier: str,
+        predecessor_wait: str,
         settings_verifier: str,
         transaction: str,
     ) -> None:
@@ -3217,8 +3854,10 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"platform workflow lost exact wiring: {required}")
         if workflow.count("fetch-depth: 0") != 2:
             raise ValueError("both jobs must independently fetch exact complete history")
-        if workflow.count("release-window") != 2:
-            raise ValueError("both jobs must independently bind the release window")
+        if workflow.count("release-window") != 1 or "release-window" not in publish_job:
+            raise ValueError("the write job must rebind the release window exactly once")
+        if "release-window" in settings_job:
+            raise ValueError("ordering must be isolated in the GET-only predecessor script")
 
         for required in (
             "outputs:\n      attestation: ${{ steps.required-jobs.outputs.attestation }}",
@@ -3250,6 +3889,9 @@ class WorkflowStructureTests(unittest.TestCase):
 
         for required in (
             "outputs:\n      attestation: ${{ steps.immutable-settings.outputs.attestation }}",
+            "predecessor: ${{ steps.predecessor.outputs.attestation }}",
+            "CONTENTS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "bash scripts/ci/wait-platform-release-predecessor.sh",
             "environment:\n      name: platform-release\n      deployment: false",
             "permissions:\n      contents: read",
             WorkflowStructureTests.ACTION_PIN,
@@ -3260,6 +3902,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "permission-administration: read",
             "skip-token-revoke: false",
             "IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable-settings-token.outputs.token }}",
+            "SOURCE_SHA: ${{ steps.source.outputs.source_sha }}",
             "bash scripts/ci/verify-platform-release-settings.sh",
         ):
             if required not in settings_job:
@@ -3275,17 +3918,35 @@ class WorkflowStructureTests(unittest.TestCase):
             settings_job.index("    outputs:\n") : settings_job.index("    runs-on:")
         ]
         if "token" in outputs.lower() or outputs.count("attestation:") != 1:
-            raise ValueError("settings job may export only one sanitized attestation")
+            raise ValueError("settings job may export only sanitized attestations")
+        if not (
+            settings_job.index("bash scripts/ci/wait-platform-release-predecessor.sh")
+            < settings_job.index(WorkflowStructureTests.ACTION_PIN)
+            < settings_job.index("bash scripts/ci/verify-platform-release-settings.sh")
+        ):
+            raise ValueError(
+                "bounded ordering must finish before the fresh immutable-settings proof"
+            )
 
         for required in (
             "needs: [main-ci-jobs, immutable-settings]",
             "needs.main-ci-jobs.outputs.attestation ==",
             "github.event.workflow_run.id, github.event.workflow_run.run_attempt,",
             "needs.immutable-settings.outputs.attestation ==",
+            "needs.immutable-settings.outputs.predecessor ==",
             "format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,",
             "github.run_attempt, github.event.workflow_run.head_sha)",
+            "format('PASS:{0}:{1}', github.repository,",
             "permissions:\n      contents: write",
             "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "git fetch --quiet --tags origin",
+            "release-window",
+            "base_sha=\"$(jq -er '.base_sha'",
+            "base_tag=\"$(jq -er '.base_tag'",
+            "fragment_path=\"$(jq -er '.fragment_path'",
+            "fragment_sha256=\"$(jq -er '.fragment_sha256'",
+            "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
+            "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
             "bash scripts/ci/publish-platform-release.sh",
         ):
             if required not in publish_job:
@@ -3297,6 +3958,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "PLATFORM_RELEASE_APP_PRIVATE_KEY",
             "IMMUTABLE_SETTINGS_TOKEN",
             "ACTIONS_READ_TOKEN",
+            "CONTENTS_READ_TOKEN",
             "permission-administration",
             "verify-platform-release-settings.sh",
             "verify-platform-release-main-jobs.sh",
@@ -3314,6 +3976,8 @@ class WorkflowStructureTests(unittest.TestCase):
             raise ValueError("Actions read must occur only in the jobs-proof job")
         if workflow.count("ACTIONS_READ_TOKEN") != 1:
             raise ValueError("Actions token must occur only in the jobs-proof job")
+        if workflow.count("CONTENTS_READ_TOKEN") != 1:
+            raise ValueError("contents-read token must occur only in predecessor ordering")
         for forbidden in (
             "permission-administration: write",
             "permission-contents:",
@@ -3370,6 +4034,59 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"jobs verifier gained foreign authority: {forbidden}")
 
         for required in (
+            ': "${CONTENTS_READ_TOKEN:?CONTENTS_READ_TOKEN is required}"',
+            ': "${SOURCE_SHA:?SOURCE_SHA is required}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${ACTIONS_READ_TOKEN-}"',
+            'read_token="${CONTENTS_READ_TOKEN}"',
+            "unset CONTENTS_READ_TOKEN",
+            "--request GET",
+            '"Authorization: Bearer ${read_token}"',
+            "git fetch --quiet --tags origin",
+            "for _attempt in {1..30}",
+            'python3 -I -B "${contract}" release-window',
+            'test "${status}" -eq 3 || exit "${status}"',
+            'python3 -I -B "${contract}" release-notes',
+            "classify_predecessor_tag",
+            "classify_predecessor_release exact",
+            "classify_predecessor_release absent",
+            'printf \'attestation=PASS:%s:%s\\n\'',
+            "unset read_token",
+        ):
+            if required not in predecessor_wait:
+                raise ValueError(f"predecessor waiter lost exact guard: {required}")
+        for forbidden in (
+            "--request POST",
+            "--request PUT",
+            "--request PATCH",
+            "--request DELETE",
+            "gh ",
+            "contents: write",
+            "run_write_gh",
+            "release create",
+            "/immutable-releases",
+            "/actions/",
+        ):
+            if forbidden in predecessor_wait:
+                raise ValueError(
+                    f"GET-only predecessor waiter gained foreign authority: {forbidden}"
+                )
+        if predecessor_wait.count("attestation=") != 1:
+            raise ValueError("predecessor waiter may export only one sanitized attestation")
+        if predecessor_wait.count("classify_predecessor_tag") != 2:
+            raise ValueError("predecessor tag classifier must be defined and invoked once")
+        if predecessor_wait.count("unset read_token") != 2:
+            raise ValueError("predecessor read token must be cleared on both exits")
+        if predecessor_wait.index("classify_predecessor_release exact") > predecessor_wait.index(
+            "classify_predecessor_release absent"
+        ):
+            raise ValueError("predecessor exact state must be attempted before clean absence")
+
+        for required in (
             ': "${IMMUTABLE_SETTINGS_TOKEN:?IMMUTABLE_SETTINGS_TOKEN is required}"',
             'test -z "${GH_TOKEN-}"',
             'test -z "${GITHUB_TOKEN-}"',
@@ -3410,8 +4127,14 @@ class WorkflowStructureTests(unittest.TestCase):
 
         for required in (
             "tag-state",
+            ': "${BASE_SHA:?BASE_SHA is required}"',
+            ': "${BASE_TAG:?BASE_TAG is required}"',
             'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
             'test -z "${ACTIONS_READ_TOKEN-}"',
+            'test -z "${CONTENTS_READ_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
             'write_token="${GH_TOKEN}"',
             "unset GH_TOKEN",
             'GH_TOKEN="${write_token}" gh "$@"',
@@ -3419,6 +4142,12 @@ class WorkflowStructureTests(unittest.TestCase):
             "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
             "recovery_tag='v0.1.0'",
             PUBLISHER_TAG_GUARD,
+            "write_predecessor_notes",
+            '--head "${BASE_SHA}" --tag "${BASE_TAG}"',
+            '"${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}"',
+            'classify_release exact "${BASE_TAG}"',
+            'test "${SOURCE_SHA}" != "${BASE_SHA}"',
+            'test "${TAG}" != "${BASE_TAG}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
@@ -3458,25 +4187,35 @@ class WorkflowStructureTests(unittest.TestCase):
         if transaction.count("for attempt in 1 2 3 4 5") != 3:
             raise ValueError("recovery Release, current tag, and current Release need bounded retries")
         if transaction.count("preflight_publication_state") != 6:
-            raise ValueError("all four states need an initial preflight and four mutation-boundary rechecks")
+            raise ValueError("all six states need an initial preflight and four mutation-boundary rechecks")
         if (
             "preflight_publication_state\n"
             "complete_recovery_release\n"
             "publish_current_release"
         ) not in transaction:
-            raise ValueError("all four states must be classified before either publication phase")
+            raise ValueError("all six states must be classified before either publication phase")
         if transaction.count('test "${tag_race_verified}" = true') != 1:
             raise ValueError("current tag race must have one terminal exact-state assertion")
         if transaction.count('test "${release_race_verified}" = true') != 2:
             raise ValueError("both Release races must have terminal exact-state assertions")
-        if transaction.count("classify_tag exact") < 8:
-            raise ValueError("recovery/current tag reuse and pre/post checks must be exact")
-        if transaction.count("classify_release exact") < 6:
-            raise ValueError("recovery/current Release paths must reach exact REST state")
+        if transaction.count("classify_tag exact") < 9:
+            raise ValueError("predecessor/recovery/current tag checks must be exact")
+        if transaction.count("classify_release exact") < 8:
+            raise ValueError("predecessor/recovery/current Release paths must reach exact REST state")
+        if transaction.count("write_predecessor_notes") != 3:
+            raise ValueError("predecessor notes must be defined and rebound twice")
 
         preflight_start = transaction.index("preflight_publication_state() {")
         recovery_start = transaction.index("complete_recovery_release() {")
         initial_preflight = transaction[preflight_start:recovery_start]
+        predecessor_guard = (
+            'classify_tag exact \\\n'
+            '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
+            '    "${predecessor_tagger_date}" >/dev/null\n'
+            '  classify_release exact "${BASE_TAG}" >/dev/null'
+        )
+        if initial_preflight.count(predecessor_guard) != 2:
+            raise ValueError("both predecessor preflight observations must be exact")
         if initial_preflight.count(
             'classify_tag exact \\\n    "${recovery_source_sha}"'
         ) != 2 or 'classify_tag absent \\\n    "${recovery_source_sha}"' in initial_preflight:
@@ -3505,7 +4244,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "publication-state",
             "targetCommitish",
         ):
-            if forbidden in workflow + jobs_verifier + settings_verifier + transaction:
+            if forbidden in workflow + jobs_verifier + predecessor_wait + settings_verifier + transaction:
                 raise ValueError(f"platform publisher has non-authoritative verifier: {forbidden}")
 
     def test_every_main_sha_has_split_read_and_write_exact_paths(self):
@@ -3521,6 +4260,9 @@ class WorkflowStructureTests(unittest.TestCase):
         jobs_verifier = (
             ROOT / "scripts" / "ci" / "verify-platform-release-main-jobs.sh"
         ).read_text(encoding="utf-8")
+        predecessor_wait = (
+            ROOT / "scripts" / "ci" / "wait-platform-release-predecessor.sh"
+        ).read_text(encoding="utf-8")
         transaction = (
             ROOT / "scripts" / "ci" / "publish-platform-release.sh"
         ).read_text(encoding="utf-8")
@@ -3530,7 +4272,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_sha", workflow)
         self.assertNotIn("queue:", ci + workflow)
         self.require_exact_wiring(
-            workflow, jobs_verifier, settings_verifier, transaction
+            workflow, jobs_verifier, predecessor_wait, settings_verifier, transaction
         )
 
         workflow_deletions = (
@@ -3543,6 +4285,9 @@ class WorkflowStructureTests(unittest.TestCase):
             "cancel-in-progress: false",
             "branches: [main]",
             "outputs:\n      attestation: ${{ steps.immutable-settings.outputs.attestation }}",
+            "predecessor: ${{ steps.predecessor.outputs.attestation }}",
+            "CONTENTS_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "bash scripts/ci/wait-platform-release-predecessor.sh",
             "environment:\n      name: platform-release\n      deployment: false",
             self.ACTION_PIN,
             "app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}",
@@ -3563,8 +4308,12 @@ class WorkflowStructureTests(unittest.TestCase):
             "needs.main-ci-jobs.outputs.attestation ==",
             "github.event.workflow_run.id, github.event.workflow_run.run_attempt,",
             "needs.immutable-settings.outputs.attestation ==",
+            "needs.immutable-settings.outputs.predecessor ==",
             "format('PASS:{0}:{1}:{2}:{3}', github.repository, github.run_id,",
             "github.run_attempt, github.event.workflow_run.head_sha)",
+            "format('PASS:{0}:{1}', github.repository,",
+            "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
+            "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
             "bash scripts/ci/publish-platform-release.sh",
         )
         for token in workflow_deletions:
@@ -3572,6 +4321,7 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.require_exact_wiring(
                     workflow.replace(token, "", 1),
                     jobs_verifier,
+                    predecessor_wait,
                     settings_verifier,
                     transaction,
                 )
@@ -3609,6 +4359,43 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.require_exact_wiring(
                     workflow,
                     jobs_verifier.replace(token, "", 1),
+                    predecessor_wait,
+                    settings_verifier,
+                    transaction,
+                )
+
+        predecessor_deletions = (
+            ': "${CONTENTS_READ_TOKEN:?CONTENTS_READ_TOKEN is required}"',
+            ': "${SOURCE_SHA:?SOURCE_SHA is required}"',
+            'test -z "${GH_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+            'test -z "${ACTIONS_READ_TOKEN-}"',
+            'read_token="${CONTENTS_READ_TOKEN}"',
+            "unset CONTENTS_READ_TOKEN",
+            "--request GET",
+            '"Authorization: Bearer ${read_token}"',
+            "git fetch --quiet --tags origin",
+            "for _attempt in {1..30}",
+            'python3 -I -B "${contract}" release-window',
+            'test "${status}" -eq 3 || exit "${status}"',
+            'python3 -I -B "${contract}" release-notes',
+            "classify_predecessor_tag",
+            "classify_predecessor_release exact",
+            "classify_predecessor_release absent",
+            'printf \'attestation=PASS:%s:%s\\n\'',
+            "unset read_token",
+        )
+        for token in predecessor_deletions:
+            with self.subTest(predecessor_deletion=token), self.assertRaises(
+                ValueError
+            ):
+                self.require_exact_wiring(
+                    workflow,
+                    jobs_verifier,
+                    predecessor_wait.replace(token, "", 1),
                     settings_verifier,
                     transaction,
                 )
@@ -3637,14 +4424,21 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.require_exact_wiring(
                     workflow,
                     jobs_verifier,
+                    predecessor_wait,
                     settings_verifier.replace(token, "", 1),
                     transaction,
                 )
 
         transaction_deletions = (
             "tag-state",
+            ': "${BASE_SHA:?BASE_SHA is required}"',
+            ': "${BASE_TAG:?BASE_TAG is required}"',
             'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
             'test -z "${ACTIONS_READ_TOKEN-}"',
+            'test -z "${CONTENTS_READ_TOKEN-}"',
+            'test -z "${GITHUB_TOKEN-}"',
+            'test -z "${GH_ENTERPRISE_TOKEN-}"',
+            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
             'write_token="${GH_TOKEN}"',
             "unset GH_TOKEN",
             'GH_TOKEN="${write_token}" gh "$@"',
@@ -3652,6 +4446,10 @@ class WorkflowStructureTests(unittest.TestCase):
             "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
             "recovery_tag='v0.1.0'",
             PUBLISHER_TAG_GUARD,
+            "write_predecessor_notes() {",
+            'classify_release exact "${BASE_TAG}"',
+            'test "${SOURCE_SHA}" != "${BASE_SHA}"',
+            'test "${TAG}" != "${BASE_TAG}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
@@ -3672,6 +4470,7 @@ class WorkflowStructureTests(unittest.TestCase):
                 self.require_exact_wiring(
                     workflow,
                     jobs_verifier,
+                    predecessor_wait,
                     settings_verifier,
                     transaction.replace(token, "", 1),
                 )
@@ -3711,11 +4510,28 @@ class WorkflowStructureTests(unittest.TestCase):
                 "  publish:\n    env:\n      ACTIONS_READ_TOKEN: crossed\n",
                 1,
             ),
+            workflow.replace(
+                "bash scripts/ci/wait-platform-release-predecessor.sh",
+                "__WAIT_FOR_PREDECESSOR__",
+                1,
+            ).replace(
+                "bash scripts/ci/verify-platform-release-settings.sh",
+                "bash scripts/ci/wait-platform-release-predecessor.sh",
+                1,
+            ).replace(
+                "__WAIT_FOR_PREDECESSOR__",
+                "bash scripts/ci/verify-platform-release-settings.sh",
+                1,
+            ),
         )
         for index, mutant in enumerate(workflow_mutants):
             with self.subTest(workflow_mutant=index), self.assertRaises(ValueError):
                 self.require_exact_wiring(
-                    mutant, jobs_verifier, settings_verifier, transaction
+                    mutant,
+                    jobs_verifier,
+                    predecessor_wait,
+                    settings_verifier,
+                    transaction,
                 )
 
         # The un-prefixed mutant below pins whatever version this source
@@ -3780,12 +4596,17 @@ class WorkflowStructureTests(unittest.TestCase):
         for index, mutant in enumerate(transaction_mutants):
             with self.subTest(transaction_mutant=index), self.assertRaises(ValueError):
                 self.require_exact_wiring(
-                    workflow, jobs_verifier, settings_verifier, mutant
+                    workflow,
+                    jobs_verifier,
+                    predecessor_wait,
+                    settings_verifier,
+                    mutant,
                 )
         with self.assertRaises(ValueError):
             self.require_exact_wiring(
                 workflow.replace("cancel-in-progress: false", "cancel-in-progress: true", 1),
                 jobs_verifier,
+                predecessor_wait,
                 settings_verifier,
                 transaction,
             )
@@ -3793,13 +4614,20 @@ class WorkflowStructureTests(unittest.TestCase):
             self.require_exact_wiring(
                 workflow,
                 jobs_verifier,
+                predecessor_wait,
                 settings_verifier,
                 transaction + '\ngit rev-list -n 1 "${TAG}"\n',
             )
         for forbidden in ("kubectl", "flux", "tofu apply", "terraform apply", "cloudflared"):
             self.assertNotIn(
                 forbidden,
-                (workflow + jobs_verifier + settings_verifier + transaction).lower(),
+                (
+                    workflow
+                    + jobs_verifier
+                    + predecessor_wait
+                    + settings_verifier
+                    + transaction
+                ).lower(),
             )
 
 

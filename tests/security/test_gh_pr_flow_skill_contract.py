@@ -85,7 +85,7 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("--resource-kind pull-request", main),
             ("owner assignee", main),
             ("milestone", main),
-            ("exact proposed `vX.Y.Z` milestone", main),
+            ("repository's delivery arc milestone", main),
             ("never infer completion from a title", main),
             ("repo-specific coverage", main),
             ("neutral/skipped/canceled", main),
@@ -106,9 +106,11 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("bypass actors", governance),
             ("Every merge", releases),
             ("exactly one patch", releases),
-            ("every intermediate\n`VERSION` state", releases),
-            ("transient future values", releases),
-            ("same complete-history monotonic state machine", releases),
+            ("exactly one immutable\nrelease input", releases),
+            ("issue-namespaced `changelog.d/` fragment", releases),
+            ("never reserve a patch number", releases),
+            ("anchored immutable tag ledger", releases),
+            ("bounded pending transaction", releases),
             ("publisher-recoverable release intent", releases),
             ("Distinct main SHAs", releases),
             ("two and three rapid merges", releases),
@@ -135,7 +137,7 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             ("empty/mis-scoped include", governance),
             ("problem, acceptance", governance),
             ("threats, tests/mutations, exclusions, rollout/rollback", governance),
-            ("exactly match the\nproposed `VERSION` as `vX.Y.Z`", governance),
+            ("no\nPR pre-allocates a patch number", governance),
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -354,6 +356,59 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             packet[blocker] = True
             with self.subTest(raw_minimal_packet_blocker=blocker):
                 self.assertFalse(ready_from_packet(packet))
+
+    def test_open_pr_capacity_has_no_fixed_count_ceiling_and_keeps_authority_closed(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+
+        def capacity_denial(repository_contract, portable_skill):
+            required = (
+                ("open PR's dependency edges", repository_contract),
+                ("available\n   review capacity", repository_contract),
+                ("no fixed count ceiling", repository_contract),
+                ("dependency edges, collision\n  paths", repository_contract),
+                ("one-writer-per-branch ownership", repository_contract),
+                ("reviewer capacity", repository_contract),
+                ("keeps each affected PR Draft", repository_contract),
+                (
+                    "Open work never broadens authority: the owner alone merges",
+                    repository_contract,
+                ),
+                ("there is no numeric PR quota", portable_skill),
+                ("Dependent Draft PRs may be published", portable_skill),
+                ("without a fixed count ceiling", portable_skill),
+                ("one-writer branch ownership", portable_skill),
+                ("owner-only merge gates", portable_skill),
+            )
+            for fragment, document in required:
+                if fragment not in document:
+                    return f"open-PR capacity contract lost: {fragment}"
+            if re.search(
+                r"(?i)(?:at most|maximum|max)\s+[0-9]+\s+"
+                r"(?:agent[- ]authored\s+|agent\s+)?(?:open\s+)?PRs?",
+                repository_contract + "\n" + portable_skill,
+            ):
+                return "fixed open-PR count ceiling returned"
+            return None
+
+        self.assertIsNone(capacity_denial(agents, skill))
+        mutants = (
+            (agents.replace("There is no fixed count ceiling", "At most 3 agent PRs", 1), skill),
+            (agents.replace("keeps each affected PR Draft", "may leave Draft", 1), skill),
+            (
+                agents.replace(
+                    "Open work never broadens authority: the owner alone merges",
+                    "Open work broadens authority: agents may merge",
+                    1,
+                ),
+                skill,
+            ),
+            (agents, skill.replace("there is no numeric PR quota", "at most 3 open PRs", 1)),
+            (agents, skill.replace("Dependent Draft PRs", "Dependent PRs", 1)),
+        )
+        for index, (mutant_agents, mutant_skill) in enumerate(mutants):
+            with self.subTest(capacity_mutant=index):
+                self.assertIsNotNone(capacity_denial(mutant_agents, mutant_skill))
 
     def test_agents_ci_map_matches_executable_workflow_trigger_topology(self):
         expected = {

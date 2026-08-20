@@ -64,7 +64,12 @@ substitute for that out-of-band rule and review.
 
 The platform publisher supports both merge methods enabled for this repository:
 one-commit squash and merge-free multi-commit rebase. Merge commits stay
-disabled. That code cannot prevent an owner from merging a failing or stale PR
+disabled. Each range adds one immutable `changelog.d/` fragment and leaves the
+frozen legacy `VERSION` and `CHANGELOG.md` untouched. The publisher derives the
+next patch from the protected tag ledger anchored at `v0.1.9`; see
+[`platform-source-releases.md`](./platform-source-releases.md) for the exact
+fragment, rapid-merge, and dependency-queue state machine. That code cannot
+prevent an owner from merging a failing or stale PR
 when server-side checks are optional, and repository code cannot make a GitHub
 Release immutable. The automatic-release policy must not become Ready until the
 repository owner configures and then observes this exact server state:
@@ -241,9 +246,13 @@ validators remain separate load-bearing checks.
 
 The `immutable-settings` job is the only job attached to environment
 `platform-release`. It has `contents: read`, checks out and binds the exact
-successful main SHA, mints the App token, performs one GET-only immutable-setting
-probe, and exports only one sanitized attestation bound to repository, workflow
-run ID, run attempt, and source SHA. A partial job rerun cannot replay an older
+successful main SHA, then uses the ordinary contents-read token in a bounded
+GET-only step to wait for the derived predecessor's exact tag and immutable
+Release. Only after ordering completes does it mint the App token and perform
+one GET-only immutable-setting probe, so the proof is fresh immediately before
+the write job. It exports only two sanitized attestations: the predecessor
+source binding and the settings receipt bound to repository, workflow run ID,
+run attempt, and source SHA. A partial job rerun cannot replay an older
 settings result; only a rerun of the settings job can produce the current
 attempt's exact value. Its step summary contains this closed value-only receipt:
 
@@ -262,7 +271,10 @@ attempt's exact value. Its step summary contains this closed value-only receipt:
 The dependent `publish` job independently checks out and rebinds the same event
 SHA. It has `contents: write`, no environment, no App variable, no App secret,
 and no App token. The settings shell rejects `GH_TOKEN`; the publisher rejects
-`IMMUTABLE_SETTINGS_TOKEN` and the Actions-read token. Never combine the jobs,
+`IMMUTABLE_SETTINGS_TOKEN`, the Actions-read token, and the predecessor
+contents-read token. It rebinds the release window once, then requires the exact
+predecessor tag and immutable Release again at every preflight before mutation.
+Never combine the jobs,
 export either read token as a job output, or pass any read credential to the
 publication transaction.
 
@@ -314,8 +326,9 @@ source `51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e` with the contract's exact bot
 tagger metadata. The owner must not create the Release. Until that tag is exact,
 the automatic transaction performs no write. The workflow's own `GITHUB_TOKEN`
 then creates or verifies the immutable zero-asset v0.1.0 Release as
-`github-actions[bot]` before it begins v0.1.1. Missing, lightweight, moved,
-foreign, partial, or raced states fail closed; exact completion is idempotent.
+`github-actions[bot]` before it begins the current tag-derived release. Missing,
+lightweight, moved, foreign, partial, or raced states fail closed; exact
+completion is idempotent.
 The Release call uses `--verify-tag` and deliberately omits `--target`: GitHub
 documents `target_commitish` as unused when the tag already exists. Supplying
 the historical workflow-bearing target would require Workflows write, an

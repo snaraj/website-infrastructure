@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -15,7 +16,16 @@ from typing import Mapping
 
 
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+TAG_RE = re.compile(
+    r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+FRAGMENT_PATH_RE = re.compile(
+    r"^changelog\.d/([1-9][0-9]*)-[a-z0-9]+(?:-[a-z0-9]+)*\.md$"
+)
+FRAGMENT_CATEGORIES = frozenset({"Added", "Changed", "Fixed", "Security"})
+GENERATED_RELEASE_PATHS = frozenset({"VERSION", "CHANGELOG.md"})
+MAX_FRAGMENT_BYTES = 16 * 1024
 WORKFLOW_NAME = "Pull request"
 WORKFLOW_PATH = ".github/workflows/pull-request.yml"
 GITHUB_API_VERSION = "2026-03-10"
@@ -71,6 +81,15 @@ CODEQL_EXACT_STEPS = (
 RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
 RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
 RECOVERY_TAG = "v0.1.0"
+# Issue #164 moves the publisher from commit-authored VERSION boundaries to an
+# immutable tag ledger.  Historical source releases before this exact boundary
+# contain two intentionally absent tags, so the new contiguous state machine
+# starts at the last release produced by the retired model rather than
+# pretending the legacy gap never existed.
+TAG_LEDGER_FLOOR_TAG = "v0.1.9"
+TAG_LEDGER_FLOOR_SHA = "02863737ec3759e03e032f0a478f4b5298c61a0b"
+RELEASE_TAGGER_NAME = "github-actions[bot]"
+RELEASE_TAGGER_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 PREFLIGHT_APP_ID_VARIABLE = "PLATFORM_RELEASE_APP_ID"
 PREFLIGHT_APP_PRIVATE_KEY_SECRET = "PLATFORM_RELEASE_APP_PRIVATE_KEY"
 PREFLIGHT_ENVIRONMENT = "platform-release"
@@ -78,6 +97,10 @@ PREFLIGHT_ENVIRONMENT = "platform-release"
 
 class ContractError(ValueError):
     """A platform release input cannot satisfy the immutable contract."""
+
+
+class PendingRelease(ContractError):
+    """A later main SHA is waiting for an earlier release identity."""
 
 
 @dataclass(frozen=True, order=True)
@@ -114,7 +137,24 @@ class Intent:
 @dataclass(frozen=True)
 class TransitionWindow:
     base_sha: str
+    base_tag: str
     intent: Intent
+    fragment_path: str
+    fragment_sha256: str
+
+
+@dataclass(frozen=True)
+class FragmentIntent:
+    source_sha: str
+    fragment_path: str
+    fragment_sha256: str
+
+
+@dataclass(frozen=True, order=True)
+class TagBoundary:
+    version: Version
+    tag: str
+    source_sha: str
 
 
 def require_sha(raw: object, field: str) -> str:
@@ -172,9 +212,132 @@ def _file(
     return _git(repository, "show", f"{revision}:{path}", allow_absent=allow_absent)
 
 
-def _version_at(repository: Path, revision: str) -> Version | None:
-    raw = _file(repository, revision, "VERSION", allow_absent=True)
-    return Version.parse(raw) if raw is not None else None
+def _git_bytes(repository: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *args],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode:
+        raise ContractError(f"git {' '.join(args)} failed")
+    return result.stdout
+
+
+def _file_bytes(repository: Path, revision: str, path: str) -> bytes:
+    return _git_bytes(repository, "show", f"{revision}:{path}")
+
+
+def _exact_commit(repository: Path, revision: str, field: str) -> str:
+    revision = require_sha(revision, field)
+    if _git(repository, "rev-parse", "--verify", f"{revision}^{{commit}}") != revision:
+        raise ContractError(f"{field} did not resolve exactly")
+    return revision
+
+
+def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ContractError("git ancestry check failed")
+
+
+def _nul_paths(repository: Path, *args: str) -> tuple[str, ...]:
+    raw = _git_bytes(repository, *args)
+    fields = raw.split(b"\0")
+    if fields[-1] != b"":
+        raise ContractError("git path inventory was not NUL terminated")
+    paths: list[str] = []
+    for field in fields[:-1]:
+        try:
+            path = field.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ContractError("release path is not UTF-8") from exc
+        if not path or path in paths:
+            raise ContractError("release path inventory is empty or duplicated")
+        paths.append(path)
+    return tuple(sorted(paths))
+
+
+def validate_fragment_bytes(path: str, payload: bytes) -> str:
+    if not FRAGMENT_PATH_RE.fullmatch(path):
+        raise ContractError(
+            "fragment path must be changelog.d/<issue>-<lowercase-slug>.md"
+        )
+    if not payload or len(payload) > MAX_FRAGMENT_BYTES:
+        raise ContractError("fragment must be non-empty and at most 16 KiB")
+    if payload.startswith(b"\xef\xbb\xbf") or b"\r" in payload or b"\x00" in payload:
+        raise ContractError("fragment must be BOM-free UTF-8 with LF line endings")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError("fragment is not UTF-8") from exc
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        raise ContractError("fragment must end in exactly one newline")
+    if "${{" in text:
+        raise ContractError("fragment must not contain a workflow expression opener")
+    lines = text.splitlines()
+    if len(lines) < 3 or lines[1] != "":
+        raise ContractError("fragment must contain one category heading and bullet list")
+    heading = lines[0]
+    if not heading.startswith("### ") or heading[4:] not in FRAGMENT_CATEGORIES:
+        raise ContractError("fragment category must be Added, Changed, Fixed, or Security")
+    bullets = lines[2:]
+    if not bullets or any(not line.startswith("- ") or len(line) == 2 for line in bullets):
+        raise ContractError("every fragment body line must be one non-empty Markdown bullet")
+    if any(line.rstrip() != line for line in lines):
+        raise ContractError("fragment lines must not contain trailing whitespace")
+    return text
+
+
+def _release_surface_intents(
+    repository: Path, base_sha: str, head_sha: str
+) -> tuple[FragmentIntent, ...]:
+    _linear_commits(repository, base_sha, head_sha)
+    pathspec = ("--", "VERSION", "CHANGELOG.md", "changelog.d")
+    changed = _nul_paths(
+        repository,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        base_sha,
+        head_sha,
+        *pathspec,
+    )
+    added = _nul_paths(
+        repository,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=A",
+        "-z",
+        base_sha,
+        head_sha,
+        *pathspec,
+    )
+    generated = sorted(set(changed) & GENERATED_RELEASE_PATHS)
+    if generated:
+        raise ContractError(
+            "retired generated release files changed: " + ", ".join(generated)
+        )
+    if changed != added:
+        raise ContractError("release fragments may only be newly added, never edited or removed")
+    intents: list[FragmentIntent] = []
+    for path in added:
+        payload = _file_bytes(repository, head_sha, path)
+        validate_fragment_bytes(path, payload)
+        intents.append(
+            FragmentIntent(head_sha, path, hashlib.sha256(payload).hexdigest())
+        )
+    return tuple(intents)
 
 
 def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]:
@@ -199,132 +362,217 @@ def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]
     return commits
 
 
-def _linear_history(repository: Path, head_sha: str) -> list[str]:
-    """Return the complete merge-free history ending at one exact head."""
-    raw = _git(repository, "rev-list", "--reverse", head_sha)
-    commits = raw.splitlines() if raw else []
-    if not commits or commits[-1] != head_sha:
-        raise ContractError("release history is empty or does not end at the exact head")
-    previous: str | None = None
-    for commit in commits:
-        fields = _git(repository, "rev-list", "--parents", "-n", "1", commit).split()
-        if fields[0] != commit:
-            raise ContractError("release history commit identity is not exact")
-        if previous is None:
-            if len(fields) != 1:
-                raise ContractError("release history root must have no parent")
-        elif len(fields) != 2 or fields[1] != previous:
-            raise ContractError("release history must be one contiguous linear commit chain")
-        previous = commit
-    return commits
-
-
-def _monotonic_transitions(
-    repository: Path, base_sha: str, commits: list[str]
-) -> list[tuple[str, str, Version]]:
-    """Classify exact patch boundaries without permitting skips or reversions."""
-    current = _version_at(repository, base_sha)
-    previous = base_sha
-    transitions: list[tuple[str, str, Version]] = []
-    for commit in commits:
-        observed = _version_at(repository, commit)
-        if observed == current:
-            previous = commit
-            continue
-        expected = next_version(current)
-        if observed != expected:
-            rendered = "absent" if observed is None else str(observed)
-            raise ContractError(
-                f"commit {commit} version {rendered} must remain at the base "
-                f"or advance exactly once to {expected}"
-            )
-        transitions.append((previous, commit, expected))
-        current = expected
-        previous = commit
-    return transitions
-
-
-def _validated_history_transitions(
-    repository: Path, head_sha: str
-) -> list[tuple[str, str, Version]]:
-    """Prove the complete publisher-visible history and return its boundaries."""
-    history = _linear_history(repository, head_sha)
-    root = history[0]
-    if _version_at(repository, root) is not None:
-        raise ContractError("platform release history must begin before VERSION exists")
-    return _monotonic_transitions(repository, root, history[1:])
-
-
 def validate_transition(
     repository: Path, base_sha: str, head_sha: str, *, first_parent: bool
-) -> Intent:
-    """Bind one allowed integration range to its exact final-tree patch."""
-    base_sha = require_sha(base_sha, "base SHA")
-    head_sha = require_sha(head_sha, "head SHA")
-    if _git(repository, "rev-parse", f"{base_sha}^{{commit}}") != base_sha:
-        raise ContractError("base did not resolve exactly")
-    if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
-        raise ContractError("head did not resolve exactly")
-    # A squash may collapse several reviewed commits to one main commit, while
-    # GitHub rebase installs those commits individually. Both enabled owner
-    # choices are release-live only when the reviewed and installed range is a
-    # single linear chain with the same monotonic VERSION state machine. A
-    # merge-bearing topic is therefore denied even on the PR endpoint: prose
-    # cannot make its enabled rebase outcome publisher-recoverable.
-    commits = _linear_commits(repository, base_sha, head_sha)
-    transitions = _monotonic_transitions(repository, base_sha, commits)
-    if len(transitions) != 1:
-        raise ContractError("release range must contain exactly one patch boundary")
-    history_transitions = _validated_history_transitions(repository, head_sha)
-    if not history_transitions or history_transitions[-1] != transitions[0]:
-        raise ContractError(
-            "release range boundary is not the exact publisher-visible boundary"
-        )
+) -> FragmentIntent:
+    """Bind one PR or protected-main range to one immutable fragment."""
+    del first_parent  # Both enabled merge methods require the same linear range.
+    base_sha = _exact_commit(repository, base_sha, "base SHA")
+    head_sha = _exact_commit(repository, head_sha, "head SHA")
+    intents = _release_surface_intents(repository, base_sha, head_sha)
+    if len(intents) != 1:
+        raise ContractError("release range must add exactly one changelog fragment")
+    return intents[0]
 
-    base = _version_at(repository, base_sha)
-    head_raw = _file(repository, head_sha, "VERSION")
-    assert head_raw is not None
-    head = Version.parse(head_raw)
-    expected = next_version(base)
-    if head != expected:
-        raise ContractError(f"head version {head} must be exact next patch {expected}")
-    changelog = _file(repository, head_sha, "CHANGELOG.md")
-    assert changelog is not None
-    validate_changelog(changelog, head)
-    return Intent(head_sha, head)
+
+def _platform_tag_boundaries(repository: Path) -> tuple[TagBoundary, ...]:
+    raw = _git(repository, "tag", "--list", "v*")
+    names = raw.splitlines() if raw else []
+    boundaries: list[TagBoundary] = []
+    seen_versions: set[Version] = set()
+    for name in names:
+        match = TAG_RE.fullmatch(name)
+        if not match:
+            raise ContractError(f"platform tag is not canonical SemVer: {name!r}")
+        version = Version(*(int(part) for part in match.groups()))
+        if version in seen_versions:
+            raise ContractError("platform tag version is duplicated")
+        seen_versions.add(version)
+        raw = _git_bytes(
+            repository,
+            "for-each-ref",
+            "--count=1",
+            "--format=%(objecttype)%00%(*objecttype)%00%(tag)%00%(taggername)%00%(taggeremail)%00%(taggerdate:iso-strict)%00%(contents)%00%(*objectname)%00",
+            f"refs/tags/{name}",
+        )
+        if not raw.endswith(b"\0\n"):
+            raise ContractError(f"platform tag {name} metadata is not bounded")
+        try:
+            fields = tuple(field.decode("utf-8") for field in raw[:-2].split(b"\0"))
+        except UnicodeDecodeError as exc:
+            raise ContractError(f"platform tag {name} metadata is not UTF-8") from exc
+        if len(fields) != 8:
+            raise ContractError(f"platform tag {name} metadata is incomplete")
+        (
+            object_type,
+            peeled_type,
+            embedded_name,
+            tagger_name,
+            tagger_email,
+            tagger_date,
+            message,
+            source_sha,
+        ) = fields
+        source_sha = require_sha(source_sha, f"{name} target")
+        expected_message = f"Platform release {name} from {source_sha}"
+        expected_date = _git(repository, "show", "-s", "--format=%cI", source_sha)
+        if (
+            object_type != "tag"
+            or peeled_type != "commit"
+            or embedded_name != name
+            or tagger_name != RELEASE_TAGGER_NAME
+            or tagger_email != f"<{RELEASE_TAGGER_EMAIL}>"
+            or tagger_date != expected_date
+            or message != expected_message
+        ):
+            raise ContractError(f"platform tag {name} metadata is not exact")
+        boundaries.append(TagBoundary(version, name, source_sha))
+    boundaries.sort()
+    floor_version = Version.parse(TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+    ledger = tuple(boundary for boundary in boundaries if boundary.version >= floor_version)
+    if not ledger:
+        raise ContractError("tag-derived release ledger has no migration floor")
+    floor = ledger[0]
+    if floor.tag != TAG_LEDGER_FLOOR_TAG or floor.source_sha != TAG_LEDGER_FLOOR_SHA:
+        raise ContractError("tag-derived release ledger floor is not exact")
+    previous = floor
+    for boundary in ledger[1:]:
+        if boundary.version != next_version(previous.version):
+            raise ContractError("tag-derived release ledger skips or reverses a patch")
+        if boundary.source_sha == previous.source_sha or not _is_ancestor(
+            repository, previous.source_sha, boundary.source_sha
+        ):
+            raise ContractError("tag-derived release ledger is not one ancestral sequence")
+        _linear_commits(repository, previous.source_sha, boundary.source_sha)
+        intents = _release_surface_intents(
+            repository, previous.source_sha, boundary.source_sha
+        )
+        if len(intents) != 1:
+            raise ContractError(
+                "every adjacent tag-derived release must bind exactly one fragment"
+            )
+        previous = boundary
+    return ledger
 
 
 def discover_transition_window(repository: Path, head_sha: str) -> TransitionWindow:
-    """Recover the last boundary from the same monotonic history main CI enforces."""
-    head_sha = require_sha(head_sha, "head SHA")
-    if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
-        raise ContractError("head did not resolve exactly")
-    transitions = _validated_history_transitions(repository, head_sha)
-    if not transitions:
-        raise ContractError("release history contains no patch boundary")
-    head_version = _version_at(repository, head_sha)
-    if head_version is None:
-        raise ContractError("release head has no VERSION")
-    base_sha, _transition_commit, transition_version = transitions[-1]
-    if transition_version != head_version:
-        raise ContractError("release head does not retain the last patch boundary")
-    changelog = _file(repository, head_sha, "CHANGELOG.md")
-    assert changelog is not None
-    validate_changelog(changelog, head_version)
-    return TransitionWindow(base_sha, Intent(head_sha, head_version))
+    """Derive one exact patch from the immutable tag ledger and one fragment."""
+    head_sha = _exact_commit(repository, head_sha, "head SHA")
+    ledger = _platform_tag_boundaries(repository)
+
+    for index, boundary in enumerate(ledger):
+        if boundary.source_sha != head_sha:
+            continue
+        if index == 0:
+            raise ContractError("the migration-floor release is not a publishable new window")
+        previous = ledger[index - 1]
+        intents = _release_surface_intents(repository, previous.source_sha, head_sha)
+        if len(intents) != 1:
+            raise ContractError("an existing release tag must bind exactly one fragment")
+        fragment = intents[0]
+        return TransitionWindow(
+            previous.source_sha,
+            previous.tag,
+            Intent(head_sha, boundary.version),
+            fragment.fragment_path,
+            fragment.fragment_sha256,
+        )
+
+    for boundary in ledger:
+        if _is_ancestor(repository, head_sha, boundary.source_sha):
+            raise ContractError("source SHA is behind a later tag but has no exact release tag")
+
+    latest = ledger[-1]
+    if not _is_ancestor(repository, latest.source_sha, head_sha):
+        raise ContractError("source SHA does not descend from the latest platform tag")
+    intents = _release_surface_intents(repository, latest.source_sha, head_sha)
+    if len(intents) > 1:
+        raise PendingRelease(
+            f"source is waiting for {len(intents) - 1} earlier main release(s)"
+        )
+    if len(intents) != 1:
+        raise ContractError("unreleased source must add exactly one changelog fragment")
+    fragment = intents[0]
+    version = next_version(latest.version)
+    return TransitionWindow(
+        latest.source_sha,
+        latest.tag,
+        Intent(head_sha, version),
+        fragment.fragment_path,
+        fragment.fragment_sha256,
+    )
+
+
+def _legacy_release_notes(head_sha: str, tag: str) -> str:
+    return (
+        f"## Platform {tag}\n\n"
+        f"Immutable repository source: `{head_sha}`\n\n"
+        "This release names platform source only. It does not deploy, promote, "
+        "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
+        "See `CHANGELOG.md` at this tag for the human-readable change record.\n"
+    )
+
+
+def render_release_notes(
+    repository: Path,
+    head_sha: str,
+    tag: str,
+    *,
+    expected_base_sha: str | None = None,
+    expected_base_tag: str | None = None,
+) -> str:
+    if (expected_base_sha is None) != (expected_base_tag is None):
+        raise ContractError("release-notes base SHA and tag must be supplied together")
+    head_sha = _exact_commit(repository, head_sha, "release-notes head SHA")
+    if tag == TAG_LEDGER_FLOOR_TAG:
+        if head_sha != TAG_LEDGER_FLOOR_SHA:
+            raise ContractError("legacy migration-floor notes source is not exact")
+        ledger = _platform_tag_boundaries(repository)
+        if ledger[0].source_sha != head_sha or ledger[0].tag != tag:
+            raise ContractError("legacy migration-floor release is not exact")
+        if expected_base_sha is not None:
+            raise ContractError("legacy migration-floor notes have no derived base")
+        return _legacy_release_notes(head_sha, tag)
+    window = discover_transition_window(repository, head_sha)
+    if window.intent.tag != tag:
+        raise ContractError("release-notes tag is not the derived tag")
+    if expected_base_sha is not None and (
+        window.base_sha != expected_base_sha or window.base_tag != expected_base_tag
+    ):
+        raise ContractError("release-notes predecessor is not the derived base")
+    payload = _file_bytes(repository, head_sha, window.fragment_path)
+    text = validate_fragment_bytes(window.fragment_path, payload)
+    if hashlib.sha256(payload).hexdigest() != window.fragment_sha256:
+        raise ContractError("release fragment changed after window derivation")
+    return (
+        f"## Platform {tag}\n\n"
+        f"Immutable repository source: `{head_sha}`\n\n"
+        "This release names platform source only. It does not deploy, promote, "
+        "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
+        f"Fragment: `{window.fragment_path}` "
+        f"(`sha256:{window.fragment_sha256}`)\n\n"
+        f"{text}"
+    )
 
 
 def validate_recovery_release(repository: Path, source_sha: str, tag: str) -> Intent:
     """Bind the sole pre-App release backlog entry to its immutable history."""
-    source_sha = require_sha(source_sha, "recovery source SHA")
+    source_sha = _exact_commit(repository, source_sha, "recovery source SHA")
     if source_sha != RECOVERY_SOURCE_SHA or tag != RECOVERY_TAG:
         raise ContractError("release recovery source or tag is not the exact frozen backlog")
-    window = discover_transition_window(repository, source_sha)
-    if window.base_sha != RECOVERY_BASE_SHA:
+    if _git(repository, "rev-parse", f"{source_sha}^") != RECOVERY_BASE_SHA:
         raise ContractError("release recovery base is not the exact protected predecessor")
-    if window.intent.source_sha != RECOVERY_SOURCE_SHA or window.intent.tag != RECOVERY_TAG:
-        raise ContractError("release recovery history does not reproduce the frozen intent")
-    return window.intent
+    if _git(repository, "cat-file", "-t", f"refs/tags/{tag}") != "tag":
+        raise ContractError("release recovery tag is not annotated")
+    if _git(repository, "rev-parse", f"refs/tags/{tag}^{{commit}}") != source_sha:
+        raise ContractError("release recovery tag target is not exact")
+    version = Version.parse(_file(repository, source_sha, "VERSION") or "")
+    if version.tag != tag:
+        raise ContractError("release recovery VERSION is not exact")
+    changelog = _file(repository, source_sha, "CHANGELOG.md")
+    assert changelog is not None
+    validate_changelog(changelog, version)
+    return Intent(source_sha, version)
 
 
 def plan_workflow_run(event: Mapping[str, object], expected_repository: str) -> str:
@@ -1326,6 +1574,19 @@ def _emit(intent: Intent) -> None:
     )
 
 
+def _emit_fragment(intent: FragmentIntent) -> None:
+    print(
+        json.dumps(
+            {
+                "fragment_path": intent.fragment_path,
+                "fragment_sha256": intent.fragment_sha256,
+                "source_sha": intent.source_sha,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _read_object(path: Path) -> Mapping[str, object]:
     return _object(json.loads(path.read_text(encoding="utf-8")), str(path))
 
@@ -1341,6 +1602,12 @@ def _parser() -> argparse.ArgumentParser:
     window = commands.add_parser("release-window")
     window.add_argument("--repository", type=Path, required=True)
     window.add_argument("--head", required=True)
+    notes = commands.add_parser("release-notes")
+    notes.add_argument("--repository", type=Path, required=True)
+    notes.add_argument("--head", required=True)
+    notes.add_argument("--tag", required=True)
+    notes.add_argument("--base-sha")
+    notes.add_argument("--base-tag")
     recovery = commands.add_parser("recovery-release")
     recovery.add_argument("--repository", type=Path, required=True)
     recovery.add_argument("--source-sha", required=True)
@@ -1419,7 +1686,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "transition":
-            _emit(
+            _emit_fragment(
                 validate_transition(
                     args.repository,
                     args.base,
@@ -1433,12 +1700,26 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     {
                         "base_sha": window.base_sha,
+                        "base_tag": window.base_tag,
+                        "fragment_path": window.fragment_path,
+                        "fragment_sha256": window.fragment_sha256,
                         "source_sha": window.intent.source_sha,
                         "tag": window.intent.tag,
                         "version": str(window.intent.version),
                     },
                     sort_keys=True,
                 )
+            )
+        elif args.command == "release-notes":
+            print(
+                render_release_notes(
+                    args.repository,
+                    args.head,
+                    args.tag,
+                    expected_base_sha=args.base_sha,
+                    expected_base_tag=args.base_tag,
+                ),
+                end="",
             )
         elif args.command == "recovery-release":
             _emit(
@@ -1559,6 +1840,9 @@ def main(argv: list[str] | None = None) -> int:
             print(require_publication_state(state, args.require) if args.require else state)
         else:  # pragma: no cover - argparse owns this path
             raise ContractError("unknown command")
+    except PendingRelease as exc:
+        print(f"PENDING: {exc}", file=sys.stderr)
+        return 3
     except (ContractError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         print(f"DENY: {exc}", file=sys.stderr)
         return 1
