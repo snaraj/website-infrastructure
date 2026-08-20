@@ -47,9 +47,9 @@ body:
   - type: input
     id: milestone
     attributes:
-      label: Exact release milestone
-      description: Use the proposed VERSION as vX.Y.Z for release-bearing work.
-      placeholder: v0.1.0
+      label: Delivery arc milestone
+      description: Use the repository's exact delivery or maintenance arc. Platform source tags are derived only after protected-main merge; do not pre-allocate vX.Y.Z.
+      placeholder: Platform upkeep
     validations:
       required: true
   - type: checkboxes

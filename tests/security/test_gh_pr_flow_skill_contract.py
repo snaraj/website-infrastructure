@@ -156,13 +156,23 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "Tests and mutation plan",
             "Scope and exclusions",
             "Rollout and rollback",
-            "Exact release milestone",
+            "Delivery arc milestone",
+            "tags are derived only after protected-main merge",
+            "do not pre-allocate vX.Y.Z",
+            "placeholder: Platform upkeep",
             "scope and agent-provenance labels",
             "repository owner will be assigned",
             "standalone `Closes #N`",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, form)
+        for retired in (
+            "Exact release milestone",
+            "Use the proposed VERSION as vX.Y.Z",
+            "placeholder: v0.1.0",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, form)
         self.assertEqual(form.count("required: true"), 10)
         self.assertEqual(config, "blank_issues_enabled: false\n")
 
