@@ -107,3 +107,7 @@ Thumbs.db
 *~
 
 # Keep SOPS ciphertext tracked. Do not add *.sops.yaml here.
+
+# Agent worktrees (see AGENTS.md, "Parallel agents in one checkout"). The
+# tracked .claude/settings.json is deliberately not covered by this rule.
+.claude/worktrees/
