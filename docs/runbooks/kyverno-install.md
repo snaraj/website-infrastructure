@@ -156,9 +156,35 @@ change invalidates this contract. Rebind and rerun the canaries before an
 install, promotion, or rollback; never widen a CIDR to make a test pass.
 
 `kustomize` and `kubectl` must resolve to absolute paths outside the checkout.
-The installer verifies both exact versions and executable SHA-256 pins from
-`versions.env`. Controller, helper, and canary images require full non-zero
-digests and must equal the reviewed pins.
+Run the installer directly or as
+`/bin/bash -p scripts/install-kyverno-admission.sh`.
+The fixed `/bin/bash -p` entry point does not elevate privilege: it prevents
+`BASH_ENV`, `ENV`, and exported shell functions from running before the guards.
+The installer then removes those startup hooks and closes helper lookup to
+`/usr/bin:/bin`; ambient `PATH` is retained only as data for Bash's non-executing
+lookup of the two candidate tools.
+
+Each candidate must be a single-link regular executable, owned by root or the
+effective operator, with no special bits or group/other write permission. The
+installer opens it once, verifies its SHA-256 pin from `versions.env`, and copies
+the reviewed bytes into an operator-owned mode-0700 directory as a mode-0500
+image. Linux opens and unlinks that image, then rechecks and executes
+`/proc/self/fd/<fd>` for every call. Darwin's `/dev/fd` is non-executable, so the
+offline harness retains the mode-0500 image inside the revalidated private
+directory and binds its inode, held descriptor, and digest before every call.
+The only accepted script form is the synthetic harness's exact
+`#!/bin/bash -p`; production pins name native Linux tools. Replacing the source
+path cannot change the bytes that receive cluster authority, and a changed held
+image is refused before its next invocation. Self-reported versions remain a
+separate compatibility check, never executable identity. This binds external
+pathname races, not a compromised process running as the effective operator.
+Controller, helper, and canary images require full non-zero digests and must
+equal the reviewed pins.
+
+Native Windows does not simulate POSIX owner/mode or file-descriptor semantics.
+Its portable structure and policy tests still run, while this custody proof runs
+under WSL, a Linux container, or Linux CI. Windows credential-workspace and other
+Windows-specific checks remain separate and are not skipped by this contract.
 
 ## Journal and recovery contract
 
