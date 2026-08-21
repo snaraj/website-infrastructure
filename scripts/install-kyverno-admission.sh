@@ -23,9 +23,12 @@
 #                     There is no operator-owned webhook phase: registration
 #                     belongs to the controller.
 #
-#   BINDING           The tools are the versions versions.env pins and are not
-#                     resolved out of the checkout; the render's SHA-256 and
-#                     object inventory match the committed
+#   BINDING           The tools are the versions and executable SHA-256 values
+#                     versions.env pins, are not resolved out of the checkout,
+#                     satisfy a closed owner/mode/link/type contract, and run
+#                     only through held descriptors for private, unlinked
+#                     execution images; the render's SHA-256 and object
+#                     inventory match the committed
 #                     kubernetes/platform/admission-install/render.lock; every
 #                     image in the render is one of the pinned digests; and the
 #                     target is an explicitly named kubeconfig, context, and
@@ -279,27 +282,26 @@ case "$MODE" in
 esac
 
 digest_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum <"$1" | cut -d' ' -f1
-  else
-    shasum -a 256 <"$1" | cut -d' ' -f1
-  fi
+  [[ -x /usr/bin/sha256sum && -x /usr/bin/cut ]] || \
+    die 'fixed sha256sum/cut identity is unavailable'
+  /usr/bin/sha256sum <"$1" | /usr/bin/cut -d' ' -f1
 }
 
 digest_text() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | cut -d' ' -f1
-  else
-    printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
-  fi
+  [[ -x /usr/bin/sha256sum && -x /usr/bin/cut ]] || \
+    die 'fixed sha256sum/cut identity is unavailable'
+  printf '%s' "$1" | /usr/bin/sha256sum | /usr/bin/cut -d' ' -f1
 }
 
 # --- tool binding ------------------------------------------------------------
 
-# A tool that satisfies `command -v` is not a bound tool. Two things are proven
-# here: the binary is not being resolved out of the checkout (a repository that
-# can supply its own kubectl can supply one that reports whatever the gate wants
-# to hear), and its version is exactly the one versions.env pins.
+# A tool that satisfies `command -v` is not a bound tool. Resolution names only
+# a candidate. Before that candidate may execute, bind_tool_image opens it once,
+# proves a closed owner/mode/link/type contract, hashes and copies the held
+# descriptor into a private image, opens the copy, and unlinks its last pathname.
+# Every invocation rechecks and executes that held descriptor. This closes the
+# path replacement between digest and exec without treating version output as
+# executable identity.
 resolved_tool() {
   local tool="$1" path=''
   path="$(command -v "$tool" 2>/dev/null)" || die "${tool} is required"
@@ -311,37 +313,169 @@ resolved_tool() {
   # entry rarely is (macOS TMPDIR alone is a symlink), so a textual comparison
   # would miss exactly the case this guard exists for.
   local directory=''
-  directory="$(cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P)" || \
+  directory="$(cd -- "$(/usr/bin/dirname -- "$path")" 2>/dev/null && pwd -P)" || \
     die "${tool} resolves to an unreadable directory"
-  path="${directory}/$(basename -- "$path")"
+  path="${directory}/$(/usr/bin/basename -- "$path")"
   case "$path" in
     "${REPO_ROOT}"/*) die "${tool} resolves inside the checkout: ${path}" ;;
   esac
   printf '%s' "$path"
 }
 
+tool_metadata() {
+  local path="$1"
+  /usr/bin/stat -Lc '%d:%i:%f:%u:%g:%a:%h:%s:%Y:%Z' -- "$path" 2>/dev/null || true
+}
+
+validate_tool_metadata() {
+  local tool="$1" metadata="$2" expected_owner="$3"
+  local device='' inode='' raw_mode='' owner='' group='' mode='' links=''
+  local size='' _mtime='' ctime=''
+  IFS=: read -r device inode raw_mode owner group mode links size _mtime ctime <<<"$metadata"
+  [[ -n "$ctime" && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ ]] || \
+    die "${tool} executable metadata is unavailable"
+  [[ "$raw_mode" =~ ^[0-9a-fA-F]+$ && "$owner" =~ ^[0-9]+$ && \
+     "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ && \
+     "$links" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] || \
+    die "${tool} executable metadata is invalid"
+  # The file-type nibble of st_mode is 8 for a regular file. Keep this check
+  # independent of locale-sensitive `stat %F` output.
+  [[ "${raw_mode:0:1}" == '8' ]] || die "${tool} executable is not a regular file"
+  [[ "$links" == '1' ]] || die "${tool} executable has more than one hard link"
+  [[ "$owner" == '0' || "$owner" == "$expected_owner" ]] || \
+    die "${tool} executable owner is outside the operator/root contract"
+  local mode_value=$((8#$mode))
+  (( (mode_value & 07000) == 0 )) || \
+    die "${tool} executable has special permission bits"
+  (( (mode_value & 0022) == 0 )) || \
+    die "${tool} executable is writable by group or other"
+  (( (mode_value & 0111) != 0 )) || die "${tool} executable is not executable"
+}
+
+bound_descriptor_path() {
+  local fd="$1"
+  [[ "$fd" =~ ^[0-9]+$ ]] || die 'bound executable descriptor is invalid'
+  local path="/proc/self/fd/${fd}"
+  [[ -r "$path" ]] || die 'bound executable descriptor is unavailable'
+  printf '%s' "$path"
+}
+
+validate_bound_tool() {
+  local tool="$1" fd="$2" expected_digest="$3" expected_owner="$4"
+  local path='' metadata=''
+  local device='' inode='' raw_mode='' owner='' group='' mode='' links=''
+  local size='' _mtime='' ctime=''
+  path="$(bound_descriptor_path "$fd")"
+  metadata="$(tool_metadata "$path")"
+  IFS=: read -r device inode raw_mode owner group mode links size _mtime ctime <<<"$metadata"
+  [[ -n "$ctime" && "$device" =~ ^[0-9]+$ && "$inode" =~ ^[0-9]+$ && \
+     "$raw_mode" =~ ^[0-9a-fA-F]+$ && "$owner" =~ ^[0-9]+$ && \
+     "$group" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{3,4}$ && \
+     "$links" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] || \
+    die "${tool} bound executable metadata is invalid"
+  [[ "${raw_mode:0:1}" == '8' ]] || \
+    die "${tool} bound executable is not a regular file"
+  [[ "$owner" == "$expected_owner" ]] || \
+    die "${tool} bound executable owner changed"
+  [[ "$mode" == '500' ]] || die "${tool} bound executable is writable or has the wrong mode"
+  [[ "$links" == '0' ]] || die "${tool} bound executable still has a pathname"
+  [[ "$(digest_of "$path")" == "$expected_digest" ]] || \
+    die "${tool} bound executable no longer matches its reviewed sha256"
+}
+
 pinned_version() {
   local key="$1" line=''
   [[ -f "$VERSIONS_FILE" ]] || die 'versions.env is missing'
-  line="$(grep -E "^${key}=" "$VERSIONS_FILE" || true)"
+  line="$(/usr/bin/grep -E "^${key}=" "$VERSIONS_FILE" || true)"
   [[ -n "$line" ]] || die "versions.env has no ${key}"
   printf '%s' "${line#*=}"
 }
 
-verify_tool_digest() {
-  local tool="$1" path="$2" pin_key="$3" expected='' actual=''
-  expected="$(pinned_version "$pin_key")"
-  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "versions.env has no valid ${pin_key}"
-  actual="$(digest_of "$path")"
-  [[ "$actual" == "$expected" ]] || \
-    die "${tool} executable sha256 ${actual} does not match versions.env ${pin_key}"
+bind_tool_image() {
+  local tool="$1" pin_key="$2" output_fd_variable="$3"
+  local candidate='' expected_digest='' operator_uid='' source_fd=''
+  local source_path='' before='' after='' candidate_identity=''
+  local source_digest='' staged='' staged_metadata='' staged_digest=''
+  local staged_fd='' staged_path='' staged_identity=''
+
+  candidate="$(resolved_tool "$tool")"
+  [[ ! -L "$candidate" ]] || die "${tool} executable path is a symlink"
+  operator_uid="$(/usr/bin/id -u)"
+  [[ "$operator_uid" =~ ^[0-9]+$ ]] || die 'operator uid is unavailable'
+  expected_digest="$(pinned_version "$pin_key")"
+  [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] || \
+    die "versions.env has no valid ${pin_key}"
+
+  exec {source_fd}<"$candidate" || die "${tool} executable could not be opened"
+  source_path="$(bound_descriptor_path "$source_fd")"
+  before="$(tool_metadata "$source_path")"
+  validate_tool_metadata "$tool" "$before" "$operator_uid"
+  [[ ! -L "$candidate" ]] || die "${tool} executable path became a symlink"
+  candidate_identity="$(/usr/bin/stat -Lc '%d:%i' -- "$candidate" 2>/dev/null || true)"
+  [[ -n "$candidate_identity" && "$candidate_identity" == \
+     "$(/usr/bin/stat -Lc '%d:%i' -- "$source_path" 2>/dev/null || true)" ]] || \
+    die "${tool} executable path changed while it was opened"
+  source_digest="$(digest_of "$source_path")"
+  [[ "$source_digest" == "$expected_digest" ]] || \
+    die "${tool} executable sha256 ${source_digest} does not match versions.env ${pin_key}"
+
+  staged="${TOOL_WORK}/${tool}"
+  [[ ! -e "$staged" && ! -L "$staged" ]] || die "${tool} staged path already exists"
+  /usr/bin/install -m 0500 -- "$source_path" "$staged" || \
+    die "${tool} executable could not be staged"
+  after="$(tool_metadata "$source_path")"
+  [[ "$after" == "$before" ]] || die "${tool} executable changed while it was staged"
+  [[ ! -L "$candidate" ]] || die "${tool} executable path became a symlink"
+  [[ "$candidate_identity" == \
+     "$(/usr/bin/stat -Lc '%d:%i' -- "$candidate" 2>/dev/null || true)" ]] || \
+    die "${tool} executable path changed while it was staged"
+  staged_metadata="$(tool_metadata "$staged")"
+  validate_tool_metadata "$tool staged" "$staged_metadata" "$operator_uid"
+  staged_digest="$(digest_of "$staged")"
+  [[ "$staged_digest" == "$expected_digest" ]] || \
+    die "${tool} staged executable does not match versions.env ${pin_key}"
+
+  staged_identity="$(/usr/bin/stat -Lc '%d:%i' -- "$staged" 2>/dev/null || true)"
+  exec {staged_fd}<"$staged" || die "${tool} staged executable could not be opened"
+  staged_path="$(bound_descriptor_path "$staged_fd")"
+  [[ -n "$staged_identity" && "$staged_identity" == \
+     "$(/usr/bin/stat -Lc '%d:%i' -- "$staged_path" 2>/dev/null || true)" ]] || \
+    die "${tool} staged executable changed while it was opened"
+  /usr/bin/rm -f -- "$staged" || die "${tool} staged pathname could not be removed"
+  [[ ! -e "$staged" && ! -L "$staged" ]] || \
+    die "${tool} staged pathname still exists"
+  validate_bound_tool "$tool" "$staged_fd" "$expected_digest" "$operator_uid"
+  exec {source_fd}<&-
+  printf -v "$output_fd_variable" '%s' "$staged_fd"
+}
+
+run_bound_tool() {
+  local tool="$1" fd="$2" pin_key="$3"
+  shift 3
+  local expected_digest='' operator_uid='' path=''
+  expected_digest="$(pinned_version "$pin_key")"
+  [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] || \
+    die "versions.env has no valid ${pin_key}"
+  operator_uid="$(/usr/bin/id -u)"
+  validate_bound_tool "$tool" "$fd" "$expected_digest" "$operator_uid"
+  path="$(bound_descriptor_path "$fd")"
+  "$path" "$@"
+}
+
+KUSTOMIZE() {
+  run_bound_tool kustomize "$KUSTOMIZE_FD" KUSTOMIZE_LINUX_AMD64_SHA256 "$@"
+}
+
+KUBECTL_RAW() {
+  run_bound_tool kubectl "$KUBECTL_FD" KUBECTL_LINUX_AMD64_SHA256 "$@"
 }
 
 bind_tools() {
   local expected='' actual=''
-  KUSTOMIZE_BIN="$(resolved_tool kustomize)"
+  [[ -n "${TOOL_WORK:-}" ]] || die 'private tool staging directory is unavailable'
+  bind_tool_image kustomize KUSTOMIZE_LINUX_AMD64_SHA256 KUSTOMIZE_FD
   expected="$(pinned_version KUSTOMIZE_VERSION)"
-  actual="$("$KUSTOMIZE_BIN" version 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  actual="$(KUSTOMIZE version 2>/dev/null | head -n1 | tr -d '[:space:]')"
   [[ "$actual" == "$expected" ]] || \
     die "kustomize is ${actual}; versions.env pins ${expected}"
   # The lock records which renderer produced its digests; a different one may
@@ -351,16 +485,13 @@ bind_tools() {
   lock_tool_version="$(lock_value render.tool.version)"
   [[ "$actual" == "$lock_tool_version" ]] || \
     die "kustomize is ${actual}; render.lock digests were produced by ${lock_tool_version}"
-  verify_tool_digest kustomize "$KUSTOMIZE_BIN" KUSTOMIZE_LINUX_AMD64_SHA256
-
-  KUBECTL_BIN="$(resolved_tool kubectl)"
+  bind_tool_image kubectl KUBECTL_LINUX_AMD64_SHA256 KUBECTL_FD
   expected="$(pinned_version KUBERNETES_VERSION)"
-  actual="$("$KUBECTL_BIN" version --client --output=json 2>/dev/null |
+  actual="$(KUBECTL_RAW version --client --output=json 2>/dev/null |
     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -n1)"
   [[ -n "$actual" ]] || die 'kubectl did not report a client version'
   [[ "$actual" == "$expected" ]] || \
     die "kubectl is ${actual}; versions.env pins ${expected}"
-  verify_tool_digest kubectl "$KUBECTL_BIN" KUBECTL_LINUX_AMD64_SHA256
 }
 
 # --- pin binding -------------------------------------------------------------
@@ -402,7 +533,7 @@ bind_pins() {
 
 render_stage() {
   local stage="$1" destination="$2"
-  "$KUSTOMIZE_BIN" build "${REPO_ROOT}/${INSTALL_ROOT}/${stage}" >"$destination"
+  KUSTOMIZE build "${REPO_ROOT}/${INSTALL_ROOT}/${stage}" >"$destination"
   [[ -s "$destination" ]] || die "render produced no bytes for stage ${stage}"
 }
 
@@ -498,9 +629,9 @@ bind_target_identity() {
   [[ -n "${KYVERNO_INSTALL_SERVER:-}" ]] || die 'KYVERNO_INSTALL_SERVER must name the exact API server URL'
 
   local cluster='' server=''
-  cluster="$("$KUBECTL_BIN" config view -o "jsonpath={.contexts[?(@.name=='${KYVERNO_INSTALL_CONTEXT}')].context.cluster}" 2>/dev/null || true)"
+  cluster="$(KUBECTL_RAW config view -o "jsonpath={.contexts[?(@.name=='${KYVERNO_INSTALL_CONTEXT}')].context.cluster}" 2>/dev/null || true)"
   [[ -n "$cluster" ]] || die "the kubeconfig defines no context named ${KYVERNO_INSTALL_CONTEXT}"
-  server="$("$KUBECTL_BIN" config view -o "jsonpath={.clusters[?(@.name=='${cluster}')].cluster.server}" 2>/dev/null || true)"
+  server="$(KUBECTL_RAW config view -o "jsonpath={.clusters[?(@.name=='${cluster}')].cluster.server}" 2>/dev/null || true)"
   [[ -n "$server" ]] || die "the kubeconfig context ${KYVERNO_INSTALL_CONTEXT} names no server"
   [[ "$server" == "${KYVERNO_INSTALL_SERVER}" ]] || \
     die "context ${KYVERNO_INSTALL_CONTEXT} targets a different server than KYVERNO_INSTALL_SERVER"
@@ -511,7 +642,7 @@ bind_target() {
 }
 
 KUBECTL() {
-  "$KUBECTL_BIN" --kubeconfig "${KUBECONFIG}" --context "${KYVERNO_INSTALL_CONTEXT}" \
+  KUBECTL_RAW --kubeconfig "${KUBECONFIG}" --context "${KYVERNO_INSTALL_CONTEXT}" \
     --server "${KYVERNO_INSTALL_SERVER}" "$@"
 }
 
@@ -1213,12 +1344,37 @@ EOF
 # --- modes -------------------------------------------------------------------
 
 WORK=''
+TOOL_WORK=''
+KUSTOMIZE_FD=''
+KUBECTL_FD=''
 cleanup() {
   local status=$?
-  [[ -z "$WORK" ]] || rm -rf -- "$WORK"
+  [[ -z "$WORK" ]] || /usr/bin/rm -rf -- "$WORK"
+  [[ -z "$TOOL_WORK" ]] || /usr/bin/rm -rf -- "$TOOL_WORK"
   exit "$status"
 }
 trap cleanup EXIT
+
+create_private_tool_work() {
+  local candidate='' physical='' metadata='' owner='' mode=''
+  candidate="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/kyverno-tools.XXXXXX")" || \
+    die 'private tool staging directory could not be created'
+  TOOL_WORK="$candidate"
+  [[ -d "$candidate" && ! -L "$candidate" ]] || \
+    die 'private tool staging path is not a directory'
+  physical="$(cd -- "$candidate" 2>/dev/null && pwd -P)" || \
+    die 'private tool staging directory is unreadable'
+  case "${physical}/" in
+    "${REPO_ROOT}"/*) die 'private tool staging directory resolved inside the checkout' ;;
+  esac
+  metadata="$(/usr/bin/stat -Lc '%u:%a' -- "$physical" 2>/dev/null || true)"
+  IFS=: read -r owner mode <<<"$metadata"
+  [[ "$owner" == "$(/usr/bin/id -u)" && "$mode" == '700' ]] || \
+    die 'private tool staging directory must be owned by the operator at mode 0700'
+  TOOL_WORK="$physical"
+}
+
+create_private_tool_work
 
 if [[ "$MODE" == '--break-glass' ]]; then
   # The fastest correct action when the cluster has started refusing writes:
@@ -1272,7 +1428,7 @@ demote_to_report_only() {
 
 if [[ "$MODE" == '--demote' ]]; then
   bind_tools
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"
+  WORK="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"
   bind_target
   bind_runtime_network_contract
   cross_check_runtime_network_contract
@@ -1281,7 +1437,7 @@ if [[ "$MODE" == '--demote' ]]; then
 fi
 
 bind_tools
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"
+WORK="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"
 RENDERED="${WORK}/${STAGE}.yaml"
 render_stage "$STAGE" "$RENDERED"
 
@@ -1289,7 +1445,7 @@ if [[ "$MODE" == '--render' ]]; then
   # The lock-regeneration path. It deliberately requires no pins and no cluster:
   # its whole job is to report what the working tree renders to, so a reviewer
   # can commit those values.
-  printf 'render.tool.version=%s\n' "$("$KUSTOMIZE_BIN" version | head -n1 | tr -d '[:space:]')"
+  printf 'render.tool.version=%s\n' "$(KUSTOMIZE version | head -n1 | tr -d '[:space:]')"
   printf '%s.sha256=%s\n' "$STAGE" "$(digest_of "$RENDERED")"
   printf '%s.objects=%s\n' "$STAGE" "$(object_count "$RENDERED")"
   exit 0

@@ -156,9 +156,18 @@ change invalidates this contract. Rebind and rerun the canaries before an
 install, promotion, or rollback; never widen a CIDR to make a test pass.
 
 `kustomize` and `kubectl` must resolve to absolute paths outside the checkout.
-The installer verifies both exact versions and executable SHA-256 pins from
-`versions.env`. Controller, helper, and canary images require full non-zero
-digests and must equal the reviewed pins.
+Each Linux candidate must be a single-link regular executable, owned by root or
+the effective operator, with no special bits or group/other write permission.
+The installer opens the candidate once, verifies its SHA-256 pin from
+`versions.env`, copies that held descriptor into an operator-owned mode-0700
+directory, opens the mode-0500 copy, and unlinks its last pathname. Every call
+rechecks and executes `/proc/self/fd/<fd>`, so replacing the source path after
+binding cannot change the bytes that receive cluster authority. A changed held
+image is refused before its next invocation. The self-reported versions remain
+a separate compatibility check; they are not executable identity. This binds
+external pathname races, not a compromised process running as the effective
+operator. Controller, helper, and canary images require full non-zero digests
+and must equal the reviewed pins.
 
 ## Journal and recovery contract
 
