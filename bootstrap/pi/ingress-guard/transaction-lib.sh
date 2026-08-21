@@ -23,7 +23,11 @@ readonly IG_LEGACY_JOURNAL_PATH="${IG_TRANSACTION_ROOT}/journal.v1"
 readonly IG_LEGACY_LOAD_JOURNAL_PATH="${IG_TRANSACTION_ROOT}/load-journal.v1"
 readonly IG_OWNED_TABLE=website_infrastructure_ingress_guard
 readonly IG_GUARD_UNIT=website-infrastructure-ingress-guard.service
+# Consumed by the transaction entry points after sourcing; intentionally not exported.
+# shellcheck disable=SC2034
 readonly IG_CONTRACT_INPUT="${IG_INPUT_ROOT}/admin-ingress.env"
+# Consumed by the retrofit entry point after sourcing; intentionally not exported.
+# shellcheck disable=SC2034
 readonly IG_RETROFIT_INPUT="${IG_INPUT_ROOT}/retrofit-attestation.env"
 
 ig_die() {
@@ -953,7 +957,7 @@ ig_verify_closed_load_receipt() {
   local result table_state rollback observed destination
   case "${IG_LOAD_PHASE}" in
     committed) result=pass; table_state=verified; rollback=not-needed ;;
-    rolled-back) result=rollback-verified; table_state=absent; rollback=verified ;;
+    rolled-back) result='rollback-verified'; table_state=absent; rollback=verified ;;
     recovery-required) result=recovery-required; table_state=unverified; rollback=required ;;
     *) return 1 ;;
   esac

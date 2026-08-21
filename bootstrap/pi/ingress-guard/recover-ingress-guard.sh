@@ -187,6 +187,8 @@ if [[ "${IG_PHASE}" == committed || "${IG_PHASE}" == rolled-back ]]; then
   exit 0
 fi
 
+# This exact executable phase assignment is pinned by the transaction wiring gate.
+# shellcheck disable=SC2100
 IG_PHASE=rollback-intent
 IG_RECEIPT_SHA256=none
 ig_journal_write

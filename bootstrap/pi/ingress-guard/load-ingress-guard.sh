@@ -170,7 +170,7 @@ if [[ -e "${IG_LOAD_JOURNAL_PATH}" || -L "${IG_LOAD_JOURNAL_PATH}" ]]; then
       if [[ "${previous_phase}" == committed ]]; then
         previous_result=pass
       else
-        previous_result=rollback-verified
+        previous_result='rollback-verified'
       fi
       previous_receipt_path="$(load_receipt_path "${previous_attempt}" "${previous_result}")" \
         || ig_die LOAD_RECEIPT_INVALID
