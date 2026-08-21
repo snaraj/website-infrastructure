@@ -1,6 +1,6 @@
 """Adversarial matrix for the SSH-only ingress-guard semantic verifier.
 
-Every fixture is a structured `nft -j` document assembled at runtime (never
+Every fixture is a structured `nft -a -j` document assembled at runtime (never
 a tracked host capture), and every dangerous shape the handoff enumerates —
 partial port coverage, SSH inclusion, destination-only rules, wildcard or
 multi-interface overreach, alternate tables, set/verdict-map indirection,
@@ -9,6 +9,7 @@ priority/policy/hook drift, foreign objects, unknown grammar — must map to
 a fixed value-free failure token. The healthy model must pass exactly.
 """
 
+import copy
 import json
 import subprocess
 import sys
@@ -33,6 +34,7 @@ MODEL_TOKENS = frozenset({
     "SCHEMA_VERSION_UNSUPPORTED",
     "TABLE_MISSING",
     "TABLE_DUPLICATE",
+    "TABLE_GRAMMAR_UNSUPPORTED",
     "TABLE_FAMILY_INVALID",
     "FOREIGN_OBJECT_IN_OWNED_TABLE",
     "CHAIN_MISSING",
@@ -45,6 +47,7 @@ MODEL_TOKENS = frozenset({
     "POLICY_INVALID",
     "RULE_PLACEMENT_INVALID",
     "RULE_GRAMMAR_UNSUPPORTED",
+    "RULE_HANDLE_DUPLICATE",
     "MATCH_INVERSION_UNSUPPORTED",
     "SET_INDIRECTION_UNSUPPORTED",
     "WILDCARD_UNSUPPORTED",
@@ -71,6 +74,16 @@ def rule(iface, port, verdict, family="inet", chain=CHAIN, table=TABLE, expr=Non
     return {"rule": {"family": family, "table": table, "chain": chain, "handle": 7, "expr": expr}}
 
 
+def metainfo(schema_version=1):
+    return {
+        "metainfo": {
+            "version": "1.0.9",
+            "release_name": "synthetic",
+            "json_schema_version": schema_version,
+        }
+    }
+
+
 def document(rules, family="inet", prio=-10, policy="accept", hook="input",
              chain_type="filter", chain_name=CHAIN, extra=(), chain_extra=None,
              schema_version=1):
@@ -84,12 +97,15 @@ def document(rules, family="inet", prio=-10, policy="accept", hook="input",
         for key in ("type", "hook", "prio", "policy"):
             chain.pop(key, None)
     items = [
-        {"metainfo": {"version": "1.0.9", "release_name": "synthetic",
-                      "json_schema_version": schema_version}},
+        metainfo(schema_version),
         {"table": {"family": family, "name": TABLE, "handle": 20}},
         {"chain": chain},
     ]
-    items.extend(rules)
+    for index, item in enumerate(rules, start=100):
+        item = copy.deepcopy(item)
+        if "rule" in item:
+            item["rule"]["handle"] = index
+        items.append(item)
     items.extend(extra)
     return {"nftables": items}
 
@@ -139,8 +155,265 @@ class GuardModelAdversarialTests(unittest.TestCase):
         observed = errors(doc, interfaces)
         self.assertIn(token, observed, f"expected {token}, observed {observed}")
 
+    def test_ruleset_envelope_and_metainfo_grammar_are_exact(self):
+        self.assertToken({}, "RULESET_JSON_INVALID")
+
+        extra_top_level = healthy()
+        extra_top_level["future"] = {}
+        self.assertToken(extra_top_level, "RULESET_JSON_INVALID")
+
+        two_member_item = healthy()
+        two_member_item["nftables"].append(
+            {"future": {}, "another_future": {}}
+        )
+        self.assertToken(two_member_item, "RULESET_JSON_INVALID")
+
+        empty_item = healthy()
+        empty_item["nftables"].append({})
+        self.assertToken(empty_item, "RULESET_JSON_INVALID")
+
+        non_object_body = healthy()
+        non_object_body["nftables"].append({"future": []})
+        self.assertToken(non_object_body, "RULESET_JSON_INVALID")
+        self.assertEqual(
+            MODULE.absence_errors(
+                {"nftables": [metainfo(), {"future": []}]}
+            ),
+            ["RULESET_JSON_INVALID"],
+        )
+
+        reordered = healthy()
+        metadata_item = reordered["nftables"].pop(0)
+        reordered["nftables"].insert(1, metadata_item)
+        self.assertToken(reordered, "SCHEMA_VERSION_UNSUPPORTED")
+
+        for missing_key in ("version", "release_name", "json_schema_version"):
+            with self.subTest(missing_metainfo_key=missing_key):
+                candidate = healthy()
+                del candidate["nftables"][0]["metainfo"][missing_key]
+                self.assertToken(candidate, "SCHEMA_VERSION_UNSUPPORTED")
+
+        for key, value in (
+            ("future", "unsupported"),
+            ("version", ""),
+            ("version", True),
+            ("version", 1),
+            ("release_name", ""),
+            ("release_name", True),
+            ("release_name", 1),
+        ):
+            with self.subTest(metainfo_key=key, value=value):
+                candidate = healthy()
+                candidate["nftables"][0]["metainfo"][key] = value
+                self.assertToken(candidate, "SCHEMA_VERSION_UNSUPPORTED")
+
+    def test_owned_table_grammar_is_exact_and_active(self):
+        for missing_key in ("family", "name", "handle"):
+            with self.subTest(missing_table_key=missing_key):
+                candidate = healthy()
+                del candidate["nftables"][1]["table"][missing_key]
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+
+        for key, value in (
+            ("flags", "dormant"),
+            ("flags", ["dormant"]),
+            ("flags", "owner"),
+            ("flags", ["owner"]),
+            ("flags", "persist"),
+            ("flags", ["persist"]),
+            ("flags", []),
+            ("comment", "looks-active"),
+            ("future", "unsupported"),
+        ):
+            with self.subTest(table_key=key, value=value):
+                candidate = healthy()
+                candidate["nftables"][1]["table"][key] = value
+                self.assertToken(candidate, "TABLE_GRAMMAR_UNSUPPORTED")
+
+        for handle in (0, -1, True, 1.0, "1", 2**64):
+            with self.subTest(table_handle=handle):
+                candidate = healthy()
+                candidate["nftables"][1]["table"]["handle"] = handle
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+
+        maximum = healthy()
+        maximum["nftables"][1]["table"]["handle"] = 2**64 - 1
+        self.assertEqual(errors(maximum), [])
+
+    def test_owned_chain_keys_handles_and_priority_are_exact(self):
+        required_keys = {
+            "family": "RULESET_JSON_INVALID",
+            "name": "RULESET_JSON_INVALID",
+            "handle": "RULESET_JSON_INVALID",
+            "type": "CHAIN_GRAMMAR_UNSUPPORTED",
+            "hook": "CHAIN_GRAMMAR_UNSUPPORTED",
+            "prio": "CHAIN_GRAMMAR_UNSUPPORTED",
+            "policy": "CHAIN_GRAMMAR_UNSUPPORTED",
+        }
+        for missing_key, token in required_keys.items():
+            with self.subTest(missing_chain_key=missing_key):
+                candidate = healthy()
+                del candidate["nftables"][2]["chain"][missing_key]
+                self.assertToken(candidate, token)
+
+        missing_table = healthy()
+        del missing_table["nftables"][2]["chain"]["table"]
+        self.assertToken(missing_table, "RULESET_JSON_INVALID")
+
+        for key in ("newname", "dev", "comment", "flags", "future"):
+            with self.subTest(extra_chain_key=key):
+                candidate = healthy()
+                candidate["nftables"][2]["chain"][key] = "unsupported"
+                self.assertToken(candidate, "CHAIN_GRAMMAR_UNSUPPORTED")
+
+        for handle in (0, -1, True, 1.0, "1", 2**64):
+            with self.subTest(chain_handle=handle):
+                candidate = healthy()
+                candidate["nftables"][2]["chain"]["handle"] = handle
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+
+        for priority in (-10.0, True, "-10"):
+            with self.subTest(chain_priority=priority):
+                candidate = healthy()
+                candidate["nftables"][2]["chain"]["prio"] = priority
+                self.assertToken(candidate, "PRIORITY_INVALID")
+
+        maximum = healthy()
+        maximum["nftables"][2]["chain"]["handle"] = 2**64 - 1
+        self.assertEqual(errors(maximum), [])
+
+    def test_owned_rule_keys_and_handles_are_exact(self):
+        for missing_key in ("family", "table", "chain", "handle", "expr"):
+            with self.subTest(missing_rule_key=missing_key):
+                candidate = healthy()
+                del candidate["nftables"][3]["rule"][missing_key]
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+
+        for key in ("index", "comment", "future"):
+            with self.subTest(extra_rule_key=key):
+                candidate = healthy()
+                candidate["nftables"][3]["rule"][key] = "unsupported"
+                self.assertToken(candidate, "RULE_GRAMMAR_UNSUPPORTED")
+
+        for handle in (0, -1, True, 1.0, "1", 2**64):
+            with self.subTest(rule_handle=handle):
+                candidate = healthy()
+                candidate["nftables"][3]["rule"]["handle"] = handle
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+
+        maximum = healthy()
+        maximum["nftables"][3]["rule"]["handle"] = 2**64 - 1
+        self.assertEqual(errors(maximum), [])
+
+    def test_owned_rule_handles_are_unique_within_the_owned_chain(self):
+        candidate = healthy()
+        candidate["nftables"][4]["rule"]["handle"] = (
+            candidate["nftables"][3]["rule"]["handle"]
+        )
+        self.assertToken(candidate, "RULE_HANDLE_DUPLICATE")
+
+    def test_adjacent_known_object_identities_fail_before_ownership_filtering(self):
+        valid_objects = {
+            "table": {
+                "table": {"family": "ip", "name": "foreign", "handle": 1}
+            },
+            "chain": {"chain": {
+                "family": "ip", "table": "foreign", "name": "foreign_chain",
+                "handle": 2,
+            }},
+            "rule": {"rule": {
+                "family": "ip", "table": "foreign", "chain": "foreign_chain",
+                "handle": 3, "expr": [],
+            }},
+        }
+        required_keys = {
+            "table": ("family", "name", "handle"),
+            "chain": ("family", "table", "name", "handle"),
+            "rule": ("family", "table", "chain", "handle", "expr"),
+        }
+        string_keys = {
+            "table": ("family", "name"),
+            "chain": ("family", "table", "name"),
+            "rule": ("family", "table", "chain"),
+        }
+        malformed = []
+        for kind, item in valid_objects.items():
+            for key in required_keys[kind]:
+                candidate = copy.deepcopy(item)
+                del candidate[kind][key]
+                malformed.append((kind + "-missing-" + key, candidate))
+            for key in string_keys[kind]:
+                candidate = copy.deepcopy(item)
+                candidate[kind][key] = True
+                malformed.append((kind + "-boolean-" + key, candidate))
+                candidate = copy.deepcopy(item)
+                candidate[kind][key] = ""
+                malformed.append((kind + "-empty-" + key, candidate))
+            for handle in (0, -1, True, 1.0, "1", 2**64):
+                candidate = copy.deepcopy(item)
+                candidate[kind]["handle"] = handle
+                malformed.append((kind + "-invalid-handle-" + str(handle), candidate))
+        wrong_expr = copy.deepcopy(valid_objects["rule"])
+        wrong_expr["rule"]["expr"] = True
+        malformed.append(("rule-boolean-expr", wrong_expr))
+
+        for label, item in malformed:
+            with self.subTest(mode="model", case=label):
+                candidate = healthy()
+                candidate["nftables"].append(copy.deepcopy(item))
+                self.assertToken(candidate, "RULESET_JSON_INVALID")
+            with self.subTest(mode="absence", case=label):
+                candidate = {"nftables": [metainfo(), copy.deepcopy(item)]}
+                self.assertEqual(
+                    MODULE.absence_errors(candidate),
+                    ["RULESET_JSON_INVALID"],
+                )
+
+        for kind, item in valid_objects.items():
+            maximum = copy.deepcopy(item)
+            maximum[kind]["handle"] = 2**64 - 1
+            with self.subTest(mode="model", case=kind + "-maximum-handle"):
+                candidate = healthy()
+                candidate["nftables"].append(copy.deepcopy(maximum))
+                self.assertEqual(errors(candidate), [])
+            with self.subTest(mode="absence", case=kind + "-maximum-handle"):
+                candidate = {"nftables": [metainfo(), maximum]}
+                self.assertEqual(MODULE.absence_errors(candidate), [])
+
+    def test_anonymous_counter_output_grammar_is_exact_uint64(self):
+        counter_cases = (
+            {},
+            {"packets": 0},
+            {"bytes": 0},
+            {"packets": 0, "bytes": 0, "future": 0},
+            {"packets": True, "bytes": 0},
+            {"packets": 0, "bytes": True},
+            {"packets": 0.0, "bytes": 0},
+            {"packets": 0, "bytes": 0.0},
+            {"packets": "0", "bytes": 0},
+            {"packets": 0, "bytes": "0"},
+            {"packets": -1, "bytes": 0},
+            {"packets": 0, "bytes": -1},
+            {"packets": 2**64, "bytes": 0},
+            {"packets": 0, "bytes": 2**64},
+        )
+        for counter in counter_cases:
+            with self.subTest(counter=counter):
+                candidate = healthy()
+                candidate["nftables"][3]["rule"]["expr"][2]["counter"] = counter
+                self.assertToken(candidate, "RULE_GRAMMAR_UNSUPPORTED")
+
+        maximum = healthy()
+        for item in maximum["nftables"]:
+            if "rule" in item:
+                item["rule"]["expr"][2]["counter"] = {
+                    "packets": 2**64 - 1,
+                    "bytes": 2**64 - 1,
+                }
+        self.assertEqual(errors(maximum), [])
+
     def test_missing_table_fails(self):
-        doc = {"nftables": [{"metainfo": {"json_schema_version": 1}}]}
+        doc = {"nftables": [metainfo()]}
         self.assertToken(doc, "TABLE_MISSING")
 
     def test_duplicate_owned_tables_fail(self):
@@ -159,7 +432,7 @@ class GuardModelAdversarialTests(unittest.TestCase):
 
     def test_missing_or_renamed_chain_fails(self):
         doc = {"nftables": [
-            {"metainfo": {"json_schema_version": 1}},
+            metainfo(),
             {"table": {"family": "inet", "name": TABLE, "handle": 20}},
         ]}
         self.assertToken(doc, "CHAIN_MISSING")
@@ -335,6 +608,28 @@ class GuardModelAdversarialTests(unittest.TestCase):
     def test_future_schema_version_fails(self):
         self.assertToken(document([], schema_version=2), "SCHEMA_VERSION_UNSUPPORTED")
 
+    def test_schema_cardinality_is_exact(self):
+        missing = document([])
+        missing["nftables"] = [
+            item for item in missing["nftables"] if "metainfo" not in item
+        ]
+        duplicate = document([])
+        duplicate["nftables"].insert(
+            1,
+            {"metainfo": {"json_schema_version": 1}},
+        )
+        for candidate in (missing, duplicate):
+            with self.subTest(candidate=candidate):
+                self.assertToken(candidate, "SCHEMA_VERSION_UNSUPPORTED")
+
+    def test_schema_version_type_is_exact(self):
+        for schema_version in (True, 1.0):
+            with self.subTest(schema_version=schema_version):
+                self.assertToken(
+                    document([], schema_version=schema_version),
+                    "SCHEMA_VERSION_UNSUPPORTED",
+                )
+
     def test_every_failure_token_stays_in_the_closed_vocabulary(self):
         adversarial = (
             document([]),
@@ -351,9 +646,46 @@ class GuardModelAdversarialTests(unittest.TestCase):
 class AbsenceModeTests(unittest.TestCase):
     """The loader's pre-install proof: no owned identity, no decoy."""
 
+    def test_schema_cardinality_and_version_are_closed(self):
+        extra_top_level = {"nftables": [metainfo()], "future": {}}
+        extra_metainfo = {"nftables": [metainfo()]}
+        extra_metainfo["nftables"][0]["metainfo"]["future"] = "unsupported"
+        empty_version = {"nftables": [metainfo()]}
+        empty_version["nftables"][0]["metainfo"]["version"] = ""
+        boolean_version = {"nftables": [metainfo()]}
+        boolean_version["nftables"][0]["metainfo"]["version"] = True
+        empty_release = {"nftables": [metainfo()]}
+        empty_release["nftables"][0]["metainfo"]["release_name"] = ""
+        reordered = {"nftables": [
+            {"table": {"family": "ip", "name": "unrelated", "handle": 1}},
+            metainfo(),
+        ]}
+        unsupported = (
+            {"nftables": []},
+            {"nftables": [metainfo(), metainfo()]},
+            {"nftables": [metainfo(2)]},
+            {"nftables": [metainfo(True)]},
+            {"nftables": [metainfo(1.0)]},
+            extra_metainfo,
+            empty_version,
+            boolean_version,
+            empty_release,
+            reordered,
+        )
+        for document in unsupported:
+            with self.subTest(document=document):
+                self.assertEqual(
+                    MODULE.absence_errors(document),
+                    ["SCHEMA_VERSION_UNSUPPORTED"],
+                )
+        self.assertEqual(
+            MODULE.absence_errors(extra_top_level),
+            ["RULESET_JSON_INVALID"],
+        )
+
     def test_clean_ruleset_is_absent(self):
         doc = {"nftables": [
-            {"metainfo": {"json_schema_version": 1}},
+            metainfo(),
             {"table": {"family": "ip", "name": "unrelated", "handle": 1}},
             {"chain": {"family": "ip", "table": "unrelated", "name": "input",
                        "handle": 2, "type": "filter", "hook": "input",
@@ -367,12 +699,93 @@ class AbsenceModeTests(unittest.TestCase):
 
     def test_decoy_chain_name_is_reported(self):
         doc = {"nftables": [
-            {"metainfo": {"json_schema_version": 1}},
+            metainfo(),
             {"chain": {"family": "ip", "table": "unrelated", "name": CHAIN,
                        "handle": 2, "type": "filter", "hook": "input",
                        "prio": 0, "policy": "accept"}},
         ]}
         self.assertEqual(MODULE.absence_errors(doc), ["CHAIN_NAME_COLLISION"])
+
+
+class RawRulesetDecoderTests(unittest.TestCase):
+    """Raw JSON must stay closed before Python can normalize object members."""
+
+    def assertRawRejected(self, raw, *arguments):
+        with tempfile.TemporaryDirectory() as scratch:
+            ruleset = Path(scratch).resolve() / "ruleset.json"
+            ruleset.write_text(raw, encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, "-I", "-B", str(SCRIPT), "model",
+                 "--ruleset", str(ruleset), *arguments],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(
+            completed.stderr,
+            "ingress-guard: FAIL RULESET_JSON_INVALID\n",
+        )
+
+    @staticmethod
+    def duplicate_version(document):
+        raw = json.dumps(document, separators=(",", ":"))
+        needle = '"version":"1.0.9"'
+        replacement = '"version":false,"version":"1.0.9"'
+        if raw.count(needle) != 1:
+            raise AssertionError("duplicate-member fixture anchor drifted")
+        return raw.replace(needle, replacement, 1)
+
+    @staticmethod
+    def append_ignored_value(document, constant):
+        raw = json.dumps(document, separators=(",", ":"))
+        if not raw.endswith("]}"):
+            raise AssertionError("non-finite fixture envelope drifted")
+        return (
+            raw[:-2]
+            + ',{"future":{"value":'
+            + constant
+            + "}}]}"
+        )
+
+    def test_duplicate_object_members_fail_in_model_and_absence_modes(self):
+        self.assertRawRejected(
+            self.duplicate_version(healthy()),
+            "--interface", "adminvpn0",
+        )
+        self.assertRawRejected(
+            self.duplicate_version({"nftables": [metainfo()]}),
+            "--expect-absent",
+        )
+
+    def test_nonstandard_numeric_constants_fail_before_foreign_objects_are_ignored(self):
+        for constant in ("NaN", "Infinity", "-Infinity", "1e9999"):
+            with self.subTest(mode="model", constant=constant):
+                self.assertRawRejected(
+                    self.append_ignored_value(healthy(), constant),
+                    "--interface", "adminvpn0",
+                )
+            with self.subTest(mode="absence", constant=constant):
+                self.assertRawRejected(
+                    self.append_ignored_value(
+                        {"nftables": [metainfo()]}, constant
+                    ),
+                    "--expect-absent",
+                )
+
+    def test_decoder_resource_failures_are_value_free(self):
+        oversized_integer = self.append_ignored_value(
+            healthy(), "9" * 5000
+        )
+        self.assertRawRejected(
+            oversized_integer,
+            "--interface", "adminvpn0",
+        )
+        deeply_nested = self.append_ignored_value(
+            {"nftables": [metainfo()]}, "[" * 2000 + "0" + "]" * 2000
+        )
+        self.assertRawRejected(deeply_nested, "--expect-absent")
 
 
 class VerifierPrivacyTests(unittest.TestCase):

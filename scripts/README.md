@@ -44,7 +44,7 @@ validates the closed positive kind allowlist and bounded prestate-to-poststate
 evidence shape for a separately authorized disposable-workload experiment.
 [`ci/destructive_transaction_fixture.py`](./ci/destructive_transaction_fixture.py)
 proves the repeated/mixed-signal guard and durable recovery journal only inside
-a caller-provided disposable sentinel root. None of these tools authenticates
+a caller-provided disposable sentinel root; [`ci/ingress_guard_transaction_fixture.py`](./ci/ingress_guard_transaction_fixture.py) proves the SSH-only ingress-guard retrofit's custody, journal-bound recovery selection, closed-state preservation, reboot closure, and exact controller-health behavior inside an unprivileged Linux namespace. None of these tools authenticates
 an agent identity, grants a live window, contacts a cluster, or performs a live
 mutation.
 [`generate_encryption_config.py`](./generate_encryption_config.py) is the
@@ -103,11 +103,14 @@ hard links, non-root ownership, partial reads, and LAN/CNI interface classes
 with fixed value-free tokens; and
 [`validate_ingress_guard.py`](./validate_ingress_guard.py) is the semantic
 verifier, deterministic renderer, and tracked-artifact gate for the SSH-only
-host-ingress guard: it normalizes structured `nft -j` output against one
+host-ingress guard: it normalizes structured `nft -a -j` output against one
 closed expected model (TCP 22 preserved; 2379/2380/6443/10250 terminally
-denied per reviewed interface) and refuses sets, maps, inversions,
-wildcards, alternate families, decoy chains, and unknown grammar, so the
-guard's proof can never be widened or bypassed by rule indirection.
+denied per reviewed interface), requires the exact current envelope/metainfo
+and table/chain/rule/counter output shapes, requires bounded and distinct owned
+rule handles, and refuses duplicate/non-finite raw JSON, table flags (including
+`dormant`), sets, maps, inversions, wildcards, alternate families, decoy chains,
+malformed handles/counters, and unknown grammar, so the guard's proof can never
+be widened or bypassed by rule indirection.
 
 ```mermaid
 flowchart LR

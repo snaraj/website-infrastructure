@@ -42,21 +42,11 @@ shim still computes the REAL digest via hashlib so the recorded hash is
 verifiable). Everything else (find, sort, awk) runs real against
 temporary directories only.
 
-NOTE — restarting kubelet vs the guard installer's exact-match refusal
-(pending-contract ratchet, same style as the duplicate-row NOTE in
-test_containerd_cri_health_contract_matrix.py). The ordering gate
-string-compares ``ActiveState`` to ``active``, so a kubelet mid
-crash-loop — ``activating``/auto-restart, a unit systemd is about to
-start again — is NOT refused today, even though installing the guard
-under it is operationally a live retrofit. The gap is recorded two ways:
-``test_restarting_kubelet_is_currently_tolerated`` pins the shipped
-behavior green, and ``test_pending_restarting_kubelet_refusal_xfail``
-asserts the desired refusal under ``unittest.expectedFailure``. Because
-the harness executes the EXTRACTED shipped text, the day the platform
-lane widens the refusal both flip on their own — the tolerated pin goes
-red and the xfail becomes an unexpected success, a hard failure under
-``python -m unittest`` — forcing the marker's removal and converting
-this note into an enforced deny row. Nothing here changes what the
+The guard gate now delegates ActiveState parsing to the shared transaction
+library and then admits only ``inactive``. The matrix therefore extracts and
+executes both shipped regions together: ``active`` retains the documented
+``KUBELET_ALREADY_ACTIVE`` refusal, while crash-looping ``activating`` fails
+closed as ``KUBELET_STATE_INVALID``. Nothing here retypes or broadens what the
 shipped scripts enforce.
 """
 
@@ -76,6 +66,9 @@ INSTALLER = REPO_ROOT / "bootstrap" / "pi" / "install-kubernetes.sh"
 GUARD_INSTALLER = (
     REPO_ROOT / "bootstrap" / "pi" / "ingress-guard" / "install-ingress-guard.sh"
 )
+TRANSACTION_LIBRARY = (
+    REPO_ROOT / "bootstrap" / "pi" / "ingress-guard" / "transaction-lib.sh"
+)
 # The tracked drop-in source the collision gate hashes on its tolerance leg;
 # read-only platform-lane input, byte-copied into each scenario's temp tree.
 GUARD_DROPIN_SOURCE = (
@@ -91,13 +84,16 @@ GUARD_DROPIN_NAME = "50-website-infrastructure-ingress-guard.conf"
 
 # Slice markers. COLLISION_LOOP matches the textual pin in
 # test_service_collision_guard_ordering.py; the region ends at the loop's
-# own two-space ``done``. The guard gate is the one ActiveState refusal.
+# own two-space ``done``. The guard gate delegates its one ActiveState probe
+# to the shipped shared helper and then permits only inactive kubelet state.
 COLLISION_LOOP = "for name in containerd.service kubelet.service; do"
 COLLISION_END = "\n  done\n"
-GUARD_GATE_START = (
-    'if [[ "$(systemctl show -p ActiveState --value kubelet.service'
+SYSTEMCTL_STATE_START = "ig_systemctl_state() {"
+SYSTEMCTL_STATE_END = "\n}\n"
+GUARD_GATE_START = 'kubelet_state="$(ig_systemctl_state kubelet.service ActiveState)"'
+GUARD_GATE_END = (
+    '[[ "${kubelet_state}" == inactive ]] || ig_die KUBELET_STATE_INVALID\n'
 )
-GUARD_GATE_END = "\nfi\n"
 
 BASH = shutil.which("bash")
 
@@ -107,6 +103,8 @@ BASH = shutil.which("bash")
 DIE_STATUS = 70
 STUB_PREAMBLE = """set -euo pipefail
 die() { printf 'DIE %s\\n' "$1" >&2; exit 70; }
+ig_die() { die "$@"; }
+ig_run_bounded() { "$@"; }
 check_sha() { printf 'check_sha %s %s\\n' "$1" "$2" >>"${FAKE_SYSTEMCTL_LOG}"; }
 guard_dropin_source="${FAKE_GUARD_DROPIN_SOURCE}"
 guard_dropin_target="${FAKE_GUARD_DROPIN_TARGET}"
@@ -505,11 +503,17 @@ class IngressGuardOrderingGateMatrixTests(FakeSystemctlHarness):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.region = slice_region(
+        helper = slice_region(
+            TRANSACTION_LIBRARY.read_text(encoding="utf-8"),
+            SYSTEMCTL_STATE_START,
+            SYSTEMCTL_STATE_END,
+        )
+        gate = slice_region(
             GUARD_INSTALLER.read_text(encoding="utf-8"),
             GUARD_GATE_START,
             GUARD_GATE_END,
         )
+        cls.region = helper + gate
 
     def test_extracted_region_is_the_ordering_refusal_and_nothing_more(self):
         self.assertIn("die KUBELET_ALREADY_ACTIVE", self.region)
@@ -545,25 +549,19 @@ class IngressGuardOrderingGateMatrixTests(FakeSystemctlHarness):
         completed = self.probe_gate("inactive")
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_restarting_kubelet_is_currently_tolerated(self):
-        # Shipped behavior, pinned green (module NOTE): the refusal
-        # string-matches ActiveState ``active`` exactly, so a kubelet mid
-        # auto-restart — ``activating`` — passes the gate today. This pin
-        # goes red the day the platform lane widens the refusal, forcing
-        # conversion into an enforced deny alongside the xfail below.
-        completed = self.probe_gate("activating")
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-
-    @unittest.expectedFailure
-    def test_pending_restarting_kubelet_refusal_xfail(self):
-        # Desired contract (module NOTE): a crash-looping kubelet is a live
-        # kubelet — systemd will start it again momentarily, so installing
-        # the guard under it is a live retrofit and should be refused like
-        # ``active``. Xfail until the shipped gate says so; the extracted
-        # region flips this to an unexpected success automatically when it
-        # does.
+    def test_restarting_kubelet_fails_closed_as_invalid_state(self):
+        # The shared parser rejects the unclosed activating state before the
+        # installer can enter its inactive-only transaction path.
         completed = self.probe_gate("activating")
         self.assertEqual(completed.returncode, DIE_STATUS)
+        self.assertIn("DIE KUBELET_STATE_INVALID", completed.stderr)
+
+    def test_failed_kubelet_fails_closed_as_invalid_state(self):
+        # Failed is a recognized systemd state, but it is still not the only
+        # offline posture the installer admits: fully inactive.
+        completed = self.probe_gate("failed")
+        self.assertEqual(completed.returncode, DIE_STATUS)
+        self.assertIn("DIE KUBELET_STATE_INVALID", completed.stderr)
 
 
 if __name__ == "__main__":
