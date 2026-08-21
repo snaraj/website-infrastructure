@@ -46,6 +46,9 @@ INSTALLER = REPO_ROOT / "bootstrap" / "pi" / "install-kubernetes.sh"
 GUARD_INSTALLER = (
     REPO_ROOT / "bootstrap" / "pi" / "ingress-guard" / "install-ingress-guard.sh"
 )
+TRANSACTION_LIBRARY = (
+    REPO_ROOT / "bootstrap" / "pi" / "ingress-guard" / "transaction-lib.sh"
+)
 GUARD_DROPIN = (
     REPO_ROOT
     / "bootstrap"
@@ -122,16 +125,25 @@ class IngressGuardOrderingTests(unittest.TestCase):
 
     def test_guard_installer_refuses_while_kubelet_is_active(self):
         script = GUARD_INSTALLER.read_text(encoding="utf-8")
-        probe = "systemctl show -p ActiveState --value kubelet.service"
+        library = TRANSACTION_LIBRARY.read_text(encoding="utf-8")
+        probe = 'kubelet_state="$(ig_systemctl_state kubelet.service ActiveState)"'
         refusal = "die KUBELET_ALREADY_ACTIVE"
         self.assertIn(probe, script)
         self.assertIn(refusal, script)
-        # The refusal must precede all mutation machinery: the rollback
-        # bookkeeping, the rollback trap, and the first artifact install.
+        helper_start = library.index("ig_systemctl_state()")
+        helper_end = library.index("\n}\n", helper_start)
+        helper = library[helper_start:helper_end]
+        self.assertIn(
+            'ig_run_bounded systemctl show -p "${property}" --value "${unit}"',
+            helper,
+        )
+        # The helper-backed refusal must precede the transaction lock,
+        # durable mutation intent, and every system artifact install.
         refusal_at = script.index(refusal)
-        self.assertLess(refusal_at, script.index("created_paths=()"))
-        self.assertLess(refusal_at, script.index("trap rollback EXIT"))
-        self.assertLess(refusal_at, script.index("install_exact"))
+        self.assertLess(script.index(probe), refusal_at)
+        self.assertLess(refusal_at, script.index("ig_acquire_lock"))
+        self.assertLess(refusal_at, script.index("mutation_started=yes"))
+        self.assertLess(refusal_at, script.index("ig_install_exact"))
 
     def test_kubelet_dropin_binds_kubelet_to_the_guard_unit(self):
         # Exact whole-line membership: a commented-out or suffixed directive

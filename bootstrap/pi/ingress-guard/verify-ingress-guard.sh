@@ -11,30 +11,35 @@
 set -euo pipefail
 umask 077
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 contract_path=/etc/website-infrastructure/admin-ingress.env
 library_dir=/usr/local/lib/website-infrastructure/ingress-guard
 guard_unit=website-infrastructure-ingress-guard.service
 
 die() { printf 'INGRESS-GUARD VERIFY FAIL %s\n' "$1" >&2; exit 1; }
+run_bounded() { timeout --signal=TERM --kill-after=2s 30s "$@"; }
 
 [[ "${EUID}" -eq 0 ]] || die NOT_ROOT
 command -v nft >/dev/null 2>&1 || die NFT_MISSING
 command -v python3 >/dev/null 2>&1 || die PYTHON_MISSING
 command -v systemctl >/dev/null 2>&1 || die SYSTEMCTL_MISSING
+command -v timeout >/dev/null 2>&1 || die TIMEOUT_MISSING
 verifier="${library_dir}/validate_ingress_guard.py"
 [[ -f "${verifier}" ]] || die LIBRARY_MISSING
 
 # Persistence proof: the loader must be enabled (reboot coverage) and have
 # completed successfully in this boot.
-systemctl is-enabled --quiet "${guard_unit}" 2>/dev/null || die UNIT_NOT_ENABLED
-[[ "$(systemctl show -p ActiveState --value "${guard_unit}" 2>/dev/null)" == active ]] \
+run_bounded systemctl is-enabled --quiet "${guard_unit}" 2>/dev/null || die UNIT_NOT_ENABLED
+[[ "$(run_bounded systemctl show -p ActiveState --value "${guard_unit}" 2>/dev/null)" == active ]] \
   || die UNIT_NOT_ACTIVE
 
 # Ordering proof: the kubelet drop-in must be loaded so kubelet cannot start
 # (and cannot stay started) without this guard.
-ordering_after="$(systemctl show -p After --value kubelet.service 2>/dev/null)"
+ordering_after="$(run_bounded systemctl show -p After --value kubelet.service 2>/dev/null)"
 grep -qw -- "${guard_unit}" <<<"${ordering_after}" || die KUBELET_ORDERING_MISSING
-ordering_requires="$(systemctl show -p Requires --value kubelet.service 2>/dev/null)"
+ordering_requires="$(run_bounded systemctl show -p Requires --value kubelet.service 2>/dev/null)"
 grep -qw -- "${guard_unit}" <<<"${ordering_requires}" || die KUBELET_REQUIRES_MISSING
 
 # Semantic proof: normalize the live structured ruleset against the closed
@@ -45,8 +50,8 @@ chmod 0700 "${capture_dir}"
 capture="${capture_dir}/ruleset.json"
 cleanup() { rm -f -- "${capture}"; rmdir -- "${capture_dir}"; }
 trap cleanup EXIT
-nft -j list ruleset >"${capture}" 2>/dev/null || die RULESET_CAPTURE_FAILED
-python3 -I -B "${verifier}" live \
+run_bounded nft -a -j list ruleset >"${capture}" 2>/dev/null || die RULESET_CAPTURE_FAILED
+run_bounded python3 -I -B "${verifier}" live \
   --ruleset "${capture}" --contract "${contract_path}" >/dev/null \
   || die MODEL_VERIFICATION_FAILED
 
