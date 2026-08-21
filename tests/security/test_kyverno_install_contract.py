@@ -39,7 +39,8 @@ from pathlib import Path
 from .support import required_tool
 
 
-BASH = shutil.which("bash")
+SYSTEM_BASH = Path("/bin/bash")
+BASH = str(SYSTEM_BASH) if SYSTEM_BASH.is_file() else shutil.which("bash")
 BASH_REQUIRED = "bash is required to exercise the installer"
 KUSTOMIZE = shutil.which("kustomize")
 CONFTEST = shutil.which("conftest")
@@ -1402,11 +1403,13 @@ class RenderLockTests(unittest.TestCase):
 
         installer = read(INSTALLER)
         block = capture(
-            r"(?s)declare -A PHASE_KINDS=\(\n(.*?)\n\)", installer, "the phase table"
+            r"(?s)phase_kinds\(\) \{\n(.*?)\n\}", installer, "the phase table"
         )
         declared = {
             phase: tuple(kinds.split("|"))
-            for phase, kinds in re.findall(r"\[([a-z0-9-]+)\]='([^']+)'", block)
+            for phase, kinds in re.findall(
+                r"^\s*([a-z0-9-]+)\) printf '%s' '([^']+)' ;;$", block, re.MULTILINE
+            )
         }
         self.assertEqual(
             declared,

@@ -156,15 +156,18 @@ RUNTIME_NETWORK_SCHEMA='website-infrastructure-kyverno-network-v1'
 # phase stops the install: an unclassified object is an object whose ordering
 # nobody decided, and ordering is the whole point of this script.
 PHASE_NAMES=(namespace bounds network crds controller-prerequisites controller policies)
-declare -A PHASE_KINDS=(
-  [namespace]='Namespace'
-  [bounds]='ResourceQuota|LimitRange'
-  [network]='NetworkPolicy'
-  [crds]='CustomResourceDefinition'
-  [controller-prerequisites]='ConfigMap|ServiceAccount|ClusterRole|ClusterRoleBinding|Role|RoleBinding|Service|PodDisruptionBudget|PriorityClass'
-  [controller]='Deployment'
-  [policies]='ClusterPolicy|Policy'
-)
+phase_kinds() {
+  case "$1" in
+    namespace) printf '%s' 'Namespace' ;;
+    bounds) printf '%s' 'ResourceQuota|LimitRange' ;;
+    network) printf '%s' 'NetworkPolicy' ;;
+    crds) printf '%s' 'CustomResourceDefinition' ;;
+    controller-prerequisites) printf '%s' 'ConfigMap|ServiceAccount|ClusterRole|ClusterRoleBinding|Role|RoleBinding|Service|PodDisruptionBudget|PriorityClass' ;;
+    controller) printf '%s' 'Deployment' ;;
+    policies) printf '%s' 'ClusterPolicy|Policy' ;;
+    *) return 1 ;;
+  esac
+}
 
 # There is deliberately no webhook phase. Registering a ValidatingWebhookConfiguration
 # by `kubectl apply` points the API server at a backend whose health nothing has
@@ -478,7 +481,7 @@ validate_tool_metadata() {
 
 validate_tool_format() {
   local tool="$1" path="$2" prefix='' interpreter=''
-  IFS= read -r -N 2 prefix <"$path" || true
+  IFS= read -r -n 2 prefix <"$path" || true
   [[ -n "$prefix" ]] || die "${tool} executable is empty"
   if [[ "$prefix" == '#!' ]]; then
     IFS= read -r interpreter <"$path" || true
@@ -493,6 +496,29 @@ bound_descriptor_path() {
   local path="${DESCRIPTOR_ROOT}/${fd}"
   [[ -r "$path" ]] || die 'bound executable descriptor is unavailable'
   printf '%s' "$path"
+}
+
+# Bash 4.1 introduced `exec {variable}<path` descriptor allocation, but macOS
+# still ships Bash 3.2 at the fixed /bin/bash interpreter this script promises.
+# Three closed descriptor roles keep the binding portable without eval or path
+# interpolation: 7 is the short-lived source, 8 is kustomize, and 9 is kubectl.
+open_tool_descriptor() {
+  local fd="$1" path="$2"
+  case "$fd" in
+    7) exec 7<"$path" || return 1 ;;
+    8) exec 8<"$path" || return 1 ;;
+    9) exec 9<"$path" || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+close_tool_descriptor() {
+  case "$1" in
+    7) exec 7<&- ;;
+    8) exec 8<&- ;;
+    9) exec 9<&- ;;
+    *) return 1 ;;
+  esac
 }
 
 validate_bound_tool() {
@@ -556,11 +582,17 @@ pinned_version() {
 
 bind_tool_image() {
   local tool="$1" pin_key="$2" output_fd_variable="$3" output_path_variable="$4"
-  local candidate='' expected_digest='' operator_uid='' source_fd=''
+  local candidate='' expected_digest='' operator_uid='' source_fd='7'
   local source_path='' source_metadata_path='' copy_path=''
   local before='' candidate_identity=''
   local source_digest='' staged='' staged_metadata=''
   local staged_fd='' staged_descriptor='' staged_identity='' exec_path=''
+
+  case "$tool" in
+    kustomize) staged_fd='8' ;;
+    kubectl) staged_fd='9' ;;
+    *) die "${tool} has no closed descriptor role" ;;
+  esac
 
   candidate="$(resolved_tool "$tool")"
   [[ ! -L "$candidate" ]] || die "${tool} executable path is a symlink"
@@ -570,7 +602,8 @@ bind_tool_image() {
   [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] || \
     die "versions.env has no valid ${pin_key}"
 
-  exec {source_fd}<"$candidate" || die "${tool} executable could not be opened"
+  open_tool_descriptor "$source_fd" "$candidate" || \
+    die "${tool} executable could not be opened"
   source_path="$(bound_descriptor_path "$source_fd")"
   case "$TOOL_CUSTODY" in
     unlinked-descriptor)
@@ -607,7 +640,8 @@ bind_tool_image() {
   validate_tool_format "$tool staged" "$staged"
 
   staged_identity="$(path_identity "$staged" || true)"
-  exec {staged_fd}<"$staged" || die "${tool} staged executable could not be opened"
+  open_tool_descriptor "$staged_fd" "$staged" || \
+    die "${tool} staged executable could not be opened"
   staged_descriptor="$(bound_descriptor_path "$staged_fd")"
   [[ -n "$staged_identity" && "$staged_identity" == \
      "$(path_identity "$staged_descriptor" || true)" ]] || \
@@ -622,7 +656,7 @@ bind_tool_image() {
     *) die "${tool} executable custody mode is invalid" ;;
   esac
   validate_bound_tool "$tool" "$staged_fd" "$expected_digest" "$operator_uid" "$exec_path"
-  exec {source_fd}<&-
+  close_tool_descriptor "$source_fd" || die "${tool} source descriptor could not be closed"
   printf -v "$output_fd_variable" '%s' "$staged_fd"
   printf -v "$output_path_variable" '%s' "$exec_path"
 }
@@ -656,6 +690,9 @@ KUBECTL_RAW() {
 
 bind_tools() {
   local expected='' actual=''
+  close_tool_descriptor 7
+  close_tool_descriptor 8
+  close_tool_descriptor 9
   [[ -n "${TOOL_WORK:-}" ]] || die 'private tool staging directory is unavailable'
   bind_tool_image kustomize KUSTOMIZE_LINUX_AMD64_SHA256 \
     KUSTOMIZE_FD KUSTOMIZE_PATH
@@ -1020,22 +1057,18 @@ document_metadata() {
   ' "$file" | tr -d '"'
 }
 
-phase_kinds() {
-  local phase="$1"
-  printf '%s' "${PHASE_KINDS[$phase]}"
-}
-
 # Every kind this transaction is able to journal, DERIVED from the phase table
 # rather than restated beside it. The journal writer classifies each rendered
-# document through PHASE_KINDS and refuses anything it cannot place, so a kind
+# document through `phase_kinds` and refuses anything it cannot place, so a kind
 # absent from that table is a kind no attempt of this installer ever recorded —
 # and a journal line naming one can only have been authored by something else.
 # Deriving it is what keeps the writer and the rollback reader from drifting
 # apart the way a second hard-coded list would.
 journalable_kinds() {
-  local phase='' pattern=''
+  local phase='' kinds='' pattern=''
   for phase in "${PHASE_NAMES[@]}"; do
-    pattern="${pattern}${pattern:+|}${PHASE_KINDS[$phase]}"
+    kinds="$(phase_kinds "$phase")" || die "install phase ${phase} has no kind classification"
+    pattern="${pattern}${pattern:+|}${kinds}"
   done
   printf '%s' "$pattern"
 }
@@ -1274,7 +1307,9 @@ validate_journal() {
   namespaced_inventory=",${namespaced_names},"
   journalable="$(journalable_kinds)"
   local -a lines=()
-  mapfile -t lines <"$journal"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lines[${#lines[@]}]="$line"
+  done <"$journal"
   ((${#lines[@]} > 1)) || die "journal records no transaction: ${journal}"
   IFS='|' read -r schema stage render_digest target_digest network_digest attempt_id rest <<<"${lines[0]}"
   [[ -z "$rest" && "$schema" == '@transaction-v3' ]] || \
@@ -1359,7 +1394,9 @@ rollback_journal() {
   remove_runtime_webhooks || \
     die 'rollback could not remove every reviewed runtime webhook; controller objects were left in place and admission is NOT proven clear'
   local -a entries=()
-  mapfile -t entries <"$journal"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    entries[${#entries[@]}]="$line"
+  done <"$journal"
   local index=0
   for ((index = ${#entries[@]} - 1; index >= 0; index--)); do
     line="${entries[index]}"
@@ -1539,6 +1576,9 @@ KUSTOMIZE_PATH=''
 KUBECTL_PATH=''
 cleanup() {
   local status=$?
+  close_tool_descriptor 7
+  close_tool_descriptor 8
+  close_tool_descriptor 9
   [[ -z "$WORK" ]] || command "$RM_BIN" -rf -- "$WORK"
   [[ -z "$TOOL_WORK" ]] || command "$RM_BIN" -rf -- "$TOOL_WORK"
   exit "$status"

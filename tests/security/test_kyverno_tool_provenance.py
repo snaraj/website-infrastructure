@@ -24,8 +24,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install-kyverno-admission.sh"
-BASH = shutil.which("bash")
 SYSTEM_BASH = Path("/bin/bash")
+BASH = str(SYSTEM_BASH) if SYSTEM_BASH.is_file() else shutil.which("bash")
 LINUX = sys.platform.startswith("linux")
 REQUIRES_BASH = unittest.skipUnless(BASH, "bash is required for this behavior")
 REQUIRES_POSIX_PROVENANCE = unittest.skipUnless(
@@ -462,6 +462,17 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
         self.assertIn("unset BASH_ENV ENV", text)
         self.assertIn("TOOL_SEARCH_PATH=", text)
         self.assertIn("PATH='/usr/bin:/bin'", text)
+        for unsupported in (
+            r"^\s*declare\s+-A\b",
+            r"^\s*mapfile\b",
+            r"^\s*IFS=.*read\s+-r\s+-N\b",
+            r"^\s*exec\s+\{",
+        ):
+            self.assertNotRegex(
+                text,
+                re.compile(unsupported, re.MULTILINE),
+                f"fixed /bin/bash must not depend on Bash 4-only {unsupported!r}",
+            )
 
 
 if __name__ == "__main__":
