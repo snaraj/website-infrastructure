@@ -469,8 +469,8 @@ def validate_final_network_policy_inventory(
     if (
         re.fullmatch(r"[0-9a-f]{32}", owner) is None
         or not isinstance(acceptance_spec, dict)
-        or document.get("apiVersion") != "networking.k8s.io/v1"
-        or document.get("kind") != "NetworkPolicyList"
+        or document.get("apiVersion") != "v1"
+        or document.get("kind") != "List"
     ):
         raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
     items = document.get("items")

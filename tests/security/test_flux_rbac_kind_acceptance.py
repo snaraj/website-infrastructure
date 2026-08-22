@@ -354,8 +354,8 @@ class PureContractTests(unittest.TestCase):
             }
 
         inventory = {
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "NetworkPolicyList",
+            "apiVersion": "v1",
+            "kind": "List",
             "items": [
                 network_policy(
                     "allow-egress",
