@@ -185,20 +185,28 @@ for filename, kind in (
 # Chart sources: exactly two, one per site, each verified against that site's
 # own keyless publisher identity. The artifact digest is what makes the running
 # chart content-addressed even though the SemVer range selected it by tag.
+#
+# Note the deliberate split between the two "tag" ideas below. CHART_TAG_RE
+# constrains the chart VERSION the SemVer range resolved — that is still a
+# stable vMAJOR.MINOR.PATCH release tag. The certificate SUBJECT constrains the
+# REF THE PUBLISHER RAN AT, which is the protected `main` branch: a run at a ref
+# executes the definition at that ref, and `main` is the only ref those site
+# repositories gate on creation and update with no bypass actors
+# (ADR 0016 amendment 2026-08-22).
 CHART_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 oci_chart_sources = {
     ("naranjo-online", "naranjo-online-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
         "subject": (
             r"^https://github\.com/snaraj/naranjo\.online/\.github/workflows/"
-            r"release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+            r"release-publisher\.yml@refs/heads/main$"
         ),
     },
     ("lidersea-com", "lidersea-com-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
         "subject": (
             r"^https://github\.com/snaraj/lidersea\.com/\.github/workflows/"
-            r"release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+            r"release-publisher\.yml@refs/heads/main$"
         ),
     },
 }

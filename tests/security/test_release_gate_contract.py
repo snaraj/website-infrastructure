@@ -49,7 +49,7 @@ def chart_subject(domain):
         r"^https://github\.com/snaraj/"
         + escaped
         + r"/\.github/workflows/release-publisher\.yml"
-        r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+        r"@refs/heads/main$"
     )
 
 
@@ -1026,14 +1026,28 @@ class ReleaseGateContractTests(unittest.TestCase):
             "foreign issuer": lambda item: item["spec"]["verify"][
                 "matchOIDCIdentity"
             ][0].update({"issuer": "^https://accounts\\.example\\.invalid$"}),
-            "branch ref subject": lambda item: item["spec"]["verify"][
+            # Re-pointed 2026-08-22 with the identity itself (ADR 0016
+            # amendment): protected `main` became the trusted ref, so the
+            # untrusted ref this row must keep refusing is a version tag.
+            "tag ref subject": lambda item: item["spec"]["verify"][
                 "matchOIDCIdentity"
             ][0].update(
                 {
                     "subject": (
                         r"^https://github\.com/snaraj/naranjo\.online/"
                         r"\.github/workflows/release-publisher\.yml"
-                        r"@refs/heads/main$"
+                        r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+                    )
+                }
+            ),
+            "branch ref family widened": lambda item: item["spec"]["verify"][
+                "matchOIDCIdentity"
+            ][0].update(
+                {
+                    "subject": (
+                        r"^https://github\.com/snaraj/naranjo\.online/"
+                        r"\.github/workflows/release-publisher\.yml"
+                        r"@refs/heads/.*$"
                     )
                 }
             ),

@@ -68,15 +68,25 @@ def chart_repository_path(slug):
     return SIGNATURE_MODULE.CHART_REPOSITORIES[slug][len("oci://") :].split("/", 1)[1]
 
 
-def publisher_identity(slug, *, tag="v0.1.9", ref="refs/tags"):
-    """Build the certificate identity that site's publisher would carry."""
+def publisher_identity(slug, *, tag="v0.1.9", ref="refs/heads/main"):
+    """Build the certificate identity that site's publisher would carry.
+
+    ``ref`` defaults to the protected `main` branch, which is what the real
+    publishers mint: each site's release contract accepts only a
+    workflow_dispatch run selected from `main`, and that ref is the only one
+    those repositories gate on creation and update with no bypass actors
+    (ADR 0016 amendment 2026-08-22). ``tag`` names WHICH release version is
+    being published and reaches the identity only when a caller asks for a
+    hostile tag-ref signer via ``ref="refs/tags"``.
+    """
 
     domain = SIGNATURE_MODULE.SIGNATURE_REPOSITORIES[slug]
     workflow = SIGNATURE_MODULE.SIGNATURE_CONTRACTS[slug]
+    suffix = ref if ref == "refs/heads/main" else "{}/{}".format(ref, tag)
     return SigningIdentity(
         issuer="https://token.actions.githubusercontent.com",
-        subject="https://github.com/snaraj/{}/.github/workflows/{}@{}/{}".format(
-            domain, workflow, ref, tag
+        subject="https://github.com/snaraj/{}/.github/workflows/{}@{}".format(
+            domain, workflow, suffix
         ),
     )
 
@@ -190,18 +200,36 @@ class SyncContractHarness(unittest.TestCase):
         identities = {
             "own": publisher_identity(self.slug, tag=version),
             "sibling": publisher_identity("lidersea-com", tag=version),
-            "branch": SigningIdentity(
+            # Re-pointed 2026-08-22 with the identity itself (ADR 0016
+            # amendment). This row is the ref-family refusal and it survives
+            # the re-point by swapping sides: the trusted ref is now protected
+            # `main`, so the signer source-controller must refuse is the right
+            # workflow in the right repository run at a VERSION TAG — the ref
+            # family whose creation those repositories do not restrict.
+            "tag-ref": SigningIdentity(
                 issuer="https://token.actions.githubusercontent.com",
                 subject=(
                     "https://github.com/snaraj/naranjo.online/.github/workflows/"
-                    "release-publisher.yml@refs/heads/main"
+                    "release-publisher.yml@refs/tags/" + version
                 ),
             ),
+            # Another branch head, so the refusal is proven against the
+            # `refs/heads/*` family too and not only against a different ref
+            # kind.
+            "other-branch": SigningIdentity(
+                issuer="https://token.actions.githubusercontent.com",
+                subject=(
+                    "https://github.com/snaraj/naranjo.online/.github/workflows/"
+                    "release-publisher.yml@refs/heads/release"
+                ),
+            ),
+            # Same repository, same trusted ref, different workflow file: the
+            # refusal here is attributable to the workflow path alone.
             "other-workflow": SigningIdentity(
                 issuer="https://token.actions.githubusercontent.com",
                 subject=(
                     "https://github.com/snaraj/naranjo.online/.github/workflows/"
-                    "nightly.yml@refs/tags/" + version
+                    "nightly.yml@refs/heads/main"
                 ),
             ),
             "other-issuer": SigningIdentity(
@@ -433,7 +461,13 @@ class ChartSourceSyncTests(SyncContractHarness):
         self.assertNotIn("artifact", source.status)
 
     def test_a_chart_signed_by_the_wrong_authority_is_refused(self):
-        for label in ("sibling", "branch", "other-workflow", "other-issuer"):
+        for label in (
+            "sibling",
+            "tag-ref",
+            "other-branch",
+            "other-workflow",
+            "other-issuer",
+        ):
             with self.subTest(signature=label):
                 self.setUp()
                 self.publish("v0.1.9", signature=label)

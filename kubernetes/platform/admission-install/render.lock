@@ -68,19 +68,25 @@ runtime.controllers.names=kyverno-admission-controller,kyverno-reports-controlle
 # rendered bytes depend on the committed policy set — and therefore on the base
 # this branch lands on, not on this branch alone. #87 added a fourth rule to
 # require-release-readiness and #96 rewrote the storage policy's rule bodies,
-# both after this branch was cut, and each changes the rendered bytes. This
-# branch has since MERGED `origin/main`, so the digests below describe this
-# branch's own working tree, which is also the tree that lands. Re-derive them
-# in the same pull request as anything that changes a committed policy, and
+# both after that branch was cut, and each changed the rendered bytes. Re-derive
+# them in the same pull request as anything that changes a committed policy, and
 # keep the base recorded here so a reader can tell which tree they describe.
-render.base=c63f357fbc77d55f6e60050f687cceb8723eda6c
+#
+# Re-derived 2026-08-22 for issue #185, which re-points both site publishers'
+# cosign subjects from `@refs/tags/v*` to `@refs/heads/main` in
+# policies/kyverno/require-signed-{naranjo-online,lidersea-com}.yaml. Both roots
+# compose that directory, so both digests moved. The rendered delta was diffed
+# against this base and is EXACTLY four lines per stage — the two subjects in
+# each of the two policies — with no other byte, no object added or removed, and
+# both counts still 23. The inventory lists below are therefore unchanged.
+render.base=5b43bc4b10c88c6c5e70469f007a3c99e5c4bb79
 
 # STAGE 1 — kubernetes/platform/admission-install/report-only
-report-only.sha256=59696a083dd6ceb496cddc3c773ff70f575633485757e6b00183c2eb668feb0b
+report-only.sha256=58276208de09ae8900d7be1472ed7be1242ef36ac136d5e26d9d22b864be2b83
 report-only.objects=23
 
 # STAGE 2 — kubernetes/platform/admission-install/enforce
-enforce.sha256=8ad0b562e6e9f03fea12d94b72696d379b270f227ad8a7bbf01449fedb3a4218
+enforce.sha256=396424d7331397155d6e369168049cff7e9b6894ce6814deee4be555748808c8
 enforce.objects=23
 
 # The inventory, by scope. Both stages carry the identical object set — stage 1

@@ -21,10 +21,16 @@ umask 077
   printf 'GITHUB_SHA is not one full Git commit\n' >&2
   exit 2
 }
-# Site releases are published by each standalone repository from immutable
-# version tags; the trust boundary is the exact tag-triggered publisher.
-[[ "${WORKFLOW_IDENTITY}" =~ ^https://github\.com/snaraj/(naranjo\.online|lidersea\.com)/\.github/workflows/release-publisher\.yml@refs/tags/v\*$ ]] || {
-  printf 'WORKFLOW_IDENTITY is outside the tagged-publisher trust boundary\n' >&2
+# Site releases are published by each standalone repository under immutable
+# version tags, but the SIGNING identity is the publisher run itself, which is
+# a workflow_dispatch selected from that repository's protected `main` branch.
+# The trust boundary is therefore that exact branch-ref publisher: a run at a
+# ref executes the definition at that ref, and `main` is the only ref those
+# repositories gate on creation and update with no bypass actors, whereas tag
+# creation there is unrestricted (ADR 0016 amendment 2026-08-22). RELEASE_TAG
+# above still pins WHICH release is being verified.
+[[ "${WORKFLOW_IDENTITY}" =~ ^https://github\.com/snaraj/(naranjo\.online|lidersea\.com)/\.github/workflows/release-publisher\.yml@refs/heads/main$ ]] || {
+  printf 'WORKFLOW_IDENTITY is outside the protected-main publisher trust boundary\n' >&2
   exit 2
 }
 for command_name in cosign oras; do

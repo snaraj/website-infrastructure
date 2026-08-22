@@ -35,9 +35,15 @@ signature_policy_actions := {"Audit", "Enforce"}
 # other edit is still denied.
 signature_policy_failure_policies := {"Fail", "Ignore"}
 
+# The publisher's certificate identity ends in the protected `main` branch ref,
+# not a tag ref: each site's publisher is a workflow_dispatch run selected from
+# protected `main`, and that ref is the only one whose creation and update those
+# repositories gate with no bypass actors. This literal carries no wildcard, so
+# it is strictly narrower than the `@refs/tags/v*` glob it replaces
+# (ADR 0016 amendment 2026-08-22).
 signature_keyless(contract) := {
   "subject": sprintf(
-    "https://github.com/snaraj/%s/.github/workflows/%s@refs/tags/v*",
+    "https://github.com/snaraj/%s/.github/workflows/%s@refs/heads/main",
     [contract.repository, contract.workflow],
   ),
   "issuer": "https://token.actions.githubusercontent.com",

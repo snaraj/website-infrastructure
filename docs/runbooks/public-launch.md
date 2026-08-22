@@ -3,8 +3,9 @@
 Public launch is blocked until every item is evidenced:
 
 - a generated digest-pinned Flux manifest for each site;
-- release evidence supplied by each standalone site repository's tag-triggered
-  publisher: independent Go/Svelte tests, dual-architecture builds, scans,
+- release evidence supplied by each standalone site repository's release
+  publisher, dispatched from that repository's protected `main` branch:
+  independent Go/Svelte tests, dual-architecture builds, scans,
   SBOMs, provenance, keyless signatures and verification, plus an immutable
   stable-version/digest evidence mapping for each selected image;
 - public GHCR visibility for anonymous Pi pulls;

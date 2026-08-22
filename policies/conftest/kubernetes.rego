@@ -215,8 +215,11 @@ tenant_chart_paths := {
 
 git_chart_namespaces := {"cloudflare-public"}
 
-# Each site's Helm chart is published by that site's own tag-triggered release
-# publisher, so the published version tag is the release identity Flux follows.
+# Each site's Helm chart is published by that site's own release publisher at a
+# stable version tag, so the published version tag is the release identity Flux
+# follows. The publisher itself is dispatched from protected `main`, which is a
+# separate thing from the version it publishes under — see
+# `site_chart_identities` below.
 site_chart_sources := {
   "naranjo-online": "naranjo-online-chart",
   "lidersea-com": "lidersea-com-chart",
@@ -240,15 +243,19 @@ site_chart_layer_media_type := "application/vnd.cncf.helm.chart.content.v1.tar+g
 
 # The exact keyless certificate identity of each site's chart publisher. These
 # two tuples must never couple: a chart signed by the other site's workflow, by
-# another workflow in the same repository, or by a branch-ref run is denied.
+# another workflow in the same repository, or by a run at any ref other than
+# that repository's protected `main` — a tag ref included — is denied. The
+# branch ref is the anchor because a run at a ref executes the workflow
+# definition AT that ref, and `main` is the only ref those repositories gate on
+# creation and update with no bypass actors (ADR 0016 amendment 2026-08-22).
 site_chart_identities := {
   "naranjo-online": {
     "issuer": `^https://token\.actions\.githubusercontent\.com$`,
-    "subject": `^https://github\.com/snaraj/naranjo\.online/\.github/workflows/release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`,
+    "subject": `^https://github\.com/snaraj/naranjo\.online/\.github/workflows/release-publisher\.yml@refs/heads/main$`,
   },
   "lidersea-com": {
     "issuer": `^https://token\.actions\.githubusercontent\.com$`,
-    "subject": `^https://github\.com/snaraj/lidersea\.com/\.github/workflows/release-publisher\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`,
+    "subject": `^https://github\.com/snaraj/lidersea\.com/\.github/workflows/release-publisher\.yml@refs/heads/main$`,
   },
 }
 
