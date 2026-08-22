@@ -1,0 +1,4 @@
+# The runner always replaces this refusal value with a locally built,
+# digest-bound image that it loads into its owned kind node.
+image: acceptance.invalid/refusal@sha256:0000000000000000000000000000000000000000000000000000000000000000
+failureMode: false

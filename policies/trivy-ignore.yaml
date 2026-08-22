@@ -6,10 +6,13 @@ misconfigurations:
   - id: AVD-KSV-0041
     paths:
       - "kubernetes/flux-system/controllers/gotk-components.yaml"
+      - "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+      - "tests/kubernetes/fixtures/allow/flux-reconciler-rbac.yaml"
       - ".artifacts/rendered/kubernetes-flux-system.yaml"
     statement: >-
-      The version-pinned generated Flux controller manifest uses its standard
-      cluster-scoped Secret discovery permission; all other findings stay active.
+      Helm's release-storage informer requires cluster-scoped Secret
+      get/list/watch; the generated source manifest is retained only as the
+      upstream input, and all other findings stay active.
     expired_at: 2027-08-08
   - id: AVD-KSV-0046
     paths:

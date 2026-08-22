@@ -18,7 +18,7 @@ is denied with no DNS or API-server allow in force. That refusal is the
 executable form of the install-ordering deadlock:
 
 ``FreshClusterDryRunGateTests`` drives the pre-apply gate through the
-fresh-cluster shape it must accept — 13 cluster-scoped ``created`` plus 11
+fresh-cluster shape it must accept — 19 cluster-scoped ``created`` plus 11
 children reporting ``namespaces "flux-system" not found``
 (kubernetes/kubernetes#83562, which the old "all 25 must be created" gate could
 never pass) — and the genuine failures it must still refuse.
@@ -94,10 +94,18 @@ EXPECTED_EXCLUDED_RANGES = (
     "240.0.0.0/4",
 )
 
-# The 12 non-namespaced objects that a `kubectl delete namespace flux-system`
+# The 18 non-namespaced objects that a `kubectl delete namespace flux-system`
 # cannot remove. The installer's rollback and the runbook's removal procedure
 # are both measured against this effective, post-overlay list; the deleted
 # generated cluster-admin binding is deliberately absent.
+#
+# The three `crd-controller-<controller>-flux-system` pairs are authored, not
+# generated (issue #98): they replace the Flux-group authority the narrowing
+# patch strips from the shared role, and they are part of the INSTALL ROOT
+# because the same transaction removes what they replace. They are cluster
+# scoped for the same reason the shared role was — `--watch-all-namespaces=true`
+# makes every registered informer a cluster-wide list/watch — so rollback has to
+# account for them exactly like the generated three.
 CLUSTER_SCOPED_CRDS = (
     "buckets.source.toolkit.fluxcd.io",
     "externalartifacts.source.toolkit.fluxcd.io",
@@ -110,11 +118,17 @@ CLUSTER_SCOPED_CRDS = (
 )
 CLUSTER_SCOPED_ROLES = (
     "crd-controller-flux-system",
+    "crd-controller-helm-flux-system",
+    "crd-controller-kustomize-flux-system",
+    "crd-controller-source-flux-system",
     "flux-edit-flux-system",
     "flux-view-flux-system",
 )
 CLUSTER_SCOPED_BINDINGS = (
     "crd-controller-flux-system",
+    "crd-controller-helm-flux-system",
+    "crd-controller-kustomize-flux-system",
+    "crd-controller-source-flux-system",
 )
 CONTROLLER_DEPLOYMENTS = ("source-controller", "kustomize-controller", "helm-controller")
 CANARY_NAME = "flux-api-reachability-canary"
@@ -227,6 +241,7 @@ class ControllerFlagScopeTests(unittest.TestCase):
         "--no-cross-namespace-refs",
         "--no-remote-bases",
         "--default-service-account",
+        "--feature-gates=",
     )
 
     def test_source_controller_carries_no_reconciler_only_flag(self):
@@ -249,6 +264,7 @@ class ControllerFlagScopeTests(unittest.TestCase):
                     "--no-cross-namespace-refs=true",
                     "--no-remote-bases=true",
                     "--default-service-account=default",
+                    "--feature-gates=DisableConfigWatchers=true",
                 ),
             ),
             (
@@ -260,6 +276,22 @@ class ControllerFlagScopeTests(unittest.TestCase):
             for flag in expected:
                 with self.subTest(controller=name, flag=flag):
                     self.assertIn("value: " + flag, patch)
+
+    def test_kustomize_config_watcher_gate_is_exact_and_unique(self):
+        expected = "--feature-gates=DisableConfigWatchers=true"
+        for name, wanted in (
+            ("source-controller", []),
+            ("kustomize-controller", [expected]),
+            ("helm-controller", []),
+        ):
+            patch = read(CONTROLLERS / "patches" / (name + ".yaml"))
+            feature_gates = [
+                value
+                for value in re.findall(r"(?m)^\s*value:\s*(--\S+)\s*$", patch)
+                if value.startswith("--feature-gates=")
+            ]
+            with self.subTest(controller=name):
+                self.assertEqual(feature_gates, wanted)
 
     def test_the_live_state_expectation_matches_the_patched_arguments(self):
         # bootstrap.sh both expects the reviewed argument set and re-probes the
@@ -629,16 +661,16 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertIn("does not enforce restricted Pod Security", self.text)
 
     def test_it_dry_runs_before_it_applies_and_bounds_the_inventory(self):
-        # The gate keeps a server-side dry run and the exact-24 bound, and now
-        # also carries the fresh-cluster classification (13 cluster-scoped +
+        # The gate keeps a server-side dry run and the exact-30 bound, and now
+        # also carries the fresh-cluster classification (19 cluster-scoped +
         # 11 namespace-not-found children) and the namespace-independent
         # corroboration (client-side strict validation). The behaviour is
         # exercised in FreshClusterDryRunGateTests; these pins fail if the
         # corrected gate is reverted to the old "all must be created" shape.
         self.assertIn("--dry-run=server", self.text)
         self.assertIn("--dry-run=client --validate=strict", self.text)
-        self.assertIn("EXPECTED_OBJECTS=24", self.text)
-        self.assertIn("EXPECTED_CLUSTER_SCOPED=13", self.text)
+        self.assertIn("EXPECTED_OBJECTS=30", self.text)
+        self.assertIn("EXPECTED_CLUSTER_SCOPED=19", self.text)
         self.assertIn("EXPECTED_NAMESPACED=11", self.text)
         self.assertIn('namespaces "flux-system" not found', self.text)
         plan_index = self.text.index('"$MODE" == \'--plan\'')
@@ -653,10 +685,10 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertNotIn("apply -k", self.text)
 
     def test_the_phase_constants_partition_the_reviewed_inventory(self):
-        # 21 + 3 = 24 and 4 + 1 = 5. Constants that stopped adding up would let
+        # 27 + 3 = 30 and 4 + 1 = 5. Constants that stopped adding up would let
         # a phase quietly drop an object; the installer re-checks the same sums
         # at run time against the actual split.
-        self.assertIn("EXPECTED_PREREQUISITES=21", self.text)
+        self.assertIn("EXPECTED_PREREQUISITES=27", self.text)
         self.assertIn("EXPECTED_WORKLOADS=3", self.text)
         self.assertIn("EXPECTED_EGRESS_POLICIES=5", self.text)
         self.assertIn("EXPECTED_STARTUP_POLICIES=4", self.text)
@@ -999,11 +1031,11 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
 
 
 def _reviewed_render() -> str:
-    """A faithful 24-object skeleton of the reviewed controller render.
+    """A faithful 30-object skeleton of the reviewed controller render.
 
     The stubbed ``kustomize`` prints this, so the installer's own content gates
     (no Flux CR, no Secret, no blanket egress, restricted Pod Security enforced,
-    exactly 24 ``kind:`` lines) run against it, its inventory cross-check finds
+    exactly 30 ``kind:`` lines) run against it, its inventory cross-check finds
     the exact reviewed CRD/ClusterRole/ClusterRoleBinding/Deployment names in
     it, and its document splitter has the same ``---``-separated, two-space
     indented shape ``kustomize`` emits. Only structure matters here —
@@ -1059,8 +1091,8 @@ def _render_with_an_unrecognized_deployment() -> str:
     """The reviewed render with one document the splitter cannot see is a Deployment.
 
     The Service document is replaced by a fourth Deployment whose ``kind`` is
-    quoted. Every count the installer takes still adds up — 24 objects, the three
-    reviewed Deployment names still derive exactly, 21 + 3 still partitions — and
+    quoted. Every count the installer takes still adds up — 30 objects, the three
+    reviewed Deployment names still derive exactly, 27 + 3 still partitions — and
     the document splitter, which matches ``^kind: Deployment$``, leaves this one
     in phase 1. That is the whole hazard: a workload created into the namespace
     BEFORE its egress allows exist, which on an enforcing CNI is the deadlock
@@ -2081,7 +2113,7 @@ class FixtureFidelityTests(InstallerBehaviourTestCase):
 
     def test_the_render_skeleton_matches_the_reviewed_shape(self):
         render = _reviewed_render()
-        self.assertEqual(render.count("\nkind:") + render.startswith("kind:"), 24)
+        self.assertEqual(render.count("\nkind:") + render.startswith("kind:"), 30)
         self.assertIn("pod-security.kubernetes.io/enforce: restricted", render)
         self.assertNotIn("kind: Secret", render)
         self.assertEqual(_reviewed_egress_render().count("\nkind:"), 5)
@@ -2113,7 +2145,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
         completed = self._run(scenario="fresh-ok")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn(
-            "fresh-cluster dry run clean (13 created + 11 expected namespace-not-found)",
+            "fresh-cluster dry run clean (19 created + 11 expected namespace-not-found)",
             completed.stdout,
         )
         self.assertIn("PLAN only; no mutation attempted", completed.stdout)
@@ -2121,7 +2153,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
     def test_existing_cluster_shape_is_accepted(self):
         completed = self._run(scenario="existing-ok")
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertIn("existing-cluster dry run clean (24 objects)", completed.stdout)
+        self.assertIn("existing-cluster dry run clean (30 objects)", completed.stdout)
 
     def test_a_foreign_object_in_the_dry_run_fails_closed(self):
         completed = self._run(scenario="fresh-foreign")
@@ -2190,7 +2222,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
                 )
 
     def test_apply_refuses_an_existing_install_and_touches_nothing(self):
-        # The peer's P1: on the existing path the 21 phase-1 objects are rewritten
+        # The peer's P1: on the existing path the 27 phase-1 objects are rewritten
         # as `configured` with no prestate recorded, so a later failure rolls back
         # nothing and reports "the cluster is unchanged" over a namespace whose
         # RBAC, CRDs and policies were just rewritten. The scope of an honest
@@ -2211,7 +2243,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
     def test_the_existing_path_probes_ownership_of_every_namespaced_object(self):
         # The probe used to stop at the cluster-scoped objects while the
         # script claimed foreign ownership "stops the install before anything is
-        # applied" of all 24. A foreign NetworkPolicy inside flux-system passed
+        # applied" of all 30. A foreign NetworkPolicy inside flux-system passed
         # the dry run and would have been overwritten.
         state = self._state("existing-ok")
         registry = state / "registry"
@@ -2393,7 +2425,7 @@ class InstallOrderingTests(InstallerBehaviourTestCase):
         calls = read(Path(completed.state) / "calls.log")
         self.assertIn("phase-1-prerequisites.yaml", calls)
         self.assertIn(
-            "install-flux-controllers: phase prerequisites: creating 21 attempt-bound object(s)",
+            "install-flux-controllers: phase prerequisites: creating 27 attempt-bound object(s)",
             completed.stdout,
         )
         self.assertIn(
@@ -2926,7 +2958,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         self.assertIn("phase workloads create failed", completed.stderr)
         self.assertIn("rollback complete", completed.stderr)
         # The proof that matters: nothing of this attempt survives, and that
-        # includes all 12 non-namespaced objects `delete namespace` cannot reach.
+        # includes all 18 non-namespaced objects `delete namespace` cannot reach.
         registry = read(Path(completed.state) / "registry")
         for name in CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS:
             with self.subTest(object=name):
@@ -2964,7 +2996,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
 
     def test_an_owned_install_is_never_reapplied_over(self):
         # This replaces a test that asserted the OLD behaviour verbatim: an
-        # upgrade over an owned install rewrote 21 objects as `configured`, kept
+        # upgrade over an owned install rewrote 27 objects as `configured`, kept
         # an empty ledger, and printed "this attempt created nothing; the cluster
         # is unchanged". The names still existed, which is all the old assertion
         # checked, so the misleading all-clear was pinned rather than caught.
@@ -2988,7 +3020,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         # server while its confirmation line does not reach the operator -- a
         # dropped connection, or a signal delivered between the create and the
         # print -- and a ledger fed only by stdout would then roll back nothing
-        # while 21 objects, 13 of them cluster-scoped (Namespace included), stayed behind.
+        # while 27 objects, 19 of them cluster-scoped (Namespace included), stayed behind.
         # is re-derived from the cluster, so the rollback is still complete.
         completed = self._run(
             "--apply",
@@ -3120,7 +3152,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
     def test_a_ledger_that_recorded_nothing_reports_a_cluster_that_changed_nothing(self):
         # The other direction, and the only path on which "created nothing" is
         # true: the first phase fails before its first object is created. It is
-        # also the proof that the 24 client-dry-run lines printed moments earlier
+        # also the proof that the 30 client-dry-run lines printed moments earlier
         # never entered the ledger -- had they, this would try to delete them.
         completed = self._run(
             "--apply",
@@ -3137,7 +3169,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
     def test_a_signal_mid_transaction_never_leaves_silent_residue(self):
         # The gap a failed-phase rollback does not cover: a Ctrl-C, a hangup or a
         # `kill` during the apply leaves everything the earlier phases created,
-        # including all 12 non-namespaced objects, that a namespace delete
+        # including all 18 non-namespaced objects, that a namespace delete
         # cannot remove, with no undo and no list. The signal must take the same
         # rollback path a failed phase takes.
         returncode, errors, state = self._run_until_signalled(
@@ -3359,7 +3391,7 @@ class InstallCeremonyValidatorTests(unittest.TestCase):
 
     def test_the_cluster_scoped_inventory_is_derived_and_not_empty(self):
         derived = self.module.cluster_scoped_flux_objects(ROOT)
-        self.assertEqual(len(derived), 12, "8 CRDs + 3 ClusterRoles + 1 binding")
+        self.assertEqual(len(derived), 18, "8 CRDs + 6 ClusterRoles + 4 bindings")
         self.assertEqual(
             set(derived),
             set(CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS),

@@ -17,6 +17,55 @@ subjects:
     name: kustomize-controller
     namespace: flux-system
 ---
+# The confused deputy coming back (issue #98), three ways.
+#
+# 1. A Flux API group re-added to the shared role. It is bound to all three
+#    controllers, so this hands each of them authority over the other two's
+#    execution objects — the exact finding the split removed. The verbs are
+#    read-only here on purpose: the rule must refuse the SHAPE, not a verb list
+#    somebody remembered to enumerate.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-flux-system
+rules:
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases]
+    verbs: [get, list, watch]
+---
+# 2. A per-controller binding grown a second subject: the shared role rebuilt
+#    under a new name, with every rule still reading correctly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-helm-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-helm-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+---
+# 3. A per-controller binding repointed at another controller's role. The
+#    subject set is correct, so only the roleRef check catches it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-source-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-kustomize-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -87,7 +136,20 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch, update]
+    resourceNames: [wrong-age-key]
+    verbs: [get]
+---
+# A separate one-axis mutation keeps the correct name but adds one write verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flux-controller-decryption
+  namespace: flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [sops-age]
+    verbs: [get, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -123,3 +185,254 @@ subjects:
   - kind: ServiceAccount
     name: kustomize-controller
     namespace: flux-system
+---
+# Each Kustomize mutation changes one axis of the exact secondary-source rule.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-kustomize-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, ocirepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-kustomize-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [buckets, gitrepositories, ocirepositories]
+    verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-kustomize-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [buckets, gitrepositories, ocirepositories, externalartifacts]
+    verbs: [get, list, watch]
+---
+# The real Kustomize Deployment with only the reviewed feature gate changed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: kustomize-controller
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+    app.kubernetes.io/version: v2.9.3
+    control-plane: controller
+  name: kustomize-controller
+  namespace: flux-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kustomize-controller
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app: kustomize-controller
+        app.kubernetes.io/component: kustomize-controller
+        app.kubernetes.io/instance: flux-system
+        app.kubernetes.io/part-of: flux
+        app.kubernetes.io/version: v2.9.3
+    spec:
+      containers:
+        - args:
+            - --events-addr=
+            - --watch-all-namespaces=true
+            - --log-level=info
+            - --log-encoding=json
+            - --enable-leader-election
+            - --no-cross-namespace-refs=true
+            - --no-remote-bases=true
+            - --default-service-account=default
+            - --feature-gates=DisableConfigWatchers=false
+          env:
+            - name: RUNTIME_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: manager
+                  resource: limits.memory
+          image: ghcr.io/fluxcd/kustomize-controller:v1.9.4@sha256:2b8bec54ffb6caf421bd2a6c005d27f567d5dd4db7feb55794fb51fcabd69b8f
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+          name: manager
+          ports:
+            - containerPort: 8080
+              name: http-prom
+              protocol: TCP
+            - containerPort: 9440
+              name: healthz
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /tmp
+              name: temp
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-cluster-critical
+      securityContext:
+        fsGroup: 1337
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: kustomize-controller
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - emptyDir: {}
+          name: temp
+---
+# Issue #186 finding 1 over-corrected into cluster-wide Secret mutation. The
+# source rules remain exact so this document isolates the Secret mutation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, update]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories]
+    verbs: [get, list, watch]
+---
+# Even read-only verbs are not the reviewed cache rule when an extra field
+# narrows or otherwise changes its shape. Keep the exception byte-for-byte
+# semantic rather than teaching the policy to ignore unreviewed fields.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+    resourceNames: [sh.helm.release.v1.example.v1]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories]
+    verbs: [get, list, watch]
+---
+# Three one-axis mutations cover Helm's two exact source rules independently.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories]
+    verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories, gitrepositories]
+    verbs: [get, list, watch]
+---
+# The same read-only cache grant on source-controller is still cluster-wide
+# credential visibility. The exception belongs only to helm-controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-source-flux-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+# Issue #186 finding 2 widened from readiness read-back into workload control.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helm-reconciler
+  namespace: naranjo-online
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+---
+# The exception is a tenant identity tuple, not any Role with this name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helm-reconciler
+  namespace: kyverno
+rules:
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+---
+# The exception is also the exact Role name, not any tenant-local identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: readiness-lookalike
+  namespace: naranjo-online
+rules:
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]

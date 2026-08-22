@@ -1,0 +1,225 @@
+# Per-controller authority for the three installed controllers (issues #98 and #186).
+#
+# THIS FILE IS PART OF THE INSTALL TRANSACTION, and that placement is the whole
+# point of it. `scripts/install-flux-controllers.sh` applies the `controllers`
+# root and nothing else; `kubernetes/flux-system/access.yaml` is reconciled
+# later, by Flux, from `./kubernetes/reconciliation`. The narrowing patch in
+# patches/crd-controller-role.yaml removes every Flux API group from the shared
+# `crd-controller-flux-system` ClusterRole, so if the replacement authority
+# lived only in access.yaml a fresh `--apply` would create three controllers
+# with no informer authority over their primary and secondary watched custom
+# resources at all: all twenty-four list/watch probes deny and helm-controller cannot
+# sync its Secret-backed release-storage cache. The controllers cannot start an
+# informer, and the readiness gate can never pass. The replacements have to be
+# created by the same transaction that removes what they replace.
+#
+# `--watch-all-namespaces=true` makes every registered informer a CLUSTER-wide
+# list/watch, which no Role can satisfy, so this authority has to be
+# cluster-scoped. What matters is that each ClusterRole is bound to exactly ONE
+# ServiceAccount.
+#
+# The generated export shipped a single `crd-controller-flux-system` ClusterRole
+# bound to all three accounts. Every `update`/`patch` in it was therefore
+# authority each controller held over the OTHER two's reconciliation
+# specifications, and impersonation does not contain that: rewriting or
+# unsuspending another controller's execution object gets it applied BY that
+# controller, under whichever account it impersonates. Splitting the role is the
+# only fix — the shared role now grants no Flux API group at all.
+#
+# The split is derived, not invented: `OWNED_CONTROLLER_KINDS` and
+# `CONTROLLER_SECONDARY_WATCH_KINDS` in
+# tests/security/testsupport/rbac_model.py declare each controller's primary
+# reconcilers and secondary informers. The narrowness half of the proof rejects
+# any verb here that the derivation does not ask for. Deleting one of these
+# roles fails the sufficiency half; widening one fails the narrowness half.
+#
+# Every object here carries this install's two ownership labels, identical to the
+# ones the generated objects get. The installer treats an existing object bearing
+# BOTH as a previous run of THIS install and anything else as foreign — never
+# adopted, never reconfigured, never rolled back — so objects it creates must be
+# markable as its own or its rollback would refuse to remove them. They carry no
+# `app.kubernetes.io/version`: that label tracks the Flux release the export came
+# from, and stamping it on authorization this repository derived itself would let
+# a Flux bump rewrite it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-source-flux-system
+rules:
+  # The five source kinds source-controller registers a reconciler for. Each is
+  # a cluster-wide informer, so `list`/`watch` cannot be namespaced, and the
+  # controller exits rather than degrade if it cannot start one. Creation is not
+  # granted: sources are created by the impersonated reconcilers from Git, never
+  # by a controller.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets
+      - gitrepositories
+      - helmcharts
+      - helmrepositories
+      - ocirepositories
+    verbs: [get, list, watch, update, patch]
+  # HelmChart carries NO `create` and NO `delete` here. The intermediate chart
+  # object is created and removed by helm-controller, which derives it from a
+  # HelmRelease; source-controller only reconciles it into an artifact. The
+  # generated export gave source-controller both verbs, which is the
+  # "source-controller may create and delete HelmCharts" finding in issue #98.
+  #
+  # ExternalArtifact is granted on its own rule because it is the one kind here
+  # whose reconciler registration at the pinned version this repository cannot
+  # confirm from its own manifests. It is declared slack in the narrowness
+  # proof rather than asserted as required, and it belongs to source-controller
+  # alone — the other two controllers no longer receive it at all.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [externalartifacts]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets/status
+      - externalartifacts/status
+      - gitrepositories/status
+      - helmcharts/status
+      - helmrepositories/status
+      - ocirepositories/status
+    verbs: [get, patch, update]
+  # Finalizer subresource access is only consulted when the API server runs the
+  # OwnerReferencesPermissionEnforcement admission plugin. It is granted because
+  # a missing grant there produces a stuck, hard-to-diagnose deletion rather
+  # than a clear denial, and it authorizes nothing else.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources:
+      - buckets/finalizers
+      - externalartifacts/finalizers
+      - gitrepositories/finalizers
+      - helmcharts/finalizers
+      - helmrepositories/finalizers
+      - ocirepositories/finalizers
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-source-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-source-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: source-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-kustomize-flux-system
+rules:
+  # kustomize-controller owns Kustomization status and finalizers. It never
+  # creates or deletes one: the root Kustomization applies the five children
+  # while impersonating root-reconciler, whose namespaced Role carries those
+  # verbs.
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/status]
+    verbs: [get, patch, update]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/finalizers]
+    verbs: [update]
+  # READ ONLY. The pinned binary unconditionally registers secondary informers
+  # for all three source kinds, even when today's desired state references only
+  # a GitRepository. A reconciler also resolves `spec.sourceRef` through its own
+  # API client BEFORE the impersonation config is built, so reading the source
+  # is the controller's authority; writing it never is. The verb list therefore
+  # stops at `watch`, and ExternalArtifact stays absent while its feature gate
+  # remains disabled.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [buckets, gitrepositories, ocirepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-kustomize-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-kustomize-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-helm-flux-system
+rules:
+  # helm-controller owns HelmRelease status and finalizers on the same terms as
+  # kustomize-controller owns Kustomization's.
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases/status]
+    verbs: [get, patch, update]
+  - apiGroups: [helm.toolkit.fluxcd.io]
+    resources: [helmreleases/finalizers]
+    verbs: [update]
+  # Helm release storage is Secret-backed. helm-controller constructs a
+  # cluster-scoped PartialObjectMetadata Secret informer before any
+  # reconciliation, so a namespaced Role cannot satisfy startup. This rule is
+  # deliberately isolated from mutable rules and stops at read-only cache
+  # verbs; list/watch cannot be narrowed with resourceNames.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  # The one controller that creates and deletes a source object under its own
+  # identity: helm-controller derives an intermediate HelmChart from a
+  # HelmRelease whose chart comes from a source object, and removes it when the
+  # release goes away. The cloudflare-public release is exactly that shape.
+  # `watch` is included because the controller keeps an informer over the chart
+  # it owns so a new artifact triggers an upgrade.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # READ ONLY. The pinned binary unconditionally registers an OCIRepository
+  # secondary informer, and direct `spec.chartRef` resolution also occurs under
+  # the controller's own identity. A legacy `spec.chart.spec.sourceRef` is
+  # copied into the intermediate HelmChart for source-controller to resolve;
+  # helm-controller does not read that GitRepository itself.
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+  name: crd-controller-helm-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-helm-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
