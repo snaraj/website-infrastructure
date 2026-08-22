@@ -205,6 +205,15 @@ def registry_name(run_id: str) -> str:
     return f"fra-registry-{run_id}"
 
 
+def registry_publish_spec() -> str:
+    """Request a Docker-assigned loopback port without the empty-port form."""
+
+    # Docker 24 can report a random HostPort for the empty host-port form
+    # without actually opening the host listener. An explicit zero preserves
+    # daemon allocation and makes the resulting inspected port reachable.
+    return f"{LOOPBACK}:0:5000"
+
+
 class AcceptanceError(RuntimeError):
     """A fail-closed state whose code is safe to expose in the receipt."""
 
@@ -2713,7 +2722,7 @@ class AcceptanceHarness:
                 "--network",
                 self.owned.network,
                 "--publish",
-                LOOPBACK + ":" + ":5000",
+                registry_publish_spec(),
                 "--label",
                 owner,
                 "--name",

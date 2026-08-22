@@ -187,6 +187,17 @@ class MatrixContractTests(unittest.TestCase):
 
 
 class PureContractTests(unittest.TestCase):
+    def test_registry_publish_uses_explicit_random_loopback_port(self):
+        self.assertEqual(acceptance.registry_publish_spec(), "127.0.0.1:0:5000")
+        infrastructure = (
+            (ROOT / "scripts" / "flux_rbac_kind_acceptance.py")
+            .read_text(encoding="utf-8")
+            .split("    def create_infrastructure", 1)[1]
+            .split("    def build_artifacts", 1)[0]
+        )
+        self.assertIn("registry_publish_spec()", infrastructure)
+        self.assertNotIn('LOOPBACK + ":" + ":5000"', infrastructure)
+
     def test_versions_parser_requires_digest_pins_and_no_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "versions.env"
