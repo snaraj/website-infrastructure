@@ -457,6 +457,44 @@ exact `subresource=finalizers` SelfSubjectAccessReview. This is the same narrow
 exception shape as ServiceAccount `impersonate`; it is never permission to
 skip discovery for the resource itself.
 
+### Disposable real-API receipt (2026-08-21)
+
+This issue's local destructive authority was limited to a disposable kind
+cluster; it did not authorize a protected-cluster apply. A clean-from-zero
+kind v0.32.0 cluster running Kubernetes v1.36.1 established all eight reviewed
+Flux CRDs before the committed v1.36.4 kubectl client submitted any
+authorization review. The merged oracle ran through held executable and
+mode-0600 flattened-kubeconfig custody, with the exact ServiceAccount user and
+all three Kubernetes groups on every raw SelfSubjectAccessReview.
+
+The prediction and observation matched exactly:
+
+- before narrowing, all 18 literal issue-98 crossings were `ALLOWED`;
+- after the per-controller roles and narrowed shared role were applied, all 18
+  crossings were `DENIED`, producing 18 exact yes-to-no flips;
+- nine owned controls remained `ALLOWED`: source main-resource patch and status
+  update; kustomize main-resource patch, status update, and finalizer update;
+  helm main-resource patch, status update, and HelmChart create/delete;
+- each requested row ran only after the oracle's two allowed controls and inert
+  denied control returned `ALLOWED`, `ALLOWED`, and `DENIED` respectively;
+- the applied shared role contained zero Flux API groups, its binding named the
+  exact three installed controllers, and every CRD remained `Established`.
+
+The first disposable attempt is not counted. It proved all 18 pre-change
+allows, then stopped closed because the evidence harness incorrectly tried to
+apply the binding's strategic-merge patch as a standalone object without its
+base `roleRef`. That cluster was deleted before the harness was corrected; the
+accepted receipt came from a new cluster created from zero. After the accepted
+run, the cluster node, empty kind network, temporary kubeconfigs, discovery
+cache, and harness were deleted and their absence was verified.
+
+This mixed real-authorizer result rejects the constant-answer design; the raw
+request receipts bind the correct ServiceAccount brackets and groups; the real
+kubectl and API server reject protocol stubbing; and held descriptors plus the
+hostile custody suite reject caller-controlled executable, kubeconfig,
+environment, and alternate-path bypasses. It is local implementation evidence,
+not a promotion receipt and not permission to mutate the protected cluster.
+
 ## What each step removes — read this before the procedure
 
 Only one step in this migration is a deletion, but TWO of them remove
