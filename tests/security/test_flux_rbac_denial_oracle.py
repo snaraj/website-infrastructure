@@ -1158,6 +1158,35 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
         )
         receipt = oracle.discover(adapter, service_accounts, "impersonate")
         self.assertEqual(receipt["verbEvidence"], "AUTHORIZATION_ONLY")
+
+        self.assertEqual(
+            oracle.AUTHORIZATION_ONLY_VERBS,
+            frozenset({("impersonate", "", "serviceaccounts", None)}),
+        )
+        for key in (
+            ("", "secrets"),
+            ("", "namespaces"),
+            ("", "serviceaccounts/token"),
+        ):
+            foreign = oracle.RESOURCE_IDENTITIES[key]
+            adapter.run.return_value = _completed_json(
+                _resource_list(
+                    foreign.group_version,
+                    [
+                        _resource(
+                            foreign.discovery_resource,
+                            foreign.kind,
+                            foreign.namespaced,
+                        )
+                    ],
+                )
+            )
+            with self.subTest(key=key), self.assertRaisesRegex(
+                oracle.OracleError,
+                "exact reviewed request verb",
+            ):
+                oracle.discover(adapter, foreign, "impersonate")
+
         adapter.run.return_value = completed(["create", "get", "list", "watch"])
         with self.assertRaisesRegex(oracle.OracleError, "exact reviewed request verb"):
             oracle.discover(adapter, identity, "impersonate")

@@ -251,9 +251,12 @@ during binding. It copies from the held source
 descriptor into private custody and revalidates descriptor identity, mode, and
 digest before every invocation; replacing the original path cannot change the
 bytes used. Live custody runs only on Linux/WSL with the platform pins. Native
-Windows and macOS retain portable request/response parsing, discovery-verb,
-SSAR-echo, identity, and constant-answer decision tests; they do not pretend
-to run process-level kubectl parity, simulate POSIX custody, or produce a live
+Windows retains portable request/response parsing, discovery-verb, SSAR-echo,
+identity, and constant-answer decision tests without pretending to provide
+POSIX descriptor custody or a live receipt. macOS runs those portable checks
+and, when local kubectl and OpenSSL are available, the descriptor-custody and
+hand-written TLS loopback protocol tests. That locally self-hashed client lane
+does not substitute for Linux CI's repository-pinned kubectl or produce a live
 receipt.
 
 `tests/security/test_flux_rbac_denial_oracle.py` drives the production kubectl
