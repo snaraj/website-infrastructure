@@ -27,6 +27,11 @@ ROOT = Path(__file__).resolve().parents[2]
 KUBECTL = shutil.which("kubectl")
 OPENSSL = shutil.which("openssl")
 POSIX_CUSTODY = os.name == "posix" and hasattr(os, "geteuid")
+FLUX_SERVICE_ACCOUNT_GROUPS = (
+    "system:serviceaccounts",
+    "system:serviceaccounts:flux-system",
+    "system:authenticated",
+)
 
 
 def _resource_list(group_version: str, resources: list[dict[str, object]]) -> dict[str, object]:
@@ -114,7 +119,7 @@ class OracleApiState:
         self.decisions = {
             (
                 source,
-                oracle.service_account_groups(source),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "create",
                 "coordination.k8s.io",
                 "v1",
@@ -126,7 +131,7 @@ class OracleApiState:
             ): True,
             (
                 kustomize,
-                oracle.service_account_groups(kustomize),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "list",
                 "kustomize.toolkit.fluxcd.io",
                 "v1",
@@ -138,7 +143,7 @@ class OracleApiState:
             ): True,
             (
                 kustomize,
-                oracle.service_account_groups(kustomize),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "create",
                 "",
                 "v1",
@@ -150,7 +155,7 @@ class OracleApiState:
             ): False,
             (
                 kustomize,
-                oracle.service_account_groups(kustomize),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "create",
                 "apps",
                 "v1",
@@ -162,7 +167,7 @@ class OracleApiState:
             ): False,
             (
                 inert,
-                oracle.service_account_groups(inert),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "get",
                 "",
                 "v1",
@@ -174,7 +179,7 @@ class OracleApiState:
             ): False,
             (
                 kustomize,
-                oracle.service_account_groups(kustomize),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
                 "list",
                 "kustomize.toolkit.fluxcd.io",
                 "v1",
@@ -350,9 +355,7 @@ class OracleApiHandler(BaseHTTPRequestHandler):
         allowed = True if self.state.constant_allow else self.state.decisions.get(key, False)
         if self.state.pre_deletion_broad_binding and key[:9] == (
             "system:serviceaccount:flux-system:kustomize-controller",
-            oracle.service_account_groups(
-                "system:serviceaccount:flux-system:kustomize-controller"
-            ),
+            FLUX_SERVICE_ACCOUNT_GROUPS,
             "create",
             "apps",
             "v1",
@@ -825,7 +828,7 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
             )
             self.assertEqual(
                 item["impersonateGroups"],
-                oracle.service_account_groups(str(item["impersonate"])),
+                FLUX_SERVICE_ACCOUNT_GROUPS,
             )
             self.assertIsNone(item["contentType"])
         requested = posts[-1]["attributes"]
