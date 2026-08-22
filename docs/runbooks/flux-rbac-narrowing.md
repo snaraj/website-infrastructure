@@ -15,16 +15,25 @@ repository now:
 1. deletes the `cluster-reconciler-flux-system` binding
    (`kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml`);
 2. replaces the shared `crd-controller-flux-system` rules with an enumerated set
-   that carries no wildcard, no cluster-wide Secret read, and no
-   `serviceaccounts/token` creation
+   that carries no wildcard, no cluster-wide Secret read, no
+   `serviceaccounts/token` creation, and — since the per-controller split
+   (issue #98) — **no Flux API group at all**: what remains is common read-only
+   cluster metadata, event reporting, and the `/livez/ping` probe
    (`.../patches/crd-controller-role.yaml`);
 3. pins that binding's subjects to the three installed controllers
    (`.../patches/crd-controller-binding.yaml`);
-4. adds the namespaced authority the controllers still need — leader election,
+4. adds one ClusterRole and ClusterRoleBinding per controller, each bound to
+   exactly one ServiceAccount and carrying only that controller's own
+   custom-resource authority — `crd-controller-source-flux-system`,
+   `crd-controller-kustomize-flux-system`, and
+   `crd-controller-helm-flux-system`
+   (`kubernetes/flux-system/controllers/per-controller-rbac.yaml`, a resource
+   of the controller install root rather than `access.yaml`);
+5. adds the namespaced authority the controllers still need — leader election,
    controller-owned ConfigMaps, the SOPS age key read, and one name-restricted
    impersonation Role per namespace holding reconciler accounts
    (`kubernetes/flux-system/access.yaml`);
-5. corrects both site release reconcilers from `gitrepositories` to
+6. corrects both site release reconcilers from `gitrepositories` to
    `ocirepositories`, the kind their own source objects declare.
 
 **The live cluster still carries the broad binding.** The Flux controllers were
@@ -71,14 +80,30 @@ justification fail identically. Without it "narrow" meant only "passes a
 deny-list", and a `batch/jobs` write or a cluster-wide `pods/exec` read could be
 added with every gate green.
 
-The largest entry in that inventory is the one residual worth an operator's
-attention: `crd-controller-flux-system` is a single ClusterRole bound to all
-three controllers, so each holds the other two's write authority over
-Kustomizations, HelmReleases, and source objects. Impersonation does not contain
-it — the victim controller performs the reconciliation. Splitting the role per
-controller is tracked separately; until then the residual is enumerated row by
-row rather than described in prose, and it cannot grow without the suite
-failing.
+That inventory used to be dominated by one residual:
+`crd-controller-flux-system` was a single ClusterRole bound to all three
+controllers, so each held the other two's write authority over Kustomizations,
+HelmReleases, and source objects. Impersonation did not contain it — the victim
+controller performs the reconciliation. **That residual is retired by issue
+#98.** Of its 135 declared-slack request atoms, 134 no longer exist; the one
+legitimate overlap, helm-controller watching the HelmChart it creates, is
+re-attributed to that owning controller. The retired reason remains pinned at
+zero so reintroducing even one deputy grant cannot hide as declared slack.
+
+The replacement proof is deliberately redundant:
+
+- the shared role names no Flux API group;
+- each split binding names exactly one canonical controller ServiceAccount and
+  the same-named ClusterRole;
+- the exact cross-controller write matrix, including status and finalizer
+  subresources, is denied while owned positive controls remain allowed; and
+- the install root alone authorizes every registered informer before
+  `access.yaml` can be reconciled.
+
+The fast validator, RBAC model, bootstrap live-state mirror, and Conftest rules
+all enforce these properties. Conftest is additive defence in depth over the
+rendered output; it does not replace the independent structural, behavioral,
+or live comparison gates.
 
 ### The declared gaps, and what they block
 
@@ -157,6 +182,37 @@ may enable the following three ordered, separately recorded operations:
    endpoint. This is the same non-persistent review API used by `auth can-i`,
    not a persisted object create, and avoids that command's unavoidable
    cluster-scope warning text.
+
+### Rejected evidence designs
+
+Four tempting substitutes are explicitly non-evidence for this migration:
+
+1. **Constant-allow or constant-deny behavior.** An all-allowed or all-denied
+   matrix is vacuous. Two owned positive controls and one inert denied control
+   must all resolve in opposite directions before any requested row counts;
+   `test_constant_allow_is_non_evidence`,
+   `test_constant_deny_is_non_evidence`, and the portable constant-answer
+   mutation prove both constant shapes fail closed.
+2. **Incorrect ServiceAccount identity bracketing.** A near-match principal
+   proves the wrong subject. The user must be exactly
+   `system:serviceaccount:<namespace>:<name>` and the impersonation groups must
+   be exactly `system:serviceaccounts`,
+   `system:serviceaccounts:<namespace>`, and `system:authenticated`. Boundary
+   prefixes, suffixes, fixture envelopes, missing groups, and foreign groups
+   are rejected by the portable identity and protocol tests.
+3. **Non-faithful protocol stubbing.** Invented kubectl or API output is not a
+   protocol receipt. The hermetic lane drives the real pinned kubectl client
+   and validates its captured discovery and raw SelfSubjectAccessReview
+   request/response contract; the final issue-98 matrix also runs against a
+   disposable real Kubernetes API server after installing all reviewed Flux
+   CRDs. Hand-written loopback responses alone never satisfy that final lane.
+4. **Custody bypass.** No caller-selected executable, kubeconfig, environment,
+   exec plugin, external credential path, mutable source path, or alternate
+   entry point may evade reviewed kubectl/kubeconfig custody. Descriptor
+   replacement, link, mode, owner, digest, context/server, external-reference,
+   and direct-checkout bypass attempts all fail closed without printing or
+   reading Secret values. Native Windows keeps the portable protocol and
+   identity suite; it does not pretend to supply POSIX descriptor custody.
 
 Discovery and authorization have closed values. Discovery is `RESOLVED` or
 `UNRESOLVED`; authorization is `ALLOWED`, `DENIED`, or `UNRESOLVED`. Missing,
@@ -270,14 +326,22 @@ real API-server/authorizer substitute. The issue-closing evidence therefore
 also requires the final matrix against a disposable real Kubernetes API
 server; never use the Raspberry Pi for that experiment.
 
-After the trusted launcher lands, and after applying the narrowed authority
-(step 3 below) but before deleting the broad binding (step 4), confirm each
-non-wildcard row through the oracle. Until then the migration stays blocked.
-The
-first block must classify `ALLOWED`, the second `DENIED`. While the broad
-binding is still present the second block will classify `ALLOWED` — that is the
-point of running the sweep again after the deletion. A single `UNRESOLVED` or
-unexpected state invalidates the whole sweep; never infer the remaining rows.
+After the trusted launcher lands, repeat every non-wildcard row through the
+oracle at each migration boundary. Until then the migration stays blocked. The
+expected states are predicted before any apply:
+
+- before step 3, owned rows and all 18 issue-98 crossing rows are `ALLOWED`;
+- after step 3 but before step 4, every owned row remains `ALLOWED`; the three
+  source-controller controller-to-controller categories (seven literal rows)
+  become `DENIED`, while all 11 kustomize-controller and helm-controller rows
+  remain `ALLOWED` only because the still-live
+  `cluster-reconciler-flux-system` binding grants those two `cluster-admin`;
+- after step 4, every owned row remains `ALLOWED` and every crossing/general
+  forbidden row is `DENIED`.
+
+A single `UNRESOLVED` or unexpected state invalidates the entire boundary; do
+not infer the remaining rows. This mixed phase prediction also prevents a
+constant-output tool from masquerading as migration evidence.
 
     # must be yes
     auth can-i impersonate serviceaccounts/root-reconciler -n flux-system \
@@ -355,6 +419,82 @@ unexpected state invalidates the whole sweep; never infer the remaining rows.
     auth can-i '*' '*' -A \
       --as=system:serviceaccount:flux-system:kustomize-controller
 
+The issue-98 crossing sweep is the following literal 18-request matrix, not a
+representative sample. Every request is cluster-wide (`allNamespaces=true`) and
+has no object name. The portable RBAC model expands the same ownership property
+exhaustively to 1,365 verb/resource/subresource/scope requests and also pins 88
+owned grant atoms, 98 exclusive comparisons, and the six exact HelmChart
+handoff exemptions.
+
+| Subject ServiceAccount | Verb | API group and resource | After step 3 | After step 4 |
+|---|---|---|---|---|
+| source-controller | patch | `kustomize.toolkit.fluxcd.io` / `kustomizations` | DENIED | DENIED |
+| source-controller | update | `kustomize.toolkit.fluxcd.io` / `kustomizations/status` | DENIED | DENIED |
+| source-controller | update | `kustomize.toolkit.fluxcd.io` / `kustomizations/finalizers` | DENIED | DENIED |
+| source-controller | patch | `helm.toolkit.fluxcd.io` / `helmreleases` | DENIED | DENIED |
+| source-controller | update | `helm.toolkit.fluxcd.io` / `helmreleases/status` | DENIED | DENIED |
+| source-controller | create | `source.toolkit.fluxcd.io` / `helmcharts` | DENIED | DENIED |
+| source-controller | delete | `source.toolkit.fluxcd.io` / `helmcharts` | DENIED | DENIED |
+| kustomize-controller | patch | `helm.toolkit.fluxcd.io` / `helmreleases` | ALLOWED | DENIED |
+| kustomize-controller | update | `helm.toolkit.fluxcd.io` / `helmreleases/status` | ALLOWED | DENIED |
+| kustomize-controller | patch | `source.toolkit.fluxcd.io` / `ocirepositories` | ALLOWED | DENIED |
+| kustomize-controller | patch | `source.toolkit.fluxcd.io` / `gitrepositories` | ALLOWED | DENIED |
+| kustomize-controller | create | `source.toolkit.fluxcd.io` / `helmcharts` | ALLOWED | DENIED |
+| helm-controller | patch | `kustomize.toolkit.fluxcd.io` / `kustomizations` | ALLOWED | DENIED |
+| helm-controller | update | `kustomize.toolkit.fluxcd.io` / `kustomizations/status` | ALLOWED | DENIED |
+| helm-controller | update | `kustomize.toolkit.fluxcd.io` / `kustomizations/finalizers` | ALLOWED | DENIED |
+| helm-controller | patch | `source.toolkit.fluxcd.io` / `gitrepositories` | ALLOWED | DENIED |
+| helm-controller | patch | `source.toolkit.fluxcd.io` / `ocirepositories` | ALLOWED | DENIED |
+| helm-controller | update | `source.toolkit.fluxcd.io` / `buckets/status` | ALLOWED | DENIED |
+
+All 18 are required in the disposable real-API sweep as well as in the future
+owner-run protected sweep. The `status` identities must resolve through the
+API server's advertised subresources. Kubernetes does not advertise the
+RBAC-only `finalizers` identity as an ordinary API subresource, so those two
+rows are labeled `AUTHORIZATION_ONLY`: the oracle still resolves the exact base
+resource, live CRD, version, scope, and `update` verb before it submits the
+exact `subresource=finalizers` SelfSubjectAccessReview. This is the same narrow
+exception shape as ServiceAccount `impersonate`; it is never permission to
+skip discovery for the resource itself.
+
+### Disposable real-API receipt (2026-08-21)
+
+This issue's local destructive authority was limited to a disposable kind
+cluster; it did not authorize a protected-cluster apply. A clean-from-zero
+kind v0.32.0 cluster running Kubernetes v1.36.1 established all eight reviewed
+Flux CRDs before the resolved local v1.36.4 kubectl client submitted any
+authorization review. The merged oracle ran through held executable and
+mode-0600 flattened-kubeconfig custody, with the exact ServiceAccount user and
+all three Kubernetes groups on every raw SelfSubjectAccessReview.
+
+The prediction and observation matched exactly:
+
+- before narrowing, all 18 literal issue-98 crossings were `ALLOWED`;
+- after the per-controller roles and narrowed shared role were applied, all 18
+  crossings were `DENIED`, producing 18 exact yes-to-no flips;
+- nine owned controls remained `ALLOWED`: source main-resource patch and status
+  update; kustomize main-resource patch, status update, and finalizer update;
+  helm main-resource patch, status update, and HelmChart create/delete;
+- each requested row ran only after the oracle's two allowed controls and inert
+  denied control returned `ALLOWED`, `ALLOWED`, and `DENIED` respectively;
+- the applied shared role contained zero Flux API groups, its binding named the
+  exact three installed controllers, and every CRD remained `Established`.
+
+The first disposable attempt is not counted. It proved all 18 pre-change
+allows, then stopped closed because the evidence harness incorrectly tried to
+apply the binding's strategic-merge patch as a standalone object without its
+base `roleRef`. That cluster was deleted before the harness was corrected; the
+accepted receipt came from a new cluster created from zero. After the accepted
+run, the cluster node, empty kind network, temporary kubeconfigs, discovery
+cache, and harness were deleted and their absence was verified.
+
+This mixed real-authorizer result rejects the constant-answer design; the raw
+request receipts bind the correct ServiceAccount brackets and groups; the real
+kubectl and API server reject protocol stubbing; and held descriptors plus the
+hostile custody suite reject caller-controlled executable, kubeconfig,
+environment, and alternate-path bypasses. It is local implementation evidence,
+not a promotion receipt and not permission to mutate the protected cluster.
+
 ## What each step removes — read this before the procedure
 
 Only one step in this migration is a deletion, but TWO of them remove
@@ -366,6 +506,17 @@ live shared ClusterRole loses its wildcard rules, its cluster-wide Secret read,
 and `serviceaccounts/token` creation, and the live binding loses four of its
 seven subjects. That is a removal, not an addition, and it happens before the
 "destructive" step.
+
+Issue #98 makes that replacement narrower again: the shared role loses every
+Flux API group, while six new install-root objects carry the replacement —
+three ClusterRoles and their three exactly-one-ServiceAccount bindings. The six
+must exist before the shared-role replacement lands. Applying the replacement
+without them removes all fourteen registered-informer list/watch grants from
+the controller install and cannot reach readiness.
+
+That transaction boundary is why the six live in
+`kubernetes/flux-system/controllers/per-controller-rbac.yaml`, a resource of
+the controller install root, and never in later-reconciled `access.yaml`.
 
 For **kustomize-controller and helm-controller** the loss is masked: they still
 hold `cluster-admin` through `cluster-reconciler-flux-system` until step 4.
@@ -381,16 +532,19 @@ object rather than the parts someone judged load-bearing.
 
 ## Procedure
 
-Three objects change across this migration, at two boundaries. Each boundary has
-its own verification and its own rollback, and the rollback payload is frozen
-before anything is applied.
+Nine cluster-scoped objects change across this migration, at two boundaries:
+three existing objects are replaced or deleted and six issue-98 objects are
+created. Each boundary has its own verification and rollback. Existing-object
+bytes are frozen before mutation; the six create-only objects are recorded by
+exact UID and resourceVersion so rollback cannot delete a concurrent foreign
+replacement.
 
 1. **Confirm the gate below is fully satisfied and the owner has said go.**
    Confirm the controllers are the reviewed digests and the reconciliation is
    still inert: every Flux object suspended, and the ones that are not
    (`flux-system`, `platform-prerequisites`) reconciling only objects this
    change has already proven authorized.
-2. **Freeze the pre-change authorization.** Capture all three objects as they
+2. **Freeze the pre-change authorization.** Capture all three EXISTING objects as they
    exist live, with a digest, into operator-held storage — not into this
    repository, which describes the target state and therefore cannot describe
    what to roll back to:
@@ -404,15 +558,25 @@ before anything is applied.
    the source for the deleted binding only; the pre-change ClusterRole rules
    exist nowhere else once step 3 has run, so without this file the migration is
    one-way.
-3. **Apply the narrowed authority — additive for the Roles, REPLACING for the
-   shared ClusterRole and its binding.** Apply `access.yaml` first: it is purely
-   additive, it creates the namespaced Roles and RoleBindings that carry the
-   replacement authority, and applying it alone changes no controller's
-   effective permissions downward. Then apply the narrowed
-   `crd-controller-flux-system` ClusterRole and its subject-pinned binding,
-   which is where authority is removed (see the section above). Then, at this
-   boundary:
-   - run the "must be yes" block; every row must answer `yes`;
+
+   Confirm the six per-controller objects are absent before create. Any existing
+   name is foreign or an unresolved earlier attempt and is a stop, never an
+   object to adopt or overwrite. The expected absent set is the three
+   `crd-controller-{source,kustomize,helm}-flux-system` ClusterRoles and the
+   same three ClusterRoleBindings.
+3. **Apply the narrowed authority — additive first, replacement second.** The
+   reviewed transaction first creates the six objects from
+   `controllers/per-controller-rbac.yaml` and records their exact identities,
+   then applies the namespaced Roles/RoleBindings from `access.yaml`, and only
+   then replaces the shared `crd-controller-flux-system` ClusterRole and its
+   subject-pinned binding. A fresh install obtains the same order from the
+   controller install root; do not split its root into a later Flux
+   reconciliation. At this boundary:
+   - run every owned row and require `ALLOWED`;
+   - require all seven literal source-controller crossing rows to be `DENIED`;
+   - require all 11 literal kustomize/helm crossing rows to remain `ALLOWED` only
+     because the broad cluster-admin binding still exists; any other phase
+     shape is unresolved or wrong;
    - confirm all three controller Pods are Ready and have not restarted —
      `kubectl -n flux-system get pods` — because a controller that lost leader
      election or its own ConfigMap authority crashloops at startup rather than
@@ -422,13 +586,17 @@ before anything is applied.
      `status.observedGeneration` current and its artifact revision advancing.
 
    **Rollback at this boundary:** re-apply the frozen ClusterRole and
-   ClusterRoleBinding from step 2. Nothing else has changed yet.
+   ClusterRoleBinding from step 2, then delete only the six transaction-created
+   objects whose UID, resourceVersion, exact two ownership labels, roleRef, and
+   single subject still match the recorded create receipt. A missing or replaced
+   identity is residue requiring review, not permission to delete by name.
 4. **Delete the broad binding.** Remove the `cluster-reconciler-flux-system`
    ClusterRoleBinding. It removes no object the controllers own and interrupts
    no workload: the connectors, both sites, and every Pod on the cluster are
    untouched, because no running workload authenticates as a Flux controller.
-5. **Prove the removal.** Run the "must be no" block; every row must now answer
-   `no`. Then run `bootstrap/flux/bootstrap.sh --verify`, which compares live
+5. **Prove the removal.** Require every owned row to remain `ALLOWED` and every
+   general forbidden and issue-98 crossing row to be `DENIED`. Then run
+   `bootstrap/flux/bootstrap.sh --verify`, which compares live
    ServiceAccounts, Roles, RoleBindings, ClusterRoles, and ClusterRoleBindings
    against the reviewed model and fails on any drift — including a
    `cluster-reconciler-flux-system` that is still present, or any other binding
@@ -449,9 +617,9 @@ immediately: no restart, no drain, no workload impact.
 
 | Failed at | Restore |
 |---|---|
-| step 3 (narrowed authority applied) | re-apply the frozen `crd-controller-flux-system` ClusterRole **and** its ClusterRoleBinding from step 2 |
-| step 4 or later (broad binding deleted) | re-create `cluster-reconciler-flux-system` from the frozen capture, **then** re-apply the frozen ClusterRole and its binding |
-| interrupted anywhere, state unknown | re-apply all three frozen objects; they are the complete pre-change authorization, and applying them is idempotent |
+| step 3 (narrowed authority applied) | re-apply the frozen `crd-controller-flux-system` ClusterRole **and** its ClusterRoleBinding from step 2; then remove only the six new objects whose UID, resourceVersion, labels, roleRef, and single subject still exactly match the create receipt |
+| step 4 or later (broad binding deleted) | re-create `cluster-reconciler-flux-system` from the frozen capture, **then** re-apply the frozen ClusterRole and its binding; remove the six new objects only under the same exact receipt match |
+| interrupted anywhere, state unknown | re-apply all three frozen objects; then inventory the six new names and remove only exact transaction-owned matches — a missing or changed identity is residue for review, never permission to delete by name |
 
 Re-creating the deleted binding alone is **not** a full rollback: it restores
 `cluster-admin` for kustomize-controller and helm-controller, and nothing at all
@@ -467,9 +635,13 @@ scratch.
 
 If step 6 fails, the cause is a missing grant, and the failing Kustomization
 names the exact resource and verb in its status condition. Add it to
-`access.yaml` or to the narrowed ClusterRole through a reviewed change, not with
-a live `kubectl` edit: a grant that exists only on the cluster is invisible to
-the sufficiency proof and will be reverted by the next verify.
+`access.yaml` only when it belongs to an impersonated namespaced reconciler, or
+to the owning controller's ClusterRole in
+`controllers/per-controller-rbac.yaml` when it is controller-owned custom-
+resource authority. Common non-Flux read authority alone belongs in the shared
+role patch. Make the choice through a reviewed change, not a live `kubectl`
+edit: a grant that exists only on the cluster is invisible to the sufficiency
+proof and will be reverted by the next verify.
 
 **What is not proven here.** Rollback is written from the objects' semantics —
 `roleRef` immutability, replace-not-merge patch behaviour, per-request RBAC

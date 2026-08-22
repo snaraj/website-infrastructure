@@ -48,8 +48,22 @@ DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
 DNS_SUBDOMAIN_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 API_VERB_RE = re.compile(r"[a-z]+\Z")
-VERBS = frozenset({"create", "get", "impersonate", "list", "patch"})
+VERBS = frozenset({"create", "delete", "get", "impersonate", "list", "patch", "update"})
 AUTHORIZATION_ONLY_VERBS = frozenset({("impersonate", "", "serviceaccounts", None)})
+# The oracle is intentionally generic over canonical ServiceAccounts: the
+# subject is part of the exact SSAR and receipt, while this exception closes
+# only the one unadvertised RBAC identity issue #98 asks it to classify. It is
+# not a wildcard over verb, group, resource, or subresource.
+AUTHORIZATION_ONLY_RESOURCES = frozenset(
+    {
+        (
+            "update",
+            "kustomize.toolkit.fluxcd.io",
+            "kustomizations",
+            "finalizers",
+        ),
+    }
+)
 
 
 class OracleError(Exception):
@@ -117,6 +131,26 @@ for _group, _resource, _kind in (
         _kind,
         True,
         f"{_resource}.{_group}",
+    )
+
+# Issue #98 names these exact status/finalizer identities in its live
+# cross-controller matrix. Keep the registry literal: adding an identity is an
+# expansion of what the closed oracle is willing to classify as evidence.
+for _group, _resource, _kind, _subresource in (
+    ("source.toolkit.fluxcd.io", "buckets", "Bucket", "status"),
+    ("kustomize.toolkit.fluxcd.io", "kustomizations", "Kustomization", "status"),
+    ("kustomize.toolkit.fluxcd.io", "kustomizations", "Kustomization", "finalizers"),
+    ("helm.toolkit.fluxcd.io", "helmreleases", "HelmRelease", "status"),
+):
+    _base = RESOURCE_IDENTITIES[(_group, _resource)]
+    RESOURCE_IDENTITIES[(_group, f"{_resource}/{_subresource}")] = ResourceIdentity(
+        _group,
+        _base.version,
+        _resource,
+        _kind,
+        True,
+        _base.crd_name,
+        _subresource,
     )
 
 
@@ -521,10 +555,30 @@ def discover(
     resources = document.get("resources")
     if not isinstance(resources, list):
         raise OracleError("discovery resources are malformed")
+    authorization_only_verb = (
+        required_verb,
+        identity.group,
+        identity.resource,
+        identity.subresource,
+    ) in AUTHORIZATION_ONLY_VERBS
+    authorization_only_resource = (
+        required_verb,
+        identity.group,
+        identity.resource,
+        identity.subresource,
+    ) in AUTHORIZATION_ONLY_RESOURCES
+    # `*/finalizers` is an RBAC identity consulted by Kubernetes admission,
+    # not an API subresource advertised in APIResourceList. Resolve its exact
+    # base APIResource and CRD before the exact finalizer SSAR; only the
+    # separately enumerated ServiceAccount impersonate verb may be absent from
+    # the base APIResource verb inventory.
+    discovery_resource = (
+        identity.resource if authorization_only_resource else identity.discovery_resource
+    )
     matches = [
         item
         for item in resources
-        if isinstance(item, dict) and item.get("name") == identity.discovery_resource
+        if isinstance(item, dict) and item.get("name") == discovery_resource
     ]
     if len(matches) != 1:
         raise OracleError("discovery did not contain exactly one reviewed resource identity")
@@ -532,12 +586,6 @@ def discover(
     if match.get("kind") != identity.kind or match.get("namespaced") is not identity.namespaced:
         raise OracleError("discovery resource kind or scope is foreign")
     verbs = match.get("verbs")
-    authorization_only = (
-        required_verb,
-        identity.group,
-        identity.resource,
-        identity.subresource,
-    ) in AUTHORIZATION_ONLY_VERBS
     if (
         not isinstance(verbs, list)
         or any(
@@ -545,7 +593,7 @@ def discover(
             for item in verbs
         )
         or len(set(verbs)) != len(verbs)
-        or (required_verb not in verbs and not authorization_only)
+        or (required_verb not in verbs and not authorization_only_verb)
     ):
         raise OracleError("discovery does not support the exact reviewed request verb")
 
@@ -615,7 +663,11 @@ def discover(
         "namespaced": identity.namespaced,
         "crdName": identity.crd_name,
         "verb": required_verb,
-        "verbEvidence": "AUTHORIZATION_ONLY" if authorization_only else "DISCOVERY",
+        "verbEvidence": (
+            "AUTHORIZATION_ONLY"
+            if authorization_only_verb or authorization_only_resource
+            else "DISCOVERY"
+        ),
     }
 
 

@@ -357,7 +357,15 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
                 {
                     "apiVersion": "rbac.authorization.k8s.io/v1",
                     "kind": "ClusterRoleBinding",
-                    "metadata": cls.metadata(name, None, c["flux_labels"]()),
+                    # Per name, not one label set for all: the generated export
+                    # labels its own objects with the Flux instance and version,
+                    # and the per-controller split's ClusterRoleBindings
+                    # (issue #98) are authored here and carry none — pinning a
+                    # Flux version label onto authorization this repository
+                    # derived itself would make a Flux bump rewrite it.
+                    "metadata": cls.metadata(
+                        name, None, c["expected_cluster_binding_labels"](name)
+                    ),
                     "roleRef": expected[0],
                     "subjects": expected[1],
                 }

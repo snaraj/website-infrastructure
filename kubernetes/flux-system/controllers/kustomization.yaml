@@ -7,6 +7,14 @@ kind: Kustomization
 resources:
   # Generated locally from the pinned Flux CLI before bootstrap.
   - gotk-components.yaml
+  # Authored (issue #98). The per-controller replacement for the Flux-group
+  # authority that patches/crd-controller-role.yaml removes from the shared
+  # ClusterRole. It is a RESOURCE here, not a patch, because the six objects do
+  # not exist in the generated export — and it is in THIS root, rather than in
+  # access.yaml with the rest of the authored RBAC, because the installer
+  # applies only this root. Authority that replaces authority removed in the
+  # same transaction has to be created by that transaction.
+  - per-controller-rbac.yaml
 patches:
   - target:
       group: apps

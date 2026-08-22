@@ -10,6 +10,16 @@
 # is additionally pinned by scripts/validate_repository.py, by the Conftest rule
 # over the rendered output, and by the live-state model in
 # bootstrap/flux/bootstrap.sh, so a silent re-broadening fails three ways.
+#
+# All three controllers still share this ONE binding, and that is now safe:
+# after the per-controller split (issue #98) the role it points at grants only
+# cluster metadata reads, event reporting, and the liveness probe — nothing that
+# names another controller's execution objects. Each controller's own
+# `update`/`patch`/`/status`/`/finalizers` authority, and the HelmChart
+# `create`/`delete` pair, are bound one subject at a time by the per-controller
+# ClusterRoleBindings in ../per-controller-rbac.yaml. A write verb re-added to
+# crd-controller-flux-system would be a write verb all three hold, which is why
+# the additive Conftest rule over the rendered output refuses one outright.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

@@ -2,10 +2,14 @@
 # scripts/test-policy-fixtures.sh compares this whole set: a message that
 # disappears is a weakened rule, a message that appears is an unreviewed
 # denial. File-level rejection alone hides both.
+ClusterRole crd-controller-flux-system is bound to all three controllers and must not grant helm.toolkit.fluxcd.io
+ClusterRole crd-controller-flux-system is bound to all three controllers and must not grant source.toolkit.fluxcd.io
 ClusterRole crd-controller-flux-system must not grant a wildcard resources
 ClusterRole crd-controller-flux-system must not grant a wildcard verbs
 ClusterRole flux-cluster-impersonator must not grant impersonate at cluster scope
 ClusterRole flux-token-minter must not grant ServiceAccount token creation
+ClusterRoleBinding crd-controller-helm-flux-system must bind only flux-system/helm-controller
+ClusterRoleBinding crd-controller-source-flux-system must bind ClusterRole crd-controller-source-flux-system
 ClusterRoleBinding cluster-reconciler-flux-system must not bind cluster-admin
 ClusterRoleBinding flux-operator-view must not bind a wildcard aggregation role
 Role flux-controller-impersonation must restrict impersonate to named accounts

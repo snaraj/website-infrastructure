@@ -9,9 +9,11 @@
 # HelmRelease in this repository names an explicit `spec.serviceAccountName`,
 # so the controllers impersonate a per-tenant reconciler ServiceAccount whose
 # authority is the namespaced Role bound to it in ../../access.yaml. The
-# authority the controllers keep for themselves — their own custom resources,
-# leader election, event reporting, and the impersonation grants — is the
-# enumerated set in ./crd-controller-role.yaml and ../../access.yaml.
+# authority the controllers keep for themselves is split by scope: their own
+# custom resources are in ../per-controller-rbac.yaml; common cluster metadata,
+# event reporting, and liveness are in ./crd-controller-role.yaml; namespaced
+# leader election, controller-owned ConfigMaps, and impersonation are in
+# ../../access.yaml.
 #
 # `roleRef` is immutable, so this is a deletion rather than a repoint: a live
 # cluster that already carries the broad binding is migrated by applying the

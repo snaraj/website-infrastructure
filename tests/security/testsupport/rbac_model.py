@@ -30,10 +30,11 @@ no admission plugin executes here. Three things are modelled rather than
 observed and are named as such at their definitions: the verb set a Flux apply
 issues (``APPLY_VERBS``), the kinds each Helm chart renders (``SITE_CHART_KINDS``
 for charts that live in the site repositories), and the kind-to-resource mapping
-(``KIND_RESOURCES``). The live half of the proof is
-``bootstrap/flux/bootstrap.sh --verify`` plus the ``kubectl auth can-i`` sweep in
-``docs/runbooks/flux-rbac-narrowing.md``; this module is what makes that sweep
-short enough to trust and repeatable enough to run.
+(``KIND_RESOURCES``). The live half is
+``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound denial oracle
+and disposable real-API-server matrix in
+``docs/runbooks/flux-rbac-narrowing.md``; this module is what makes that matrix
+bounded enough to review and repeat.
 
 This module is support code: unittest discovery only collects ``test_*.py``, and
 the coverage gate measures ``scripts/`` alone, so nothing here enters any
@@ -308,6 +309,14 @@ FLUX_RBAC_PATCH_FILES = (
     "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
 )
 
+# Authored RBAC that is a RESOURCE of the install root rather than a patch of
+# the generated export: the six per-controller objects (issue #98). They live in
+# the install root because the patch above removes the authority they replace in
+# the same transaction — see `controller_root_rbac`.
+FLUX_CONTROLLER_ROOT_RBAC_FILES = (
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+)
+
 
 def _identity(document):
     metadata = document.get("metadata") or {}
@@ -341,8 +350,23 @@ def apply_patches(base, patches):
     return list(composed.values())
 
 
-def effective_flux_rbac(root=REPO_ROOT):
-    """The RBAC the cluster would hold: generated export + patches + access.yaml."""
+def controller_root_rbac(root=REPO_ROOT):
+    """The RBAC the INSTALLER alone creates: the `controllers` root, rendered.
+
+    Modelled separately from `effective_flux_rbac` because the two are applied
+    by different actors at different times. `scripts/install-flux-controllers.sh`
+    applies THIS root and nothing else; `access.yaml` arrives later, reconciled
+    by Flux from `./kubernetes/reconciliation`, and cannot help a controller that
+    has to start an informer before Flux is running at all.
+
+    That distinction is not academic. The narrowing patch strips every Flux API
+    group from the shared `crd-controller-flux-system` ClusterRole, so while the
+    six per-controller replacements sat in access.yaml this composition denied
+    all fourteen registered-kind list/watch probes and a fresh install could
+    never reach readiness. The replacements are part of this root now, and
+    `FluxRbacControllerRootSufficiencyTests` builds an authorizer from exactly
+    this function so that regression is caught by name.
+    """
 
     root = Path(root)
     base = load_rbac_documents(root / "kubernetes/flux-system/controllers/gotk-components.yaml")
@@ -350,7 +374,16 @@ def effective_flux_rbac(root=REPO_ROOT):
     for relative in FLUX_RBAC_PATCH_FILES:
         patches.extend(load_documents(root / relative))
     documents = apply_patches(base, patches)
-    documents.extend(load_documents(root / "kubernetes/flux-system/access.yaml"))
+    for relative in FLUX_CONTROLLER_ROOT_RBAC_FILES:
+        documents.extend(load_documents(root / relative))
+    return documents
+
+
+def effective_flux_rbac(root=REPO_ROOT):
+    """The RBAC the cluster would hold: the install root, then access.yaml."""
+
+    documents = controller_root_rbac(root)
+    documents.extend(load_documents(Path(root) / "kubernetes/flux-system/access.yaml"))
     return documents
 
 
@@ -665,8 +698,8 @@ CONTROLLER_BASELINE_GRANTS = (
 # costs a red build for an unnecessary permission, while NOT requiring one it
 # does exercise costs a crashloop on a cluster nobody is watching. The peer
 # review of this change asked for the strict side, and this is it. The live
-# confirmation is the `kubectl auth can-i` sweep in the runbook, which carries a
-# row for each.
+# confirmation is the runbook's fail-closed oracle matrix, which carries a row
+# for each and refuses unresolved discovery or authorization.
 CONTROLLER_RUNTIME_GRANTS = (
     ("", "configmaps", ("create", "update", "patch", "delete"),
      "controller-runtime owns ConfigMaps in its own namespace; the generated "
