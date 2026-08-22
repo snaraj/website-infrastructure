@@ -455,6 +455,50 @@ authority: the owner alone merges.
   consequence is proven. Only the coordinator flips Ready and re-verifies;
   author and reviewer never do. Nobody but the repository owner merges.
 
+## Parallel agents in one checkout
+
+Several agents — different models and vendors, executors and reviewers — work
+this repository at once, sometimes on one machine. Git worktrees are the
+isolation mechanism, and these rules are part of the contract: they bind every
+lane whether or not any vendor-specific tooling is present.
+
+- **The shared checkout is nobody's workspace.** It stays on `main`, clean, and
+  is used only for coordination — `git fetch`, worktree creation and removal,
+  ceremony reads. No agent builds, edits, or checks out a branch there. It may
+  lag `origin/main` harmlessly: every actor works from `origin/main` after its
+  own `git fetch origin`, never from a local `main`.
+- **One worktree per acting context, named for its lane.** Executors run
+  `git worktree add .claude/worktrees/<lane>-<topic> -b <lane>/<topic>
+  origin/main`. The directory and the branch carry the SAME lane, because the
+  cleanup rule below depends on ownership being legible to every other agent.
+  A worktree whose name and branch disagree, or a branch with no lane prefix,
+  is a contract violation.
+- **Reviewers work disposably.** A detached-HEAD worktree at the exact pull
+  request head (`git worktree add .claude/worktrees/<lane>-review-<PR#>
+  <headSHA>`), removed once the receipt posts. A reviewer stays read-only
+  toward every other workspace and reverts every experiment inside its own.
+- **One writer per branch, one branch per worktree.** A worktree that is not
+  yours is a worktree you never write to. Treat reads with care: a tree that
+  advances under you mid-operation is a live executor, not stale state.
+- **Some git state is shared — that is the trap.** HEAD, index, and working
+  tree are per-worktree; refs, remotes, config, and stash are repository-wide.
+  So `git fetch`, `git branch -d/-D`, and `git worktree prune` act on every lane
+  at once: run them only from the main checkout during deliberate cleanup,
+  never mid-task. Never `git config` anything — identity is env-pinned per
+  command per "Commit identity mechanics", and one lane's config write poisons
+  all of them. A branch checked out in any worktree cannot be deleted or
+  checked out elsewhere; that lock marks live ownership.
+- **Clean only your own lane, and only after the owner merges.** Confirm the
+  merge against the remote, then remove your worktree and delete your branch
+  from the main checkout with `git worktree remove` and `git branch -d` — no
+  `--force`, no `-D`. Those refusals are the safety net: a dirty tree or an
+  unmerged branch is somebody's live work, very possibly another lane running
+  right now. Another lane's leftovers are that lane's to remove.
+- **Shared machines contend.** Heavy suites in several worktrees compete for CPU
+  and load-sensitive tests can flake under contention. Treat a contention flake
+  as an environment finding — name it, rerun it, never weaken the test — and
+  stagger the heaviest batteries when many lanes run at once.
+
 ## Working a change end to end
 
 The complete delivery loop, each step gated by the sections around it:
