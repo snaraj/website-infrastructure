@@ -120,14 +120,149 @@ the suite enforces.
 ## Live proof, before the deletion
 
 Use the protected kubeconfig ceremony; never a bare `kubectl` against a mutable
-default context. Every command here is a read: `auth can-i` issues a
-SubjectAccessReview and changes nothing.
+default context. Every command here is a read. The command inventory below uses
+`auth can-i` to keep each reviewed request legible, but a raw `no` is **not** a
+denial receipt: kubectl can produce the same text and exit status before the
+authorizer is reached.
 
-After applying the narrowed authority (step 3 below) and before deleting the
-broad binding (step 4), confirm each row. The first block must all answer `yes`,
-the second block must all answer `no`. While the broad binding is still present
-the second block will answer `yes` — that is the point of running the sweep
-again after the deletion.
+### Closed discovery + authorization oracle
+
+**LIVE USE IS BLOCKED.** `scripts/flux_rbac_denial_oracle.py` contains and
+hermetically tests the closed protocol below, but a mutable checkout script
+cannot establish its own stage-zero trust before receiving a protected
+kubeconfig. Current main has no trusted reviewed-blob launcher for this entry
+point, so its direct CLI returns `UNRESOLVED` before opening kubectl or the
+kubeconfig. Do not invoke it directly, do not classify raw `auth can-i` output,
+and do not use either as promotion evidence.
+
+Once the owner supplies and separately reviews the missing launcher, it must
+copy this exact script blob from the reviewed commit through a held descriptor,
+bind the interpreter/tool and protected kubeconfig without reopening mutable
+sources, and preserve the oracle's closed output. Only that reviewed launcher
+may enable the following three ordered, separately recorded operations:
+
+1. uncached raw discovery for the requested resource, the built-in Lease
+   positive control, the exact reviewed Flux Kustomization positive control,
+   and the built-in kube-system Secret used by the inert denial control;
+2. for a Flux resource, a live CRD read proving exact group, plural, kind,
+   namespaced scope, the sole served/storage version reviewed here, and both
+   `NamesAccepted=True` and `Established=True`;
+3. only after every discovery result is `RESOLVED`, the real pinned kubectl
+   path POSTs one exact JSON SelfSubjectAccessReview to the raw authorization
+   endpoint. This is the same non-persistent review API used by `auth can-i`,
+   not a persisted object create, and avoids that command's unavoidable
+   cluster-scope warning text.
+
+Discovery and authorization have closed values. Discovery is `RESOLVED` or
+`UNRESOLVED`; authorization is `ALLOWED`, `DENIED`, or `UNRESOLVED`. Missing,
+stale, wrong-version/foreign, malformed, warning-bearing, unparseable, or
+transport-failed discovery is always `UNRESOLVED`, and the authorizer is not
+called. A warning, malformed answer, or transport/exit mismatch from
+authorization is also `UNRESOLVED`. The response must exactly echo
+apiVersion, kind, and every requested ResourceAttribute; `status.allowed` must
+be a boolean, `denied` must be a boolean if present and cannot contradict an
+allow, and `evaluationError` may only be absent/empty. Only then do true and
+false become `ALLOWED` and `DENIED`.
+This occurs after resolved discovery, two exact allowed controls, and one exact
+denied control. The mixed controls make both a
+constant-deny and a constant-allow authorizer non-evidence.
+
+The denied control impersonates the exact canonical but deliberately inert
+identity
+`system:serviceaccount:flux-system:rbac-oracle-denial-control` for `get` on
+`secrets` in `kube-system`. Only that exact denied request is load-bearing; the
+oracle does not require a cluster-wide binding inventory. If it ever becomes
+allowed, the control fails closed. Unlike either controller identity, this
+request stays denied while the current broad controller binding exists, so
+pre-deletion protected rows may faithfully report `ALLOWED` while a
+constant-allow authorizer still fails the control.
+
+The 2026-08-21 bounded read-only Pi probe established the pre-deletion baseline:
+the exact Kustomization v1 discovery and live CRD conditions above resolved,
+and warning-free raw reviews with the exact ServiceAccount groups returned
+`allowed:true` for an allowed cluster-scoped row and `allowed:false` for the
+inert Secret denial. Direct probes also confirmed that the current broad
+binding still allows the protected controller row. These results confirm the
+phase assumptions but are not promotion receipts while the trusted-launcher
+boundary remains blocked.
+
+The ServiceAccount subject is not a label or substring. It must be the exact
+protocol identity `system:serviceaccount:<namespace>:<name>`; prefixes,
+suffixes, envelopes, or malformed boundary characters stop unresolved. Each
+request also impersonates exactly `system:serviceaccounts`,
+`system:serviceaccounts:<subject-namespace>`, and `system:authenticated`; a
+missing, extra, or foreign group is non-evidence. The request binds that full
+identity plus verb, API group/version, resource, subresource, namespace, and
+optional name. Wildcards are deliberately outside the oracle's reviewed
+identity set; the final `'*' '*'` row below remains a coarse diagnostic, never
+denial evidence.
+
+The future owner-run Pi plan for the first protected denial row is recorded
+below as an argument manifest, **not an executable command**. Repeat the exact
+tuple and expected state for each non-wildcard row only after the trusted
+launcher exists:
+
+```text
+REVIEWED_BLOB=scripts/flux_rbac_denial_oracle.py@<exact-owner-reviewed-commit>
+KUBECTL=<reviewed absolute Linux ARM64 path supplied through held custody>
+KUBECONFIG=<owner-generated mode-0600 flattened embedded-credential JSON snapshot>
+CONTEXT=<exact owner-reviewed Pi context>
+SERVER=<exact owner-reviewed Pi API server URL>
+SUBJECT=system:serviceaccount:flux-system:kustomize-controller
+VERB=create
+API_GROUP=apps
+RESOURCE=deployments
+NAMESPACE=kube-system
+NAME=<absent>
+ALL_NAMESPACES=false
+EXPECT=ALLOWED  # required pre-deletion baseline; DENIED only after the reviewed deletion
+```
+
+The single JSON receipt must bind the exact requested discovery identity with
+`"state":"RESOLVED"`, report the phase-appropriate expected authorization
+state, both positive controls as `ALLOWED`, the inert denial control as
+`DENIED`, and
+`"result":"PASS"`; any other output or nonzero exit stops the sweep. Record
+only the bounded receipt, never `--list` authorization inventory.
+
+The verified non-root source is mode 0600 and one link, but it is YAML and is
+therefore deliberately rejected by the oracle's closed JSON snapshot parser.
+It is not a ready oracle input. Through the protected ceremony, the owner must
+explicitly authorize generation of a separate flattened JSON snapshot
+containing only embedded credentials, with the exact context/server supplied
+privately to the launcher, and deliver that snapshot through held custody. Do
+not copy credentials during review, substitute the root kubeconfig, use sudo,
+or record private host identity here. The launcher must also enforce the
+v1.36.3 ARM64 `kubectl` SHA-256 already recorded as
+`KUBECTL_ARM64_SHA256`.
+
+Executable and kubeconfig custody remains part of the future result. The oracle refuses
+links, non-regular sources, foreign owners, unsafe modes, an unpinned kubectl,
+and source replacement during binding. It copies from the held source
+descriptor into private custody and revalidates descriptor identity, mode, and
+digest before every invocation; replacing the original path cannot change the
+bytes used. Live custody runs only on Linux/WSL with the platform pins. Native
+Windows and macOS retain the portable parsing, protocol-shape, identity, and
+value-sensitivity coverage; they do not simulate POSIX custody or produce a
+live receipt.
+
+`tests/security/test_flux_rbac_denial_oracle.py` drives the production kubectl
+adapter against an authenticated TLS loopback API surface. It observes real
+v1.36 raw discovery and exact JSON SelfSubjectAccessReview requests, including
+the complete ServiceAccount impersonation groups, serialization, warnings,
+and exit status; the fake
+authorizer is keyed on every request dimension and discovery state. This is a
+hermetic protocol parity test, not live-cluster evidence. No kind cluster,
+Raspberry Pi, Secret, apply, or provider is used.
+
+After the trusted launcher lands, and after applying the narrowed authority
+(step 3 below) but before deleting the broad binding (step 4), confirm each
+non-wildcard row through the oracle. Until then the migration stays blocked.
+The
+first block must classify `ALLOWED`, the second `DENIED`. While the broad
+binding is still present the second block will classify `ALLOWED` — that is the
+point of running the sweep again after the deletion. A single `UNRESOLVED` or
+unexpected state invalidates the whole sweep; never infer the remaining rows.
 
     # must be yes
     auth can-i impersonate serviceaccounts/root-reconciler -n flux-system \
@@ -333,6 +468,9 @@ frozen capture from step 2 is what makes any of them reversible.
 
 This apply is deferred and stays deferred until ALL of the following hold:
 
+- an owner-approved trusted reviewed-blob launcher exists for the denial
+  oracle, binds the exact reviewed script/tool/kubeconfig bytes through held
+  custody, and the read-only Pi matrix produces only bounded resolved receipts;
 - the recovery window is closed — the temporary passwordless sudo installed for
   the Service-CIDR repair is removed and `sudo -n` is proven unavailable;
 - the route install, controlled reboot, post-reboot acceptance, and behavioural
