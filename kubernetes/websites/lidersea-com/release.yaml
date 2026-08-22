@@ -52,5 +52,5 @@ spec:
     deploymentReady: true
     image:
       repository: ghcr.io/snaraj/lidersea-com
-      tag: v0.1.9
-      digest: sha256:4714041a4ab9acf0a514c6f5b690684f74f78bb6d59effbcfd0db2d97f4ce479
+      tag: v0.1.25
+      digest: sha256:22745912327de4b09fbe3e10860a799e21966c774cd3e36034bd7964af6cd1c7

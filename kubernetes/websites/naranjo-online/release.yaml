@@ -52,5 +52,5 @@ spec:
     deploymentReady: true
     image:
       repository: ghcr.io/snaraj/naranjo-online
-      tag: v0.1.9
-      digest: sha256:3e36de5e72f2721dee4b0dd1f815ea4bbc961ef9b3bf78b7b452039699c10767
+      tag: v0.1.28
+      digest: sha256:38eaeb8afb5e18ba821826bc11b987a7b7d4ee52e28ee43945a657a27da0e4e7
