@@ -43,7 +43,8 @@ fetch() {
   # The basename is public release metadata and makes a failed pin actionable
   # without printing query strings, credentials, or a caller's local paths.
   printf 'Fetching checksum-pinned asset %s.\n' "${url##*/}"
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --retry 3 --retry-all-errors --retry-delay 1 \
     --output "${output}" "${url}"
   printf '%s  %s\n' "${sha256}" "${output}" | sha256sum --check --status || {
     printf 'checksum mismatch: %s\n' "${url}" >&2
@@ -142,6 +143,16 @@ install_archive_binary \
   'https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz' \
   '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198' \
   'shellcheck-v0.11.0/shellcheck' 'shellcheck' 'shellcheck'
+
+# The denial-oracle protocol test must exercise the same reviewed kubectl bytes
+# as protected operator scripts, never whichever client happens to be on the
+# GitHub runner PATH.
+kubectl_file="${download_root}/kubectl"
+fetch \
+  'https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl' \
+  'ebbd080e7c2e275093b55915722043257eb24004363e20acb3c4d71919f88336' \
+  "${kubectl_file}"
+install -m 0755 "${kubectl_file}" "${install_root}/kubectl"
 
 # ORAS publishes archive hashes inside a signed-release checksum asset. Pin the
 # checksum asset itself before trusting the archive entry selected from it.
