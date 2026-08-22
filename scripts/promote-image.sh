@@ -9,6 +9,24 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # verifier removes drift, while each tuple retains its own image, workflow,
 # source-label provenance, values file, Helm release, namespace, and rollback
 # decision.
+#
+# The certificate identity below is fixed to that site's protected `main`
+# branch and deliberately does NOT interpolate the requested release tag. A
+# workflow run at a ref executes the workflow definition AT that ref, so the
+# ref in the identity names whichever control gates writes to it: `main` is
+# gated on creation and update with no bypass actors, while tag creation in
+# those repositories is unrestricted. Every site image published after v0.1.9
+# is signed under that branch ref, so the previous per-tag identity could not
+# verify any image this rollback/emergency-pin path would need today
+# (ADR 0016 amendment 2026-08-22). WHICH release is being pinned is still
+# bounded exactly as before, by release_tag and by the digest argument.
+#
+# Known cost, stated so it is not rediscovered as a bug: the v0.1.9 images —
+# the ones kubernetes/websites/*/release.yaml still pins — ARE tag-signed and
+# no longer verify here. That is one release lost against every release after
+# it gained. If this command fails on v0.1.9, the answer is to promote
+# forward; it is NOT to accept both refs, which would put the ungated ref back
+# into the trust boundary.
 usage() {
   printf 'Usage: %s {naranjo-online|lidersea-com} vMAJOR.MINOR.PATCH sha256:<64 lowercase hex> [--rollback]\n' "$0" >&2
 }
@@ -32,7 +50,7 @@ case "${site}" in
     parent_relative='kubernetes/reconciliation/naranjo-online.yaml'
     values="${repo_root}/kubernetes/websites/naranjo-online/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/naranjo-online.yaml"
-    identity="https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    identity="https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main"
     expected_source='https://github.com/snaraj/naranjo.online'
     attestations_required='false'
     chart_oci='oci://ghcr.io/snaraj/charts/naranjo-online'
@@ -45,7 +63,7 @@ case "${site}" in
     parent_relative='kubernetes/reconciliation/lidersea-com.yaml'
     values="${repo_root}/kubernetes/websites/lidersea-com/release.yaml"
     parent="${repo_root}/kubernetes/reconciliation/lidersea-com.yaml"
-    identity="https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/tags/${2:-}"
+    identity="https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/heads/main"
     expected_source='https://github.com/snaraj/lidersea.com'
     attestations_required='false'
     chart_oci='oci://ghcr.io/snaraj/charts/lidersea-com'

@@ -85,7 +85,7 @@ class PromotionContractTests(unittest.TestCase):
                 "kubernetes/websites/naranjo-online/release.yaml",
                 "kubernetes/reconciliation/naranjo-online.yaml",
                 "https://github.com/snaraj/naranjo.online/.github/workflows/"
-                "release-publisher.yml@refs/tags/",
+                "release-publisher.yml@refs/heads/main",
                 "expected_source='https://github.com/snaraj/naranjo.online'",
                 "oci://ghcr.io/snaraj/charts/naranjo-online",
             ),
@@ -94,7 +94,7 @@ class PromotionContractTests(unittest.TestCase):
                 "kubernetes/websites/lidersea-com/release.yaml",
                 "kubernetes/reconciliation/lidersea-com.yaml",
                 "https://github.com/snaraj/lidersea.com/.github/workflows/"
-                "release-publisher.yml@refs/tags/",
+                "release-publisher.yml@refs/heads/main",
                 "expected_source='https://github.com/snaraj/lidersea.com'",
                 "oci://ghcr.io/snaraj/charts/lidersea-com",
             ),

@@ -221,3 +221,158 @@ References:
 - <https://fluxcd.io/flux/components/helm/helmreleases/>
 - <https://fluxcd.io/flux/cheatsheets/oci-artifacts/>
 - <https://helm.sh/docs/topics/registries/>
+
+## Amendment (2026-08-22): the publisher's certificate ref
+
+The decision stands unchanged. One factual detail inside it was overtaken by a
+change in the site repositories, and this amendment records both the correction
+and why the original text was right when it was written.
+
+**What this amendment changes.** Everywhere this ADR binds the site publishers'
+keyless certificate identity, the ref is
+`…/release-publisher.yml@refs/heads/main`, not `…@refs/tags/v*`. Concretely:
+
+- In §2 "Reconcile time", the `matchOIDCIdentity` subject is
+  `https://github.com/snaraj/<site-repo>/.github/workflows/release-publisher.yml@refs/heads/main`,
+  and the list of cases source-controller must refuse reads *signed under a tag
+  ref or any other branch* where it previously read "signed under a branch ref".
+  Every other refusal in that list — unsigned, sibling site, different workflow
+  in the same repository, different issuer — is unchanged.
+- In §2 "Admission time", the `require-signed-<site>` Kyverno policies bind the
+  same amended tuple, so a chart and the image it names still cannot be
+  described by this repository as coming from different authorities. See the
+  correction below for what those policies do and do not enforce today.
+- In §6, `scripts/promote-image.sh` verifies against the same amended identity.
+  That leg was not merely stale but broken: every site image published after
+  `v0.1.9` is branch-signed, so the previous per-tag identity could not verify
+  any image the rollback/emergency-pin path would need today.
+
+**Correction: Kyverno is not a live second line of defence.** §2 "Admission
+time" and the "Consequences" section describe the `require-signed-<site>`
+policies as an unchanged, operating control. That is not true of runtime state
+and must not be read as if it were. Confirmed with the platform lane on
+2026-08-22: Kyverno is **not installed** on the cluster — zero CRDs — and is
+**not authorized to be installed**; the runbook locks out both the report-only
+and the enforcing stage pending issues #100, #101 and #102, and the committed
+controller sentinel is not an installable release. The answer recorded was
+"NO-GO, not eventually-yes."
+
+So today those two files are **CI assertions and future desired state**, not an
+active admission control. They are kept exactly in step with the chart-source
+identity anyway, because CI evaluates them and checks their parity against the
+Conftest corpus, so an obsolete identity there would be a false assertion this
+repository makes about itself. Kyverno becomes a genuine second runtime line
+only after a separately reviewed, owner-authorized, evidenced install.
+
+What that means for this amendment: the **live** defences on the chart leg
+today are Flux's own `spec.verify` source verification and the publisher-side
+controls in the site repositories. There is no compensating admission control
+behind them. That is precisely why the ref this identity names has to be the
+one an attacker cannot rewrite.
+
+**What this amendment does NOT change.** The version tag is still the official
+release identity and still what the SemVer range selects — the chart *version*
+and the publisher's *signing ref* are two different things, and only the second
+one moved. Digest integrity on both legs, the ratchet floor, the graduation
+ceiling, the no-git-write-back rule, and the ordered transition table all stand
+exactly as written. Steps 3 and 4 remain separately authorized and are not
+performed by the change that carries this amendment.
+
+**What it costs, measured rather than asserted.** The re-point is not free on
+the image leg, and the cost lands on exactly one release. Verified against GHCR
+on 2026-08-22:
+
+| artifact | verifies under tag ref | verifies under `@refs/heads/main` |
+| --- | --- | --- |
+| every published site CHART (naranjo 0.1.19–0.1.28, lidersea 0.1.18–0.1.25) | no | **yes** |
+| site IMAGES from v0.1.10 onward | no | **yes** |
+| site IMAGES at `v0.1.9` — the ones `kubernetes/websites/*/release.yaml` still pins | **yes** | no |
+
+So on the chart leg there is no trade at all: the outgoing identity could verify
+*nothing* that exists, and the incoming one verifies everything. On the image
+leg the trade is one version against roughly eighteen — `promote-image.sh` gains
+the ability to verify every release after `v0.1.9` and loses the ability to
+verify `v0.1.9` itself. That is a real operational consequence and is stated
+here rather than discovered later: re-running the promotion verifier against the
+currently pinned `v0.1.9` digests will now fail, and the correct response is to
+promote forward, not to widen the identity to accept both refs. Accepting both
+would reintroduce exactly the ungated ref this amendment exists to remove.
+
+**Why the original text was correct.** This ADR is dated 2026-08-12. The site
+publishers ran as `push` events on tag refs through `v0.1.9` on 2026-08-11, and
+those runs really did mint `…/release-publisher.yml@refs/tags/v0.1.9`. The
+images still pinned in `kubernetes/websites/*/release.yaml` are those `v0.1.9`
+images and are genuinely tag-signed, which is why the committed manifests
+looked internally consistent. The site repositories then redesigned their
+publishers to `workflow_dispatch` selected from protected `main`:
+naranjo.online's first such run was 2026-08-15, lidersea.com's 2026-08-18, and
+neither repository has published from a tag ref since. Both now hard-assert the
+new shape in reviewed code — their release contracts refuse any event other
+than `workflow_dispatch` and any ref other than `refs/heads/main`. Every chart
+and image published since carries the branch ref. The ADR was not wrong; it was
+overtaken, and this is the record of that.
+
+**Why the branch ref is the stronger anchor, not a weaker one.** A workflow run
+at a ref executes the workflow definition *at that ref*, so the ref inside a
+certificate identity names whichever control gates writes to it. Measured on
+2026-08-22 in the two SITE repositories — the ones whose publishers mint these
+certificates, and whose rulesets are therefore the ones that matter here.
+`snaraj/naranjo.online` and `snaraj/lidersea.com` are configured identically:
+
+| ref | protected by | includes `creation`? | bypass actors |
+| --- | --- | --- | --- |
+| `refs/heads/main` | `Protect-Main` branch ruleset, 10 rules: creation, deletion, non-fast-forward, linear history, pull request, code scanning, code quality, code coverage, required signatures, required status checks | yes | none |
+| `refs/tags/v*.*.*` | `immutable-release-tags` tag ruleset, 3 rules: update, deletion, non-fast-forward | **no** | none |
+
+Tags are immutable once created but freely creatable, while `main` is gated on
+creation and update by a control with no bypass actors — the owner included.
+Under a tag-ref identity, an actor holding only `contents: write` could push a
+branch carrying a rewritten publisher, tag it inside the reviewed SemVer window,
+run it there, and mint a certificate matching the committed subject. Under a
+branch-ref identity the same actor is stopped at the first step, because
+changing what the publisher does at `refs/heads/main` means passing the
+protected-branch gate. The platform's security model is "agents may push, only
+the owner merges"; the branch ref anchors the signing identity to the machine
+enforcement of that rule, and a tag ref routes around it. Nothing behind it
+compensates, per the Kyverno correction above.
+
+**The accepted subject shape, stated exactly.** Exact issuer, exact
+repository and workflow path, terminal `@refs/heads/main`. No `refs/heads/*`,
+no `refs/tags/*`, no alternation, no substring match. The anti-widening
+property this ADR's §5 promised ("negative coverage that is equal or stronger
+at each re-point") is preserved rather than spent: `@refs/heads/main$` is one
+fully anchored literal ref, exactly as narrow as the stable-tag pattern it
+replaces. The named negative-coverage mutations were re-pointed rather than
+removed, and the committed contracts still refuse tag refs, arbitrary branch
+refs, `refs/heads/*` and `refs/tags/*` wildcards, foreign workflow paths,
+foreign repositories, altered issuers, and every unanchored variant.
+
+**Follow-up, deliberately not carried here.** Nothing in this repository
+notices if a site publisher's identity moves again — the failure this
+amendment repairs was silent for a week. A recurring check that re-verifies the
+newest published chart of each site against the committed identity would close
+that gap. It is kept out of this change to keep a signature-policy change
+reviewable, and it carries constraints of its own: it must derive issuer and
+identity from the committed policy source rather than duplicating a regex in
+workflow YAML, resolve each chart to an immutable digest before verifying,
+let the two sites fail independently, and land manual-dispatch-only until the
+owner confirms its billing and quota effect is zero.
+
+**Not the fix: restricting tag creation.** The obvious-looking counter-move —
+add a `creation` rule to the `immutable-release-tags` tag rulesets so a tag-ref
+identity becomes defensible again — was considered and is **rejected**, and this
+is recorded so it is not proposed a third time. GitHub's "restrict creations"
+rule means only *bypass actors* may create a matching ref. Those tag rulesets
+have `bypass_actors: []`, and each site's publisher creates its own release tag
+using a `contents: write` workflow token, which is not a bypass actor. Adding
+the rule would therefore stop the publishers from creating release tags at all
+and take releases down. It is not a smaller, safer alternative to this
+amendment and must not be described as a simple next step. No ruleset or
+repository setting is changed by this amendment; the tag rulesets keep the
+immutability they already have.
+
+References:
+
+- <https://docs.github.com/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect>
+- <https://docs.github.com/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets>
+- <https://docs.sigstore.dev/cosign/verifying/verify/>

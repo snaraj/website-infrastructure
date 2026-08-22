@@ -177,7 +177,8 @@ DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 # One closed tuple drives every site-specific release check so adding a site
 # cannot silently leave image publication, admission, or activation asymmetric.
 # The third element is the publisher workflow inside each STANDALONE site
-# repository (tag-triggered); it feeds the pinned signature identities.
+# repository, dispatched from that repository's protected `main` branch; it
+# feeds the pinned signature identities.
 SITE_RELEASE_CONTRACTS = (
     ("naranjo.online", "naranjo-online", "release-publisher.yml"),
     ("lidersea.com", "lidersea-com", "release-publisher.yml"),

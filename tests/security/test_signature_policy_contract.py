@@ -49,7 +49,8 @@ class ChartSourceContractTests(unittest.TestCase):
     source-controller runs here, no registry is contacted, and no signature is
     actually verified. What they prove is that the desired state this
     repository publishes cannot silently stop demanding a cosign signature
-    from exactly one site's tag-triggered publisher.
+    from exactly one site's publisher, run at that repository's protected
+    `main` branch.
     """
 
     def canonical(self, slug="naranjo-online"):
@@ -72,7 +73,7 @@ class ChartSourceContractTests(unittest.TestCase):
         for slug, subject in subjects.items():
             with self.subTest(slug=slug):
                 self.assertTrue(subject.startswith("^https://github\\.com/snaraj/"))
-                self.assertTrue(subject.endswith("@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                self.assertTrue(subject.endswith("@refs/heads/main$"))
                 self.assertIn("/.github/workflows/".replace(".", "\\."), subject)
                 for other in subjects:
                     if other != slug:
@@ -119,8 +120,22 @@ class ChartSourceContractTests(unittest.TestCase):
                 MODULE.CHART_OIDC_ISSUER_PATTERN,
                 "^https://accounts\\.example\\.invalid$",
             ),
-            "branch ref accepted": canonical.replace(
-                "@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$", "@refs/heads/main$"
+            # Re-pointed 2026-08-22 with the identity itself (ADR 0016
+            # amendment): the trusted ref moved from a stable version tag to
+            # protected `main`, so the mutation that must stay dead moved with
+            # it. A tag ref is now the untrusted side, because tag creation in
+            # the site repositories is unrestricted while `main` is gated with
+            # no bypass actors. The anti-widening property is unchanged: this
+            # deny row and the two below still prove the contract rejects the
+            # sibling ref family and every unanchored variant.
+            "tag ref accepted": canonical.replace(
+                "@refs/heads/main$", "@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+$"
+            ),
+            "branch ref family widened": canonical.replace(
+                "@refs/heads/main$", "@refs/heads/.*$"
+            ),
+            "trusted ref unanchored": canonical.replace(
+                "@refs/heads/main$", "@refs/heads/main"
             ),
             "subject unanchored": canonical.replace(
                 "subject: ^https://github", "subject: https://github"
@@ -321,7 +336,7 @@ class SignaturePolicyContractTests(unittest.TestCase):
             "attestors removed": ("          attestors:\n", "          authorities:\n"),
             "zero threshold": ("            - count: 1\n", "            - count: 0\n"),
             "subject regex": (
-                "                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/tags/v*\n",
+                "                    subject: https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main\n",
                 "                    subjectRegExp: https://github.com/.+\n",
             ),
             "wrong issuer": (

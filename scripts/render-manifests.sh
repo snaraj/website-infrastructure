@@ -170,8 +170,9 @@ signature_row='' signature_site='' signature_workflow=''
 for signature_row in "${SIGNATURE_POLICY_ROWS[@]}"; do
   IFS='|' read -r signature_site signature_workflow <<<"$signature_row"
   # Reconcile-time half of the same identity tuple: the site's published chart
-  # source must demand a cosign signature from exactly this site's tag-triggered
-  # publisher before source-controller will produce an artifact from it.
+  # source must demand a cosign signature from exactly this site's publisher,
+  # run at that repository's protected `main` branch, before source-controller
+  # will produce an artifact from it.
   python3 -B "${REPO_ROOT}/scripts/validate_signature_policy.py" chart-source \
     --file "${REPO_ROOT}/kubernetes/websites/${signature_site}/source.yaml" \
     --site "$signature_site"

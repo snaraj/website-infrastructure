@@ -214,6 +214,37 @@ and dependency-governed Draft capacity is recorded durably in
   Promotion to enforcement still needs independent validation by the
   platform (peer) lane, recorded on the pull request. Amend this row if
   the owner or the platform (peer) lane rules otherwise.
+- `kubernetes/websites/*/source.yaml` — NOT transferred, ruling PENDING.
+  The row above assigns `kubernetes/websites/*/release.yaml` to delivery
+  through the promotion surface and leaves the remaining
+  `kubernetes/websites/**` files unruled; these per-site chart
+  `OCIRepository` objects are among them. Each one carries a cosign
+  `matchOIDCIdentity` that the delivery-lane validators
+  (`scripts/validate_signature_policy.py`,
+  `policies/conftest/kubernetes.rego`) already assert byte for byte, so
+  the manifest and the gate that pins it cannot be changed from different
+  lanes without one of them going stale. The delivery lane touched these
+  two files under issue #185 to re-point that identity: a DECLARED
+  CROSSING under the rule below, not a lane transfer, and it grants no
+  standing claim on the tree. Record the owner or platform (peer) ruling
+  in this row when it arrives.
+- `docs/adr/0016-tag-driven-flux-release-sync.md` — NOT transferred,
+  ruling PENDING. The lane split above assigns "the remaining ADRs" to
+  the platform lane, and "Lane discipline in docs" says the delivery lane
+  cites them by number rather than editing them. ADR 0016 is nonetheless
+  the decision record for surfaces this lane owns outright (the
+  signature-policy validators, the conftest and Kyverno policies, the
+  promotion script), and it was authored from this lane in commit
+  `c0911d7` without a recorded ruling. Issue #185 amended it, because
+  leaving it asserting a signing identity the platform no longer trusts
+  would have been a silent contradiction. The amendment is append-only:
+  it adds one `## Amendment` section in the convention ADRs 0010 and
+  0014 already use and leaves every pre-existing line byte for byte
+  intact, so what it corrects it corrects on the record rather than by
+  rewriting history. That is a DECLARED CROSSING under the rule below,
+  not a lane transfer. Record the owner or platform (peer) ruling in
+  this row when it arrives, including whether ADR 0016 belongs to this
+  lane outright given what it governs.
 
 **A path in neither list is not implicitly delivery.** Silence is not
 permission. Declare the crossing in the pull request body before touching

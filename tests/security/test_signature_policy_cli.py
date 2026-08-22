@@ -101,10 +101,21 @@ class SignaturePolicyCliTests(unittest.TestCase):
             ("validationFailureAction: Enforce", "validationFailureAction: Audit", "action-downgrade"),
             ("failurePolicy: Fail", "failurePolicy: Ignore", "webhook-downgrade"),
             ("rekor:", "rekor_disabled:", "rekor-tamper"),
-            ("@refs/tags/v*", "@refs/heads/*", "identity-widening"),
+            # Re-pointed 2026-08-22 with the identity itself (ADR 0016
+            # amendment). The trusted subject now ends in the protected `main`
+            # branch ref, so `identity-widening` widens THAT ref to the
+            # `refs/heads/*` family, and `identity-tag-ref` proves the ref
+            # family this contract stopped trusting is now refused. Widening in
+            # either direction stays dead.
+            ("@refs/heads/main", "@refs/heads/*", "identity-widening"),
+            ("@refs/heads/main", "@refs/tags/v*", "identity-tag-ref"),
         ):
-            if old not in text:
-                continue
+            # A mutation whose source text is absent silently proves nothing.
+            # This assertion is why the re-point above could not be a deletion:
+            # when the committed identity moved, a `continue` here would have
+            # turned the deny row into a no-op and the suite would have stayed
+            # green with no negative coverage at all.
+            self.assertIn(old, text, f"mutation source vanished: {label}")
             hostile = self.root / f"{label}.yaml"
             hostile.write_bytes(text.replace(old, new, 1).encode("utf-8"))
             with self.subTest(mutation=label):

@@ -26,7 +26,25 @@ def bash_executable():
 
 @unittest.skipUnless(bash_executable(), "Bash is required for OCI release behavior tests")
 class VerifyExistingOCIReleaseBehaviorTests(unittest.TestCase):
-    def run_fixture(self, *, sha_digest=DIGEST, version_digest=DIGEST, fail_version=False):
+    #: The one keyless identity this verifier trusts: that site's own
+    #: release-publisher workflow run at its protected `main` branch. A run at
+    #: a ref executes the workflow definition AT that ref, and `main` is the
+    #: only ref those repositories gate on creation and update with no bypass
+    #: actors, whereas tag creation there is unrestricted
+    #: (ADR 0016 amendment 2026-08-22).
+    TRUSTED_IDENTITY = (
+        "https://github.com/snaraj/naranjo.online/.github/"
+        "workflows/release-publisher.yml@refs/heads/main"
+    )
+
+    def run_fixture(
+        self,
+        *,
+        sha_digest=DIGEST,
+        version_digest=DIGEST,
+        fail_version=False,
+        workflow_identity=None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "bin"
@@ -68,8 +86,9 @@ printf '%s\n' "$*" > "${FAKE_COSIGN_LOG}"
                     "RELEASE_TAG": "v0.1.0",
                     "GITHUB_SHA": "b" * 40,
                     "WORKFLOW_IDENTITY": (
-                        "https://github.com/snaraj/naranjo.online/.github/"
-                        "workflows/release-publisher.yml@refs/tags/v*"
+                        self.TRUSTED_IDENTITY
+                        if workflow_identity is None
+                        else workflow_identity
                     ),
                     "VERIFY_ERROR_ROOT": (root / "errors").as_posix(),
                     "FAKE_SHA_DIGEST": sha_digest,
@@ -115,6 +134,70 @@ printf '%s\n' "$*" > "${FAKE_COSIGN_LOG}"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("malformed digest", result.stderr)
         self.assertEqual(cosign_call, "")
+
+    def test_identities_outside_the_trust_boundary_fail_closed(self):
+        # The trust-boundary regex had no negative coverage before the
+        # 2026-08-22 identity re-point, so re-pointing it could have widened
+        # it invisibly. Every row below must be refused BEFORE any registry
+        # call, and the empty cosign log is what proves the refusal came from
+        # the guard rather than from a signature check that never ran.
+        rejected = {
+            # The ref family this verifier stopped trusting. Tag creation in
+            # the site repositories carries no ruleset rule, so a tag ref is
+            # not evidence that the publisher definition passed any gate.
+            "version tag ref": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/tags/v0.1.0"
+            ),
+            "legacy tag glob": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/tags/v*"
+            ),
+            # Widening the trusted ref to its family, in both the glob and the
+            # unanchored-suffix forms a careless edit would produce.
+            "branch ref family widened": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/heads/*"
+            ),
+            "another branch head": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/heads/release"
+            ),
+            "trusted ref with a suffix": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/heads/main-attacker"
+            ),
+            # The rest of the tuple must stay just as closed as the ref.
+            "third-party repository": (
+                "https://github.com/attacker/naranjo.online/.github/"
+                "workflows/release-publisher.yml@refs/heads/main"
+            ),
+            "another workflow file": (
+                "https://github.com/snaraj/naranjo.online/.github/"
+                "workflows/nightly.yml@refs/heads/main"
+            ),
+            "look-alike host": (
+                "https://github.com.attacker.invalid/snaraj/naranjo.online/"
+                ".github/workflows/release-publisher.yml@refs/heads/main"
+            ),
+        }
+        for label, identity in rejected.items():
+            with self.subTest(identity=label):
+                result, cosign_call = self.run_fixture(workflow_identity=identity)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(
+                    "outside the protected-main publisher trust boundary",
+                    result.stderr,
+                )
+                self.assertEqual(cosign_call, "")
+
+    def test_the_trusted_identity_is_the_committed_one(self):
+        # Binds this battery to the script itself: if the guard's literal ever
+        # moves again, the accepting fixture above must move with it instead
+        # of silently testing an identity the script no longer trusts.
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(r"release-publisher\.yml@refs/heads/main$", script)
+        self.assertNotIn("@refs/tags/", script)
 
 
 if __name__ == "__main__":

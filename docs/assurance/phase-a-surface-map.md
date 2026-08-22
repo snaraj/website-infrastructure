@@ -14,7 +14,7 @@ resources appear by type and ordinal only. Inferences are marked
 | 4 | Network preparation (NetworkManager/Calico/CNI) | `validate_pi_network.py`, `validate_cni_manifest.py`, `bootstrap/pi` | validated, unapplied here |
 | 5 | Live-input generation (READY / schema-v3) | private channel contract; five role keys + additional unit + VPN link, template-hash-verified | delivered, canonical |
 | 6 | Container runtime + host tools | Codex staged installer (signed, HTTPS-only, receipted) | Codex-owned |
-| 7 | OCI images (sites) | standalone repos' publishers → GHCR, cosign tag-form identities | v0.1.6 live, verified |
+| 7 | OCI images (sites) | standalone repos' publishers → GHCR, cosign protected-`main` identities (tag-form through v0.1.9; re-pointed 2026-08-22, ADR 0016 amendment) | v0.1.6 live, verified |
 | 8 | OCI charts (sites) | same publishers → `ghcr.io/snaraj/charts/*` | v0.1.6 live, verified |
 | 9 | kubeadm init + control plane | `validate_kubeadm_config.py`, `validate_encryption_config.py`; execution Codex-owned | pending live |
 | 10 | Recovery tooling + etcd snapshots | `bootstrap/`, `docs/runbooks/*`, Phase E harnesses (planned) | designed, partially tested |

@@ -4,15 +4,27 @@
 Two families live here because they answer the same question at two different
 moments of one release:
 
-* the Kyverno ``require-signed-<site>`` policies decide, at admission time,
-  whether the *image* a Pod names was signed by that site's publisher;
+* the Kyverno ``require-signed-<site>`` policies would decide, at admission
+  time, whether the *image* a Pod names was signed by that site's publisher;
 * the per-site OCIRepository chart sources decide, at reconcile time, whether
   the *chart* Flux is about to resolve was signed by the same publisher.
 
+Only the second is a live runtime control. Kyverno is NOT installed on the
+cluster and is not authorized to be (confirmed with the platform lane
+2026-08-22; the runbook locks out both the report-only and the enforcing stage
+pending issues #100/#101/#102). The ``require-signed-*`` policies are therefore
+CI assertions and future desired state, not a second line of defence operating
+today — do not reason about them as one. They are still pinned here byte for
+byte, and still kept in step with the chart-source identity below, because CI
+evaluates them and checks their parity against the Conftest corpus: an obsolete
+identity in those files would be a false claim this repository makes about
+itself, and it would be inherited the moment an install is authorized.
+
 Both bind the identical certificate identity tuple — one site repository, one
-workflow file, tag refs only, the GitHub Actions OIDC issuer — so a chart and
-an image can never be accepted from different authorities, and the two site
-tuples can never couple (AGENTS.md safety invariant 14).
+workflow file, the protected ``main`` branch ref only, the GitHub Actions OIDC
+issuer — so a chart and an image can never be accepted from different
+authorities, and the two site tuples can never couple (AGENTS.md safety
+invariant 14).
 """
 
 import argparse
@@ -25,9 +37,21 @@ from pathlib import Path
 
 MAX_POLICY_BYTES = 64 * 1024
 ALLOWED_ACTIONS = ("Audit", "Enforce")
-# Publisher identities live in the standalone site repositories and are
-# tag-triggered: the certificate identity ends in @refs/tags/v* rather
-# than a branch ref.
+# Publisher identities live in the standalone site repositories. Each site's
+# release-publisher workflow is selected by workflow_dispatch from the
+# protected `main` branch and refuses any other event or ref in its own
+# reviewed code, so the certificate identity ends in @refs/heads/main.
+#
+# The branch ref is the STRONGER anchor here, not a relaxation of a tag ref. A
+# workflow run at a ref executes the workflow definition AT THAT REF, so the
+# ref in the certificate identity names whichever control gates writes to it.
+# In these repositories the branch ruleset on `refs/heads/main` restricts
+# creation, deletion, force-push and updates with no bypass actors, while the
+# tag ruleset makes tags immutable ONCE CREATED but does not restrict creation
+# at all. A tag-ref identity is therefore satisfiable by anyone holding
+# `contents: write` — push a branch carrying a rewritten publisher, tag it, run
+# it — whereas a `refs/heads/main` identity can only be minted by a definition
+# that already passed the protected-branch gate.
 SIGNATURE_CONTRACTS = {
     "naranjo-online": "release-publisher.yml",
     "lidersea-com": "release-publisher.yml",
@@ -87,9 +111,13 @@ CHART_SEMVER_RANGES = {
 # what source-controller extracts.
 CHART_LAYER_MEDIA_TYPE = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
 CHART_OIDC_ISSUER_PATTERN = r"^https://token\.actions\.githubusercontent\.com$"
-# Stable vMAJOR.MINOR.PATCH tag refs only. A branch ref, a prerelease ref, a
-# moved `latest`, or a workflow_dispatch identity cannot match this subject.
-CHART_TAG_REF_PATTERN = r"@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$"
+# The protected `main` branch ref only. This is ONE fully anchored literal ref
+# — `$` closes it — so it is exactly as narrow as the stable-tag pattern it
+# replaces: any tag ref, any other branch, any `refs/heads/*` wildcard, and any
+# unanchored variant all fail to match. What changes is WHICH single ref is
+# trusted, and the one named here is the ref the protected-branch ruleset
+# guards with no bypass actors.
+CHART_BRANCH_REF_PATTERN = r"@refs/heads/main$"
 CHART_SEMVER_RANGE_RE = re.compile(
     r">=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) "
     r"<(0|[1-9][0-9]*)\.0\.0\Z"
@@ -191,7 +219,7 @@ def expected_policy_body(slug, workflow, action):
         + SIGNATURE_REPOSITORIES[slug]
         + "/.github/workflows/"
         + workflow
-        + "@refs/tags/v*"
+        + "@refs/heads/main"
     )
     description = SIGNATURE_DESCRIPTIONS[slug]
     return """apiVersion: kyverno.io/v1
@@ -268,8 +296,9 @@ def chart_source_certificate_subject(slug):
 
     Anchored at both ends and built only from that site's own repository and
     workflow file, so a chart signed by the sibling site, by another workflow
-    in the same repository, or by a branch-ref run of the right workflow is not
-    a match. This is the same tuple ``expected_policy_body`` binds for images.
+    in the same repository, or by a run of the right workflow at any ref other
+    than protected `main` — a tag ref included — is not a match. This is the
+    same tuple ``expected_policy_body`` binds for images.
     """
 
     if slug not in SIGNATURE_CONTRACTS:
@@ -281,7 +310,7 @@ def chart_source_certificate_subject(slug):
         + domain
         + r"/\.github/workflows/"
         + workflow
-        + CHART_TAG_REF_PATTERN
+        + CHART_BRANCH_REF_PATTERN
     )
 
 

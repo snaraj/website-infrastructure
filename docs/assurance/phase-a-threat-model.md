@@ -41,11 +41,16 @@ action-inventory diff check to the terminal gate.
 
 Attack: attacker publishes a rogue image/chart, reuses a version, or swaps a
 tag to point at different bytes.
-Controls: admission requires cosign keyless signatures from exactly the two
-tag-form publisher identities (PLAT-SUP-002); deployment is digest-pinned
-(PLAT-SUP-001); publishers refuse tag reuse and have no manual dispatch
-(PLAT-REL-002); `verify-existing-oci-release.sh` re-proves any existing
-release read-only.
+Controls: the committed chart sources and signature policies require cosign
+keyless signatures from exactly the two protected-`main` publisher identities
+(PLAT-SUP-002 — re-pointed from the tag form 2026-08-22, ADR 0016 amendment;
+note that admission is not among the LIVE controls here, because Kyverno is not
+installed and not authorized to be, so the operating check is Flux's own
+`spec.verify` at reconcile time); deployment is digest-pinned (PLAT-SUP-001);
+publishers refuse tag reuse, and their manual dispatch is bound by their own
+`authorize` job to a commit that already landed on protected `main` through the
+full gate, so a dispatcher cannot choose arbitrary source bytes (PLAT-REL-002);
+`verify-existing-oci-release.sh` re-proves any existing release read-only.
 Residual: GHCR account compromise could delete-and-recreate a package; the
 digest pins in Git still refuse the swap (different digest), and unsigned
 0.1.5 chart versions await owner deletion (flagged). Rekor transparency

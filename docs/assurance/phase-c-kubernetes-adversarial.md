@@ -93,7 +93,8 @@ behavioral; specified in the handoff's Phase G list.
 
 Positive: conftest `approved_git_source_urls`/`approved_git_source_scopes`
 pin per-source URLs, chart-rooted sparse checkout, exact ignore rules;
-signature policies pin the two tag-form publisher identities; suspended
+signature policies pin the two protected-`main` publisher identities
+(re-pointed from the tag form 2026-08-22, ADR 0016 amendment); suspended
 sentinels assert inertness; the extracted evidence validators
 (`validate_flux_release_evidence.py`, `validate_runtime_inventory_evidence.py`)
 are executed by 27 unit tests over synthetic captured state — the successor
