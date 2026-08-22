@@ -141,9 +141,14 @@ bind the interpreter/tool and protected kubeconfig without reopening mutable
 sources, and preserve the oracle's closed output. Only that reviewed launcher
 may enable the following three ordered, separately recorded operations:
 
-1. uncached raw discovery for the requested resource, the built-in Lease
-   positive control, the exact reviewed Flux Kustomization positive control,
-   and the built-in kube-system Secret used by the inert denial control;
+1. uncached raw discovery for the requested resource and verb, the built-in
+   Lease positive control, the exact reviewed Flux Kustomization positive
+   control, and the built-in kube-system Secret used by the inert denial
+   control; each APIResource verb inventory must be well formed and advertise
+   the exact ordinary verb that its following review will ask about. Kubernetes
+   does not advertise the RBAC-only `impersonate` verb there, so that one
+   exception is closed to the core `serviceaccounts` identity and is labeled
+   `AUTHORIZATION_ONLY` in the discovery receipt;
 2. for a Flux resource, a live CRD read proving exact group, plural, kind,
    namespaced scope, the sole served/storage version reviewed here, and both
    `NamesAccepted=True` and `Established=True`;
@@ -155,9 +160,10 @@ may enable the following three ordered, separately recorded operations:
 
 Discovery and authorization have closed values. Discovery is `RESOLVED` or
 `UNRESOLVED`; authorization is `ALLOWED`, `DENIED`, or `UNRESOLVED`. Missing,
-stale, wrong-version/foreign, malformed, warning-bearing, unparseable, or
-transport-failed discovery is always `UNRESOLVED`, and the authorizer is not
-called. A warning, malformed answer, or transport/exit mismatch from
+stale, wrong-version/foreign, malformed, missing-requested-verb,
+warning-bearing, unparseable, or transport-failed discovery is always
+`UNRESOLVED`, and the authorizer is not called. A warning, malformed answer,
+or transport/exit mismatch from
 authorization is also `UNRESOLVED`. The response must exactly echo
 apiVersion, kind, and every requested ResourceAttribute; `status.allowed` must
 be a boolean, `denied` must be a boolean if present and cannot contradict an
@@ -218,10 +224,11 @@ ALL_NAMESPACES=false
 EXPECT=ALLOWED  # required pre-deletion baseline; DENIED only after the reviewed deletion
 ```
 
-The single JSON receipt must bind the exact requested discovery identity with
-`"state":"RESOLVED"`, report the phase-appropriate expected authorization
-state, both positive controls as `ALLOWED`, the inert denial control as
-`DENIED`, and
+The single JSON receipt must bind the exact requested discovery identity, verb,
+and closed `verbEvidence` (`DISCOVERY` or the exact ServiceAccount
+`AUTHORIZATION_ONLY` exception) with `"state":"RESOLVED"`, report the
+phase-appropriate expected authorization state, both positive controls as
+`ALLOWED`, the inert denial control as `DENIED`, and
 `"result":"PASS"`; any other output or nonzero exit stops the sweep. Record
 only the bounded receipt, never `--list` authorization inventory.
 
@@ -236,24 +243,29 @@ or record private host identity here. The launcher must also enforce the
 v1.36.3 ARM64 `kubectl` SHA-256 already recorded as
 `KUBECTL_ARM64_SHA256`.
 
-Executable and kubeconfig custody remains part of the future result. The oracle refuses
-links, non-regular sources, foreign owners, unsafe modes, an unpinned kubectl,
-and source replacement during binding. It copies from the held source
+Executable and kubeconfig custody remains part of the future result. The
+oracle requires one independently supplied lowercase SHA-256 pin for every
+executable and refuses links, non-regular sources, foreign owners, unsafe
+modes, a missing/malformed/mismatched kubectl pin, and source replacement
+during binding. It copies from the held source
 descriptor into private custody and revalidates descriptor identity, mode, and
 digest before every invocation; replacing the original path cannot change the
 bytes used. Live custody runs only on Linux/WSL with the platform pins. Native
-Windows and macOS retain the portable parsing, protocol-shape, identity, and
-value-sensitivity coverage; they do not simulate POSIX custody or produce a
-live receipt.
+Windows and macOS retain portable request/response parsing, discovery-verb,
+SSAR-echo, identity, and constant-answer decision tests; they do not pretend
+to run process-level kubectl parity, simulate POSIX custody, or produce a live
+receipt.
 
 `tests/security/test_flux_rbac_denial_oracle.py` drives the production kubectl
-adapter against an authenticated TLS loopback API surface. It observes real
-v1.36 raw discovery and exact JSON SelfSubjectAccessReview requests, including
-the complete ServiceAccount impersonation groups, serialization, warnings,
-and exit status; the fake
-authorizer is keyed on every request dimension and discovery state. This is a
-hermetic protocol parity test, not live-cluster evidence. No kind cluster,
-Raspberry Pi, Secret, apply, or provider is used.
+adapter against an authenticated TLS loopback API surface. It observes the
+real v1.36 kubectl client's raw discovery and exact JSON
+SelfSubjectAccessReview requests, including the complete ServiceAccount
+impersonation groups, serialization, warnings, and exit status; the loopback
+discovery and authorizer responses remain deliberately hand-written and keyed
+on every request dimension. This is hermetic client-protocol parity, not a
+real API-server/authorizer substitute. The issue-closing evidence therefore
+also requires the final matrix against a disposable real Kubernetes API
+server; never use the Raspberry Pi for that experiment.
 
 After the trusted launcher lands, and after applying the narrowed authority
 (step 3 below) but before deleting the broad binding (step 4), confirm each

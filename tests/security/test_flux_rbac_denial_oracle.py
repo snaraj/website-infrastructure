@@ -35,22 +35,38 @@ FLUX_SERVICE_ACCOUNT_GROUPS = (
 
 
 def _resource_list(group_version: str, resources: list[dict[str, object]]) -> dict[str, object]:
-    return {
-        "apiVersion": "v1",
+    document = {
         "groupVersion": group_version,
         "kind": "APIResourceList",
         "resources": resources,
     }
+    if group_version != "v1":
+        document["apiVersion"] = "v1"
+    return document
 
 
-def _resource(name: str, kind: str, namespaced: bool) -> dict[str, object]:
+def _resource(
+    name: str,
+    kind: str,
+    namespaced: bool,
+    verbs: object = None,
+) -> dict[str, object]:
     return {
         "name": name,
         "singularName": "",
         "namespaced": namespaced,
         "kind": kind,
-        "verbs": ["create", "get", "list", "watch"],
+        "verbs": verbs if verbs is not None else ["create", "get", "list", "watch"],
     }
+
+
+def _completed_json(document: object) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(
+        ["kubectl"],
+        0,
+        stdout=json.dumps(document).encode("utf-8"),
+        stderr=b"",
+    )
 
 
 def _synthetic_pem(label: str, marker: int, size: int) -> bytes:
@@ -609,6 +625,16 @@ class FluxRbacOracleCustodyTests(unittest.TestCase):
         with self.subTest(case="mode"), self.assertRaises(oracle.OracleError):
             oracle.BoundFile(self.tool, executable=True, expected_digest=self.digest)
 
+    def test_wrong_executable_digest_is_refused(self) -> None:
+        wrong_digest = "0" * 64
+        self.assertNotEqual(wrong_digest, self.digest)
+        with self.assertRaisesRegex(oracle.OracleError, "reviewed SHA-256 pin"):
+            oracle.BoundFile(
+                self.tool,
+                executable=True,
+                expected_digest=wrong_digest,
+            )
+
     def test_symlinked_parent_is_refused(self) -> None:
         real_parent = self.scratch / "real-parent"
         real_parent.mkdir()
@@ -810,6 +836,8 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
                 "kind": "Deployment",
                 "namespaced": True,
                 "crdName": None,
+                "verb": "create",
+                "verbEvidence": "DISCOVERY",
             },
         )
         self.assertEqual(receipt["authorization"], "DENIED")
@@ -938,6 +966,8 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
                 "kind": "Kustomization",
                 "namespaced": True,
                 "crdName": "kustomizations.kustomize.toolkit.fluxcd.io",
+                "verb": "list",
+                "verbEvidence": "DISCOVERY",
             },
         )
         attributes = [
@@ -1072,6 +1102,147 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
             ),
         )
 
+    def test_executable_pin_is_mandatory_and_closed_before_any_path_open(self) -> None:
+        unopened = Path("relative-path-must-not-be-opened")
+        for pin in (None, "", "0" * 63, "A" * 64):
+            with self.subTest(pin=pin), self.assertRaisesRegex(
+                oracle.OracleError,
+                "reviewed SHA-256 pin",
+            ):
+                oracle.BoundFile(
+                    unopened,
+                    executable=True,
+                    expected_digest=pin,
+                )
+
+    def test_discovery_binds_the_exact_request_verb_without_kubectl(self) -> None:
+        identity = oracle.RESOURCE_IDENTITIES[("apps", "deployments")]
+
+        def completed(verbs: object) -> subprocess.CompletedProcess[bytes]:
+            return _completed_json(
+                _resource_list(
+                    "apps/v1",
+                    [_resource("deployments", "Deployment", True, verbs)],
+                )
+            )
+
+        for verbs in (
+            [],
+            ["get", "list"],
+            "create",
+            ["create", "create"],
+            ["create", 1],
+            ["CREATE"],
+        ):
+            adapter = mock.Mock()
+            adapter.run.return_value = completed(verbs)
+            with self.subTest(verbs=verbs), self.assertRaisesRegex(
+                oracle.OracleError,
+                "exact reviewed request verb",
+            ):
+                oracle.discover(adapter, identity, "create")
+
+        adapter = mock.Mock()
+        adapter.run.return_value = completed(["create", "get", "list", "watch"])
+        receipt = oracle.discover(adapter, identity, "create")
+        self.assertEqual(receipt["verb"], "create")
+        self.assertEqual(receipt["verbEvidence"], "DISCOVERY")
+        self.assertEqual(receipt["resource"], "deployments")
+
+        service_accounts = oracle.RESOURCE_IDENTITIES[("", "serviceaccounts")]
+        adapter.run.return_value = _completed_json(
+            _resource_list(
+                "v1",
+                [_resource("serviceaccounts", "ServiceAccount", True)],
+            )
+        )
+        receipt = oracle.discover(adapter, service_accounts, "impersonate")
+        self.assertEqual(receipt["verbEvidence"], "AUTHORIZATION_ONLY")
+        adapter.run.return_value = completed(["create", "get", "list", "watch"])
+        with self.assertRaisesRegex(oracle.OracleError, "exact reviewed request verb"):
+            oracle.discover(adapter, identity, "impersonate")
+
+    def test_authorization_protocol_shape_and_echo_are_portable(self) -> None:
+        adapter = mock.Mock()
+        subject = "system:serviceaccount:flux-system:kustomize-controller"
+        spec = {
+            "resourceAttributes": {
+                "verb": "create",
+                "version": "v1",
+                "resource": "deployments",
+                "group": "apps",
+                "namespace": "kube-system",
+            }
+        }
+        arguments = (
+            "create",
+            "--raw=/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+            "-f",
+            "-",
+            f"--as={subject}",
+            "--as-group=system:serviceaccounts",
+            "--as-group=system:serviceaccounts:flux-system",
+            "--as-group=system:authenticated",
+        )
+        request = {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": spec,
+        }
+        response = {**request, "status": {"allowed": False, "denied": True}}
+        adapter.run.return_value = _completed_json(response)
+        self.assertEqual(
+            oracle.authorize(
+                adapter,
+                subject=subject,
+                verb="create",
+                identity=oracle.RESOURCE_IDENTITIES[("apps", "deployments")],
+                namespace="kube-system",
+                name=None,
+            ),
+            "DENIED",
+        )
+        payload = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        adapter.run.assert_called_once_with(arguments, stdin=payload)
+
+        foreign = json.loads(json.dumps(response))
+        foreign["spec"]["resourceAttributes"]["namespace"] = "foreign"
+        adapter.run.return_value = _completed_json(foreign)
+        with self.assertRaisesRegex(oracle.OracleError, "exactly echo"):
+            oracle.authorize(
+                adapter,
+                subject=subject,
+                verb="create",
+                identity=oracle.RESOURCE_IDENTITIES[("apps", "deployments")],
+                namespace="kube-system",
+                name=None,
+            )
+
+    def test_constant_answer_controls_are_portable(self) -> None:
+        request = {
+            "subject": "system:serviceaccount:flux-system:source-controller",
+            "verb": "create",
+            "group": "coordination.k8s.io",
+            "resource": "leases",
+            "namespace": "flux-system",
+            "name": None,
+            "expected": "ALLOWED",
+        }
+        with mock.patch.object(
+            oracle,
+            "discover",
+            return_value={"state": "RESOLVED"},
+        ):
+            for answer in ("ALLOWED", "DENIED"):
+                with self.subTest(answer=answer), mock.patch.object(
+                    oracle,
+                    "authorize",
+                    return_value=answer,
+                ):
+                    code, receipt = oracle.run_oracle(mock.Mock(), **request)
+                    self.assertEqual(code, oracle.EXIT_MISMATCH)
+                    self.assertEqual(receipt["result"], "FAIL")
+
     def test_cli_has_no_apply_or_mutating_kubectl_verb(self) -> None:
         source = (ROOT / "scripts" / "flux_rbac_denial_oracle.py").read_text(encoding="utf-8")
         for forbidden in ('"apply"', '"patch"', '"delete"', '"create"'):
@@ -1088,6 +1259,26 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
         self.assertEqual(
             oracle.RESOURCE_IDENTITIES[("apps", "deployments")].group_version,
             "apps/v1",
+        )
+
+    def test_required_linux_ci_lane_uses_repository_pinned_kubectl(self) -> None:
+        if not (
+            os.environ.get("GITHUB_ACTIONS") == "true"
+            and platform.system() == "Linux"
+        ):
+            self.skipTest("the required process-level parity lane runs in Linux CI")
+        self.assertTrue(POSIX_CUSTODY)
+        self.assertIsNotNone(KUBECTL, "Linux CI must not skip real-kubectl parity")
+        pins = {}
+        for line in ROOT.joinpath("versions.env").read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                pins[key] = value
+        pin_key = oracle._pin_key()
+        self.assertIn(pin_key, pins)
+        self.assertEqual(
+            hashlib.sha256(Path(KUBECTL or "").resolve().read_bytes()).hexdigest(),
+            pins[pin_key],
         )
 
     def test_invalid_scope_verb_and_names_never_reach_kubectl(self) -> None:

@@ -46,7 +46,10 @@ SERVICE_ACCOUNT_RE = re.compile(
 )
 DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
 DNS_SUBDOMAIN_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+API_VERB_RE = re.compile(r"[a-z]+\Z")
 VERBS = frozenset({"create", "get", "impersonate", "list", "patch"})
+AUTHORIZATION_ONLY_VERBS = frozenset({("impersonate", "", "serviceaccounts", None)})
 
 
 class OracleError(Exception):
@@ -270,6 +273,11 @@ class BoundFile:
         self.source = source
         self.executable = executable
         self.expected_digest = expected_digest
+        if executable and (
+            not isinstance(expected_digest, str)
+            or SHA256_RE.fullmatch(expected_digest) is None
+        ):
+            raise OracleError("executable custody requires one reviewed SHA-256 pin")
         if os.name != "posix":
             raise OracleError("POSIX descriptor custody requires WSL/Linux or macOS")
         self.work = _private_work()
@@ -487,14 +495,26 @@ def _json_output(completed: subprocess.CompletedProcess[bytes], operation: str) 
     return value
 
 
-def discover(adapter: KubectlAdapter, identity: ResourceIdentity) -> dict[str, object]:
+def discover(
+    adapter: KubectlAdapter,
+    identity: ResourceIdentity,
+    required_verb: str,
+) -> dict[str, object]:
     """Prove one exact resource identity through uncached raw discovery."""
+
+    if required_verb not in VERBS:
+        raise OracleError("discovery verb is outside the reviewed oracle verb set")
 
     document = _json_output(
         adapter.run(("get", f"--raw={identity.discovery_path}")),
         f"discovery {identity.group_version}",
     )
-    if document.get("apiVersion") != "v1" or document.get("kind") != "APIResourceList":
+    type_metadata_is_exact = (
+        identity.group == "" and "apiVersion" not in document
+    ) or (
+        identity.group != "" and document.get("apiVersion") == "v1"
+    )
+    if not type_metadata_is_exact or document.get("kind") != "APIResourceList":
         raise OracleError("discovery returned the wrong Kubernetes response kind")
     if document.get("groupVersion") != identity.group_version:
         raise OracleError("discovery returned a stale or foreign group/version")
@@ -511,6 +531,23 @@ def discover(adapter: KubectlAdapter, identity: ResourceIdentity) -> dict[str, o
     match = matches[0]
     if match.get("kind") != identity.kind or match.get("namespaced") is not identity.namespaced:
         raise OracleError("discovery resource kind or scope is foreign")
+    verbs = match.get("verbs")
+    authorization_only = (
+        required_verb,
+        identity.group,
+        identity.resource,
+        identity.subresource,
+    ) in AUTHORIZATION_ONLY_VERBS
+    if (
+        not isinstance(verbs, list)
+        or any(
+            not isinstance(item, str) or API_VERB_RE.fullmatch(item) is None
+            for item in verbs
+        )
+        or len(set(verbs)) != len(verbs)
+        or (required_verb not in verbs and not authorization_only)
+    ):
+        raise OracleError("discovery does not support the exact reviewed request verb")
 
     if identity.crd_name is not None:
         crd = _json_output(
@@ -577,6 +614,8 @@ def discover(adapter: KubectlAdapter, identity: ResourceIdentity) -> dict[str, o
         "kind": identity.kind,
         "namespaced": identity.namespaced,
         "crdName": identity.crd_name,
+        "verb": required_verb,
+        "verbEvidence": "AUTHORIZATION_ONLY" if authorization_only else "DISCOVERY",
     }
 
 
@@ -703,11 +742,13 @@ def run_oracle(
             "DENIED",
         ),
     )
-    discovery: dict[tuple[str, str], dict[str, object]] = {}
-    for identity in tuple(item[3] for item in controls) + (requested,):
-        key = (identity.group, identity.discovery_resource)
+    discovery: dict[tuple[str, str, str], dict[str, object]] = {}
+    for identity, discovery_verb in tuple((item[3], item[2]) for item in controls) + (
+        (requested, verb),
+    ):
+        key = (identity.group, identity.discovery_resource, discovery_verb)
         if key not in discovery:
-            discovery[key] = discover(adapter, identity)
+            discovery[key] = discover(adapter, identity, discovery_verb)
 
     control_receipts = []
     for label, control_subject, control_verb, identity, control_namespace, control_name, control_expected in controls:
@@ -722,13 +763,17 @@ def run_oracle(
         control_receipts.append(
             {
                 "name": label,
-                "discovery": discovery[(identity.group, identity.discovery_resource)],
+                "discovery": discovery[
+                    (identity.group, identity.discovery_resource, control_verb)
+                ],
                 "authorization": observed,
             }
         )
         if observed != control_expected:
             return EXIT_MISMATCH, {
-                "discovery": discovery[(requested.group, requested.discovery_resource)],
+                "discovery": discovery[
+                    (requested.group, requested.discovery_resource, verb)
+                ],
                 "authorization": "UNRESOLVED",
                 "controls": control_receipts,
                 "result": "FAIL",
@@ -753,7 +798,7 @@ def run_oracle(
             "name": name,
             "allNamespaces": all_namespaces,
         },
-        "discovery": discovery[(requested.group, requested.discovery_resource)],
+        "discovery": discovery[(requested.group, requested.discovery_resource, verb)],
         "authorization": observed,
         "expected": expected,
         "controls": control_receipts,
