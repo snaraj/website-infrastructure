@@ -2204,7 +2204,7 @@ class FreshClusterDryRunGateTests(InstallerBehaviourTestCase):
                 )
 
     def test_apply_refuses_an_existing_install_and_touches_nothing(self):
-        # The peer's P1: on the existing path the 21 phase-1 objects are rewritten
+        # The peer's P1: on the existing path the 27 phase-1 objects are rewritten
         # as `configured` with no prestate recorded, so a later failure rolls back
         # nothing and reports "the cluster is unchanged" over a namespace whose
         # RBAC, CRDs and policies were just rewritten. The scope of an honest
@@ -2940,7 +2940,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         self.assertIn("phase workloads create failed", completed.stderr)
         self.assertIn("rollback complete", completed.stderr)
         # The proof that matters: nothing of this attempt survives, and that
-        # includes all 12 non-namespaced objects `delete namespace` cannot reach.
+        # includes all 18 non-namespaced objects `delete namespace` cannot reach.
         registry = read(Path(completed.state) / "registry")
         for name in CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS:
             with self.subTest(object=name):
@@ -3151,7 +3151,7 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
     def test_a_signal_mid_transaction_never_leaves_silent_residue(self):
         # The gap a failed-phase rollback does not cover: a Ctrl-C, a hangup or a
         # `kill` during the apply leaves everything the earlier phases created,
-        # including all 12 non-namespaced objects, that a namespace delete
+        # including all 18 non-namespaced objects, that a namespace delete
         # cannot remove, with no undo and no list. The signal must take the same
         # rollback path a failed phase takes.
         returncode, errors, state = self._run_until_signalled(

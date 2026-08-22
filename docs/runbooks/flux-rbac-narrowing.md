@@ -462,7 +462,7 @@ skip discovery for the resource itself.
 This issue's local destructive authority was limited to a disposable kind
 cluster; it did not authorize a protected-cluster apply. A clean-from-zero
 kind v0.32.0 cluster running Kubernetes v1.36.1 established all eight reviewed
-Flux CRDs before the committed v1.36.4 kubectl client submitted any
+Flux CRDs before the resolved local v1.36.4 kubectl client submitted any
 authorization review. The merged oracle ran through held executable and
 mode-0600 flattened-kubeconfig custody, with the exact ServiceAccount user and
 all three Kubernetes groups on every raw SelfSubjectAccessReview.

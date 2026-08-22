@@ -45,8 +45,8 @@
 #   controller digest exactly.
 #
 #   TRANSACTION. A multi-object `kubectl create -f` is not atomic: a failure part-way leaves a
-#   created prefix, and 12 of this bundle's objects are non-namespaced (8 CRDs,
-#   3 ClusterRoles, 1 ClusterRoleBinding) which no `delete namespace` can
+#   created prefix, and 18 of this bundle's objects are non-namespaced (8 CRDs,
+#   6 ClusterRoles, 4 ClusterRoleBindings) which no `delete namespace` can
 #   remove. --apply therefore installs onto a FRESH cluster only. That is the
 #   scope in which the transaction is honest. Every object is created with an
 #   unpredictable per-attempt annotation and create-only semantics, so a
@@ -530,7 +530,7 @@ fi
 
 # An INTERRUPT is not a clean stop. A Ctrl-C, a terminal hangup, or a `kill`
 # during the transaction leaves everything the completed phases created -- including
-# the Namespace and all 12 non-namespaced RBAC/CRD objects -- with
+# the Namespace and all 18 non-namespaced RBAC/CRD objects -- with
 # nothing to remove them and no list of what to remove by hand. That is exactly
 # the residue the ledger exists to prevent, so the signal runs the SAME rollback
 # path a failed phase runs. Two hazards it must survive: arriving before any
@@ -1105,7 +1105,7 @@ fi
 # (2b) --apply installs onto a FRESH cluster only.
 #
 # Not a convenience limit -- a scope limit on what the transaction below can
-# honestly undo. On an existing install every one of the 22 phase-1 objects
+# honestly undo. On an existing install every one of the 27 phase-1 objects
 # reports `configured`: bytes rewritten in place, with no prestate recorded
 # anywhere. A ledger of CREATIONS cannot restore them, so a phase-2 or phase-3
 # failure would roll back nothing and print "this attempt created nothing; the
