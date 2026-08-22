@@ -39,7 +39,8 @@ from pathlib import Path
 from .support import required_tool
 
 
-BASH = shutil.which("bash")
+SYSTEM_BASH = Path("/bin/bash")
+BASH = str(SYSTEM_BASH) if SYSTEM_BASH.is_file() else shutil.which("bash")
 BASH_REQUIRED = "bash is required to exercise the installer"
 KUSTOMIZE = shutil.which("kustomize")
 CONFTEST = shutil.which("conftest")
@@ -1402,11 +1403,13 @@ class RenderLockTests(unittest.TestCase):
 
         installer = read(INSTALLER)
         block = capture(
-            r"(?s)declare -A PHASE_KINDS=\(\n(.*?)\n\)", installer, "the phase table"
+            r"(?s)phase_kinds\(\) \{\n(.*?)\n\}", installer, "the phase table"
         )
         declared = {
             phase: tuple(kinds.split("|"))
-            for phase, kinds in re.findall(r"\[([a-z0-9-]+)\]='([^']+)'", block)
+            for phase, kinds in re.findall(
+                r"^\s*([a-z0-9-]+)\) printf '%s' '([^']+)' ;;$", block, re.MULTILINE
+            )
         }
         self.assertEqual(
             declared,
@@ -1670,6 +1673,7 @@ class RealRepositoryTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 required_tool(BASH, BASH_REQUIRED),
+                "-p",
                 str(INSTALLER),
                 "--stage",
                 "enforce",
@@ -1694,6 +1698,7 @@ class RealRepositoryTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 required_tool(BASH, BASH_REQUIRED),
+                "-p",
                 str(INSTALLER),
                 "--stage",
                 "report-only",
@@ -1714,7 +1719,10 @@ class RealRepositoryTests(unittest.TestCase):
         controllers = read(ADMISSION / "kyverno" / "controllers.yaml")
         self.assertIn("@sha256:" + "0" * 64, controllers)
 
-    @unittest.skipUnless(BASH and PINNED_RENDERER, NEEDS_RENDERER)
+    @unittest.skipUnless(
+        BASH and PINNED_RENDERER and os.name != "nt",
+        "POSIX tool provenance is required; use WSL or Linux CI on Windows",
+    )
     def test_planning_the_real_repository_fails_closed(self):
         """Every apply path in THIS repository refuses, and names why.
 
@@ -1735,6 +1743,7 @@ class RealRepositoryTests(unittest.TestCase):
         )
         immutable_guard = re.compile(
             r"install-kyverno-admission: (?:"
+            r"kustomize executable path is a symlink|"
             r"kustomize executable sha256 [0-9a-f]{64} does not match "
             r"versions\.env KUSTOMIZE_LINUX_AMD64_SHA256|"
             r"kubectl is required|"
@@ -1746,7 +1755,14 @@ class RealRepositoryTests(unittest.TestCase):
         )
         for stage in ("report-only", "enforce"):
             completed = subprocess.run(
-                [required_tool(BASH, BASH_REQUIRED), str(INSTALLER), "--stage", stage, "--plan"],
+                [
+                    required_tool(BASH, BASH_REQUIRED),
+                    "-p",
+                    str(INSTALLER),
+                    "--stage",
+                    stage,
+                    "--plan",
+                ],
                 capture_output=True,
                 text=True,
                 cwd=str(ROOT),
@@ -2065,7 +2081,7 @@ SYNTHETIC_NAMESPACED, SYNTHETIC_JOURNAL_BODY = _synthetic_inventory()
 
 # The stubbed kubectl. It reproduces the report shapes the guards classify and
 # appends every invocation to KYVERNO_STUB_LOG so ordering can be asserted.
-_KUBECTL_STUB = r"""#!/usr/bin/env bash
+_KUBECTL_STUB = r"""#!/bin/bash -p
 args="$*"
 printf '%s\n' "$args" >>"${KYVERNO_STUB_LOG:-/dev/null}"
 scenario="${KYVERNO_STUB_SCENARIO:-clean}"
@@ -2223,7 +2239,10 @@ exit 99
 """
 
 
-@unittest.skipUnless(BASH, "bash is unavailable")
+@unittest.skipUnless(
+    BASH and os.name != "nt",
+    "POSIX installer behavior requires WSL or Linux CI on Windows",
+)
 class InstallerGuardTests(unittest.TestCase):
     """Behavioural: every guard, driven in both directions, against a synthetic
     repository and stubbed binaries. Nothing contacts a cluster."""
@@ -2305,7 +2324,7 @@ class InstallerGuardTests(unittest.TestCase):
 
         kustomize = cls.bin / "kustomize"
         kustomize.write_text(
-            "#!/usr/bin/env bash\n"
+            "#!/bin/bash -p\n"
             'if [[ "$1" == "version" ]]; then printf \'%s\\n\' "${KYVERNO_STUB_KUSTOMIZE_VERSION:-v5.8.1}"; exit 0; fi\n'
             'case "$2" in\n'
             '  */enforce) cat "${KYVERNO_STUB_RENDER_ENFORCE}" ;;\n'
@@ -2317,12 +2336,6 @@ class InstallerGuardTests(unittest.TestCase):
         kubectl = cls.bin / "kubectl"
         kubectl.write_text(_KUBECTL_STUB, encoding="utf-8")
         kubectl.chmod(0o755)
-        cls.bash_env = cls.base / "bash-env"
-        write_exact(
-            cls.bash_env,
-            "stat() { printf '%s\\n' \"${KYVERNO_STUB_NETWORK_MODE:-600}\"; }\n",
-        )
-
         with (cls.repo / "versions.env").open("a", encoding="utf-8") as versions:
             versions.write(
                 "KUSTOMIZE_LINUX_AMD64_SHA256={}\n".format(
@@ -2394,12 +2407,7 @@ class InstallerGuardTests(unittest.TestCase):
             hashlib.sha256(self.network_contract.read_bytes()).hexdigest(),
             hashlib.sha256(self.stage1_journal.read_bytes()).hexdigest(),
         ) + "|{}|1700000000".format("a" * 64)
-        # Git for Windows reports every ordinary NTFS fixture as 0644 even
-        # after chmod. BASH_ENV shadows only the synthetic process's `stat`;
-        # Linux CI exercises the production command, while mutations can still
-        # drive the 0600 refusal through KYVERNO_STUB_NETWORK_MODE.
-        environment["BASH_ENV"] = str(self.bash_env)
-        environment["KYVERNO_STUB_NETWORK_MODE"] = "600"
+        environment.pop("BASH_ENV", None)
         environment["KYVERNO_STUB_LOG"] = str(self.base / "invocations.log")
         crd_ready = self.base / "crd-ready"
         crd_ready.unlink(missing_ok=True)
@@ -2411,7 +2419,7 @@ class InstallerGuardTests(unittest.TestCase):
                 environment[key] = value
         (self.base / "invocations.log").write_text("", encoding="utf-8")
         return subprocess.run(
-            [required_tool(BASH, BASH_REQUIRED), str(self.installer), *arguments],
+            [required_tool(BASH, BASH_REQUIRED), "-p", str(self.installer), *arguments],
             capture_output=True,
             text=True,
             env=environment,
@@ -3597,12 +3605,11 @@ class InstallerGuardTests(unittest.TestCase):
         )
 
     def test_runtime_contract_mode_is_enforced(self):
-        completed = self._run(
-            "--stage",
-            "report-only",
-            "--plan",
-            KYVERNO_STUB_NETWORK_MODE="644",
-        )
+        self.network_contract.chmod(0o644)
+        try:
+            completed = self._run("--stage", "report-only", "--plan")
+        finally:
+            self.network_contract.chmod(0o600)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("mode must be 0600", completed.stderr)
 
