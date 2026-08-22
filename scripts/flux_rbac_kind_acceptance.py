@@ -84,6 +84,17 @@ REGISTRY_IMAGE = (
 )
 OWNER_LABEL = "dev.snaraj.flux-rbac-acceptance-owner"
 LOOPBACK = "127.0.0.1"
+RFC1918_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+FINAL_NETWORK_POLICY_NAMES = frozenset(
+    {
+        "allow-egress",
+        "allow-scraping",
+        "allow-webhooks",
+        "flux-rbac-acceptance-egress",
+    }
+)
 CANONICAL_ORIGIN_URLS = (
     "https://github.com/snaraj/website-infrastructure.git",
 )
@@ -212,6 +223,304 @@ def registry_publish_spec() -> str:
     # without actually opening the host listener. An explicit zero preserves
     # daemon allocation and makes the resulting inspected port reachable.
     return f"{LOOPBACK}:0:5000"
+
+
+def private_ipv4_host_cidr(value: object) -> str:
+    """Return one RFC 1918 IPv4 host route or fail closed."""
+
+    if not isinstance(value, str):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID") from None
+    if (
+        address.version != 4
+        or not any(address in network for network in RFC1918_IPV4_NETWORKS)
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+        or address.is_reserved
+    ):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    return f"{address.compressed}/32"
+
+
+def service_private_ipv4(
+    document: Mapping[str, object],
+    *,
+    namespace: str,
+    name: str,
+    required_ports: Sequence[tuple[str, int, str, int | str]],
+) -> str:
+    """Bind a synthetic Service identity, private address, and required ports."""
+
+    metadata = document.get("metadata")
+    spec = document.get("spec")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("namespace") != namespace
+        or metadata.get("name") != name
+        or not isinstance(spec, dict)
+        or spec.get("type") != "ClusterIP"
+        or spec.get("ipFamilies") != ["IPv4"]
+        or spec.get("ipFamilyPolicy") != "SingleStack"
+    ):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    cluster_ip = spec.get("clusterIP")
+    if spec.get("clusterIPs") != [cluster_ip]:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    ports = spec.get("ports")
+    if not isinstance(ports, list) or not ports:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    if any(not isinstance(item, dict) for item in ports):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    observed = [
+        (
+            item.get("name"),
+            item.get("port"),
+            item.get("protocol", "TCP"),
+            item.get("targetPort", item.get("port")),
+        )
+        for item in ports
+    ]
+    required = set(required_ports)
+    if (
+        len(observed) != len(set(observed))
+        or set(observed) != required
+    ):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    return private_ipv4_host_cidr(cluster_ip).removesuffix("/32")
+
+
+def api_backend_private_ipv4s(document: Mapping[str, object]) -> tuple[str, ...]:
+    """Extract the bounded ready IPv4 backend set for the synthetic API Service."""
+
+    items = document.get("items")
+    if not isinstance(items, list) or not items or len(items) > 16:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    addresses: set[str] = set()
+    address_count = 0
+    for item in items:
+        if not isinstance(item, dict) or item.get("addressType") != "IPv4":
+            raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+        metadata = item.get("metadata")
+        ports = item.get("ports")
+        endpoints = item.get("endpoints")
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("namespace") != "default"
+            or not isinstance(metadata.get("labels"), dict)
+            or metadata["labels"].get("kubernetes.io/service-name") != "kubernetes"
+            or not isinstance(ports, list)
+            or len(ports) != 1
+            or not isinstance(ports[0], dict)
+            or ports[0].get("name") != "https"
+            or ports[0].get("port") != 6443
+            or ports[0].get("protocol", "TCP") != "TCP"
+            or not isinstance(endpoints, list)
+            or not endpoints
+        ):
+            raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict):
+                raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+            conditions = endpoint.get("conditions", {})
+            endpoint_addresses = endpoint.get("addresses")
+            if (
+                not isinstance(conditions, dict)
+                or conditions.get("ready") is not True
+                or conditions.get("terminating") is True
+            ):
+                raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+            if not isinstance(endpoint_addresses, list) or not endpoint_addresses:
+                raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+            for address in endpoint_addresses:
+                canonical = private_ipv4_host_cidr(address).removesuffix("/32")
+                if canonical != address:
+                    raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+                addresses.add(canonical)
+                address_count += 1
+    if (
+        not addresses
+        or len(addresses) > 16
+        or len(addresses) != address_count
+    ):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    return tuple(sorted(addresses))
+
+
+def acceptance_egress_policy(
+    *,
+    owner: str,
+    api_service_ip: str,
+    api_backend_ips: Sequence[str],
+    dns_service_ip: str,
+    source_service_ip: str,
+    registry_service_ip: str,
+    registry_backend_ip: str,
+) -> dict[str, object]:
+    """Build only the flows needed by the disposable real-controller test."""
+
+    if re.fullmatch(r"[0-9a-f]{32}", owner) is None:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    if not api_backend_ips or len(api_backend_ips) > 16:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    api_backends = sorted(
+        {private_ipv4_host_cidr(address) for address in api_backend_ips}
+    )
+    if len(api_backends) != len(api_backend_ips):
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    registry_peers = sorted(
+        {
+            private_ipv4_host_cidr(registry_service_ip),
+            private_ipv4_host_cidr(registry_backend_ip),
+        }
+    )
+    if len(registry_peers) != 2:
+        raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": "flux-rbac-acceptance-egress",
+            "namespace": "flux-system",
+            "labels": {OWNER_LABEL: owner},
+        },
+        "spec": {
+            "podSelector": {
+                "matchLabels": {"app.kubernetes.io/part-of": "flux"}
+            },
+            "policyTypes": ["Egress"],
+            "egress": [
+                {
+                    "to": [
+                        {
+                            "ipBlock": {
+                                "cidr": private_ipv4_host_cidr(api_service_ip)
+                            }
+                        }
+                    ],
+                    "ports": [{"port": 443, "protocol": "TCP"}],
+                },
+                {
+                    "to": [
+                        {"ipBlock": {"cidr": cidr}} for cidr in api_backends
+                    ],
+                    "ports": [{"port": 6443, "protocol": "TCP"}],
+                },
+                {
+                    "to": [
+                        {
+                            "ipBlock": {
+                                "cidr": private_ipv4_host_cidr(dns_service_ip)
+                            }
+                        },
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": "kube-system"
+                                }
+                            },
+                            "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                        },
+                    ],
+                    "ports": [
+                        {"port": 53, "protocol": "UDP"},
+                        {"port": 53, "protocol": "TCP"},
+                    ],
+                },
+                {
+                    "to": [
+                        {
+                            "ipBlock": {
+                                "cidr": private_ipv4_host_cidr(source_service_ip)
+                            }
+                        }
+                    ],
+                    "ports": [{"port": 80, "protocol": "TCP"}],
+                },
+                {
+                    "to": [
+                        {"podSelector": {"matchLabels": {"app": "source-controller"}}}
+                    ],
+                    "ports": [{"port": 9090, "protocol": "TCP"}],
+                },
+                {
+                    "to": [
+                        {"ipBlock": {"cidr": cidr}} for cidr in registry_peers
+                    ],
+                    "ports": [{"port": 5000, "protocol": "TCP"}],
+                },
+            ],
+        },
+    }
+
+
+def validate_final_network_policy_inventory(
+    document: Mapping[str, object],
+    *,
+    owner: str,
+    acceptance_spec: object,
+) -> None:
+    """Prove the complete final Flux NetworkPolicy set and exact rule shapes."""
+
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", owner) is None
+        or not isinstance(acceptance_spec, dict)
+        or document.get("apiVersion") != "networking.k8s.io/v1"
+        or document.get("kind") != "NetworkPolicyList"
+    ):
+        raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+    items = document.get("items")
+    if not isinstance(items, list) or len(items) != len(FINAL_NETWORK_POLICY_NAMES):
+        raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+    observed_specs: dict[str, object] = {}
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or item.get("apiVersion") != "networking.k8s.io/v1"
+            or item.get("kind") != "NetworkPolicy"
+        ):
+            raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("namespace") != "flux-system":
+            raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+        name = metadata.get("name")
+        if not isinstance(name, str) or name in observed_specs:
+            raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+        if name == "flux-rbac-acceptance-egress":
+            if metadata.get("labels") != {OWNER_LABEL: owner}:
+                raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+        observed_specs[name] = item.get("spec")
+    expected_specs: dict[str, object] = {
+        "allow-egress": {
+            "ingress": [{"from": [{"podSelector": {}}]}],
+            "podSelector": {},
+            "policyTypes": ["Ingress", "Egress"],
+        },
+        "allow-scraping": {
+            "ingress": [
+                {
+                    "from": [{"namespaceSelector": {}}],
+                    "ports": [{"port": 8080, "protocol": "TCP"}],
+                }
+            ],
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+        },
+        "allow-webhooks": {
+            "ingress": [{"from": [{"namespaceSelector": {}}]}],
+            "podSelector": {
+                "matchLabels": {"app": "notification-controller"}
+            },
+            "policyTypes": ["Ingress"],
+        },
+        "flux-rbac-acceptance-egress": acceptance_spec,
+    }
+    if set(observed_specs) != FINAL_NETWORK_POLICY_NAMES or observed_specs != expected_specs:
+        raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
 
 
 class AcceptanceError(RuntimeError):
@@ -2508,6 +2817,7 @@ class AcceptanceHarness:
     registry_port: str | None = None
     workload_reference: str | None = None
     final_render: bytes | None = None
+    acceptance_egress_document: dict[str, object] | None = None
     kustomize_pod_uid: str | None = None
     snapshot_root: Path | None = None
     input_digests: dict[str, str] = field(default_factory=dict)
@@ -2699,6 +3009,7 @@ class AcceptanceHarness:
         self.readiness_negatives()
         self.machine.advance(State.COLD_START, State.READINESS_NEGATIVES)
         self.release_lifecycle()
+        self.assert_final_network_boundary()
         self.machine.advance(State.READINESS_NEGATIVES, State.RELEASE)
         self.machine.advance(State.RELEASE, State.COMPLETE)
         return dict(self.evidence)
@@ -3038,6 +3349,119 @@ class AcceptanceHarness:
         for row in rows:
             self.assert_review(row, expected)
 
+    def assert_acceptance_egress(self) -> None:
+        if self.owned is None or self.acceptance_egress_document is None:
+            raise AcceptanceError("ACCEPTANCE_EGRESS_INVALID")
+        observed = self.kube_json(
+            "-n",
+            "flux-system",
+            "get",
+            "networkpolicy",
+            "flux-rbac-acceptance-egress",
+            "-o",
+            "json",
+        )
+        metadata = observed.get("metadata")
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        expected_spec = self.acceptance_egress_document.get("spec")
+        if (
+            not isinstance(labels, dict)
+            or labels.get(OWNER_LABEL) != self.owned.run_id
+            or observed.get("spec") != expected_spec
+        ):
+            raise AcceptanceError("ACCEPTANCE_EGRESS_INVALID")
+
+    def install_acceptance_egress(self) -> None:
+        if self.owned is None or self.registry_ip is None:
+            raise AcceptanceError("ACCEPTANCE_EGRESS_INPUT_INVALID")
+        api_service = self.kube_json(
+            "-n", "default", "get", "service", "kubernetes", "-o", "json"
+        )
+        api_slices = self.kube_json(
+            "-n",
+            "default",
+            "get",
+            "endpointslices",
+            "-l",
+            "kubernetes.io/service-name=kubernetes",
+            "-o",
+            "json",
+        )
+        dns_service = self.kube_json(
+            "-n", "kube-system", "get", "service", "kube-dns", "-o", "json"
+        )
+        source_service = self.kube_json(
+            "-n",
+            "flux-system",
+            "get",
+            "service",
+            "source-controller",
+            "-o",
+            "json",
+        )
+        registry_service = self.kube_json(
+            "-n",
+            "flux-rbac-acceptance",
+            "get",
+            "service",
+            "registry",
+            "-o",
+            "json",
+        )
+        document = acceptance_egress_policy(
+            owner=self.owned.run_id,
+            api_service_ip=service_private_ipv4(
+                api_service,
+                namespace="default",
+                name="kubernetes",
+                required_ports=(("https", 443, "TCP", 6443),),
+            ),
+            api_backend_ips=api_backend_private_ipv4s(api_slices),
+            dns_service_ip=service_private_ipv4(
+                dns_service,
+                namespace="kube-system",
+                name="kube-dns",
+                required_ports=(
+                    ("dns", 53, "UDP", 53),
+                    ("dns-tcp", 53, "TCP", 53),
+                    ("metrics", 9153, "TCP", 9153),
+                ),
+            ),
+            source_service_ip=service_private_ipv4(
+                source_service,
+                namespace="flux-system",
+                name="source-controller",
+                required_ports=(("http", 80, "TCP", "http"),),
+            ),
+            registry_service_ip=service_private_ipv4(
+                registry_service,
+                namespace="flux-rbac-acceptance",
+                name="registry",
+                required_ports=(("registry", 5000, "TCP", 5000),),
+            ),
+            registry_backend_ip=self.registry_ip,
+        )
+        self.apply_document(document)
+        self.acceptance_egress_document = document
+        self.assert_acceptance_egress()
+
+    def assert_final_network_boundary(self) -> None:
+        if self.owned is None or self.acceptance_egress_document is None:
+            raise AcceptanceError("FINAL_NETWORK_BOUNDARY_INVALID")
+        policies = self.kube_json(
+            "-n",
+            "flux-system",
+            "get",
+            "networkpolicies",
+            "-o",
+            "json",
+        )
+        validate_final_network_policy_inventory(
+            policies,
+            owner=self.owned.run_id,
+            acceptance_spec=self.acceptance_egress_document.get("spec"),
+        )
+
     def apply_final_rbac(self) -> None:
         rendered = self.kube(
             "kustomize",
@@ -3066,6 +3490,11 @@ class AcceptanceHarness:
         ):
             raise AcceptanceError("FINAL_RENDER_INVALID")
         self.final_render = rendered
+        # The final controller root deliberately turns upstream's allow-all
+        # egress policy into a deny. Install the disposable test's exact API,
+        # DNS, artifact, and local-registry flows first so a NetworkPolicy-
+        # enforcing kind CNI tests RBAC instead of deadlocking every manager.
+        self.install_acceptance_egress()
         zero_render = controller_deployments_zero_replica(rendered)
         initial = self.evidence.get("controllerInitialCreation")
         if not isinstance(initial, dict):
@@ -3080,6 +3509,7 @@ class AcceptanceHarness:
             "--wait=true",
             "--timeout=60s",
         )
+        self.assert_final_network_boundary()
         self.wait_controllers(("source-controller",))
         shared = self.kube_json("get", "clusterrole", "crd-controller-flux-system", "-o", "json")
         rules = shared.get("rules")

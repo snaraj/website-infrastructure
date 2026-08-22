@@ -198,6 +198,334 @@ class PureContractTests(unittest.TestCase):
         self.assertIn("registry_publish_spec()", infrastructure)
         self.assertNotIn('LOOPBACK + ":" + ":5000"', infrastructure)
 
+    def test_acceptance_egress_is_private_exact_and_never_broad(self):
+        ip = lambda *octets: ".".join(octets)
+        api_service = ip("10", "96", "0", "1")
+        api_backends = (ip("172", "18", "0", "2"), ip("172", "18", "0", "3"))
+        dns_service = ip("10", "96", "0", "10")
+        source_service = ip("10", "96", "4", "20")
+        registry_service = ip("10", "96", "5", "30")
+        registry_backend = ip("172", "18", "0", "4")
+        policy = acceptance.acceptance_egress_policy(
+            owner="1" * 32,
+            api_service_ip=api_service,
+            api_backend_ips=api_backends,
+            dns_service_ip=dns_service,
+            source_service_ip=source_service,
+            registry_service_ip=registry_service,
+            registry_backend_ip=registry_backend,
+        )
+        self.assertEqual(
+            policy,
+            {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {
+                    "name": "flux-rbac-acceptance-egress",
+                    "namespace": "flux-system",
+                    "labels": {acceptance.OWNER_LABEL: "1" * 32},
+                },
+                "spec": {
+                    "podSelector": {
+                        "matchLabels": {"app.kubernetes.io/part-of": "flux"}
+                    },
+                    "policyTypes": ["Egress"],
+                    "egress": [
+                        {
+                            "to": [
+                                {"ipBlock": {"cidr": api_service + "/32"}}
+                            ],
+                            "ports": [{"port": 443, "protocol": "TCP"}],
+                        },
+                        {
+                            "to": [
+                                {"ipBlock": {"cidr": address + "/32"}}
+                                for address in api_backends
+                            ],
+                            "ports": [{"port": 6443, "protocol": "TCP"}],
+                        },
+                        {
+                            "to": [
+                                {"ipBlock": {"cidr": dns_service + "/32"}},
+                                {
+                                    "namespaceSelector": {
+                                        "matchLabels": {
+                                            "kubernetes.io/metadata.name": "kube-system"
+                                        }
+                                    },
+                                    "podSelector": {
+                                        "matchLabels": {"k8s-app": "kube-dns"}
+                                    },
+                                },
+                            ],
+                            "ports": [
+                                {"port": 53, "protocol": "UDP"},
+                                {"port": 53, "protocol": "TCP"},
+                            ],
+                        },
+                        {
+                            "to": [
+                                {"ipBlock": {"cidr": source_service + "/32"}}
+                            ],
+                            "ports": [{"port": 80, "protocol": "TCP"}],
+                        },
+                        {
+                            "to": [
+                                {
+                                    "podSelector": {
+                                        "matchLabels": {"app": "source-controller"}
+                                    }
+                                }
+                            ],
+                            "ports": [{"port": 9090, "protocol": "TCP"}],
+                        },
+                        {
+                            "to": [
+                                {"ipBlock": {"cidr": registry_service + "/32"}},
+                                {"ipBlock": {"cidr": registry_backend + "/32"}},
+                            ],
+                            "ports": [{"port": 5000, "protocol": "TCP"}],
+                        },
+                    ],
+                },
+            },
+        )
+        for invalid in (
+            ip("8", "8", "8", "8"),
+            acceptance.LOOPBACK,
+            ip("169", "254", "1", "1"),
+            ip("192", "0", "2", "1"),
+            ip("198", "18", "0", "1"),
+            ip("100", "64", "0", "1"),
+            "::" + "1",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    acceptance.AcceptanceError,
+                    "ACCEPTANCE_EGRESS_INPUT_INVALID",
+                ):
+                    acceptance.acceptance_egress_policy(
+                        owner="1" * 32,
+                        api_service_ip=invalid,
+                        api_backend_ips=(api_backends[0],),
+                        dns_service_ip=dns_service,
+                        source_service_ip=source_service,
+                        registry_service_ip=registry_service,
+                        registry_backend_ip=registry_backend,
+                    )
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "ACCEPTANCE_EGRESS_INPUT_INVALID"
+        ):
+            acceptance.acceptance_egress_policy(
+                owner="1" * 32,
+                api_service_ip=api_service,
+                api_backend_ips=(api_backends[0], api_backends[0]),
+                dns_service_ip=dns_service,
+                source_service_ip=source_service,
+                registry_service_ip=registry_service,
+                registry_backend_ip=registry_backend,
+            )
+
+    def test_final_network_policy_inventory_is_closed_and_exact(self):
+        ip = lambda *octets: ".".join(octets)
+        owner = "1" * 32
+        acceptance_policy = acceptance.acceptance_egress_policy(
+            owner=owner,
+            api_service_ip=ip("10", "96", "0", "1"),
+            api_backend_ips=(ip("172", "18", "0", "2"),),
+            dns_service_ip=ip("10", "96", "0", "10"),
+            source_service_ip=ip("10", "96", "4", "20"),
+            registry_service_ip=ip("10", "96", "5", "30"),
+            registry_backend_ip=ip("172", "18", "0", "4"),
+        )
+
+        def network_policy(name, spec, labels=None):
+            return {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {
+                    "name": name,
+                    "namespace": "flux-system",
+                    "labels": labels or {
+                        "app.kubernetes.io/part-of": "flux"
+                    },
+                },
+                "spec": spec,
+            }
+
+        inventory = {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicyList",
+            "items": [
+                network_policy(
+                    "allow-egress",
+                    {
+                        "ingress": [{"from": [{"podSelector": {}}]}],
+                        "podSelector": {},
+                        "policyTypes": ["Ingress", "Egress"],
+                    },
+                ),
+                network_policy(
+                    "allow-scraping",
+                    {
+                        "ingress": [
+                            {
+                                "from": [{"namespaceSelector": {}}],
+                                "ports": [{"port": 8080, "protocol": "TCP"}],
+                            }
+                        ],
+                        "podSelector": {},
+                        "policyTypes": ["Ingress"],
+                    },
+                ),
+                network_policy(
+                    "allow-webhooks",
+                    {
+                        "ingress": [{"from": [{"namespaceSelector": {}}]}],
+                        "podSelector": {
+                            "matchLabels": {"app": "notification-controller"}
+                        },
+                        "policyTypes": ["Ingress"],
+                    },
+                ),
+                acceptance_policy,
+            ],
+        }
+        acceptance.validate_final_network_policy_inventory(
+            inventory,
+            owner=owner,
+            acceptance_spec=acceptance_policy["spec"],
+        )
+        mutations = {}
+        extra_policy = copy.deepcopy(inventory)
+        extra_policy["items"].append(
+            network_policy(
+                "foreign-egress",
+                {
+                    "podSelector": {
+                        "matchLabels": {"app.kubernetes.io/part-of": "flux"}
+                    },
+                    "policyTypes": ["Egress"],
+                    "egress": [{}],
+                },
+            )
+        )
+        mutations["additional-selecting-policy"] = extra_policy
+        broad_peer = copy.deepcopy(inventory)
+        broad_peer["items"][3]["spec"]["egress"][2]["to"].append(
+            {"namespaceSelector": {}}
+        )
+        mutations["broad-peer"] = broad_peer
+        extra_port = copy.deepcopy(inventory)
+        extra_port["items"][3]["spec"]["egress"][0]["ports"].append(
+            {"port": 8443, "protocol": "TCP"}
+        )
+        mutations["extra-port"] = extra_port
+        for label, mutation in mutations.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    acceptance.AcceptanceError,
+                    "FINAL_NETWORK_BOUNDARY_INVALID",
+                ):
+                    acceptance.validate_final_network_policy_inventory(
+                        mutation,
+                        owner=owner,
+                        acceptance_spec=acceptance_policy["spec"],
+                    )
+
+    def test_acceptance_egress_inputs_bind_service_and_ready_api_backends(self):
+        ip = lambda *octets: ".".join(octets)
+        api_service = ip("10", "96", "0", "1")
+        ready_backend = ip("172", "18", "0", "2")
+        service = {
+            "metadata": {"namespace": "default", "name": "kubernetes"},
+            "spec": {
+                "clusterIP": api_service,
+                "clusterIPs": [api_service],
+                "ipFamilies": ["IPv4"],
+                "ipFamilyPolicy": "SingleStack",
+                "type": "ClusterIP",
+                "ports": [
+                    {
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "TCP",
+                        "targetPort": 6443,
+                    }
+                ],
+            },
+        }
+        self.assertEqual(
+            acceptance.service_private_ipv4(
+                service,
+                namespace="default",
+                name="kubernetes",
+                required_ports=(("https", 443, "TCP", 6443),),
+            ),
+            api_service,
+        )
+        endpoints = {
+            "items": [
+                {
+                    "metadata": {
+                        "namespace": "default",
+                        "name": "kubernetes",
+                        "labels": {"kubernetes.io/service-name": "kubernetes"},
+                    },
+                    "addressType": "IPv4",
+                    "ports": [
+                        {"name": "https", "port": 6443, "protocol": "TCP"}
+                    ],
+                    "endpoints": [
+                        {
+                            "addresses": [ready_backend],
+                            "conditions": {"ready": True},
+                        },
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(
+            acceptance.api_backend_private_ipv4s(endpoints),
+            (ready_backend,),
+        )
+        wrong_service = copy.deepcopy(service)
+        wrong_service["metadata"]["name"] = "foreign"
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "ACCEPTANCE_EGRESS_INPUT_INVALID"
+        ):
+            acceptance.service_private_ipv4(
+                wrong_service,
+                namespace="default",
+                name="kubernetes",
+                required_ports=(("https", 443, "TCP", 6443),),
+            )
+        unready = copy.deepcopy(endpoints)
+        unready["items"][0]["endpoints"][0]["conditions"]["ready"] = False
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "ACCEPTANCE_EGRESS_INPUT_INVALID"
+        ):
+            acceptance.api_backend_private_ipv4s(unready)
+        duplicate = copy.deepcopy(endpoints)
+        duplicate["items"][0]["endpoints"].append(
+            {
+                "addresses": [ready_backend],
+                "conditions": {"ready": True},
+            }
+        )
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "ACCEPTANCE_EGRESS_INPUT_INVALID"
+        ):
+            acceptance.api_backend_private_ipv4s(duplicate)
+        public_backend = copy.deepcopy(endpoints)
+        public_backend["items"][0]["endpoints"][0]["addresses"] = [
+            ip("8", "8", "8", "8")
+        ]
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "ACCEPTANCE_EGRESS_INPUT_INVALID"
+        ):
+            acceptance.api_backend_private_ipv4s(public_backend)
+
     def test_versions_parser_requires_digest_pins_and_no_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "versions.env"
@@ -2102,6 +2430,11 @@ class HarnessContractTests(unittest.TestCase):
         )
         self.assertIn("controller_deployments_zero_replica", final_rbac)
         self.assertNotIn("self.wait_controllers()", final_rbac)
+        self.assertLess(
+            final_rbac.index("self.install_acceptance_egress()"),
+            final_rbac.index("controller_deployments_zero_replica"),
+        )
+        self.assertIn("self.assert_final_network_boundary()", final_rbac)
         for forbidden in (
             '"scale", "deployment/helm-controller"',
             '"delete", "pod"',
@@ -2204,6 +2537,9 @@ class HarnessContractTests(unittest.TestCase):
             def release_lifecycle(self):
                 called.append("release")
 
+            def assert_final_network_boundary(self):
+                called.append("network-boundary")
+
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "state" / "journal.json"
             harness = OrchestrationHarness(
@@ -2228,7 +2564,7 @@ class HarnessContractTests(unittest.TestCase):
             [
                 "snapshot", "infrastructure", "artifacts", "stock", "final",
                 "kustomize-cold-start", "helm-cold-start",
-                "readiness-negatives", "release",
+                "readiness-negatives", "release", "network-boundary",
             ],
         )
 

@@ -85,6 +85,11 @@ ALLOWLIST = (
         "not a third invocation pin",
     ),
     (
+        "tests/security/test_flux_rbac_kind_acceptance.py",
+        "--skip-worktree",
+        "negative fixture proves Git hidden-index flags fail acceptance preflight",
+    ),
+    (
         "tests/security/test_trivy_scan_contract.py",
         "--skip-dirs ./tests/kubernetes/fixtures/deny",
         "pins the deny-fixture exemption as the ONLY allowed skip",
