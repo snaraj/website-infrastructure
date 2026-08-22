@@ -47,6 +47,16 @@ automountServiceAccountToken: false
 # ClusterRole's wildcards, cluster-wide Secret reads, and
 # `serviceaccounts/token` creation with an enumerated set. What the controllers
 # still need is namespaced, so it is granted here.
+#
+# The one part that CANNOT be namespaced lives elsewhere on purpose. Each
+# controller's authority over its own custom resources is a cluster-wide
+# list/watch (`--watch-all-namespaces=true`), so it has to be a ClusterRole; and
+# because crd-controller-role.yaml strips that authority from the shared role
+# inside the install transaction, the replacement has to be created by that same
+# transaction or a fresh install starts three controllers that cannot watch
+# anything. Those six objects are therefore part of the install root, in
+# controllers/per-controller-rbac.yaml (issue #98), not this file. This file is
+# reconciled later by Flux and is not applied by the installer.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

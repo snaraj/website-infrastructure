@@ -158,6 +158,42 @@ class OracleApiState:
                 "reviewed",
             ): True,
             (
+                source,
+                FLUX_SERVICE_ACCOUNT_GROUPS,
+                "update",
+                "kustomize.toolkit.fluxcd.io",
+                "v1",
+                "kustomizations",
+                "finalizers",
+                None,
+                None,
+                "reviewed",
+            ): False,
+            (
+                source,
+                FLUX_SERVICE_ACCOUNT_GROUPS,
+                "update",
+                "kustomize.toolkit.fluxcd.io",
+                "v1",
+                "kustomizations",
+                "status",
+                None,
+                None,
+                "reviewed",
+            ): False,
+            (
+                source,
+                FLUX_SERVICE_ACCOUNT_GROUPS,
+                "delete",
+                "source.toolkit.fluxcd.io",
+                "v1",
+                "helmcharts",
+                None,
+                None,
+                None,
+                "reviewed",
+            ): False,
+            (
                 kustomize,
                 FLUX_SERVICE_ACCOUNT_GROUPS,
                 "create",
@@ -243,6 +279,7 @@ class OracleApiHandler(BaseHTTPRequestHandler):
                 ("apps", "v1"),
                 ("coordination.k8s.io", "v1"),
                 ("kustomize.toolkit.fluxcd.io", "v1"),
+                ("source.toolkit.fluxcd.io", "v1"),
                 ("authorization.k8s.io", "v1"),
                 ("apiextensions.k8s.io", "v1"),
             ):
@@ -295,8 +332,39 @@ class OracleApiHandler(BaseHTTPRequestHandler):
                     "kustomizations",
                     "ForeignKind" if self.state.discovery_state == "foreign-kind" else "Kustomization",
                     self.state.discovery_state != "foreign-scope",
+                    ["create", "delete", "get", "list", "patch", "update", "watch"],
                 )
-                self._send(200, _resource_list("kustomize.toolkit.fluxcd.io/v1", [resource]))
+                self._send(
+                    200,
+                    _resource_list(
+                        "kustomize.toolkit.fluxcd.io/v1",
+                        [
+                            resource,
+                            _resource(
+                                "kustomizations/status",
+                                "Kustomization",
+                                True,
+                                ["get", "patch", "update"],
+                            ),
+                        ],
+                    ),
+                )
+            return
+        if path == "/apis/source.toolkit.fluxcd.io/v1":
+            self._send(
+                200,
+                _resource_list(
+                    "source.toolkit.fluxcd.io/v1",
+                    [
+                        _resource(
+                            "helmcharts",
+                            "HelmChart",
+                            True,
+                            ["create", "delete", "get", "list", "patch", "update", "watch"],
+                        )
+                    ],
+                ),
+            )
             return
         if path.endswith("/customresourcedefinitions/kustomizations.kustomize.toolkit.fluxcd.io"):
             version = "v1beta1" if self.state.discovery_state == "foreign-crd" else "v1"
@@ -326,6 +394,34 @@ class OracleApiHandler(BaseHTTPRequestHandler):
                         "versions": [{"name": version, "served": True, "storage": True}],
                     },
                     "status": {"conditions": conditions},
+                },
+            )
+            return
+        if path.endswith(
+            "/customresourcedefinitions/helmcharts.source.toolkit.fluxcd.io"
+        ):
+            self._send(
+                200,
+                {
+                    "apiVersion": "apiextensions.k8s.io/v1",
+                    "kind": "CustomResourceDefinition",
+                    "metadata": {
+                        "name": "helmcharts.source.toolkit.fluxcd.io",
+                    },
+                    "spec": {
+                        "group": "source.toolkit.fluxcd.io",
+                        "scope": "Namespaced",
+                        "names": {"plural": "helmcharts", "kind": "HelmChart"},
+                        "versions": [
+                            {"name": "v1", "served": True, "storage": True}
+                        ],
+                    },
+                    "status": {
+                        "conditions": [
+                            {"type": "Established", "status": "True"},
+                            {"type": "NamesAccepted", "status": "True"},
+                        ]
+                    },
                 },
             )
             return
@@ -595,6 +691,45 @@ class ProtocolFixture:
             resource="serviceaccounts/token",
             namespace="flux-system",
             name="controller",
+            expected="DENIED",
+        )
+
+    def run_finalizer_denial(self) -> tuple[int, dict[str, object]]:
+        return oracle.run_oracle(
+            self.adapter,
+            subject="system:serviceaccount:flux-system:source-controller",
+            verb="update",
+            group="kustomize.toolkit.fluxcd.io",
+            resource="kustomizations/finalizers",
+            namespace=None,
+            name=None,
+            all_namespaces=True,
+            expected="DENIED",
+        )
+
+    def run_status_denial(self) -> tuple[int, dict[str, object]]:
+        return oracle.run_oracle(
+            self.adapter,
+            subject="system:serviceaccount:flux-system:source-controller",
+            verb="update",
+            group="kustomize.toolkit.fluxcd.io",
+            resource="kustomizations/status",
+            namespace=None,
+            name=None,
+            all_namespaces=True,
+            expected="DENIED",
+        )
+
+    def run_delete_denial(self) -> tuple[int, dict[str, object]]:
+        return oracle.run_oracle(
+            self.adapter,
+            subject="system:serviceaccount:flux-system:source-controller",
+            verb="delete",
+            group="source.toolkit.fluxcd.io",
+            resource="helmcharts",
+            namespace=None,
+            name=None,
+            all_namespaces=True,
             expected="DENIED",
         )
 
@@ -995,6 +1130,70 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
             },
         )
 
+    def test_finalizer_uses_base_discovery_and_exact_authorization_identity(self) -> None:
+        code, receipt = self.fixture.run_finalizer_denial()
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["request"]["resource"], "kustomizations/finalizers")
+        self.assertEqual(receipt["request"]["subresource"], "finalizers")
+        self.assertEqual(receipt["discovery"]["resource"], "kustomizations/finalizers")
+        self.assertEqual(receipt["discovery"]["verbEvidence"], "AUTHORIZATION_ONLY")
+        discovery_paths = [
+            item["path"]
+            for item in self.fixture.state.requests
+            if item["method"] == "GET"
+        ]
+        self.assertIn(
+            "/apis/kustomize.toolkit.fluxcd.io/v1?timeout=10s",
+            discovery_paths,
+        )
+        self.assertEqual(
+            self.fixture.state.requests[-1]["attributes"],
+            {
+                "verb": "update",
+                "group": "kustomize.toolkit.fluxcd.io",
+                "version": "v1",
+                "resource": "kustomizations",
+                "subresource": "finalizers",
+            },
+        )
+
+    def test_status_update_uses_advertised_subresource_and_exact_identity(self) -> None:
+        code, receipt = self.fixture.run_status_denial()
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["request"]["resource"], "kustomizations/status")
+        self.assertEqual(receipt["request"]["subresource"], "status")
+        self.assertEqual(receipt["discovery"]["resource"], "kustomizations/status")
+        self.assertEqual(receipt["discovery"]["verb"], "update")
+        self.assertEqual(receipt["discovery"]["verbEvidence"], "DISCOVERY")
+        self.assertEqual(
+            self.fixture.state.requests[-1]["attributes"],
+            {
+                "verb": "update",
+                "group": "kustomize.toolkit.fluxcd.io",
+                "version": "v1",
+                "resource": "kustomizations",
+                "subresource": "status",
+            },
+        )
+
+    def test_delete_uses_exact_flux_crd_discovery_and_identity(self) -> None:
+        code, receipt = self.fixture.run_delete_denial()
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["request"]["resource"], "helmcharts")
+        self.assertIsNone(receipt["request"]["subresource"])
+        self.assertEqual(receipt["discovery"]["crdName"], "helmcharts.source.toolkit.fluxcd.io")
+        self.assertEqual(receipt["discovery"]["verb"], "delete")
+        self.assertEqual(receipt["discovery"]["verbEvidence"], "DISCOVERY")
+        self.assertEqual(
+            self.fixture.state.requests[-1]["attributes"],
+            {
+                "verb": "delete",
+                "group": "source.toolkit.fluxcd.io",
+                "version": "v1",
+                "resource": "helmcharts",
+            },
+        )
+
     def test_authorizer_is_value_sensitive_to_every_request_dimension(self) -> None:
         subject = "system:serviceaccount:flux-system:source-controller"
         identity = oracle.RESOURCE_IDENTITIES[("coordination.k8s.io", "leases")]
@@ -1084,7 +1283,10 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
 
 class FluxRbacOraclePortableStructureTests(unittest.TestCase):
     def test_reviewed_verbs_and_name_grammars_are_exact_and_bounded(self) -> None:
-        self.assertEqual(oracle.VERBS, {"create", "get", "impersonate", "list", "patch"})
+        self.assertEqual(
+            oracle.VERBS,
+            {"create", "delete", "get", "impersonate", "list", "patch", "update"},
+        )
         self.assertTrue(oracle._valid_namespace("n" * 63))
         self.assertFalse(oracle._valid_namespace("n" * 64))
         self.assertFalse(oracle._valid_namespace("flux.system"))
@@ -1100,6 +1302,22 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
                 "system:serviceaccounts:flux-system",
                 "system:authenticated",
             ),
+        )
+        expected_subresources = {
+            ("source.toolkit.fluxcd.io", "buckets/status"): "status",
+            ("kustomize.toolkit.fluxcd.io", "kustomizations/status"): "status",
+            (
+                "kustomize.toolkit.fluxcd.io",
+                "kustomizations/finalizers",
+            ): "finalizers",
+            ("helm.toolkit.fluxcd.io", "helmreleases/status"): "status",
+        }
+        self.assertEqual(
+            {
+                key: oracle.RESOURCE_IDENTITIES[key].subresource
+                for key in expected_subresources
+            },
+            expected_subresources,
         )
 
     def test_executable_pin_is_mandatory_and_closed_before_any_path_open(self) -> None:
@@ -1162,6 +1380,19 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
         self.assertEqual(
             oracle.AUTHORIZATION_ONLY_VERBS,
             frozenset({("impersonate", "", "serviceaccounts", None)}),
+        )
+        self.assertEqual(
+            oracle.AUTHORIZATION_ONLY_RESOURCES,
+            frozenset(
+                {
+                    (
+                        "update",
+                        "kustomize.toolkit.fluxcd.io",
+                        "kustomizations",
+                        "finalizers",
+                    )
+                }
+            ),
         )
         for key in (
             ("", "secrets"),

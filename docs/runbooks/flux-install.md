@@ -37,7 +37,7 @@ desired state, the live install carries at least:
 
 | Live (stock upstream render) | Reviewed desired state |
 | --- | --- |
-| `cluster-reconciler-flux-system` ClusterRoleBinding grants `cluster-admin` to the kustomize and helm controllers | that binding is deleted by the overlay; the only ClusterRoleBinding is `crd-controller-flux-system` |
+| `cluster-reconciler-flux-system` ClusterRoleBinding grants `cluster-admin` to the kustomize and helm controllers | that binding is deleted by the overlay; the remaining bindings are `crd-controller-flux-system` plus one per controller |
 | that binding's subject list names four ServiceAccounts that do not exist | subjects are exactly the three ServiceAccounts the install creates |
 | the `allow-egress` NetworkPolicy keeps upstream's blanket `egress: [{}]` — every `flux-system` Pod may egress anywhere | the blanket rule is patched away and only enumerated flows are allowed |
 | the `flux-system` Namespace carries Pod Security `warn` only | `enforce`/`audit`/`warn` restricted at a pinned version |
@@ -58,24 +58,34 @@ that refusal is correct and is not a defect to work around.
 
 ## Why the install is inert
 
-The install root renders exactly 24 objects:
+The install root renders exactly 30 objects:
 
 - one Namespace;
 - eight Flux CRDs;
-- three ClusterRoles and one ClusterRoleBinding after the overlay deletes the
-  generated `cluster-reconciler-flux-system` binding;
+- six ClusterRoles and four ClusterRoleBindings after the overlay deletes the
+  generated `cluster-reconciler-flux-system` binding: the three generated ones
+  (`crd-controller-flux-system`, now carrying no Flux API group at all, plus the
+  `flux-edit`/`flux-view` aggregation roles) and the three authored
+  per-controller pairs that replace the Flux-group authority the narrowing patch
+  removes (issue #98);
 - one ResourceQuota, three ServiceAccounts, one Service, three generated
   NetworkPolicies, and three Deployments in `flux-system`.
 
-The overlay never restores `cluster-admin`. The only rendered
-ClusterRoleBinding is `crd-controller-flux-system`, and its subjects are the
-three ServiceAccounts that this install actually creates. Reconciliation later
-uses the namespaced impersonation/RBAC contract from the current main branch;
-this PR does not replace it with generated broad authority.
+The overlay never restores `cluster-admin`. `crd-controller-flux-system`'s
+subjects are the three ServiceAccounts that this install actually creates, and
+each per-controller binding names exactly ONE of them. The per-controller
+objects are part of THIS transaction on purpose: the same render strips every
+Flux API group out of the shared role, so authority that replaces it has to be
+created by the same apply. Moving them to `kubernetes/flux-system/access.yaml`
+instead — which Flux reconciles later — would start three controllers that
+cannot watch their own custom resources and can never reach readiness.
+Reconciliation later adds the namespaced impersonation/RBAC contract from
+`access.yaml`; it does not replace this install-root authority with generated
+broad authority.
 
 The root sync objects live in
 [`kubernetes/flux-system/gotk-sync.yaml`](../../kubernetes/flux-system/gotk-sync.yaml).
-They are not part of the 24-object render. With no Flux custom resource to
+They are not part of the 30-object render. With no Flux custom resource to
 watch, the controllers elect leaders, establish watches, and idle. Both public
 sites continue through their independent outbound Cloudflare Tunnels whether
 Flux exists or not.
@@ -92,7 +102,7 @@ The installer owns this order:
 
 | Phase | Exact mutation | Invariant |
 | --- | --- | --- |
-| 1 | the 21 non-Deployment objects from the controller render | no controller Pod exists |
+| 1 | the 27 non-Deployment objects from the controller render | no controller Pod exists |
 | 2 | `default-deny`, `flux-controllers-dns`, `flux-controllers-artifacts`, and `flux-controllers-kube-apiserver` | only reviewed startup flows exist |
 | 2b | one `flux-api-reachability-canary` Pod | the selected-CNI in-Pod Service/API path must succeed; the Pod is then deleted and proved absent |
 | 3 | the three controller Deployments | Pods start only after the executable API-path proof |
@@ -215,7 +225,7 @@ COMMON_ARGS=(
 ```
 
 This contacts no cluster. It validates the pinned tools, immutable images,
-exact 24-object controller inventory, 21 + 3 controller split, 4 + 1 policy
+exact 30-object controller inventory, 27 + 3 controller split, 4 + 1 policy
 split, restricted Pod Security labels, deleted blanket egress, absence of Flux
 custom resources and Secrets, least-privilege effective RBAC inventory, and the
 one-Pod canary shape. It prints three render SHA-256 values and the source
@@ -238,11 +248,11 @@ object.
 Where no `flux-system` Namespace exists, server dry-run cannot persist the
 dry-run Namespace before validating its children
 ([kubernetes/kubernetes#83562](https://github.com/kubernetes/kubernetes/issues/83562)).
-The expected, healthy result is exactly 13 independently creatable objects
-(Namespace, eight CRDs, three ClusterRoles, one ClusterRoleBinding) and 11
+The expected, healthy result is exactly 19 independently creatable objects
+(Namespace, eight CRDs, six ClusterRoles, four ClusterRoleBindings) and 11
 namespaced children reporting `namespaces "flux-system" not found`. Any other
 error, object, namespace, status, or diagnostic fails closed. Client-side strict
-validation still covers all 24 objects and the policy/canary renders.
+validation still covers all 30 objects and the policy/canary renders.
 
 **That is not what this cluster will report.** `flux-system` already exists
 here, so the plan takes the existing-installation path below and the
@@ -439,7 +449,7 @@ Flux custom resource, or policy.
   existing install through this fresh-only path. **This is the current
   cluster's branch**: the only installer behaviour to exercise against it today
   is that `--plan` classifies and that `--apply` refuses.
-- If every one of the 24 controller objects, five policy objects, and canary is
+- If every one of the 30 controller objects, five policy objects, and canary is
   absent and the owner separately authorizes a fresh installation, run Step 2.
   This branch becomes reachable on this cluster only after Option B in
   "Converging the existing install" has been separately authorized and
@@ -484,12 +494,18 @@ Any unknown result is a blocker, not a pass.
 A failed `--apply` already runs its own ledger-backed rollback. For a separately
 authorized removal of a successful inert install,
 `kubectl delete namespace flux-system` is **not sufficient**. It leaves these
-12 non-namespaced objects:
+18 non-namespaced objects:
 
 ```sh
-kubectl delete clusterrolebinding crd-controller-flux-system
+kubectl delete clusterrolebinding crd-controller-flux-system \
+  crd-controller-source-flux-system \
+  crd-controller-kustomize-flux-system \
+  crd-controller-helm-flux-system
 kubectl delete clusterrole crd-controller-flux-system \
-  flux-edit-flux-system flux-view-flux-system
+  flux-edit-flux-system flux-view-flux-system \
+  crd-controller-source-flux-system \
+  crd-controller-kustomize-flux-system \
+  crd-controller-helm-flux-system
 kubectl delete crd buckets.source.toolkit.fluxcd.io \
   externalartifacts.source.toolkit.fluxcd.io \
   gitrepositories.source.toolkit.fluxcd.io \
@@ -506,8 +522,12 @@ These commands are not live authorization; they document complete inventory so a
 future reviewed rollback cannot mistake Namespace deletion for full removal.
 
 The reviewed render contains no `cluster-reconciler-flux-system` binding, so the
-list above is complete **for an install this repository created**. It is NOT
-complete for the cluster as it stands: the live stock install still carries
+list above is complete **for the controller install root this repository
+renders**, including the six per-controller objects. `access.yaml` contributes
+only namespaced RBAC and leaves no extra cluster-scoped removal residue.
+
+One live-prestate object is outside that desired inventory: the stock install
+still carries
 `cluster-reconciler-flux-system`, and removing the live install therefore also
 requires
 
