@@ -259,6 +259,7 @@ def write_site_release(
         "spec:\n"
         "  suspend: {suspended}\n"
         "  interval: 10m0s\n"
+        "  maxHistory: 2\n"
         "  releaseName: {slug}\n"
         "  serviceAccountName: helm-reconciler\n"
         "  driftDetection:\n"
