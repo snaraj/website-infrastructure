@@ -187,6 +187,12 @@ class MatrixContractTests(unittest.TestCase):
 
 
 class PureContractTests(unittest.TestCase):
+    def test_flux_api_group_suffix_requires_a_dns_label_boundary(self):
+        self.assertTrue(acceptance.is_flux_api_group("source.toolkit.fluxcd.io"))
+        self.assertTrue(acceptance.is_flux_api_group("toolkit.fluxcd.io"))
+        self.assertFalse(acceptance.is_flux_api_group("nottoolkit.fluxcd.io"))
+        self.assertFalse(acceptance.is_flux_api_group("toolkit.fluxcd.io.example"))
+
     def test_registry_publish_uses_explicit_random_loopback_port(self):
         self.assertEqual(acceptance.registry_publish_spec(), "127.0.0.1:0:5000")
         infrastructure = (

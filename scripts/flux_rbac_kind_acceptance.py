@@ -1705,6 +1705,10 @@ def service_account_groups(subject: str) -> tuple[str, str, str]:
     )
 
 
+def is_flux_api_group(group: str) -> bool:
+    return group == "toolkit.fluxcd.io" or group.endswith(".toolkit.fluxcd.io")
+
+
 def review_document(row: AccessRow) -> dict[str, object]:
     attributes: dict[str, object] = {
         "verb": row.verb,
@@ -3379,7 +3383,7 @@ class AcceptanceHarness:
         shared = self.kube_json("get", "clusterrole", "crd-controller-flux-system", "-o", "json")
         rules = shared.get("rules")
         if not isinstance(rules, list) or any(
-            group.endswith("toolkit.fluxcd.io")
+            is_flux_api_group(group)
             for rule in rules
             if isinstance(rule, dict)
             for group in rule.get("apiGroups", [])
