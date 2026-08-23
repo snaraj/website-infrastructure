@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.19 and can therefore
+# selector.  Its protected-base candidate follows v0.1.20 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.20"
+AUTHORIZED_RELEASE_TAG = "v0.1.21"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-convergence.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-anonymous-pr-verification.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -1366,6 +1366,37 @@ def github_get_list(path: str) -> list[object]:
     return value
 
 
+def github_require_pull_merged(path: str) -> None:
+    """Require GitHub's authoritative merged-PR endpoint to return 204."""
+
+    url = GITHUB_API + path
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "website-infrastructure-flux-rbac-convergence/1",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status != 204:
+                raise TransactionError("GITHUB_PULL_MERGED_STATUS_INVALID")
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != "https" or final.netloc != "api.github.com":
+                raise TransactionError("GITHUB_REDIRECT_INVALID")
+            payload = response.read(1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise TransactionError("GITHUB_PULL_NOT_MERGED") from exc
+        raise TransactionError("GITHUB_PULL_MERGED_STATUS_INVALID") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise TransactionError("GITHUB_REQUEST_FAILED") from exc
+    if payload:
+        raise TransactionError("GITHUB_PULL_MERGED_RESPONSE_INVALID")
+
+
 def git_blob_sha1(payload: bytes) -> str:
     framed = b"blob " + str(len(payload)).encode("ascii") + b"\x00" + payload
     return hashlib.sha1(framed, usedforsecurity=False).hexdigest()
@@ -1509,9 +1540,12 @@ def verify_release_identity(
         or SOURCE_REVISION_RE.fullmatch(str(tree.get("sha", ""))) is None
         or not isinstance(parents, list)
         or len(parents) != 1
+        or not isinstance(parents[0], Mapping)
+        or SOURCE_REVISION_RE.fullmatch(str(parents[0].get("sha", ""))) is None
     ):
         raise TransactionError("PROTECTED_MAIN_SIGNATURE_INVALID")
     tree_sha = str(tree["sha"])
+    source_parent_sha = str(parents[0]["sha"])
     main_ref = github_get(f"/repos/{REPOSITORY}/git/ref/heads/main")
     main_object = main_ref.get("object")
     if (
@@ -1555,28 +1589,54 @@ def verify_release_identity(
     merged_by = pull.get("merged_by")
     base_repo = pull_base.get("repo") if isinstance(pull_base, Mapping) else None
     head_repo = pull_head.get("repo") if isinstance(pull_head, Mapping) else None
+    pull_author = pull.get("user")
+    base_user = pull_base.get("user") if isinstance(pull_base, Mapping) else None
+    head_user = pull_head.get("user") if isinstance(pull_head, Mapping) else None
     head_sha = pull_head.get("sha") if isinstance(pull_head, Mapping) else None
+    head_ref = pull_head.get("ref") if isinstance(pull_head, Mapping) else None
+    merge_commit_sha = pull.get("merge_commit_sha")
+    merged_at = pull.get("merged_at")
     if (
         pull.get("number") != pull_number
         or pull.get("state") != "closed"
         or pull.get("draft") is not False
-        or pull.get("merged_at") is None
-        or pull.get("merge_commit_sha") != source_revision
+        or pull.get("merged") is not True
+        or not isinstance(merged_at, str)
+        or merge_commit_sha not in (None, source_revision)
         or not isinstance(pull_base, Mapping)
         or pull_base.get("ref") != "main"
+        or pull_base.get("label") != f"{OWNER_LOGIN}:main"
+        or pull_base.get("sha") != source_parent_sha
         or not isinstance(base_repo, Mapping)
         or base_repo.get("full_name") != REPOSITORY
+        or not isinstance(base_user, Mapping)
+        or base_user.get("login") != OWNER_LOGIN
         or not isinstance(head_repo, Mapping)
         or head_repo.get("full_name") != REPOSITORY
+        or not isinstance(head_user, Mapping)
+        or head_user.get("login") != OWNER_LOGIN
+        or not isinstance(head_ref, str)
+        or not head_ref
+        or pull_head.get("label") != f"{OWNER_LOGIN}:{head_ref}"
+        or not isinstance(pull_author, Mapping)
+        or pull_author.get("login") != OWNER_LOGIN
         or not isinstance(merged_by, Mapping)
         or merged_by.get("login") != OWNER_LOGIN
         or not isinstance(head_sha, str)
         or SOURCE_REVISION_RE.fullmatch(head_sha) is None
     ):
         raise TransactionError("PROTECTED_MAIN_PR_IDENTITY_INVALID")
+    try:
+        parse_time(merged_at, "PR_MERGED_AT")
+    except TransactionError as exc:
+        raise TransactionError("PROTECTED_MAIN_PR_IDENTITY_INVALID") from exc
+    github_require_pull_merged(
+        f"/repos/{REPOSITORY}/pulls/{pull_number}/merge"
+    )
     head_commit = github_get(f"/repos/{REPOSITORY}/commits/{head_sha}")
     head_body = head_commit.get("commit")
     head_verification = head_body.get("verification") if isinstance(head_body, Mapping) else None
+    head_tree = head_body.get("tree") if isinstance(head_body, Mapping) else None
     if (
         head_commit.get("sha") != head_sha
         or not isinstance(head_verification, Mapping)
@@ -1584,6 +1644,8 @@ def verify_release_identity(
         or head_verification.get("reason") != "valid"
     ):
         raise TransactionError("PROTECTED_PR_HEAD_SIGNATURE_INVALID")
+    if not isinstance(head_tree, Mapping) or head_tree.get("sha") != tree_sha:
+        raise TransactionError("PROTECTED_PR_HEAD_TREE_INVALID")
 
     pull_runs = github_get(
         f"/repos/{REPOSITORY}/actions/workflows/pull-request.yml/runs?"

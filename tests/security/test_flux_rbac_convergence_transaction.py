@@ -399,7 +399,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-convergence.md": 0o600,
+            "changelog.d/141-anonymous-pr-verification.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -1307,6 +1307,7 @@ class ReleaseOrderingTests(unittest.TestCase):
     SOURCE = "a" * 40
     HEAD = "b" * 40
     TREE = "c" * 40
+    BASE = "e" * 40
     TAG_OBJECT = "d" * 40
     TAG = transaction.AUTHORIZED_RELEASE_TAG
 
@@ -1367,26 +1368,37 @@ class ReleaseOrderingTests(unittest.TestCase):
                         "verification": {"verified": True, "reason": "valid"},
                         "tree": {"sha": self.TREE},
                     },
-                    "parents": [{"sha": "e" * 40}],
+                    "parents": [{"sha": self.BASE}],
                 }
             if path == f"/repos/{transaction.REPOSITORY}/git/ref/heads/main":
                 return {
                     "ref": "refs/heads/main",
                     "object": {"type": "commit", "sha": self.SOURCE},
                 }
-            if path == f"/repos/{transaction.REPOSITORY}/pulls/17":
+            if path.startswith(f"/repos/{transaction.REPOSITORY}/pulls/"):
                 return {
                     "number": 17,
                     "state": "closed",
                     "draft": False,
+                    "merged": True,
                     "merged_at": "2026-08-22T11:58:00Z",
                     "merge_commit_sha": self.SOURCE,
+                    "user": {"login": transaction.OWNER_LOGIN},
                     "base": {
                         "ref": "main",
+                        "label": f"{transaction.OWNER_LOGIN}:main",
+                        "sha": self.BASE,
+                        "user": {"login": transaction.OWNER_LOGIN},
                         "repo": {"full_name": transaction.REPOSITORY},
                     },
                     "head": {
+                        "ref": "5.6-sol/issue-141-flux-convergence-transaction",
+                        "label": (
+                            f"{transaction.OWNER_LOGIN}:"
+                            "5.6-sol/issue-141-flux-convergence-transaction"
+                        ),
                         "sha": self.HEAD,
+                        "user": {"login": transaction.OWNER_LOGIN},
                         "repo": {"full_name": transaction.REPOSITORY},
                     },
                     "merged_by": {"login": transaction.OWNER_LOGIN},
@@ -1396,6 +1408,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                     "sha": self.HEAD,
                     "commit": {
                         "verification": {"verified": True, "reason": "valid"},
+                        "tree": {"sha": self.TREE},
                     },
                 }
             if "/actions/workflows/pull-request.yml/runs?" in path:
@@ -1428,19 +1441,43 @@ class ReleaseOrderingTests(unittest.TestCase):
 
         return github_get
 
-    def _verify(self, **times):
+    def _verify(
+        self,
+        *,
+        associations=None,
+        response_mutator=None,
+        merge_status_error=None,
+        **times,
+    ):
         responses = self._responses(**times)
-        with mock.patch.object(transaction, "github_get", side_effect=responses), mock.patch.object(
+        association_rows = [{"number": 17}] if associations is None else associations
+
+        def github_get(path):
+            document = copy.deepcopy(responses(path))
+            if response_mutator is not None:
+                response_mutator(path, document)
+            return document
+
+        with mock.patch.object(transaction, "github_get", side_effect=github_get), mock.patch.object(
             transaction,
             "github_get_list",
-            return_value=[{"number": 17}],
-        ):
-            return transaction.verify_release_identity(
+            return_value=association_rows,
+        ), mock.patch.object(
+            transaction,
+            "github_require_pull_merged",
+            side_effect=merge_status_error,
+        ) as merged_check:
+            receipt = transaction.verify_release_identity(
                 self.SOURCE,
                 self.TAG,
                 self.Contract(),
                 b"- reviewed transaction\n",
             )
+        pull_number = association_rows[0]["number"]
+        merged_check.assert_called_once_with(
+            f"/repos/{transaction.REPOSITORY}/pulls/{pull_number}/merge"
+        )
+        return receipt
 
     def test_main_ci_platform_start_release_and_completion_order_is_accepted(self):
         receipt = self._verify(
@@ -1452,9 +1489,155 @@ class ReleaseOrderingTests(unittest.TestCase):
         self.assertEqual(receipt["sourceRevision"], self.SOURCE)
         self.assertEqual(receipt["releasePublishedAt"], "2026-08-22T12:01:00Z")
 
+    def test_public_omitted_or_null_merge_commit_sha_is_accepted_with_strong_identity(self):
+        delete = object()
+        for name, value in (("omitted", delete), ("null", None)):
+            def mutate(path, document, *, value=value):
+                if path == f"/repos/{transaction.REPOSITORY}/pulls/17":
+                    if value is delete:
+                        document.pop("merge_commit_sha")
+                    else:
+                        document["merge_commit_sha"] = value
+
+            with self.subTest(name=name):
+                receipt = self._verify(
+                    response_mutator=mutate,
+                    ci_updated="2026-08-22T12:00:00Z",
+                    platform_started="2026-08-22T12:00:00Z",
+                    release_published="2026-08-22T12:01:00Z",
+                    platform_updated="2026-08-22T12:01:00Z",
+                )
+                self.assertEqual(receipt["pullRequestNumber"], 17)
+                self.assertEqual(receipt["pullHeadSha"], self.HEAD)
+
+    def test_missing_conflicting_and_arbitrary_associations_fail_closed(self):
+        cases = (
+            ("missing", []),
+            ("conflicting", [{"number": 17}, {"number": 18}]),
+            ("non-object", [17]),
+            ("missing-number", [{}]),
+            ("arbitrary-number", [{"number": 18}]),
+        )
+        times = {
+            "ci_updated": "2026-08-22T12:00:00Z",
+            "platform_started": "2026-08-22T12:00:00Z",
+            "release_published": "2026-08-22T12:01:00Z",
+            "platform_updated": "2026-08-22T12:01:00Z",
+        }
+        for name, associations in cases:
+            with self.subTest(name=name), self.assertRaises(transaction.TransactionError):
+                self._verify(associations=associations, **times)
+
+    def test_pr_merge_base_head_tree_signature_and_owner_mutants_fail_closed(self):
+        delete = object()
+        pull_path = f"/repos/{transaction.REPOSITORY}/pulls/17"
+        source_path = f"/repos/{transaction.REPOSITORY}/commits/{self.SOURCE}"
+        head_path = f"/repos/{transaction.REPOSITORY}/commits/{self.HEAD}"
+        cases = (
+            ("conflicting-merge-commit", pull_path, ("merge_commit_sha",), "f" * 40),
+            ("wrong-merge-commit-type", pull_path, ("merge_commit_sha",), 17),
+            ("not-merged", pull_path, ("merged",), False),
+            ("open", pull_path, ("state",), "open"),
+            ("draft", pull_path, ("draft",), True),
+            ("missing-merge-time", pull_path, ("merged_at",), None),
+            ("malformed-merge-time", pull_path, ("merged_at",), "not-a-time"),
+            ("wrong-base-ref", pull_path, ("base", "ref"), "release"),
+            ("wrong-base-label", pull_path, ("base", "label"), "other:main"),
+            ("wrong-base-repository", pull_path, ("base", "repo", "full_name"), "other/repository"),
+            ("wrong-base-owner", pull_path, ("base", "user", "login"), "other-owner"),
+            ("wrong-base-parent", pull_path, ("base", "sha"), "f" * 40),
+            ("wrong-head-repository", pull_path, ("head", "repo", "full_name"), "other/repository"),
+            ("wrong-head-owner", pull_path, ("head", "user", "login"), "other-owner"),
+            ("wrong-head-label", pull_path, ("head", "label"), "other:branch"),
+            ("malformed-head", pull_path, ("head", "sha"), "not-a-sha"),
+            ("wrong-pr-author", pull_path, ("user", "login"), "other-owner"),
+            ("wrong-owner", pull_path, ("merged_by", "login"), "other-owner"),
+            ("unsigned-source", source_path, ("commit", "verification", "verified"), False),
+            ("wrong-source-parent", source_path, ("parents",), [{"sha": "f" * 40}]),
+            ("unsigned-head", head_path, ("commit", "verification", "verified"), False),
+            ("wrong-head-tree", head_path, ("commit", "tree", "sha"), "f" * 40),
+        )
+        times = {
+            "ci_updated": "2026-08-22T12:00:00Z",
+            "platform_started": "2026-08-22T12:00:00Z",
+            "release_published": "2026-08-22T12:01:00Z",
+            "platform_updated": "2026-08-22T12:01:00Z",
+        }
+        for name, endpoint, keys, value in cases:
+            def mutate(path, document, *, endpoint=endpoint, keys=keys, value=value):
+                if path != endpoint:
+                    return
+                target = document
+                for key in keys[:-1]:
+                    target = target[key]
+                if value is delete:
+                    target.pop(keys[-1])
+                else:
+                    target[keys[-1]] = value
+
+            with self.subTest(name=name), self.assertRaises(transaction.TransactionError):
+                self._verify(response_mutator=mutate, **times)
+
+    def test_authoritative_merge_endpoint_failure_stops_release_verification(self):
+        with self.assertRaisesRegex(transaction.TransactionError, "GITHUB_PULL_NOT_MERGED"):
+            self._verify(
+                merge_status_error=transaction.TransactionError(
+                    "GITHUB_PULL_NOT_MERGED"
+                ),
+                ci_updated="2026-08-22T12:00:00Z",
+                platform_started="2026-08-22T12:00:00Z",
+                release_published="2026-08-22T12:01:00Z",
+                platform_updated="2026-08-22T12:01:00Z",
+            )
+
+    def test_authoritative_merge_endpoint_requires_exact_empty_204(self):
+        class Response:
+            def __init__(self, status, payload=b"", url="https://api.github.com/example"):
+                self.status = status
+                self.payload = payload
+                self.url = url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return self.url
+
+            def read(self, _size):
+                return self.payload
+
+        path = f"/repos/{transaction.REPOSITORY}/pulls/17/merge"
+        with mock.patch.object(
+            transaction.urllib.request, "urlopen", return_value=Response(204)
+        ):
+            transaction.github_require_pull_merged(path)
+
+        rejected = (
+            ("wrong-status", Response(200)),
+            ("body-on-204", Response(204, b"x")),
+            ("redirect", Response(204, url="https://example.invalid/redirect")),
+        )
+        for name, response in rejected:
+            with self.subTest(name=name), mock.patch.object(
+                transaction.urllib.request, "urlopen", return_value=response
+            ), self.assertRaises(transaction.TransactionError):
+                transaction.github_require_pull_merged(path)
+
+        not_merged = transaction.urllib.error.HTTPError(
+            "https://api.github.com/example", 404, "not merged", {}, None
+        )
+        with mock.patch.object(
+            transaction.urllib.request, "urlopen", side_effect=not_merged
+        ), self.assertRaisesRegex(transaction.TransactionError, "GITHUB_PULL_NOT_MERGED"):
+            transaction.github_require_pull_merged(path)
+        not_merged.close()
+
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.20")
-        for rejected in ("v0.1.0", "v0.1.19", "v0.1.21", "v9.9.9"):
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.21")
+        for rejected in ("v0.1.0", "v0.1.20", "v0.1.22", "v9.9.9"):
             with self.subTest(rejected=rejected), mock.patch.object(
                 transaction, "github_get"
             ) as github_get:
