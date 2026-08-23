@@ -2260,6 +2260,13 @@ class HarnessContractTests(unittest.TestCase):
         release = harness.release_document("lidersea-com")
         self.assertTrue(source["spec"]["insecure"])
         self.assertEqual(source["spec"]["url"], harness.chart_url)
+        self.assertEqual(
+            source["spec"]["layerSelector"],
+            {
+                "mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                "operation": "copy",
+            },
+        )
         remediation = release["spec"]["upgrade"]["remediation"]
         self.assertEqual(
             remediation,

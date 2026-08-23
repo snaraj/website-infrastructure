@@ -3583,6 +3583,10 @@ class AcceptanceHarness:
                 "interval": "1m",
                 "url": self.chart_url,
                 "insecure": True,
+                "layerSelector": {
+                    "mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                    "operation": "copy",
+                },
                 "ref": {"tag": "0.1.0"},
             },
         }
