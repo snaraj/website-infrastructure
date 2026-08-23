@@ -21,6 +21,9 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TEST_TEMP_ROOT = Path(tempfile.gettempdir()).resolve()
+if TEST_TEMP_ROOT == ROOT or ROOT in TEST_TEMP_ROOT.parents:
+    raise RuntimeError("test temporary root must remain outside the checkout")
 TRANSACTION_PATH = ROOT / "bootstrap/flux/rbac-convergence/transaction.py"
 DESIRED_PATH = ROOT / "bootstrap/flux/rbac-convergence/desired-active.json"
 SOURCE_MANIFEST_PATH = ROOT / "bootstrap/flux/rbac-convergence/source-manifest.v1"
@@ -423,7 +426,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
 
 class HeldSourceDescriptorTests(unittest.TestCase):
     def test_held_root_descriptor_survives_source_path_replacement(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             base = Path(temporary)
             source = base / "source"
             (source / "nested").mkdir(parents=True)
@@ -443,7 +446,7 @@ class HeldSourceDescriptorTests(unittest.TestCase):
                 transaction.os.close(descriptor)
 
     def test_root_intermediate_and_final_symlinks_fail_closed(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             base = Path(temporary)
             source = base / "source"
             (source / "real").mkdir(parents=True)
@@ -483,7 +486,7 @@ class HeldSourceDescriptorTests(unittest.TestCase):
                 f"stage-reviewed-flux-rbac-{source_revision}-{manifest_sha256}"
             ),
         }
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             root = Path(temporary)
             custody = root / "custody"
             custody.mkdir()
@@ -1855,7 +1858,7 @@ class OracleEvidenceTests(unittest.TestCase):
             )
 
     def test_journal_first_crash_is_republished_and_tamper_or_orphan_fails(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             evidence_root = Path(temporary) / "evidence"
             evidence_root.mkdir(mode=0o700)
             journal = self.journal()
@@ -1909,7 +1912,7 @@ class OracleEvidenceTests(unittest.TestCase):
                     transaction.publish_oracle_evidence_records(journal)
 
     def test_embedded_oracle_record_rejects_post_journal_secret_injection(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             evidence_root = Path(temporary) / "evidence"
             evidence_root.mkdir(mode=0o700)
             journal = self.journal()
@@ -1931,7 +1934,7 @@ class OracleEvidenceTests(unittest.TestCase):
                 transaction.parse_journal_payload(transaction.canonical_json(candidate))
 
     def test_terminal_journal_binds_complete_evidence_and_oracle_document(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             evidence_root = Path(temporary) / "evidence"
             evidence_root.mkdir(mode=0o700)
             journal = self.journal()
@@ -2076,7 +2079,7 @@ class VerificationEvidenceTests(unittest.TestCase):
         return journal
 
     def test_same_second_verifies_are_distinct_and_index_above_32_succeeds(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             receipts = Path(temporary) / "receipts"
             receipts.mkdir(mode=0o700)
             journal = self.journal()
@@ -2125,7 +2128,7 @@ class VerificationEvidenceTests(unittest.TestCase):
             self.assertEqual(journal.document["verificationCounter"], 33)
 
     def test_pending_record_survives_crash_and_nlink_two_publish_then_next_verify(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             receipts = Path(temporary) / "receipts"
             receipts.mkdir(mode=0o700)
             journal = self.journal()
@@ -2174,7 +2177,7 @@ class VerificationEvidenceTests(unittest.TestCase):
             self.assertIn("verify.00000002.", second.name)
 
     def test_history_gap_tamper_chain_change_and_orphan_fail_closed(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             receipts = Path(temporary) / "receipts"
             receipts.mkdir(mode=0o700)
             journal = self.journal()
@@ -2218,7 +2221,7 @@ class VerificationEvidenceTests(unittest.TestCase):
                     transaction.validate_verification_history(journal)
 
     def test_terminal_receipt_exact_bytes_recover_missing_and_block_corrupt_pending(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             receipts = Path(temporary) / "receipts"
             receipts.mkdir(mode=0o700)
             journal = self.journal()
@@ -2323,7 +2326,7 @@ class VerificationEvidenceTests(unittest.TestCase):
             transaction.validate_terminal_evidence_document(candidate)
 
     def test_malformed_evidence_never_creates_positive_pending_record(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             receipts = Path(temporary) / "receipts"
             receipts.mkdir(mode=0o700)
             journal = self.journal()
@@ -2364,7 +2367,7 @@ class TerminalModeTests(unittest.TestCase):
 
         for failure_point in ("signal-unmask", "receipt"):
             with self.subTest(failure_point=failure_point), tempfile.TemporaryDirectory(
-                dir="/private/tmp"
+                dir=str(TEST_TEMP_ROOT)
             ) as temporary:
                 journal = mock.Mock()
                 journal.document = {"state": "prepared"}
@@ -3357,7 +3360,7 @@ class AtomicWriteRecoveryTests(unittest.TestCase):
     def test_publish_once_reestablishes_durability_after_directory_fsync_failure(self):
         for linked_window in (False, True):
             with self.subTest(linked_window=linked_window), tempfile.TemporaryDirectory(
-                dir="/private/tmp"
+                dir=str(TEST_TEMP_ROOT)
             ) as temporary:
                 path = Path(temporary) / "receipt.json"
                 payload = b"reviewed\n"
@@ -3394,7 +3397,7 @@ class AtomicWriteRecoveryTests(unittest.TestCase):
                 self.assertEqual(path.stat().st_nlink, 1)
 
     def test_journal_load_reestablishes_file_and_parent_durability(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             journal_path = Path(temporary) / "journal.json"
             journal = transaction.Journal("a" * 64, "b" * 40, "c" * 64)
             journal.document["sequence"] = 1
@@ -3423,7 +3426,7 @@ class AtomicWriteRecoveryTests(unittest.TestCase):
             parent_barrier.assert_called_with(journal_path.parent)
 
     def test_write_plan_recovers_no_replace_link_publication_window(self):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+        with tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT)) as temporary:
             path = Path(temporary) / "plan.json"
             plan = {"reviewed": True}
             payload = transaction.canonical_json(plan)
