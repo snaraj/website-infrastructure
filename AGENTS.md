@@ -196,6 +196,18 @@ and dependency-governed Draft capacity is recorded durably in
   the rest of `kubernetes/platform/**`, and the remaining
   `kubernetes/websites/**` files are unchanged by this ruling and stay
   unruled — reach them only through the rule below.
+  A RETENTION field is not a promotion. The delivery lane set
+  `spec.maxHistory` on both site releases under issue #198, and that edit is
+  outside this row: it is not `scripts/promote-image.sh` output and moves no
+  digest, tag, or readiness scalar. It is a DECLARED CROSSING under the rule
+  below, not a lane transfer, and it grants no standing claim on the tree.
+  The field is load-bearing for reliability rather than release identity —
+  helm-controller's unset five-revision default exceeded the measured
+  namespace Secret budget, which wedged a site release permanently and
+  blocked every subsequent deploy. Record the owner or platform (peer) ruling
+  in this row when it arrives, including whether release-retention fields
+  belong to this lane given that they gate whether a promotion can land at
+  all.
 - `kubernetes/platform/cloudflare-public/**` — DELIVERY, DERIVED from the
   Cloudflare/edge re-cut recorded in the paragraph above, not granted
   here: that re-cut names only `infrastructure/cloudflare/**` and the
