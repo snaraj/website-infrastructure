@@ -1510,6 +1510,37 @@ class ReleaseOrderingTests(unittest.TestCase):
                 self.assertEqual(receipt["pullRequestNumber"], 17)
                 self.assertEqual(receipt["pullHeadSha"], self.HEAD)
 
+    def test_distinct_valid_merge_timestamps_change_the_plan_bound_identity(self):
+        receipts = []
+        for merged_at in (
+            "2026-08-22T11:58:00+00:00",
+            "2026-08-22T11:58:01Z",
+        ):
+            def mutate(path, document, *, merged_at=merged_at):
+                if path == f"/repos/{transaction.REPOSITORY}/pulls/17":
+                    document["merged_at"] = merged_at
+
+            receipts.append(
+                self._verify(
+                    response_mutator=mutate,
+                    ci_updated="2026-08-22T12:00:00Z",
+                    platform_started="2026-08-22T12:00:00Z",
+                    release_published="2026-08-22T12:01:00Z",
+                    platform_updated="2026-08-22T12:01:00Z",
+                )
+            )
+
+        self.assertEqual(receipts[0]["pullMergedAt"], "2026-08-22T11:58:00Z")
+        self.assertEqual(receipts[1]["pullMergedAt"], "2026-08-22T11:58:01Z")
+        self.assertNotEqual(receipts[0], receipts[1])
+        plan_hashes = [
+            transaction.sha256_bytes(
+                transaction.canonical_json({"source": receipt})
+            )
+            for receipt in receipts
+        ]
+        self.assertNotEqual(plan_hashes[0], plan_hashes[1])
+
     def test_missing_conflicting_and_arbitrary_associations_fail_closed(self):
         cases = (
             ("missing", []),
@@ -1610,19 +1641,21 @@ class ReleaseOrderingTests(unittest.TestCase):
                 return self.payload
 
         path = f"/repos/{transaction.REPOSITORY}/pulls/17/merge"
+        url = transaction.GITHUB_API + path
         with mock.patch.object(
-            transaction.urllib.request, "urlopen", return_value=Response(204)
+            transaction, "github_urlopen", return_value=Response(204, url=url)
         ):
             transaction.github_require_pull_merged(path)
 
         rejected = (
-            ("wrong-status", Response(200)),
-            ("body-on-204", Response(204, b"x")),
+            ("wrong-status", Response(200, url=url)),
+            ("body-on-204", Response(204, b"x", url=url)),
+            ("same-origin-redirect", Response(204, url=url + "?redirected=1")),
             ("redirect", Response(204, url="https://example.invalid/redirect")),
         )
         for name, response in rejected:
             with self.subTest(name=name), mock.patch.object(
-                transaction.urllib.request, "urlopen", return_value=response
+                transaction, "github_urlopen", return_value=response
             ), self.assertRaises(transaction.TransactionError):
                 transaction.github_require_pull_merged(path)
 
@@ -1630,10 +1663,68 @@ class ReleaseOrderingTests(unittest.TestCase):
             "https://api.github.com/example", 404, "not merged", {}, None
         )
         with mock.patch.object(
-            transaction.urllib.request, "urlopen", side_effect=not_merged
+            transaction, "github_urlopen", side_effect=not_merged
         ), self.assertRaisesRegex(transaction.TransactionError, "GITHUB_PULL_NOT_MERGED"):
             transaction.github_require_pull_merged(path)
         not_merged.close()
+
+    def test_all_github_helpers_reject_redirects_before_following(self):
+        request = transaction.urllib.request.Request(
+            transaction.GITHUB_API + "/repos/example/example"
+        )
+        sentinel = object()
+        with mock.patch.object(
+            transaction.urllib.request, "build_opener"
+        ) as build_opener:
+            build_opener.return_value.open.return_value = sentinel
+            self.assertIs(transaction.github_urlopen(request), sentinel)
+        handler = build_opener.call_args.args[0]
+        self.assertIsInstance(handler, transaction.GitHubRejectRedirectHandler)
+        build_opener.return_value.open.assert_called_once_with(request, timeout=20)
+
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                transaction.TransactionError, "GITHUB_REDIRECT_INVALID"
+            ):
+                handler.redirect_request(
+                    request,
+                    None,
+                    status,
+                    "redirect",
+                    {},
+                    request.full_url + "?same-origin-redirect=1",
+                )
+
+        class Response:
+            status = 200
+
+            def __init__(self, url):
+                self.url = url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return self.url
+
+            def read(self, _size):
+                return b"{}"
+
+        path = "/repos/example/example"
+        exact_url = transaction.GITHUB_API + path
+        for name, redirected_url in (
+            ("same-origin", exact_url + "?redirected=1"),
+            ("cross-origin", "https://example.invalid/redirect"),
+        ):
+            with self.subTest(helper="github_request", name=name), mock.patch.object(
+                transaction, "github_urlopen", return_value=Response(redirected_url)
+            ), self.assertRaisesRegex(
+                transaction.TransactionError, "GITHUB_REDIRECT_INVALID"
+            ):
+                transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
         self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.21")

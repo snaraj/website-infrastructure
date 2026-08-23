@@ -1325,6 +1325,27 @@ def resource_urls(kind: str, namespace: str | None, name: str) -> tuple[str, str
     return collection, collection + "/" + name
 
 
+class GitHubRejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject every GitHub redirect before urllib can follow it."""
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: object,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        del request, file_pointer, code, message, headers, new_url
+        raise TransactionError("GITHUB_REDIRECT_INVALID")
+
+
+def github_urlopen(request: urllib.request.Request) -> object:
+    opener = urllib.request.build_opener(GitHubRejectRedirectHandler())
+    return opener.open(request, timeout=20)
+
+
 def github_request(path: str) -> object:
     url = GITHUB_API + path
     request = urllib.request.Request(
@@ -1337,11 +1358,10 @@ def github_request(path: str) -> object:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with github_urlopen(request) as response:
             if response.status != 200:
                 raise TransactionError("GITHUB_HTTP_STATUS_INVALID")
-            final = urllib.parse.urlsplit(response.geturl())
-            if final.scheme != "https" or final.netloc != "api.github.com":
+            if response.geturl() != url:
                 raise TransactionError("GITHUB_REDIRECT_INVALID")
             payload = response.read(MAX_HTTP_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -1380,11 +1400,10 @@ def github_require_pull_merged(path: str) -> None:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with github_urlopen(request) as response:
             if response.status != 204:
                 raise TransactionError("GITHUB_PULL_MERGED_STATUS_INVALID")
-            final = urllib.parse.urlsplit(response.geturl())
-            if final.scheme != "https" or final.netloc != "api.github.com":
+            if response.geturl() != url:
                 raise TransactionError("GITHUB_REDIRECT_INVALID")
             payload = response.read(1)
     except urllib.error.HTTPError as exc:
@@ -1627,7 +1646,7 @@ def verify_release_identity(
     ):
         raise TransactionError("PROTECTED_MAIN_PR_IDENTITY_INVALID")
     try:
-        parse_time(merged_at, "PR_MERGED_AT")
+        pull_merged_at = parse_time(merged_at, "PR_MERGED_AT")
     except TransactionError as exc:
         raise TransactionError("PROTECTED_MAIN_PR_IDENTITY_INVALID") from exc
     github_require_pull_merged(
@@ -1763,6 +1782,7 @@ def verify_release_identity(
         "sourceTreeSha": tree_sha,
         "pullRequestNumber": pull_number,
         "pullHeadSha": head_sha,
+        "pullMergedAt": iso8601(pull_merged_at),
         "mergedBy": OWNER_LOGIN,
         "mainCiRunId": run_id,
         "mainCiRunAttempt": run_attempt,
@@ -6872,6 +6892,7 @@ def validate_plan_bindings(
         "sourceBundleSha256",
         "pullRequestNumber",
         "pullHeadSha",
+        "pullMergedAt",
         "mergedBy",
         "mainCiRunId",
         "mainCiRunAttempt",
