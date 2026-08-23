@@ -1,4 +1,4 @@
-# The runner always replaces this refusal value with a locally built,
-# digest-bound image that it loads into its owned kind node.
+# The runner replaces this refusal value with the run-unique, commit-bound tag
+# it builds and loads into its owned kind node for pullPolicy Never.
 image: acceptance.invalid/refusal@sha256:0000000000000000000000000000000000000000000000000000000000000000
 failureMode: false

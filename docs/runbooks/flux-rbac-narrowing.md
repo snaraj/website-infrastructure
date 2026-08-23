@@ -780,12 +780,11 @@ This apply is deferred and stays deferred until ALL of the following hold:
   cold-starts Kustomize under final RBAC with one zero-restart Pod while Helm
   remains at zero, then cold-starts Helm with one zero-restart Pod while
   preserving that exact Kustomize Pod and denying Helm cluster-wide Secret
-  reads, one install failure and one upgrade
-  failure, each with a healthy workload, across the two missing readiness
-  rules, successful install plus
-  upgrade with all rules, acceptance-only Helm remediation rollback, and zero
-  harness-owned kind/kubeconfig/network residue; it grants no protected-cluster
-  mutation authority;
+  reads, proves the tenant-local Pod and ReplicaSet readiness reads through
+  exact authorization reviews, completes install plus upgrade under the final
+  tenant Role, rolls back an acceptance-only synthetic workload failure, and
+  leaves zero harness-owned kind/kubeconfig/network residue; it grants no
+  protected-cluster mutation authority;
 - an owner-reviewed protected-host launcher implements the closed plan,
   prestate journal, UID/resourceVersion mutations, rollback, and verification
   described above without trusting mutable checkout paths;
