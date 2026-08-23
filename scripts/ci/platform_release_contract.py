@@ -89,6 +89,22 @@ RECOVERY_TAG = "v0.1.0"
 # pretending the legacy gap never existed.
 TAG_LEDGER_FLOOR_TAG = "v0.1.9"
 TAG_LEDGER_FLOOR_SHA = "02863737ec3759e03e032f0a478f4b5298c61a0b"
+# Releases through v0.1.19 predate exact-SHA target publication. These two
+# public annotated-tag tuples are the only bridge into the stricter contract:
+# the permanent v0.1.0 recovery record and the v0.1.19 transition predecessor.
+# New/current Releases and runtime identity verification never opt into it.
+GRANDFATHERED_MAIN_RELEASE_TARGETS = frozenset(
+    {
+        (
+            RECOVERY_TAG,
+            RECOVERY_SOURCE_SHA,
+        ),
+        (
+            "v0.1.19",
+            "95d1a8f26dedc8853b5c41b349e05cdc6d1a947c",
+        )
+    }
+)
 RELEASE_TAGGER_NAME = "github-actions[bot]"
 RELEASE_TAGGER_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 PREFLIGHT_APP_ID_VARIABLE = "PLATFORM_RELEASE_APP_ID"
@@ -1525,11 +1541,26 @@ def validate_tag_record(
 
 
 def validate_release_record(
-    release_record: Mapping[str, object], *, tag: str, title: str, body: str
+    release_record: Mapping[str, object],
+    *,
+    tag: str,
+    source_sha: str,
+    title: str,
+    body: str,
+    allow_grandfathered_main_target: bool = False,
 ) -> None:
     """Verify the immutable GitHub Actions Release and closed asset set."""
+    source_sha = require_sha(source_sha, "GitHub Release target SHA")
     if release_record.get("tag_name") != tag or release_record.get("name") != title:
         raise ContractError("GitHub Release tag or title is not exact")
+    target_commitish = release_record.get("target_commitish")
+    grandfathered = (
+        allow_grandfathered_main_target
+        and target_commitish == "main"
+        and (tag, source_sha) in GRANDFATHERED_MAIN_RELEASE_TARGETS
+    )
+    if target_commitish != source_sha and not grandfathered:
+        raise ContractError("GitHub Release target is not the exact source commit")
     actual_body = release_record.get("body")
     if not isinstance(actual_body, str) or actual_body.rstrip("\r\n") != body.rstrip("\r\n"):
         raise ContractError("GitHub Release notes are not exact")
@@ -1570,9 +1601,12 @@ def classify_release_state(
     release_record: Mapping[str, object] | None,
     *,
     tag: str,
+    source_sha: str,
     title: str,
     body: str,
+    allow_grandfathered_main_target: bool = False,
 ) -> str:
+    source_sha = require_sha(source_sha, "GitHub Release target SHA")
     if http_status == 404:
         if release_record is not None:
             raise ContractError("absent GitHub Release state cannot carry a record")
@@ -1581,7 +1615,14 @@ def classify_release_state(
         raise ContractError(f"GitHub Release probe returned unexpected HTTP {http_status}")
     if release_record is None:
         raise ContractError("present GitHub Release state requires its REST record")
-    validate_release_record(release_record, tag=tag, title=title, body=body)
+    validate_release_record(
+        release_record,
+        tag=tag,
+        source_sha=source_sha,
+        title=title,
+        body=body,
+        allow_grandfathered_main_target=allow_grandfathered_main_target,
+    )
     return "exact"
 
 
@@ -1701,6 +1742,10 @@ def _parser() -> argparse.ArgumentParser:
     release_record = commands.add_parser("release-record")
     release_record.add_argument("--release-json", type=Path, required=True)
     release_record.add_argument("--tag", required=True)
+    release_record.add_argument("--source-sha", required=True)
+    release_record.add_argument(
+        "--allow-grandfathered-main-target", action="store_true"
+    )
     release_record.add_argument("--title", required=True)
     release_record.add_argument("--body", type=Path, required=True)
     release_state = commands.add_parser("release-state")
@@ -1708,6 +1753,10 @@ def _parser() -> argparse.ArgumentParser:
     release_state.add_argument("--require", choices=("absent", "exact"))
     release_state.add_argument("--release-json", type=Path)
     release_state.add_argument("--tag", required=True)
+    release_state.add_argument("--source-sha", required=True)
+    release_state.add_argument(
+        "--allow-grandfathered-main-target", action="store_true"
+    )
     release_state.add_argument("--title", required=True)
     release_state.add_argument("--body", type=Path, required=True)
     return parser
@@ -1856,8 +1905,10 @@ def main(argv: list[str] | None = None) -> int:
             validate_release_record(
                 _read_object(args.release_json),
                 tag=args.tag,
+                source_sha=args.source_sha,
                 title=args.title,
                 body=args.body.read_text(encoding="utf-8"),
+                allow_grandfathered_main_target=args.allow_grandfathered_main_target,
             )
             print("exact")
         elif args.command == "release-state":
@@ -1865,8 +1916,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.http_status,
                 _read_object(args.release_json) if args.release_json else None,
                 tag=args.tag,
+                source_sha=args.source_sha,
                 title=args.title,
                 body=args.body.read_text(encoding="utf-8"),
+                allow_grandfathered_main_target=args.allow_grandfathered_main_target,
             )
             print(require_publication_state(state, args.require) if args.require else state)
         else:  # pragma: no cover - argparse owns this path

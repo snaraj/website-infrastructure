@@ -1289,6 +1289,7 @@ class ImmutableMetadataTests(unittest.TestCase):
     def release(self) -> dict[str, object]:
         return {
             "tag_name": self.TAG,
+            "target_commitish": self.SOURCE,
             "name": self.TITLE,
             "body": self.BODY,
             "draft": False,
@@ -1351,10 +1352,17 @@ class ImmutableMetadataTests(unittest.TestCase):
     def test_release_metadata_and_zero_asset_inventory_are_exact(self):
         exact = self.release()
         MODULE.validate_release_record(
-            exact, tag=self.TAG, title=self.TITLE, body=self.BODY.rstrip()
+            exact,
+            tag=self.TAG,
+            source_sha=self.SOURCE,
+            title=self.TITLE,
+            body=self.BODY.rstrip(),
         )
         for key, value in (
             ("tag_name", "v0.1.1"),
+            ("target_commitish", "main"),
+            ("target_commitish", "b" * 40),
+            ("target_commitish", None),
             ("name", "foreign"),
             ("body", "foreign"),
             ("body", None),
@@ -1372,7 +1380,60 @@ class ImmutableMetadataTests(unittest.TestCase):
             changed[key] = value
             with self.subTest(key=key), self.assertRaises(MODULE.ContractError):
                 MODULE.validate_release_record(
-                    changed, tag=self.TAG, title=self.TITLE, body=self.BODY
+                    changed,
+                    tag=self.TAG,
+                    source_sha=self.SOURCE,
+                    title=self.TITLE,
+                    body=self.BODY,
+                )
+
+    def test_only_the_two_exact_legacy_tuples_can_bridge_main_target(self):
+        for tag, source_sha in MODULE.GRANDFATHERED_MAIN_RELEASE_TARGETS:
+            with self.subTest(accepted_tag=tag):
+                release = self.release()
+                release.update(
+                    {
+                        "tag_name": tag,
+                        "target_commitish": "main",
+                        "name": f"Platform {tag}",
+                    }
+                )
+                MODULE.validate_release_record(
+                    release,
+                    tag=tag,
+                    source_sha=source_sha,
+                    title=f"Platform {tag}",
+                    body=self.BODY,
+                    allow_grandfathered_main_target=True,
+                )
+                with self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_release_record(
+                        release,
+                        tag=tag,
+                        source_sha=source_sha,
+                        title=f"Platform {tag}",
+                        body=self.BODY,
+                    )
+
+        tag, source_sha = next(iter(MODULE.GRANDFATHERED_MAIN_RELEASE_TARGETS))
+        release = self.release()
+        release.update(
+            {"tag_name": tag, "target_commitish": "main", "name": f"Platform {tag}"}
+        )
+        for changed_tag, changed_sha in (("v9.9.9", source_sha), (tag, "f" * 40)):
+            changed = dict(release)
+            changed["tag_name"] = changed_tag
+            changed["name"] = f"Platform {changed_tag}"
+            with self.subTest(tag=changed_tag, source_sha=changed_sha), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE.validate_release_record(
+                    changed,
+                    tag=changed_tag,
+                    source_sha=changed_sha,
+                    title=f"Platform {changed_tag}",
+                    body=self.BODY,
+                    allow_grandfathered_main_target=True,
                 )
 
     def test_absent_exact_races_and_non_authoritative_states_fail_closed(self):
@@ -1384,7 +1445,12 @@ class ImmutableMetadataTests(unittest.TestCase):
             )
             self.assertEqual(
                 MODULE.classify_release_state(
-                    404, None, tag=self.TAG, title=self.TITLE, body=self.BODY
+                    404,
+                    None,
+                    tag=self.TAG,
+                    source_sha=self.SOURCE,
+                    title=self.TITLE,
+                    body=self.BODY,
                 ),
                 "absent",
             )
@@ -1398,6 +1464,7 @@ class ImmutableMetadataTests(unittest.TestCase):
                     200,
                     self.release(),
                     tag=self.TAG,
+                    source_sha=self.SOURCE,
                     title=self.TITLE,
                     body=self.BODY,
                 ),
@@ -1408,7 +1475,12 @@ class ImmutableMetadataTests(unittest.TestCase):
                 MODULE.classify_tag_state(status, None, None, **self.tag_expected())
             with self.subTest(kind="release", status=status), self.assertRaises(MODULE.ContractError):
                 MODULE.classify_release_state(
-                    status, None, tag=self.TAG, title=self.TITLE, body=self.BODY
+                    status,
+                    None,
+                    tag=self.TAG,
+                    source_sha=self.SOURCE,
+                    title=self.TITLE,
+                    body=self.BODY,
                 )
         for changed_ref, changed_tag in ((None, tag), (ref, None)):
             with self.assertRaises(MODULE.ContractError):
@@ -1422,6 +1494,16 @@ class ImmutableMetadataTests(unittest.TestCase):
                 404,
                 self.release(),
                 tag=self.TAG,
+                source_sha=self.SOURCE,
+                title=self.TITLE,
+                body=self.BODY,
+            )
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.classify_release_state(
+                404,
+                None,
+                tag=self.TAG,
+                source_sha="main",
                 title=self.TITLE,
                 body=self.BODY,
             )
@@ -1467,6 +1549,8 @@ class ImmutableMetadataTests(unittest.TestCase):
                 "404",
                 "--tag",
                 self.TAG,
+                "--source-sha",
+                self.SOURCE,
                 "--title",
                 self.TITLE,
                 "--body",
@@ -1474,6 +1558,11 @@ class ImmutableMetadataTests(unittest.TestCase):
             ]
             self.assertEqual(invoke([*release_args, "--require", "absent"]), 0)
             self.assertEqual(invoke([*release_args, "--require", "exact"]), 1)
+            invalid_source_args = list(release_args)
+            invalid_source_args[invalid_source_args.index(self.SOURCE)] = "main"
+            self.assertEqual(
+                invoke([*invalid_source_args, "--require", "absent"]), 1
+            )
 
             ref, tag = exact_tag_records(self.TAG, self.SOURCE, self.MESSAGE, self.DATE)
             ref_path, tag_path, release_path = (
@@ -1529,6 +1618,8 @@ class ImmutableMetadataTests(unittest.TestCase):
                         str(release_path),
                         "--tag",
                         self.TAG,
+                        "--source-sha",
+                        self.SOURCE,
                         "--title",
                         self.TITLE,
                         "--body",
@@ -2364,6 +2455,7 @@ class PublicationTransactionShellTests(unittest.TestCase):
         tag["sha"] = tag_object
         release = {
             "tag_name": tag_name,
+            "target_commitish": source,
             "name": f"Platform {tag_name}",
             "body": (
                 self.legacy_notes(tag_name, source)
@@ -2412,6 +2504,7 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 "complete",
                 "foreign-tag",
                 "foreign-release",
+                "foreign-release-target",
                 "partial-release",
             }:
                 raise AssertionError("predecessor fixture state is not closed")
@@ -2430,10 +2523,13 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 if predecessor_state in {
                     "complete",
                     "foreign-release",
+                    "foreign-release-target",
                     "partial-release",
                 }:
                     if predecessor_state == "foreign-release":
                         release["author"] = {"login": "owner", "id": 1}
+                    if predecessor_state == "foreign-release-target":
+                        release["target_commitish"] = "main"
                     if predecessor_state == "partial-release":
                         release["immutable"] = False
                     (state_root / f"release-{self.BASE_TAG}.json").write_text(
@@ -2464,6 +2560,7 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 "foreign-tag",
                 "release-only",
                 "foreign-release",
+                "foreign-release-target",
                 "partial-release",
             }:
                 raise AssertionError("current fixture state is not closed")
@@ -2484,10 +2581,13 @@ class PublicationTransactionShellTests(unittest.TestCase):
                     "complete",
                     "release-only",
                     "foreign-release",
+                    "foreign-release-target",
                     "partial-release",
                 }:
                     if current_state == "foreign-release":
                         release["author"] = {"login": "owner", "id": 1}
+                    if current_state == "foreign-release-target":
+                        release["target_commitish"] = "main"
                     if current_state == "partial-release":
                         release["immutable"] = False
                     (state_root / f"release-{self.TAG}.json").write_text(
@@ -2688,11 +2788,12 @@ gh() {
     return 0
   fi
   if [ "$1" = release ] && [ "$2" = create ]; then
-    local release_tag="$3" tag_verified='' draft=false prerelease=false title='' notes='' object_sha=''
+    local release_tag="$3" tag_verified='' target='' draft=false prerelease=false title='' notes='' object_sha=''
     shift 3
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --verify-tag) tag_verified=true; shift ;;
+        --target) target="$2"; shift 2 ;;
         --draft) draft=true; shift ;;
         --prerelease) prerelease=true; shift ;;
         --title) title="$2"; shift 2 ;;
@@ -2700,11 +2801,12 @@ gh() {
         *) return 2 ;;
       esac
     done
-    if [ "${tag_verified}" != true ] || [ -z "${title}" ] || [ ! -f "${notes}" ]; then
+    if [ "${tag_verified}" != true ] || [ -z "${target}" ] || \
+      [ -z "${title}" ] || [ ! -f "${notes}" ]; then
       return 2
     fi
-    "${TEST_PYTHON}" -c 'import json,sys; json.dump({"tag_name":sys.argv[2],"name":sys.argv[3],"body":open(sys.argv[4],encoding="utf-8").read(),"draft":sys.argv[5]=="true","prerelease":sys.argv[6]=="true","immutable":sys.argv[7]=="true","author":{"login":"github-actions[bot]","id":41898282},"assets":[]},open(sys.argv[1],"w",encoding="utf-8"))' \
-      "${MOCK_STATE}/release-${release_tag}.json" "${release_tag}" "${title}" "${notes}" "${draft}" "${prerelease}" "${MOCK_IMMUTABLE}"
+    "${TEST_PYTHON}" -c 'import json,sys; json.dump({"tag_name":sys.argv[2],"target_commitish":sys.argv[3],"name":sys.argv[4],"body":open(sys.argv[5],encoding="utf-8").read(),"draft":sys.argv[6]=="true","prerelease":sys.argv[7]=="true","immutable":sys.argv[8]=="true","author":{"login":"github-actions[bot]","id":41898282},"assets":[]},open(sys.argv[1],"w",encoding="utf-8"))' \
+      "${MOCK_STATE}/release-${release_tag}.json" "${release_tag}" "${target}" "${title}" "${notes}" "${draft}" "${prerelease}" "${MOCK_IMMUTABLE}"
     if [ "${MOCK_DRIFT_DURING_RELEASE}" = true ]; then
       object_sha="$("${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "${MOCK_STATE}/ref-${release_tag}.json")"
       "${TEST_PYTHON}" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p,encoding="utf-8")); v["object"]["sha"]="0"*40; json.dump(v,open(p,"w",encoding="utf-8"))' \
@@ -2825,6 +2927,7 @@ sleep() { :; }
                 self.assertIn(f"<object={self.SOURCE}>", calls)
                 self.assertIn(f"<{self.TAG}>", calls)
                 self.assertIn("<--verify-tag>", calls)
+                self.assertIn("<--target>", calls)
                 self.assertNotIn("<--draft>", calls)
                 self.assertNotIn("<--prerelease>", calls)
                 self.assertEqual(
@@ -2834,8 +2937,15 @@ sleep() { :; }
                 self.assertEqual(state[self.TAG]["release"]["prerelease"], False)
                 self.assertEqual(state[self.TAG]["release"]["immutable"], True)
                 self.assertEqual(
+                    state[self.TAG]["release"]["target_commitish"], self.SOURCE
+                )
+                self.assertEqual(
                     state[self.RECOVERY_TAG]["release"]["author"]["login"],
                     "github-actions[bot]",
+                )
+                self.assertEqual(
+                    state[self.RECOVERY_TAG]["release"]["target_commitish"],
+                    self.RECOVERY_SOURCE,
                 )
                 self.assertLess(
                     calls.index(f"<{self.RECOVERY_TAG}>"),
@@ -2860,6 +2970,9 @@ sleep() { :; }
         self.assertEqual(calls.count("CALL\n"), 1)
         self.assertIn(f"<{self.TAG}>", calls)
         self.assertEqual(state[self.TAG]["release"]["immutable"], True)
+        self.assertEqual(
+            state[self.TAG]["release"]["target_commitish"], self.SOURCE
+        )
 
     def test_app_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
@@ -2930,6 +3043,7 @@ sleep() { :; }
             "tag",
             "foreign-tag",
             "foreign-release",
+            "foreign-release-target",
             "partial-release",
         ):
             with self.subTest(predecessor_state=predecessor_state):
@@ -2947,7 +3061,7 @@ sleep() { :; }
             '  classify_tag exact \\\n'
             '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
             '    "${predecessor_tagger_date}" >/dev/null\n'
-            '  classify_release exact "${BASE_TAG}" >/dev/null'
+            '  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null'
         )
         self.assertEqual(script.count(predecessor_guard), 2)
 
@@ -2957,6 +3071,7 @@ sleep() { :; }
             "foreign-tag",
             "release-only",
             "foreign-release",
+            "foreign-release-target",
             "partial-release",
         ):
             with self.subTest(current_state=current_state):
@@ -3077,6 +3192,33 @@ sleep() { :; }
                     completed.returncode, 0, completed.stdout + completed.stderr
                 )
 
+    def test_current_and_recovery_release_targets_are_load_bearing(self):
+        script = self.script()
+        current_target = '--target "${SOURCE_SHA}"'
+        recovery_target = '--target "${recovery_source_sha}"'
+        for target in (current_target, recovery_target):
+            self.assertEqual(script.count(target), 1)
+        mutants = (
+            (script.replace(current_target, "", 1), "complete"),
+            (
+                script.replace(current_target, recovery_target, 1),
+                "complete",
+            ),
+            (script.replace(recovery_target, "", 1), "tag"),
+            (
+                script.replace(recovery_target, current_target, 1),
+                "tag",
+            ),
+        )
+        for index, (mutant, recovery_state) in enumerate(mutants):
+            with self.subTest(target_mutant=index):
+                completed, _calls, _state = self.execute(
+                    mutant, recovery_state=recovery_state
+                )
+                self.assertNotEqual(
+                    completed.returncode, 0, completed.stdout + completed.stderr
+                )
+
 
 class PredecessorWaitShellTests(unittest.TestCase):
     SOURCE = "a" * 40
@@ -3101,7 +3243,13 @@ class PredecessorWaitShellTests(unittest.TestCase):
         window_status: int = 0,
         tag_snapshot_changes: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str]:
-        if release_state not in {"missing", "complete", "foreign", "partial"}:
+        if release_state not in {
+            "missing",
+            "complete",
+            "foreign",
+            "foreign-target",
+            "partial",
+        }:
             raise AssertionError("predecessor Release fixture state is not closed")
         with tempfile.TemporaryDirectory(
             dir=ROOT, prefix=".platform-predecessor-shell-"
@@ -3117,6 +3265,7 @@ class PredecessorWaitShellTests(unittest.TestCase):
             tag["sha"] = "e" * 40
             release = {
                 "tag_name": self.BASE_TAG,
+                "target_commitish": self.BASE_SOURCE,
                 "name": f"Platform {self.BASE_TAG}",
                 "body": PublicationTransactionShellTests.legacy_notes(
                     self.BASE_TAG, self.BASE_SOURCE
@@ -3129,6 +3278,8 @@ class PredecessorWaitShellTests(unittest.TestCase):
             }
             if release_state == "foreign":
                 release["author"] = {"login": "owner", "id": 1}
+            if release_state == "foreign-target":
+                release["target_commitish"] = "main"
             records = runner / "records"
             records.mkdir()
             (records / "ref.json").write_text(json.dumps(ref), encoding="utf-8")
@@ -3371,7 +3522,7 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
         self.assertEqual(changed_calls.count("WINDOW\n"), 2)
 
     def test_absent_foreign_and_mutable_predecessors_fail_closed(self):
-        for release_state in ("missing", "foreign", "partial"):
+        for release_state in ("missing", "foreign", "foreign-target", "partial"):
             with self.subTest(release_state=release_state):
                 completed, output, calls = self.execute(release_state=release_state)
                 self.assertNotEqual(completed.returncode, 0)
@@ -4312,6 +4463,9 @@ class WorkflowStructureTests(unittest.TestCase):
             "classify_predecessor_tag",
             "classify_predecessor_release exact",
             "classify_predecessor_release absent",
+            '--source-sha "${source_sha}" \\\n'
+            '    --title "Platform ${tag}" --body "${notes}" >/dev/null',
+            'classify_predecessor_release exact "${base_tag}" "${base_sha}"',
             'printf \'attestation=PASS:%s:%s\\n\'',
             "unset read_token",
         ):
@@ -4403,13 +4557,15 @@ class WorkflowStructureTests(unittest.TestCase):
             "write_predecessor_notes",
             '--head "${BASE_SHA}" --tag "${BASE_TAG}"',
             '"${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}"',
-            'classify_release exact "${BASE_TAG}"',
+            'classify_release exact "${BASE_TAG}" "${BASE_SHA}"',
             'test "${SOURCE_SHA}" != "${BASE_SHA}"',
             'test "${TAG}" != "${BASE_TAG}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
             "release-state",
+            '--source-sha "${source_sha}" \\\n'
+            '    --title "Platform ${tag}" --body "${notes}"',
             '"${api}/releases/tags/${tag}"',
             "preflight_publication_state",
             'classify_tag "${current_tag_state}"',
@@ -4419,7 +4575,9 @@ class WorkflowStructureTests(unittest.TestCase):
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
             'run_write_gh release create "${recovery_tag}" --verify-tag',
+            '--target "${recovery_source_sha}"',
             'run_write_gh release create "${TAG}" --verify-tag',
+            '--target "${SOURCE_SHA}"',
         ):
             if required not in transaction:
                 raise ValueError(f"platform transaction lost exact wiring: {required}")
@@ -4440,8 +4598,8 @@ class WorkflowStructureTests(unittest.TestCase):
             )
         if "settings_token" in transaction or "/immutable-releases" in transaction:
             raise ValueError("App settings authority must not enter the write transaction")
-        if "--target" in transaction:
-            raise ValueError("existing exact tags must never gain a workflow-sensitive target")
+        if transaction.count("--target") != 2:
+            raise ValueError("both GitHub Releases must carry one exact commit target")
         if transaction.count("for attempt in 1 2 3 4 5") != 3:
             raise ValueError("recovery Release, current tag, and current Release need bounded retries")
         if transaction.count("preflight_publication_state") != 6:
@@ -4470,7 +4628,7 @@ class WorkflowStructureTests(unittest.TestCase):
             'classify_tag exact \\\n'
             '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
             '    "${predecessor_tagger_date}" >/dev/null\n'
-            '  classify_release exact "${BASE_TAG}" >/dev/null'
+            '  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null'
         )
         if initial_preflight.count(predecessor_guard) != 2:
             raise ValueError("both predecessor preflight observations must be exact")
@@ -4494,6 +4652,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "run_write_gh api --method POST",
             '-f object="${SOURCE_SHA}" -f type=commit',
             'run_write_gh release create "${TAG}" --verify-tag',
+            '--target "${SOURCE_SHA}"',
         ):
             if required not in current:
                 raise ValueError(f"current Release transaction lost exact create guard: {required}")
@@ -4643,6 +4802,9 @@ class WorkflowStructureTests(unittest.TestCase):
             "classify_predecessor_tag",
             "classify_predecessor_release exact",
             "classify_predecessor_release absent",
+            '--source-sha "${source_sha}" \\\n'
+            '    --title "Platform ${tag}" --body "${notes}" >/dev/null',
+            'classify_predecessor_release exact "${base_tag}" "${base_sha}"',
             'printf \'attestation=PASS:%s:%s\\n\'',
             "unset read_token",
         )
@@ -4705,13 +4867,15 @@ class WorkflowStructureTests(unittest.TestCase):
             "recovery_tag='v0.1.0'",
             PUBLISHER_TAG_GUARD,
             "write_predecessor_notes() {",
-            'classify_release exact "${BASE_TAG}"',
+            'classify_release exact "${BASE_TAG}" "${BASE_SHA}"',
             'test "${SOURCE_SHA}" != "${BASE_SHA}"',
             'test "${TAG}" != "${BASE_TAG}"',
             'tagger[name]=${tagger_name}',
             'tagger[email]=${tagger_email}',
             'tagger[date]=${tagger_date}',
             "release-state",
+            '--source-sha "${source_sha}" \\\n'
+            '    --title "Platform ${tag}" --body "${notes}"',
             '"${api}/releases/tags/${tag}"',
             "preflight_publication_state",
             'classify_tag "${current_tag_state}"',
@@ -4721,7 +4885,9 @@ class WorkflowStructureTests(unittest.TestCase):
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
             'run_write_gh release create "${recovery_tag}" --verify-tag',
+            '--target "${recovery_source_sha}"',
             'run_write_gh release create "${TAG}" --verify-tag',
+            '--target "${SOURCE_SHA}"',
         )
         for token in transaction_deletions:
             with self.subTest(transaction_deletion=token), self.assertRaises(ValueError):
@@ -4816,8 +4982,13 @@ class WorkflowStructureTests(unittest.TestCase):
                 1,
             ),
             transaction.replace(
-                '"${recovery_tag}" --verify-tag',
-                '"${recovery_tag}" --verify-tag --target "${recovery_source_sha}"',
+                '--target "${recovery_source_sha}"',
+                '--target "${SOURCE_SHA}"',
+                1,
+            ),
+            transaction.replace(
+                '--target "${SOURCE_SHA}"',
+                '--target "${recovery_source_sha}"',
                 1,
             ),
             # Both mutants name the version this source currently declares, so

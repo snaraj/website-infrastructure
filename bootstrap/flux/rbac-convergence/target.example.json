@@ -1,0 +1,11 @@
+{
+  "schema": "flux-rbac-convergence-target-v1",
+  "releaseTag": "vX.Y.Z",
+  "kubectl": "/absolute/path/to/reviewed/kubectl",
+  "kubeconfig": "/absolute/path/to/root-owned/flattened-kubeconfig.json",
+  "context": "reviewed-private-context",
+  "server": "https://api.example.invalid:6443",
+  "kubernetesCaSha256": "<64-lowercase-hex-ca-digest>",
+  "kubeSystemNamespaceUidSha256": "<64-lowercase-hex-namespace-identity-digest>",
+  "nodeIdentitySha256": "<64-lowercase-hex-node-identity-digest>"
+}
