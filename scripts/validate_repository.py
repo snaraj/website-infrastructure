@@ -188,7 +188,14 @@ SITE_RELEASE_CONTRACTS = (
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "4ad6b3fcfc80b1cfa12418215f5747d05aced7e5846467930fc7206750692ea6"
+    "23c5238d98aec9e5a61c27695b159afcd623af5565a6f0a92ac5c32c8c1803b6"
+)
+
+# The same coupling for the six cluster-scoped per-controller objects, which
+# live in the install root rather than access.yaml (issue #98). Cluster-wide
+# authority does not get a weaker review gate than namespaced authority.
+FLUX_PER_CONTROLLER_CONTRACT_SHA256 = (
+    "b9b7a1f0626a203967f7f874699303367dd77ac9aeb934aeb61d4abd7215dd5a"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -686,17 +693,27 @@ def active_kustomization_resource(text, name):
     ) is not None
 
 
-def flux_access_contract_errors(text):
-    """Require review of every byte in the accepted Flux authorization file."""
+def flux_access_contract_errors(text, expected=None, label="Flux access authorization"):
+    """Require review of every byte in an accepted Flux authorization file.
+
+    Parameterized over the digest because the authorization is now in TWO files
+    (issue #98): the namespaced grants in access.yaml, and the six cluster-scoped
+    per-controller objects that had to move into the install root so the
+    transaction that removes the authority they replace also creates them.
+    Moving them must not cost them their byte-level review coupling — an
+    unpinned ClusterRole is a worse place to keep cluster-wide authority than a
+    pinned Role.
+    """
 
     # read_text already normalizes platform newlines; the explicit replacement
     # also makes direct unit-test input behave identically on Windows and Linux.
     normalized = text.replace("\r\n", "\n")
     observed = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    if observed != FLUX_ACCESS_CONTRACT_SHA256:
+    if observed != (FLUX_ACCESS_CONTRACT_SHA256 if expected is None else expected):
         return [
-            "Flux access authorization changed; review every ServiceAccount, "
-            "Role, RoleBinding, rule, and subject before updating its digest"
+            "{} changed; review every ServiceAccount, Role, RoleBinding, "
+            "ClusterRole, ClusterRoleBinding, rule, and subject before updating "
+            "its digest".format(label)
         ]
     return []
 
@@ -1012,6 +1029,14 @@ def check_media(root):
             if pattern.search(text):
                 errors.append("{} before media discovery in {}".format(label, rel))
         for document in re.split(r"(?m)^---\s*$", text):
+            if re.search(r"(?m)^kind:\s*HelmRelease\s*$", document) and re.search(
+                r"(?m)^  (?:valuesFrom|kubeConfig|storageNamespace|targetNamespace):",
+                document,
+            ):
+                errors.append(
+                    "HelmRelease must not use controller-side external inputs or namespace redirects in "
+                    + rel
+                )
             if re.search(r"(?m)^kind:\s*GitRepository\s*$", document):
                 # A per-source override is allowed only as a second, narrower
                 # boundary paired with sparse checkout. Broad re-inclusion would
@@ -1356,11 +1381,17 @@ FLUX_INSTALLER_PIN_KEYS = (
 
 
 def cluster_scoped_flux_objects(root):
-    """Return the generated export's cluster-scoped object names.
+    """Return the install root's cluster-scoped object names.
 
     These are the objects a `kubectl delete namespace flux-system` cannot
     remove, so they are exactly the set the runbook's removal procedure and the
     installer's rollback both have to cover.
+
+    That set is NOT just the generated export any more. The six per-controller
+    objects (issue #98) are authored, are created by the same install, and are
+    cluster scoped for the same reason the shared role is — so leaving them out
+    here would let a rollback report success while three ClusterRoles and three
+    ClusterRoleBindings stayed behind on the cluster.
     """
 
     export = root / "kubernetes/flux-system/controllers/gotk-components.yaml"
@@ -1385,19 +1416,25 @@ def cluster_scoped_flux_objects(root):
             if kind and name:
                 deleted.add((kind.group(1), name.group(1)))
 
+    sources = [read(export)]
+    authored = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+    if authored.is_file():
+        sources.append(read(authored))
+
     names = []
-    for document in re.split(r"(?m)^---\s*$", read(export)):
-        kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
-        name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
-        if not kind or not name:
-            continue
-        identity = (kind.group(1), name.group(1))
-        if kind.group(1) in {
-            "CustomResourceDefinition",
-            "ClusterRole",
-            "ClusterRoleBinding",
-        } and identity not in deleted:
-            names.append(name.group(1))
+    for text in sources:
+        for document in re.split(r"(?m)^---\s*$", text):
+            kind = re.search(r"(?m)^kind:\s*(\S+)\s*$", document)
+            name = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+            if not kind or not name:
+                continue
+            identity = (kind.group(1), name.group(1))
+            if kind.group(1) in {
+                "CustomResourceDefinition",
+                "ClusterRole",
+                "ClusterRoleBinding",
+            } and identity not in deleted:
+                names.append(name.group(1))
     return names
 
 
@@ -1499,6 +1536,41 @@ FLUX_RBAC_PATCHES = {
 FLUX_AUTHORED_RBAC_FILES = (
     "kubernetes/flux-system/access.yaml",
     "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+)
+
+# The per-controller replacement authority, and the one thing about it that is
+# not negotiable: it is a RESOURCE OF THE INSTALL ROOT. The installer applies
+# `kubernetes/flux-system/controllers` and nothing else, while access.yaml is
+# reconciled later by Flux, so authority that replaces authority removed by the
+# install transaction has to be created by that same transaction.
+FLUX_PER_CONTROLLER_RBAC_RELATIVE = (
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+)
+
+# The per-controller split (issue #98). `crd-controller-flux-system` is ONE
+# ClusterRole bound to all three controller ServiceAccounts, so every Flux-group
+# verb it granted was a verb each controller held over the OTHER two's
+# reconciliation specifications — and impersonation does not contain that,
+# because the victim controller performs the resulting reconciliation. These
+# three ClusterRoles carry that authority instead, one ServiceAccount each.
+#
+# Required by name and by subject count: a missing role is a controller that
+# cannot reconcile at all, and a second subject on one of these bindings would
+# rebuild the shared role under a new name while every rule still read correctly.
+FLUX_PER_CONTROLLER_CLUSTER_ROLES = {
+    "crd-controller-source-flux-system": "source-controller",
+    "crd-controller-kustomize-flux-system": "kustomize-controller",
+    "crd-controller-helm-flux-system": "helm-controller",
+}
+
+# The API groups whose objects ARE a controller's reconciliation specification.
+# A verb over cluster metadata may be shared by all three controllers; a verb
+# over one of these groups may not, so the shared role names none of them.
+FLUX_EXECUTION_API_GROUPS = (
+    "source.toolkit.fluxcd.io",
+    "kustomize.toolkit.fluxcd.io",
+    "helm.toolkit.fluxcd.io",
 )
 
 # Controller-identity Roles that carry the authority the deleted cluster-admin
@@ -1513,6 +1585,10 @@ FLUX_CONTROLLER_ROLE_NAMESPACES = {
 }
 
 RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
+RBAC_READ_VERBS = ("get", "list", "watch")
+DISABLE_CONFIG_WATCHERS_FLAG = (
+    "--feature-gates=DisableConfigWatchers=true"
+)
 
 
 def _yaml_documents(text):
@@ -1550,7 +1626,17 @@ def _rbac_rule_blocks(document):
         if item.match(line):
             if current:
                 blocks.append("\n".join(current))
-            current = [line]
+            # The `- ` item marker is replaced by the two spaces it occupies, so
+            # the rule's FIRST field lines up with the rest and `_rbac_rule_list`
+            # can see it. Without this the first field of every rule was
+            # invisible to every check built on this helper: a rule written
+            # `- resources: [secrets]` with `verbs:` below it evaded the
+            # flux-system Secret-write check entirely, and the shared-role
+            # apiGroups check below would have been decorative for the same
+            # reason. Column alignment is preserved exactly — two characters for
+            # two characters — so the indentation this helper derives is
+            # unchanged.
+            current = [item.sub(indent + "  ", line, count=1)]
         elif current:
             current.append(line)
     if current:
@@ -1586,6 +1672,25 @@ def _rbac_rule_list(block, field):
     ]
 
 
+def _rbac_rule_fields(block):
+    """Return every mapping field authored in one RBAC rule block.
+
+    Kubernetes ignores neither ``resourceNames`` nor future rule fields.  An
+    exact cache/read-back grant therefore has to pin the complete mapping
+    shape, not merely the three list values the controller needs.  Sequence
+    members begin with ``-`` and cannot be mistaken for mapping fields here.
+    """
+
+    return {
+        match.group("field")
+        for match in re.finditer(
+            r"(?m)^\s*(?P<quote>['\"]?)(?P<field>[A-Za-z][A-Za-z0-9]*)"
+            r"(?P=quote):(?:\s|$)",
+            block,
+        )
+    }
+
+
 def flux_rbac_contract_errors(root):
     """Require the narrowed Flux controller authorization (AUDIT S12).
 
@@ -1615,7 +1720,13 @@ def flux_rbac_contract_errors(root):
             errors.append("Flux RBAC patch {} must target kind {}".format(name, kind))
         if not re.search(r"(?m)^\s*name:\s*{}\s*$".format(re.escape(target)), patch_text):
             errors.append("Flux RBAC patch {} must name {}".format(name, target))
-        if "patches/" + name not in index_text:
+        # Anchored to the `path:` entry that actually wires the patch in, not to
+        # the filename appearing anywhere in the file. A substring test was
+        # satisfied by any COMMENT naming the patch, so a root that mentioned a
+        # narrowing patch while no longer applying it read as compliant.
+        if not re.search(
+            r"(?m)^\s*path:\s*patches/{}\s*$".format(re.escape(name)), index_text
+        ):
             errors.append("Flux controller install root does not apply patches/" + name)
 
     # The cluster-admin binding is deleted rather than repointed: `roleRef` is
@@ -1624,6 +1735,36 @@ def flux_rbac_contract_errors(root):
     deletion = controllers / "patches/cluster-reconciler.yaml"
     if deletion.is_file() and not re.search(r"(?m)^\$patch:\s*delete\s*$", read(deletion)):
         errors.append("cluster-admin binding patch must delete the binding, not repoint it")
+
+    # Feature gates are an exact Deployment argument, not a substring. The
+    # Both reconcilers' default ConfigMap/Secret metadata watches would need
+    # cluster-wide Secret list/watch; disable those watches instead. No other
+    # optional feature gate is enabled by this recut.
+    expected_feature_gates = {
+        "source-controller.yaml": (),
+        "kustomize-controller.yaml": (DISABLE_CONFIG_WATCHERS_FLAG,),
+        "helm-controller.yaml": (DISABLE_CONFIG_WATCHERS_FLAG,),
+    }
+    for patch_name, expected in expected_feature_gates.items():
+        path = controllers / "patches" / patch_name
+        if not path.is_file():
+            continue
+        values = tuple(
+            value
+            for value in re.findall(
+                r"(?m)^-\s*op:\s*add\s*$\n"
+                r"^\s*path:\s*/spec/template/spec/containers/0/args/-\s*$\n"
+                r"^\s*value:\s*(--\S+)\s*$",
+                read(path),
+            )
+            if value.startswith("--feature-gates=")
+        )
+        if values != expected:
+            errors.append(
+                "{} feature-gate args must be exactly: {}".format(
+                    patch_name, ", ".join(expected) if expected else "none"
+                )
+            )
 
     # The subject list, pinned exactly. A regenerated export reintroduces four
     # subjects for controllers this install does not run.
@@ -1637,6 +1778,24 @@ def flux_rbac_contract_errors(root):
                 "crd-controller subjects must be exactly the installed controllers: "
                 + ", ".join(sorted(FLUX_CONTROLLER_ACCOUNTS))
             )
+
+    # The shared role names no Flux API group. It is the only ClusterRole bound
+    # to all three controllers, so a rule here reaches every controller: the
+    # split is only real while this file carries none.
+    role_patch = controllers / "patches/crd-controller-role.yaml"
+    if role_patch.is_file():
+        shared_text = read(role_patch)
+        for block in _rbac_rule_blocks(shared_text):
+            if "secrets" in _rbac_rule_list(block, "resources"):
+                errors.append(
+                    "the shared crd-controller ClusterRole must not grant Secret access"
+                )
+            for group in _rbac_rule_list(block, "apiGroups"):
+                if group in FLUX_EXECUTION_API_GROUPS:
+                    errors.append(
+                        "the shared crd-controller ClusterRole is bound to all three "
+                        "controllers and must not name " + group
+                    )
 
     for relative in FLUX_AUTHORED_RBAC_FILES:
         path = root / relative
@@ -1669,7 +1828,23 @@ def flux_rbac_contract_errors(root):
             continue
         name, namespace = name_match.group(1), namespace_match.group(1)
         seen_roles.add((name, namespace))
-        for block in _rbac_rule_blocks(document):
+        blocks = _rbac_rule_blocks(document)
+        if name == "flux-controller-decryption" and namespace == "flux-system":
+            exact = [
+                block for block in blocks
+                if tuple(_rbac_rule_list(block, "apiGroups")) == ("",)
+                and tuple(_rbac_rule_list(block, "resources")) == ("secrets",)
+                and tuple(_rbac_rule_list(block, "resourceNames")) == ("sops-age",)
+                and tuple(_rbac_rule_list(block, "verbs")) == ("get",)
+                and _rbac_rule_fields(block)
+                == {"apiGroups", "resources", "resourceNames", "verbs"}
+            ]
+            if len(blocks) != 1 or len(exact) != 1:
+                errors.append(
+                    "flux-system/flux-controller-decryption must have exactly one "
+                    "Secret get rule restricted to resourceNames sops-age"
+                )
+        for block in blocks:
             # Impersonation without `resourceNames` is impersonation of every
             # account in the namespace, which re-opens the escalation path the
             # deleted binding used to hold open.
@@ -1690,6 +1865,31 @@ def flux_rbac_contract_errors(root):
                                 namespace, name, verb
                             )
                         )
+        if name == "helm-reconciler" and namespace in {
+            "cloudflare-public", "naranjo-online", "lidersea-com",
+        }:
+            exact_rule_fields = ("apiGroups", "resources", "verbs")
+            expected_readback = {
+                (("",), ("pods",), RBAC_READ_VERBS, exact_rule_fields),
+                (("apps",), ("replicasets",), RBAC_READ_VERBS, exact_rule_fields),
+            }
+            actual_readback = {
+                (
+                    tuple(_rbac_rule_list(block, "apiGroups")),
+                    tuple(_rbac_rule_list(block, "resources")),
+                    tuple(_rbac_rule_list(block, "verbs")),
+                    tuple(sorted(_rbac_rule_fields(block))),
+                )
+                for block in blocks
+                if set(_rbac_rule_list(block, "resources")) & {"pods", "replicasets"}
+            }
+            if actual_readback != expected_readback:
+                errors.append(
+                    "tenant helm-reconciler {}/{} must grant only exact "
+                    "pods and replicasets get/list/watch read-back rules".format(
+                        namespace, name
+                    )
+                )
     for name, namespaces in sorted(FLUX_CONTROLLER_ROLE_NAMESPACES.items()):
         for namespace in namespaces:
             if (name, namespace) not in seen_roles:
@@ -1698,6 +1898,129 @@ def flux_rbac_contract_errors(root):
                         namespace, name
                     )
                 )
+
+    # The per-controller split's own objects. The subject list is checked as
+    # well as the role's presence, because a role bound to a second controller
+    # is the shared role again under a different name — and that is the exact
+    # failure this split exists to remove.
+    #
+    # These six live in the INSTALL ROOT, not in access.yaml, and that placement
+    # is itself the check below it: the same transaction that strips the Flux
+    # API groups off the shared ClusterRole has to create the replacements, or a
+    # fresh install brings up three controllers that cannot watch their own
+    # custom resources and can never reach readiness.
+    per_controller_path = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+    if not per_controller_path.is_file():
+        errors.append("per-controller RBAC missing: " + FLUX_PER_CONTROLLER_RBAC_RELATIVE)
+        return errors
+    install_root = root / "kubernetes/flux-system/controllers/kustomization.yaml"
+    if install_root.is_file():
+        resource = "- " + Path(FLUX_PER_CONTROLLER_RBAC_RELATIVE).name
+        if not re.search(r"(?m)^\s*{}\s*$".format(re.escape(resource)), read(install_root)):
+            errors.append(
+                "per-controller RBAC must be a resource of the install root: "
+                "controllers/kustomization.yaml does not list {}".format(
+                    Path(FLUX_PER_CONTROLLER_RBAC_RELATIVE).name
+                )
+            )
+    seen_cluster_roles = {}
+    seen_cluster_bindings = {}
+    for document in _yaml_documents(read(per_controller_path)):
+        kind_match = re.search(r"(?m)^kind:\s*(ClusterRole|ClusterRoleBinding)\s*$", document)
+        name_match = re.search(r"(?m)^  name:\s*(\S+)\s*$", document)
+        if kind_match is None or name_match is None:
+            continue
+        if kind_match.group(1) == "ClusterRole":
+            seen_cluster_roles[name_match.group(1)] = document
+            continue
+        # Issue #98 needs only this authored four-line roleRef shape. Keep the
+        # match bounded rather than importing issue #166's generalized parser
+        # and scan-cost work into the RBAC split.
+        role_ref_match = re.search(
+            r"(?m)^roleRef:\s*$\n"
+            r"  apiGroup:\s*rbac\.authorization\.k8s\.io\s*$\n"
+            r"  kind:\s*ClusterRole\s*$\n"
+            r"  name:\s*([^\s]+)\s*$",
+            document,
+        )
+        role_ref = role_ref_match.group(1) if role_ref_match else None
+        subjects = re.findall(
+            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", document
+        )
+        seen_cluster_bindings[name_match.group(1)] = (
+            role_ref,
+            tuple(sorted(subjects)),
+        )
+    for name, owner in sorted(FLUX_PER_CONTROLLER_CLUSTER_ROLES.items()):
+        if name not in seen_cluster_roles:
+            errors.append(
+                "per-controller ClusterRole missing from the install root: " + name
+            )
+        if name not in seen_cluster_bindings:
+            errors.append(
+                "per-controller ClusterRoleBinding missing from the install root: " + name
+            )
+            continue
+        role_ref, subjects = seen_cluster_bindings[name]
+        if role_ref != name:
+            errors.append(
+                "per-controller ClusterRoleBinding {} must bind ClusterRole {}".format(
+                    name, name
+                )
+            )
+        if subjects != (owner,):
+            errors.append(
+                "per-controller ClusterRoleBinding {} must name only {}".format(name, owner)
+            )
+    for name, document in sorted(seen_cluster_roles.items()):
+        secondary_source_resources = {
+            "crd-controller-kustomize-flux-system": (
+                "buckets", "gitrepositories", "ocirepositories",
+            ),
+            "crd-controller-helm-flux-system": ("ocirepositories",),
+        }
+        if name in secondary_source_resources:
+            blocks = _rbac_rule_blocks(document)
+            source_blocks = [
+                block for block in blocks
+                if tuple(_rbac_rule_list(block, "apiGroups"))
+                == ("source.toolkit.fluxcd.io",)
+            ]
+            read_blocks = [
+                block for block in source_blocks
+                if tuple(_rbac_rule_list(block, "verbs")) == RBAC_READ_VERBS
+            ]
+            expected_resources = secondary_source_resources[name]
+            exact = [
+                block for block in read_blocks
+                if tuple(_rbac_rule_list(block, "resources")) == expected_resources
+                and _rbac_rule_fields(block) == {"apiGroups", "resources", "verbs"}
+            ]
+            if len(read_blocks) != 1 or len(exact) != 1:
+                errors.append(
+                    "{} must have exactly one read-only secondary source rule for {}".format(
+                        name, ", ".join(expected_resources)
+                    )
+                )
+            forbidden_secondary = {
+                "buckets", "gitrepositories", "ocirepositories", "externalartifacts"
+            }
+            for block in source_blocks:
+                resources = set(_rbac_rule_list(block, "resources"))
+                if resources & forbidden_secondary and block not in exact:
+                    errors.append(
+                        "{} secondary source authority must not add kinds, fields, "
+                        "or write verbs".format(name)
+                    )
+        secret_blocks = [
+            block for block in _rbac_rule_blocks(document)
+            if "secrets" in _rbac_rule_list(block, "resources")
+        ]
+        if secret_blocks:
+            errors.append(
+                "per-controller ClusterRole must not grant cluster-wide Secret access: "
+                + name
+            )
     return errors
 
 
@@ -1757,10 +2080,13 @@ def check_kubernetes(root):
             ],
             "flux-system/controllers/patches/kustomize-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--no-remote-bases=true",
-                "--default-service-account=default", "runAsNonRoot", "RuntimeDefault",
+                "--default-service-account=default",
+                DISABLE_CONFIG_WATCHERS_FLAG,
+                "runAsNonRoot", "RuntimeDefault",
             ],
             "flux-system/controllers/patches/helm-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--default-service-account=default",
+                DISABLE_CONFIG_WATCHERS_FLAG,
                 "runAsNonRoot", "RuntimeDefault",
             ],
             "flux-system/controllers/patches/allow-egress.yaml": [
@@ -1786,6 +2112,15 @@ def check_kubernetes(root):
         access = flux / "access.yaml"
         if access.is_file():
             errors.extend(flux_access_contract_errors(read(access)))
+        per_controller = root / FLUX_PER_CONTROLLER_RBAC_RELATIVE
+        if per_controller.is_file():
+            errors.extend(
+                flux_access_contract_errors(
+                    read(per_controller),
+                    FLUX_PER_CONTROLLER_CONTRACT_SHA256,
+                    "Flux per-controller authorization",
+                )
+            )
         default_denies = root / "kubernetes/platform/prerequisites/network-policies.yaml"
         if not default_denies.is_file():
             errors.append("bootstrap-owned default-deny NetworkPolicies are missing")

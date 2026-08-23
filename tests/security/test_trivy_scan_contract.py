@@ -70,7 +70,6 @@ class TrivyScanContractTests(unittest.TestCase):
             {
                 "AVD-KSV-0041": {
                     "kubernetes/flux-system/controllers/gotk-components.yaml",
-                    generated,
                 },
                 "AVD-KSV-0046": {
                     "kubernetes/flux-system/controllers/gotk-components.yaml",

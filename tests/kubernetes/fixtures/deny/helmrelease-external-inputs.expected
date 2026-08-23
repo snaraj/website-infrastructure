@@ -1,0 +1,4 @@
+HelmRelease cloudflare-public/cloudflare-public must not redirect Helm storage to another namespace
+HelmRelease cloudflare-public/cloudflare-public must not redirect rendered workloads to another namespace
+HelmRelease cloudflare-public/cloudflare-public must not use kubeConfig under the closed controller RBAC contract
+HelmRelease cloudflare-public/cloudflare-public must not use valuesFrom under the closed controller RBAC contract

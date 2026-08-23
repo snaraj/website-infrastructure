@@ -34,7 +34,7 @@ Pod lidersea-bypass must not tolerate node DiskPressure
 Pod lidersea-bypass must not use hostNetwork
 Pod wildcard-disk-pressure must not use a wildcard toleration that includes node DiskPressure
 ResourceQuota lidersea-com/invented-capacity must be either the exact zero-Pod gate or a hash-bound reviewed namespace budget
-Role lidersea-com/helm-reconciler must not grant direct replicasets workload control
+Role lidersea-com/helm-reconciler must not grant direct replicasets workload control outside the exact Helm readiness read-back
 Secret naranjo-online/media-in-etcd key clip.mp4 looks like a media payload
 Service public-bypass must be ClusterIP
 Service public-bypass must not declare externalIPs

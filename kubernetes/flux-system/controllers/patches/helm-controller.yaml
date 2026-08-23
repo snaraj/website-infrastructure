@@ -13,3 +13,11 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --default-service-account=default
+# The pinned controller otherwise starts cluster-wide metadata informers for
+# every ConfigMap and Secret. Kubernetes RBAC has no metadata-only Secret verb,
+# and Helm release storage already uses the impersonated tenant reconciler.
+# The repository contract permits only inline values and the local cluster;
+# valuesFrom, kubeConfig, and namespace redirects are rejected in CI.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --feature-gates=DisableConfigWatchers=true
