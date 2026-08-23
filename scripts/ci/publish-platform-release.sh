@@ -93,7 +93,7 @@ write_predecessor_notes() {
 }
 
 classify_release() {
-  local required="$1" tag="$2" status
+  local required="$1" tag="$2" source_sha="$3" status
   local -a record_args=()
   status="$(get_json "${write_token}" \
     "${api}/releases/tags/${tag}" "${release_json}")"
@@ -103,6 +103,8 @@ classify_release() {
   python3 -I -B "${contract}" release-state \
     --http-status "${status}" --require "${required}" \
     "${record_args[@]}" --tag "${tag}" \
+    --allow-grandfathered-main-target \
+    --source-sha "${source_sha}" \
     --title "Platform ${tag}" --body "${notes}"
 }
 
@@ -128,16 +130,16 @@ preflight_publication_state() {
   classify_tag exact \
     "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
     "${predecessor_tagger_date}" >/dev/null
-  classify_release exact "${BASE_TAG}" >/dev/null
+  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null
 
   write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
     "${recovery_tagger_date}" >/dev/null
-  if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+  if classify_release exact "${recovery_tag}" "${recovery_source_sha}" >/dev/null 2>&1; then
     recovery_release_state=exact
   else
-    classify_release absent "${recovery_tag}" >/dev/null
+    classify_release absent "${recovery_tag}" "${recovery_source_sha}" >/dev/null
     recovery_release_state=absent
   fi
 
@@ -152,10 +154,10 @@ preflight_publication_state() {
       "${current_tagger_date}" >/dev/null
     current_tag_state=absent
   fi
-  if classify_release exact "${TAG}" >/dev/null 2>&1; then
+  if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
     current_release_state=exact
   else
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     current_release_state=absent
   fi
   if [ "${current_tag_state}" = absent ]; then
@@ -169,17 +171,18 @@ preflight_publication_state() {
   classify_tag exact \
     "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
     "${predecessor_tagger_date}" >/dev/null
-  classify_release exact "${BASE_TAG}" >/dev/null
+  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null
   write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
     "${recovery_tagger_date}" >/dev/null
-  classify_release "${recovery_release_state}" "${recovery_tag}" >/dev/null
+  classify_release "${recovery_release_state}" "${recovery_tag}" \
+    "${recovery_source_sha}" >/dev/null
   write_current_notes
   classify_tag "${current_tag_state}" \
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null
-  classify_release "${current_release_state}" "${TAG}" >/dev/null
+  classify_release "${current_release_state}" "${TAG}" "${SOURCE_SHA}" >/dev/null
 }
 
 complete_recovery_release() {
@@ -198,10 +201,10 @@ complete_recovery_release() {
     "${recovery_source_sha}" "${recovery_tag}" "${message}" \
     "${tagger_date}" >/dev/null
 
-  if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+  if classify_release exact "${recovery_tag}" "${recovery_source_sha}" >/dev/null 2>&1; then
     printf 'verified complete existing recovery Release %s\n' "${recovery_tag}"
   else
-    classify_release absent "${recovery_tag}" >/dev/null
+    classify_release absent "${recovery_tag}" "${recovery_source_sha}" >/dev/null
     classify_tag exact \
       "${recovery_source_sha}" "${recovery_tag}" "${message}" \
       "${tagger_date}" >/dev/null
@@ -210,14 +213,15 @@ complete_recovery_release() {
     classify_tag exact \
       "${recovery_source_sha}" "${recovery_tag}" "${message}" \
       "${tagger_date}" >/dev/null
-    classify_release absent "${recovery_tag}" >/dev/null
+    classify_release absent "${recovery_tag}" "${recovery_source_sha}" >/dev/null
     if ! run_write_gh release create "${recovery_tag}" --verify-tag \
+      --target "${recovery_source_sha}" \
       --title "Platform ${recovery_tag}" --notes-file "${notes}"; then
       printf 'recovery Release create did not succeed; checking for an exact concurrent winner\n' >&2
     fi
     release_race_verified=false
     for attempt in 1 2 3 4 5; do
-      if classify_release exact "${recovery_tag}" >/dev/null 2>&1; then
+      if classify_release exact "${recovery_tag}" "${recovery_source_sha}" >/dev/null 2>&1; then
         release_race_verified=true
         break
       fi
@@ -225,7 +229,7 @@ complete_recovery_release() {
     done
     test "${release_race_verified}" = true
   fi
-  classify_release exact "${recovery_tag}" >/dev/null
+  classify_release exact "${recovery_tag}" "${recovery_source_sha}" >/dev/null
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${message}" \
     "${tagger_date}" >/dev/null
@@ -243,11 +247,11 @@ publish_current_release() {
   else
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     preflight_publication_state
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     tag_object="$(run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -260,7 +264,7 @@ publish_current_release() {
     preflight_publication_state
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     if ! run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -283,24 +287,25 @@ publish_current_release() {
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
 
   write_current_notes
-  if classify_release exact "${TAG}" >/dev/null 2>&1; then
+  if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
     printf 'verified complete existing GitHub Release %s\n' "${TAG}"
   else
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
     preflight_publication_state
     write_current_notes
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" >/dev/null
+    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
     if ! run_write_gh release create "${TAG}" --verify-tag \
+      --target "${SOURCE_SHA}" \
       --title "Platform ${TAG}" --notes-file "${notes}"; then
       printf 'Release create did not succeed; checking for an exact concurrent winner\n' >&2
     fi
     release_race_verified=false
     for attempt in 1 2 3 4 5; do
-      if classify_release exact "${TAG}" >/dev/null 2>&1; then
+      if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
         release_race_verified=true
         break
       fi
@@ -308,7 +313,7 @@ publish_current_release() {
     done
     test "${release_race_verified}" = true
   fi
-  classify_release exact "${TAG}" >/dev/null
+  classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null
   classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
 }

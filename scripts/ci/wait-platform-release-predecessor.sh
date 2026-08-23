@@ -65,7 +65,7 @@ classify_predecessor_tag() {
 }
 
 classify_predecessor_release() {
-  local required="$1" tag="$2" status
+  local required="$1" tag="$2" source_sha="$3" status
   local -a record_args=()
   status="$(get_json "${api}/releases/tags/${tag}" "${release_json}")"
   if [ "${status}" = 200 ]; then
@@ -74,6 +74,8 @@ classify_predecessor_release() {
   python3 -I -B "${contract}" release-state \
     --http-status "${status}" --require "${required}" \
     "${record_args[@]}" --tag "${tag}" \
+    --allow-grandfathered-main-target \
+    --source-sha "${source_sha}" \
     --title "Platform ${tag}" --body "${notes}" >/dev/null
 }
 
@@ -119,9 +121,9 @@ for _attempt in {1..30}; do
   message="Platform release ${base_tag} from ${base_sha}"
   classify_predecessor_tag \
     "${base_sha}" "${base_tag}" "${message}" "${tagger_date}"
-  if classify_predecessor_release exact "${base_tag}"; then
+  if classify_predecessor_release exact "${base_tag}" "${base_sha}"; then
     :
-  elif classify_predecessor_release absent "${base_tag}"; then
+  elif classify_predecessor_release absent "${base_tag}" "${base_sha}"; then
     # Only clean absence is contention.
     sleep 10
     continue
@@ -130,7 +132,7 @@ for _attempt in {1..30}; do
     # observations. Accept only that exact concurrent winner; a present
     # foreign, mutable, partial, draft, prerelease, wrong-author,
     # asset-bearing, or mismatched Release dies here.
-    classify_predecessor_release exact "${base_tag}"
+    classify_predecessor_release exact "${base_tag}" "${base_sha}"
   fi
   printf 'attestation=PASS:%s:%s\n' \
     "${GITHUB_REPOSITORY}" "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"

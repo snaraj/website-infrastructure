@@ -1,0 +1,841 @@
+{
+  "schema": "flux-rbac-convergence-desired-v1",
+  "clusterRbacObjects": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-source-flux-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "buckets",
+            "gitrepositories",
+            "helmcharts",
+            "helmrepositories",
+            "ocirepositories"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "externalartifacts"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "buckets/status",
+            "externalartifacts/status",
+            "gitrepositories/status",
+            "helmcharts/status",
+            "helmrepositories/status",
+            "ocirepositories/status"
+          ],
+          "verbs": [
+            "get",
+            "patch",
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "buckets/finalizers",
+            "externalartifacts/finalizers",
+            "gitrepositories/finalizers",
+            "helmcharts/finalizers",
+            "helmrepositories/finalizers",
+            "ocirepositories/finalizers"
+          ],
+          "verbs": [
+            "update"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-source-flux-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "crd-controller-source-flux-system"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "source-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-kustomize-flux-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "kustomize.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "kustomizations"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "kustomize.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "kustomizations/status"
+          ],
+          "verbs": [
+            "get",
+            "patch",
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            "kustomize.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "kustomizations/finalizers"
+          ],
+          "verbs": [
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "buckets",
+            "gitrepositories",
+            "ocirepositories"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-kustomize-flux-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "crd-controller-kustomize-flux-system"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "kustomize-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-helm-flux-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "helm.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "helmreleases"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "update",
+            "patch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "helm.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "helmreleases/status"
+          ],
+          "verbs": [
+            "get",
+            "patch",
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            "helm.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "helmreleases/finalizers"
+          ],
+          "verbs": [
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "helmcharts"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "resources": [
+            "ocirepositories"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux"
+        },
+        "name": "crd-controller-helm-flux-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "crd-controller-helm-flux-system"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux",
+          "app.kubernetes.io/version": "v2.9.3"
+        },
+        "name": "crd-controller-flux-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "namespaces",
+            "serviceaccounts",
+            "configmaps"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "events"
+          ],
+          "verbs": [
+            "create",
+            "patch"
+          ]
+        },
+        {
+          "nonResourceURLs": [
+            "/livez/ping"
+          ],
+          "verbs": [
+            "head"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/instance": "flux-system",
+          "app.kubernetes.io/part-of": "flux",
+          "app.kubernetes.io/version": "v2.9.3"
+        },
+        "name": "crd-controller-flux-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "crd-controller-flux-system"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "source-controller",
+          "namespace": "flux-system"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "kustomize-controller",
+          "namespace": "flux-system"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    }
+  ],
+  "deletionIdentities": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "name": "cluster-reconciler-flux-system"
+    }
+  ],
+  "namespacedObjects": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "flux-controller-runtime",
+        "namespace": "flux-system"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "coordination.k8s.io"
+          ],
+          "resources": [
+            "leases"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps/status"
+          ],
+          "verbs": [
+            "get",
+            "update",
+            "patch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "flux-controller-runtime",
+        "namespace": "flux-system"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "flux-controller-runtime"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "source-controller",
+          "namespace": "flux-system"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "kustomize-controller",
+          "namespace": "flux-system"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "flux-controller-impersonation",
+        "namespace": "naranjo-online"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "serviceaccounts"
+          ],
+          "verbs": [
+            "impersonate"
+          ],
+          "resourceNames": [
+            "helm-reconciler"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "flux-controller-impersonation",
+        "namespace": "naranjo-online"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "flux-controller-impersonation"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "naranjo-online"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "naranjo-online"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "secrets",
+            "services",
+            "serviceaccounts"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "replicasets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "networking.k8s.io"
+          ],
+          "resources": [
+            "networkpolicies"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "naranjo-online"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "helm-reconciler"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-reconciler",
+          "namespace": "naranjo-online"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "flux-controller-impersonation",
+        "namespace": "lidersea-com"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "serviceaccounts"
+          ],
+          "verbs": [
+            "impersonate"
+          ],
+          "resourceNames": [
+            "helm-reconciler"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "flux-controller-impersonation",
+        "namespace": "lidersea-com"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "flux-controller-impersonation"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-controller",
+          "namespace": "flux-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "lidersea-com"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "lidersea-com"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "secrets",
+            "services",
+            "serviceaccounts"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "replicasets"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch"
+          ]
+        },
+        {
+          "apiGroups": [
+            "networking.k8s.io"
+          ],
+          "resources": [
+            "networkpolicies"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "helm-reconciler",
+        "namespace": "lidersea-com"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "helm-reconciler"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "helm-reconciler",
+          "namespace": "lidersea-com"
+        }
+      ]
+    }
+  ],
+  "controllerArgs": {
+    "kustomize-controller": [
+      "--events-addr=",
+      "--watch-all-namespaces=true",
+      "--log-level=info",
+      "--log-encoding=json",
+      "--enable-leader-election",
+      "--no-cross-namespace-refs=true",
+      "--no-remote-bases=true",
+      "--default-service-account=default",
+      "--feature-gates=DisableConfigWatchers=true"
+    ],
+    "helm-controller": [
+      "--events-addr=",
+      "--watch-all-namespaces=true",
+      "--log-level=info",
+      "--log-encoding=json",
+      "--enable-leader-election",
+      "--no-cross-namespace-refs=true",
+      "--default-service-account=default",
+      "--feature-gates=DisableConfigWatchers=true"
+    ]
+  },
+  "temporaryProof": {
+    "identity": {
+      "apiVersion": "helm.toolkit.fluxcd.io/v2",
+      "kind": "HelmRelease",
+      "namespace": "naranjo-online",
+      "name": "naranjo-online"
+    },
+    "annotationKey": "platform.snaraj.dev/flux-rbac-convergence-proof"
+  }
+}

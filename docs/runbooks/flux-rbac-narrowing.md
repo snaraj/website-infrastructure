@@ -1,9 +1,11 @@
-# Flux controller RBAC narrowing — DEFERRED, gated
+# Flux controller RBAC narrowing — protected transaction, gated
 
-Status: `DO NOT APPLY`. The desired state in this repository is narrowed; the
-cluster is not. Applying it is an owner-authorized operation with the
-preconditions in "Gate" below, and nothing in this document is a step to run
-today.
+Status: `DO NOT APPLY`. Checkout execution is permanently `BLOCKED`. The
+desired state in this repository is narrowed; live convergence is allowed only
+after the gate below is satisfied and only through the exact released,
+root-custodied transaction in
+[`bootstrap/flux/rbac-convergence/README.md`](../../bootstrap/flux/rbac-convergence/README.md).
+The owner must attend its `sudo`, plan-review, apply, and recovery boundaries.
 
 ## What changed, and the delta this creates
 
@@ -51,15 +53,15 @@ namespace: `valuesFrom`, `kubeConfig`, `storageNamespace`, and `targetNamespace`
 are rejected. Helm release storage remains available through each impersonated
 tenant reconciler's namespaced Role.
 
-**The live cluster still carries the broad binding.** The Flux controllers were
-installed from the pre-narrowing render, so from the moment this change merges
-until the gated apply below, Git and the cluster disagree about flux-system
-authorization. That delta is deliberate and is the only known drift this change
-introduces. It closes when step 5 of the procedure completes. The protected
-launcher must compare the live graph with the same reviewed model embedded in
-`bootstrap/flux/bootstrap.sh`; that model no longer contains
-`cluster-reconciler-flux-system`, so a cluster that still has it fails
-verification.
+The transaction's required starting prestate contains the broad
+`cluster-reconciler-flux-system` binding, and the last bounded observation
+found it. Do not treat that observation as current: `--plan` must re-read the
+entire graph, require exactly that broad cluster-admin binding for the tracked
+controllers, and reject every tracked binding outside its closed inventory.
+The intended Git/live authorization delta closes only when the transaction
+deletes that exact captured UID/resourceVersion at step 5. Final verification
+requires no cluster-admin binding to reach a tracked controller and compares
+the whole resulting graph with the plan-derived expected graph.
 
 ## Why the order is apply-then-delete
 
@@ -161,19 +163,19 @@ authorizer is reached.
 
 ### Closed discovery + authorization oracle
 
-**LIVE USE IS BLOCKED.** `scripts/flux_rbac_denial_oracle.py` contains and
-hermetically tests the closed protocol below, but a mutable checkout script
-cannot establish its own stage-zero trust before receiving a protected
-kubeconfig. Current main has no trusted reviewed-blob launcher for this entry
-point, so its direct CLI returns `UNRESOLVED` before opening kubectl or the
-kubeconfig. Do not invoke it directly, do not classify raw `auth can-i` output,
-and do not use either as promotion evidence.
+**LIVE USE IS GATED THROUGH THE PROTECTED TRANSACTION.**
+`scripts/flux_rbac_denial_oracle.py` contains and hermetically tests the closed
+protocol below, but a mutable checkout script cannot establish its own
+stage-zero trust before receiving a protected kubeconfig. Its direct CLI
+therefore remains non-evidence. Do not invoke it directly, classify raw
+`auth can-i` output, or use either as promotion evidence.
 
-Once the owner supplies and separately reviews the missing launcher, it must
-copy this exact script blob from the reviewed commit through a held descriptor,
-bind the interpreter/tool and protected kubeconfig without reopening mutable
-sources, and preserve the oracle's closed output. Only that reviewed launcher
-may enable the following three ordered, separately recorded operations:
+The exact released transaction copies this oracle blob from the reviewed
+commit through root custody, binds the interpreter, pinned kubectl, protected
+kubeconfig, exact release, target tuple, and reviewed plan without reopening
+mutable sources, and preserves the oracle's closed output in its journaled
+phase evidence. Only that root-owned launcher may perform the following three
+ordered, separately recorded operations:
 
 1. uncached raw discovery for the requested resource and verb, the built-in
    Lease positive control, the exact reviewed Flux Kustomization positive
@@ -221,8 +223,9 @@ Four tempting substitutes are explicitly non-evidence for this migration:
    direct-checkout rejection paths without printing or reading Secret values.
    Those tests show that the held-custody implementation rejects its hostile
    fixtures; they do not establish stage-zero trust for a mutable checkout or
-   enable the blocked live oracle. Native Windows keeps the portable protocol
-   and identity suite; it does not pretend to supply POSIX descriptor custody.
+   authorize direct live-oracle execution. Native Windows keeps the portable
+   protocol and identity suite; it does not pretend to supply POSIX descriptor
+   custody.
 
 Discovery and authorization have closed values. Discovery is `RESOLVED` or
 `UNRESOLVED`; authorization is `ALLOWED`, `DENIED`, or `UNRESOLVED`. Missing,
@@ -255,8 +258,8 @@ and warning-free raw reviews with the exact ServiceAccount groups returned
 `allowed:true` for an allowed cluster-scoped row and `allowed:false` for the
 inert Secret denial. Direct probes also confirmed that the current broad
 binding still allows the protected controller row. These results confirm the
-phase assumptions but are not promotion receipts while the trusted-launcher
-boundary remains blocked.
+phase assumptions but are not promotion receipts; the protected transaction
+must recapture them against its exact plan and target.
 
 The ServiceAccount subject is not a label or substring. It must be the exact
 protocol identity `system:serviceaccount:<namespace>:<name>`; prefixes,
@@ -269,10 +272,10 @@ optional name. Wildcards are deliberately outside the oracle's reviewed
 identity set; the final `'*' '*'` row below remains a coarse diagnostic, never
 denial evidence.
 
-The future owner-run Pi plan for the first protected denial row is recorded
-below as an argument manifest, **not an executable command**. Repeat the exact
-tuple and expected state for each non-wildcard row only after the trusted
-launcher exists:
+The first protected denial row is recorded below as an argument manifest,
+**not an executable command**. The protected transaction supplies the private
+tuple from root custody and repeats every non-wildcard row at its reviewed
+phase boundary:
 
 ```text
 REVIEWED_BLOB=scripts/flux_rbac_denial_oracle.py@<exact-owner-reviewed-commit>
@@ -304,13 +307,13 @@ It is not a ready oracle input. Through the protected ceremony, the owner must
 explicitly authorize generation of a separate flattened JSON snapshot
 containing only embedded credentials, with the exact context/server supplied
 privately to the launcher, and deliver that snapshot through held custody. Do
-not copy credentials during review, substitute the root kubeconfig, use sudo,
-or record private host identity here. The launcher must also enforce the
-v1.36.3 ARM64 `kubectl` SHA-256 already recorded as
-`KUBECTL_ARM64_SHA256`.
+not copy credentials during review, substitute a different kubeconfig, invoke
+the oracle with `sudo` outside the transaction, or record private host identity
+here. The launcher must also enforce the v1.36.3 ARM64 `kubectl` SHA-256 already
+recorded as `KUBECTL_ARM64_SHA256`.
 
-Executable and kubeconfig custody remains part of the future result. The
-oracle requires one independently supplied lowercase SHA-256 pin for every
+Executable and kubeconfig custody is part of the protected result. The oracle
+requires one independently supplied lowercase SHA-256 pin for every
 executable and refuses links, non-regular sources, foreign owners, unsafe
 modes, a missing/malformed/mismatched kubectl pin, and source replacement
 during binding. It copies from the held source
@@ -336,18 +339,25 @@ real API-server/authorizer substitute. The issue-closing evidence therefore
 also requires the final matrix against a disposable real Kubernetes API
 server; never use the Raspberry Pi for that experiment.
 
-After the trusted launcher lands, repeat every non-wildcard row through the
-oracle at each migration boundary. Until then the migration stays blocked. The
-expected states are predicted before any apply:
+The protected transaction repeats the closed rows through the oracle at each
+migration boundary. The phase names, contents, and counts are executable
+invariants:
 
-- before step 4, owned rows and all 18 issue-98 crossing rows are `ALLOWED`;
-- after step 4 but before step 5, every owned row remains `ALLOWED`; the three
-  source-controller controller-to-controller categories (seven literal rows)
-  become `DENIED`, while all 11 kustomize-controller and helm-controller rows
-  remain `ALLOWED` only because the still-live
-  `cluster-reconciler-flux-system` binding grants those two `cluster-admin`;
-- after step 5, every owned row remains `ALLOWED` and every crossing/general
-  forbidden row is `DENIED`.
+| Evidence label | Exact expected matrix | Receipts |
+|---|---|---:|
+| `pre-shared` | after split and namespaced convergence, before watcher/shared changes: 42 startup/informer allows, nine owned allows, all 18 issue-98 crossings allowed, and 32 tenant local-read allows plus foreign/read-write denials | 101 |
+| `mixed` | after watcher handling and shared replacement, before broad deletion: 42 startup/informer and nine owned rows allowed; the seven source-controller crossings denied; the remaining 11 kustomize/helm crossings still allowed through the broad binding | 69 |
+| `final` | after broad deletion: 42 startup/informer and nine owned rows allowed; all 18 crossings denied; 40 tenant impersonation/local-read/isolation checks and 16 cluster-Secret/general forbidden denials | 125 |
+| `post-proof-final` | after the Helm proof is restored and transaction annotations are removed: the exact `final` matrix again | 125 |
+| `rollback-terminal` | after rollback: all nine owned and all 18 crossing rows allowed, matching the captured broad-authority prestate | 27 |
+
+Committed verification reruns the 125-row final matrix; rolled-back
+verification reruns the 27-row rollback matrix. The fresh receipt-set digest
+must equal the applicable journaled terminal digest. Each receipt also carries
+its exact request echo, resolved discovery, expected result, two allowed
+controls, inert denied control, and `PASS`. A missing, extra, duplicate,
+oversized, unresolved, or differently classified receipt invalidates the
+entire phase.
 
 A single `UNRESOLVED` or unexpected state invalidates the entire boundary; do
 not infer the remaining rows. This mixed phase prediction also prevents a
@@ -531,9 +541,9 @@ handoff exemptions.
 | helm-controller | patch | `source.toolkit.fluxcd.io` / `ocirepositories` | ALLOWED | DENIED |
 | helm-controller | update | `source.toolkit.fluxcd.io` / `buckets/status` | ALLOWED | DENIED |
 
-All 18 are required in the disposable real-API sweep as well as in the future
-owner-run protected sweep. The `status` identities must resolve through the
-API server's advertised subresources. Kubernetes does not advertise the
+All 18 are required in the disposable real-API sweep as well as in the
+owner-run protected transaction. The `status` identities must resolve through
+the API server's advertised subresources. Kubernetes does not advertise the
 RBAC-only `finalizers` identity as an ordinary API subresource, so those two
 rows are labeled `AUTHORIZATION_ONLY`: the oracle still resolves the exact base
 resource, live CRD, version, scope, and `update` verb before it submits the
@@ -587,13 +597,15 @@ controller health without mutating the operator and temporarily mutates one
 HelmRelease solely as runtime proof; the release change is a separate journaled
 workload boundary.
 
-`crd-controller-flux-system` is patched with a strategic-merge patch that
-REPLACES `rules` and `subjects` wholesale. So the moment step 4 applies it, the
-live shared ClusterRole loses its wildcard rules, its cluster-wide Secret read,
-and `serviceaccounts/token` creation, and the live binding loses four of its
-seven subjects. The dedicated per-controller ClusterRoles must already preserve
-the own-resource and secondary-informer authority needed for startup. This is a
-removal, not an addition, and it happens before the "destructive" step.
+The repository render uses strategic-merge patches whose `rules` and `subjects`
+REPLACE those fields wholesale. The protected live transaction does not apply
+those patch files: at step 4 it sends the exact fully rendered shared objects as
+resourceVersion- and UID-fenced replacements. At that boundary the live shared
+ClusterRole loses its wildcard rules, cluster-wide Secret read, and
+`serviceaccounts/token` creation, and the live binding loses four of its seven
+subjects. The dedicated per-controller ClusterRoles must already preserve the
+own-resource and secondary-informer authority needed for startup. This is a
+removal, not an addition, and it happens before the broad-binding deletion.
 
 Issue #98 makes that replacement narrower again: the shared role loses every
 Flux API group, while six new install-root objects carry the replacement —
@@ -613,36 +625,92 @@ it — so from step 4 onward source-controller runs on the narrowed authority
 alone. It is therefore the controller to canary first, and the reason step 4
 carries its own verification and its own rollback boundary.
 
-The four subjects removed from the binding name ServiceAccounts this install
-does not create, so removing them takes away no live authority; they are
-restored on rollback anyway, because rollback restores the whole pre-change
-object rather than the parts someone judged load-bearing.
+The narrowed binding removes four legacy subjects, but the transaction does
+not rely on an assumption about whether those ServiceAccounts currently exist.
+It captures the entire pre-change object and restores all captured subjects on
+rollback rather than restoring only the parts judged load-bearing.
 
 ## Procedure
 
-**LIVE USE IS BLOCKED until the gate below is satisfied.** Neither current
-script is an eligible mutation entry point: the installer is fresh-only and the
-bootstrap script intentionally refuses live modes. The migration needs a new,
-separately reviewed protected-host launcher with `--plan`, `--apply`,
-`--rollback`, and `--verify`, bound to the merged commit, explicit target tuple,
-reviewed tool bytes, and a reviewed plan hash.
+**LIVE USE IS GATED.** Neither the fresh-only installer, the bootstrap script,
+the denial oracle, nor `access.yaml` is an eligible mutation entry point. The
+only entry point is the exact released, root-owned transaction documented in
+[`bootstrap/flux/rbac-convergence/README.md`](../../bootstrap/flux/rbac-convergence/README.md).
+`access.yaml` is not in its custody manifest: the transaction never reads or
+applies it.
+Its `--stage`, `--plan`, `--apply`, `--rollback`, and `--verify` modes bind the
+protected merge and platform Release, explicit target tuple, reviewed tool
+bytes, captured UID/resourceVersion prestate, and owner-reviewed plan hash.
+Use only the literal mode commands in that README. Every invocation must be
+`sudo /usr/bin/env -i LC_ALL=C`, followed by only the exact variables allowed
+for that mode, `/usr/bin/python3 -I -B`, and the fixed installed launcher. A
+bare `sudo`, ambient environment, direct shebang execution, different Python,
+or checkout path is outside the process boundary and is rejected.
+
+**Freeze before custody and keep the freeze through terminal verification.**
+From the held-descriptor custody ceremony until `--verify` succeeds for either
+the committed or rolled-back state, make no out-of-band change to the installed
+launcher, `/usr/bin/python3`, selected kubectl, kubeconfig or credentials,
+Kubernetes CA, private target identities, or `target.json`. Do not run apt or
+another package/OS upgrade. Do not reboot the operator or target host. Do not
+publish either site or move an OCI tag. Outside the exact transaction modes, do
+not change controller, RBAC, or Flux state or host WireGuard state. That is an
+owner-controlled maintenance freeze, not a claim that the launcher can observe
+every registry or host-side violation. On a violation or doubt, stop, preserve
+all state, and use owner-reviewed recovery. Never compensate with `access.yaml`,
+manual kubectl, a forward retry, or a replan.
+
+The reviewed release tree must stay unchanged until the held-descriptor stage
+prints `STAGED` and validates the root custody receipt. Only then may the source
+checkout change. After that boundary, checkout bytes are neither input nor
+authority: the root-owned custody tree and receipt are authoritative for every
+later mode, and the checkout must never be reopened or restaged into this
+transaction.
+
+The canonical `plan.json` is immutable once published. Drift, expiry, a wrong
+target, or a changed review conclusion is a stop. Do not delete, overwrite,
+regenerate, or rerun `--plan`; there is no supported same-transaction replan.
+Forward work after such a stop requires a new owner-reviewed transaction
+release and custody ceremony.
 
 Nine cluster-scoped objects are in the RBAC boundary: three existing objects are
 replaced or deleted and six split objects are created. The live active path also
 needs a deliberately selected namespaced subset; applying all of `access.yaml`
 would create dormant identities and is not an acceptable shortcut.
 
+All 23 rows stay in the recorded operation order. The six split rows are
+always creates from proven absence, and the broad binding is always a delete
+from captured presence. The 12 namespaced `converge` rows create when absent,
+replace when present and semantically different, or become semantic no-ops
+when already exact. The two controller argument rows similarly become `args`
+or `noop`, and the shared pair become `replace` or `noop`. A no-op is still
+journaled and must reread the exact captured UID, resourceVersion, prestate
+semantic hash, and desired hash without issuing an API mutation. Never omit it
+or change effective action by editing the plan.
+
 1. **Freeze the live prestate without Secret data.** The journal is a mode-0600,
    fsynced operator artifact. Bind the exact controller images, Deployment
    generations and N/N status, Pod UIDs/restarts, and the complete Flux object
-   inventory. The last read-only observation was zero GitRepositories, zero
-   Kustomizations, two site OCIRepositories, and two site HelmReleases; re-read
-   rather than assume those counts. Capture each live object's UID,
-   resourceVersion, generation, suspension, conditions, artifact revision or
-   digest, Helm history, and workload readiness. Capture canonical semantic
-   bytes plus UID/resourceVersion for every touched RBAC object. Confirm the six
-   split ClusterRoles/Bindings are absent and record the broad binding's exact
-   identity. Never journal Secret content.
+   inventory. The executable inventory requires zero Bucket,
+   ExternalArtifact, GitRepository, HelmChart, HelmRepository, and
+   Kustomization objects, plus exactly the two site OCIRepositories and two
+   same-site HelmReleases; re-read rather than assume those counts. For
+   naranjo, bind `naranjo-online-chart` version `0.1.30` to the
+   `naranjo-online` release; for lidersea, bind `lidersea-com-chart` version
+   `0.1.26` to the `lidersea-com` release. Each exact, Cosign-verified
+   OCIRepository must be current and supplies the upstream `sha256:` digest.
+   The local HelmRelease must use `helm-reconciler` and only inline
+   `values={"deploymentReady":true}`. Its attempted digest must equal that upstream digest, its
+   attempted revision must be
+   `<version>+<first-12-upstream-digest-hex>`, its latest history entry must be
+   deployed for that revision, and its status inventory must equal exactly one
+   live Helm-owned Deployment, Service, ServiceAccount, and NetworkPolicy in
+   the same namespace. Capture the OCI stored-artifact digest separately from
+   the upstream digest, plus each live object's UID, resourceVersion,
+   generation, suspension, conditions, Helm history, and workload readiness.
+   Capture canonical semantic bytes plus UID/resourceVersion for every touched
+   RBAC object. Confirm the six split ClusterRoles/Bindings are absent and
+   record the broad binding's exact identity. Never journal Secret content.
 2. **Close the mutation inventory.** It contains the six split
    ClusterRoles/Bindings; the shared `crd-controller-flux-system` ClusterRole and
    Binding; the legacy broad Binding deletion; the `flux-controller-runtime`
@@ -651,9 +719,9 @@ would create dormant identities and is not an acceptable shortcut.
    `helm-reconciler` ServiceAccount/Role/Binding; and the exact reconciler
    Deployment argument updates needed wherever live prestate lacks the reviewed
    config-watcher gate.
-   The equivalent five
-   `cloudflare-public` objects are excluded unless a separately reviewed plan
-   establishes that dormant connector readiness belongs in this transaction.
+   The equivalent five `cloudflare-public` objects are unconditionally outside
+   this closed transaction. Adding them would require a different reviewed
+   implementation and release, never a plan edit or replan.
 3. **Create replacement authority first.** Create the six split objects, which
    grant no cluster-wide Secret access, then create or replace the closed
    namespaced subset, including tenant-local Pod and ReplicaSet
@@ -715,22 +783,52 @@ from captured prestate if its step fails. Runtime-proof rollback separately
 restores the captured HelmRelease spec and verifies its workload; it does have
 workload impact.
 
+Route recovery from classified durable state only:
+
+| Journal/live classification | Only valid next action |
+|---|---|
+| `committed`, even if PASS receipt publication was interrupted | `--verify`; never `--rollback` or `--apply` |
+| `rolled-back`, even if rollback receipt publication was interrupted | `--verify`; never `--apply` |
+| safely attributable `prepared` or `recovery-required` nonterminal journal | owner reviews, then runs the exact `--rollback` command from the transaction README once |
+| ambiguous pending effect, journal, target identity, UID/resourceVersion, semantics, transaction marker, or live state | stop, preserve everything, and use owner-reviewed recovery; do not invoke a mutating mode |
+
+`--verify` does not classify a nonterminal journal and returns
+`RECOVERY_REQUIRED`. `--rollback` rejects committed state. Repeating rollback
+against an already rolled-back journal can reproduce its receipt, but the
+required next evidence step is still terminal `--verify`.
+
 | Failed at | Restore |
 |---|---|
 | during a step-3 watcher-disable rollout | restore each changed reconciler Deployment under its journaled identity, prove its rollout, restore modified namespaced objects, then remove exact transaction-created matches |
 | after additive objects and reconciler rollouts, before shared replacement | restore each changed reconciler Deployment and every modified namespaced object from the journal, then remove only transaction-created objects whose UID, resourceVersion, semantic hash, labels, roleRef, and subjects still match |
 | after shared replacement, before broad deletion | restore the captured shared ClusterRole and Binding first, then restore changed reconciler Deployments and namespaced prestate before removing exact transaction-created matches |
 | after broad deletion or during runtime proof | re-create the captured broad Binding first, restore the shared ClusterRole/Binding, changed reconciler Deployments, and namespaced prestate, then remove exact transaction-created matches; if the HelmRelease proof mutation began, restore its captured spec only under the journaled UID/resourceVersion transition and verify release plus workload poststate |
-| interrupted anywhere, state unknown | recover in the same reverse order, including the captured HelmRelease spec when its proof boundary began; any missing or changed identity is `recovery-required`, never permission to delete or overwrite by name |
+| interrupted with a safely attributable nonterminal journal | recover in the same reverse order, including the captured HelmRelease spec when its proof boundary began; any missing or changed identity changes the classification to ambiguous and requires an owner-reviewed stop, never deletion or overwrite by name |
+
+Both terminal paths carry an exact 23-row target inventory in operation order.
+Committed evidence has 22 present rows with desired semantics and one absent
+broad-binding row. Rolled-back evidence has every originally absent target
+absent and every originally present target restored semantically; unchanged
+objects retain their captured UID, while a safely recreated broad binding is
+bound to the journaled restored UID. Present rows record ID, UID, current
+resourceVersion, and semantic SHA-256. Terminal evidence also binds the exact
+binding graph and the applicable 125-row `post-proof-final` or 27-row
+`rollback-terminal` evidence record. The journal commits that evidence and its
+digest before publishing the terminal receipt; terminal `--verify` rereads all
+of it and writes a numbered, hash-chained verification record. The fresh
+inventory must keep IDs, presence, UIDs, and semantic hashes exact;
+resourceVersions are recaptured and may advance, so verification does not
+claim they equal the earlier terminal snapshot.
 
 Re-creating the deleted binding alone is **not** a full rollback: it restores
 `cluster-admin` for kustomize-controller and helm-controller, and nothing at all
 for source-controller, whose pre-change authority lived only in the shared
-ClusterRole this migration replaced. Roll back all three objects, then re-run
-the "must be yes" block plus the source-controller check from step 5 to confirm
-the cluster is back where it started. Namespaced objects created by this
-transaction are part of the rollback boundary; leaving them behind is residue,
-not a harmless shortcut.
+ClusterRole this migration replaced. Roll back all three objects, then let the
+protected launcher run the exact 27-row `rollback-terminal` matrix and complete
+prestate verification. Raw `auth can-i` output and the illustrative blocks
+above remain non-evidence. Namespaced objects created by this transaction are
+part of the rollback boundary; leaving them behind is residue, not a harmless
+shortcut.
 
 If runtime proof fails, do not infer a permission from controller logs and do
 not hand-patch the cluster. Restore the journaled prestate, reproduce the exact
@@ -772,7 +870,7 @@ It claims neither adversarial stage-zero provenance nor promotion authority. It
 is not permission to reuse a protected kubeconfig, run the protected
 convergence transaction, or unsuspend a Flux object.
 
-This apply is deferred and stays deferred until ALL of the following hold:
+This apply remains gated until ALL of the following hold:
 
 - the issue-186 repair and issue-98 split are both present on protected `main`,
   all required checks are green, and independent review binds the exact head;
@@ -785,11 +883,14 @@ This apply is deferred and stays deferred until ALL of the following hold:
   tenant Role, rolls back an acceptance-only synthetic workload failure, and
   leaves zero harness-owned kind/kubeconfig/network residue; it grants no
   protected-cluster mutation authority;
-- an owner-reviewed protected-host launcher implements the closed plan,
-  prestate journal, UID/resourceVersion mutations, rollback, and verification
-  described above without trusting mutable checkout paths;
-- a fresh read-only inventory matches the reviewed active-object plan, and any
-  drift produces a new plan rather than an operator edit;
+- the exact signed protected-main source and immutable platform Release include
+  the reviewed transaction, source manifest, closed desired inventory, prestate
+  journal, UID/resourceVersion mutations, rollback, and verification described
+  above, and the owner stages those bytes through held root custody without
+  trusting mutable checkout execution;
+- a fresh read-only inventory matches the reviewed active-object plan; any
+  later drift stops this immutable plan, and no replan or operator edit is
+  permitted within the transaction;
 - the authorization applies to the exact merged commit and reviewed plan.
 
 The paused route/reboot/admission-controller security queue is outside this

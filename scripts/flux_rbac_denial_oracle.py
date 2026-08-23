@@ -101,6 +101,7 @@ class ResourceIdentity:
 
 RESOURCE_IDENTITIES = {
     ("", "configmaps"): ResourceIdentity("", "v1", "configmaps", "ConfigMap", True),
+    ("", "events"): ResourceIdentity("", "v1", "events", "Event", True),
     ("", "namespaces"): ResourceIdentity("", "v1", "namespaces", "Namespace", False),
     ("", "pods"): ResourceIdentity("", "v1", "pods", "Pod", True),
     ("", "secrets"): ResourceIdentity("", "v1", "secrets", "Secret", True),
