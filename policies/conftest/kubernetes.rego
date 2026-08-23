@@ -942,7 +942,7 @@ deny contains msg if {
   msg := "source-controller must bound /data and /tmp plus container ephemeral-storage, and must carry no reconciler-only flag it cannot parse"
 }
 
-valid_kustomize_config_watcher_gate if {
+valid_reconciler_config_watcher_gate if {
   managers := [container |
     some container in object.get(input.spec.template.spec, "containers", [])
     object.get(container, "name", "") == "manager"
@@ -958,9 +958,9 @@ valid_kustomize_config_watcher_gate if {
 deny contains msg if {
   input.kind == "Deployment"
   input.metadata.namespace == "flux-system"
-  input.metadata.name == "kustomize-controller"
-  not valid_kustomize_config_watcher_gate
-  msg := "kustomize-controller must disable ConfigMap and Secret event watchers with the exact reviewed feature gate"
+  input.metadata.name in {"kustomize-controller", "helm-controller"}
+  not valid_reconciler_config_watcher_gate
+  msg := sprintf("%s must disable ConfigMap and Secret event watchers with the exact reviewed feature gate", [input.metadata.name])
 }
 
 deny contains msg if {
@@ -1295,6 +1295,42 @@ deny contains msg if {
   input.metadata.namespace in tenant_namespaces
   object.get(input.spec, "serviceAccountName", "") != "helm-reconciler"
   msg := sprintf("HelmRelease %s must use ServiceAccount helm-reconciler", [input.metadata.name])
+}
+
+# DisableConfigWatchers removes the controller's broad ConfigMap/Secret event
+# informers. Keep the current production contract closed over inline values and
+# the local API server; a future external input needs an explicit namespaced
+# grant and a separately reviewed design.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "valuesFrom", []) != []
+  msg := sprintf("HelmRelease %s/%s must not use valuesFrom under the closed controller RBAC contract", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "kubeConfig", null) != null
+  msg := sprintf("HelmRelease %s/%s must not use kubeConfig under the closed controller RBAC contract", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "storageNamespace", null) != null
+  msg := sprintf("HelmRelease %s/%s must not redirect Helm storage to another namespace", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "targetNamespace", null) != null
+  msg := sprintf("HelmRelease %s/%s must not redirect rendered workloads to another namespace", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
@@ -2187,39 +2223,20 @@ deny contains msg if {
   msg := "Role flux-system/flux-controller-decryption must grant only exact sops-age Secret get"
 }
 
-# helm-controller's release-storage metadata cache requires one cluster-wide
-# Secret rule. The exception is an exact object rather than a verb subset: only
-# helm-controller may hold it, and resourceNames or any other extra field would
-# silently change the reviewed authorization shape.
-valid_helm_secret_cache_rule(rule) if {
-  rule == {
-    "apiGroups": [""],
-    "resources": ["secrets"],
-    "verbs": ["get", "list", "watch"],
-  }
-}
-
+# Optional ConfigMap/Secret watchers are disabled on both reconcilers. Helm
+# release storage uses the impersonated tenant reconciler, so no controller
+# ClusterRole needs cluster-wide Secret access.
 deny contains msg if {
   input.kind == "ClusterRole"
-  input.metadata.name != "crd-controller-helm-flux-system"
   some rule in object.get(input, "rules", [])
   "secrets" in object.get(rule, "resources", [])
   msg := sprintf("ClusterRole %s must not grant cluster-wide Secret access", [input.metadata.name])
 }
 
-deny contains msg if {
-  input.kind == "ClusterRole"
-  input.metadata.name == "crd-controller-helm-flux-system"
-  some rule in object.get(input, "rules", [])
-  "secrets" in object.get(rule, "resources", [])
-  not valid_helm_secret_cache_rule(rule)
-  msg := "ClusterRole crd-controller-helm-flux-system must grant only exact Secret get/list/watch"
-}
-
 # No controller needs to write a Secret under its own identity, and a write verb
-# here would turn the narrow startup exception into credential mutation across
-# every namespace. Keep this independent denial so an attempted widening names
-# both the malformed exception and the credential-mutation authority.
+# here would enable credential mutation across every namespace. Keep this
+# independent denial so an attempted widening names both the cluster-scope read
+# and credential-mutation authority.
 deny contains msg if {
   input.kind == "ClusterRole"
   some rule in object.get(input, "rules", [])

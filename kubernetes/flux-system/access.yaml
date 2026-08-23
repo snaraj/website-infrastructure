@@ -50,9 +50,8 @@ automountServiceAccountToken: false
 #
 # The parts that CANNOT be namespaced live elsewhere on purpose. Each
 # controller's authority over its own custom resources is a cluster-wide
-# list/watch (`--watch-all-namespaces=true`), and helm-controller's
-# release-storage cache needs cluster-wide Secret get/list/watch. They have to
-# be ClusterRole rules. Because crd-controller-role.yaml strips that authority
+# list/watch (`--watch-all-namespaces=true`). Those have to be ClusterRole
+# rules. Because crd-controller-role.yaml strips that authority
 # from the shared role inside the install transaction, the replacement must be
 # created by that same transaction or a fresh install starts controllers that
 # cannot sync their caches. Those six objects are therefore part of the install
@@ -72,8 +71,8 @@ rules:
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
   # The only ConfigMaps a controller writes are its own, in its own namespace.
-  # Cluster-wide read stays in the shared ClusterRole for `substituteFrom` and
-  # Helm `valuesFrom`; the write half is confined here.
+  # Cluster-wide read stays in the shared ClusterRole for `substituteFrom`;
+  # the write half is confined here.
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -101,11 +100,10 @@ subjects:
     name: helm-controller
     namespace: flux-system
 ---
-# The one namespaced Secret grant: the SOPS age key the platform-services
-# Kustomization decrypts with. It is distinct from helm-controller's dedicated
-# cluster-wide read-only release-storage cache in the install root. Read verbs
-# only — a controller that could write Secrets could rewrite the key it decrypts
-# with. Kustomize's broad ConfigMap/Secret event watchers are disabled, so its
+# The one controller-identity Secret grant: the SOPS age key the
+# platform-services Kustomization decrypts with. Read verbs only — a controller
+# that could write Secrets could rewrite the key it decrypts with. Both
+# reconcilers' broad ConfigMap/Secret event watchers are disabled, so the
 # decryptor needs only an exact `get`; the resource name is bound here rather
 # than trusting namespace contents. The rendered-output policy and live-state
 # verifier both refuse a broader name or verb set.

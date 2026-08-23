@@ -682,7 +682,7 @@ CONTROLLER_BASELINE_GRANTS = (
     ("", "serviceaccounts", ("get", "list", "watch"),
      "a controller resolves the account it is about to impersonate"),
     ("", "configmaps", ("get", "list", "watch"),
-     "postBuild.substituteFrom and Helm valuesFrom read ConfigMaps"),
+     "the reviewed common controller baseline retains ConfigMap reads"),
 )
 
 # MODEL, declared rather than derived from the desired state, and required of
@@ -748,11 +748,12 @@ CONTROLLER_SECONDARY_WATCH_KINDS = {
 # after everything else moved to namespaced Roles.
 WATCH_ALL_NAMESPACES_FLAG = "--watch-all-namespaces=true"
 
-# Kustomize's default ConfigMap/Secret metadata watches are cluster-wide under
-# WATCH_ALL_NAMESPACES_FLAG. RBAC has no metadata-only Secret permission, so the
-# secure configuration disables those event watches instead of granting every
-# Secret. Exact-name reads during reconciliation remain available.
-KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG = (
+# Kustomize and Helm default ConfigMap/Secret metadata watches are cluster-wide
+# under WATCH_ALL_NAMESPACES_FLAG. RBAC has no metadata-only Secret permission,
+# so the secure configuration disables those event watches instead of granting
+# every Secret. Kustomize retains exact-name reads; the closed Helm contract
+# rejects external values and kubeconfig inputs.
+DISABLE_CONFIG_WATCHERS_FLAG = (
     "--feature-gates=DisableConfigWatchers=true"
 )
 
@@ -779,16 +780,6 @@ LIVENESS_URL = "/livez/ping"
 WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 READ_BACK_RESOURCES = (("apps", "replicasets"), ("", "pods"))
 READ_BACK_VERBS = ("get", "list", "watch")
-
-# Startup caches that are not Flux custom-resource reconcilers. Helm stores
-# release state in Secrets and constructs a cluster-scoped metadata informer
-# before the manager can start; this is therefore controller authority, not
-# authority of an impersonated tenant reconciler. Keep the literal map narrow:
-# adding another controller or resource must be an explicit reviewed decision.
-CONTROLLER_STARTUP_CACHE_READS = {
-    "helm-controller": (("", "secrets", ("get", "list", "watch")),),
-}
-
 
 class FluxResources(NamedTuple):
     """The reviewed desired state's Flux custom resources, by kind.
@@ -1399,6 +1390,17 @@ def derive_requirements(root=REPO_ROOT):
         owner = ("HelmRelease", name)
         reason = "HelmRelease " + name
 
+        if (
+            spec.get("valuesFrom")
+            or spec.get("kubeConfig") is not None
+            or spec.get("storageNamespace") is not None
+            or spec.get("targetNamespace") is not None
+        ):
+            raise AssertionError(
+                "{} must not use external inputs or namespace redirects under "
+                "the closed controller RBAC contract".format(reason)
+            )
+
         controller.append(
             Requirement(
                 helm_controller, "impersonate", "", "serviceaccounts",
@@ -1607,17 +1609,6 @@ def derive_requirements(root=REPO_ROOT):
                         "{}".format(name, kind),
                     )
                 )
-        for group, resource, verbs in CONTROLLER_STARTUP_CACHE_READS.get(name, ()):
-            for verb in verbs:
-                controller.append(
-                    Requirement(
-                        subject, verb, group, resource, None, None,
-                        ("Controller", "startup-cache"),
-                        "{} requires a cluster-scoped {} metadata cache before "
-                        "its manager starts".format(name, resource),
-                    )
-                )
-
     # Leader election, derived from the pinned Deployments' own arguments.
     for namespace, name in leader_election_controllers(root):
         subject = Subject(namespace, name)

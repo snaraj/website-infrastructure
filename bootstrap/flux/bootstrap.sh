@@ -824,7 +824,11 @@ def check_deployments(document):
         ),
         "helm-controller": (
             os.environ["FLUX_EXPECTED_HELM_IMAGE"],
-            ["--no-cross-namespace-refs=true", "--default-service-account=default"],
+            [
+                "--no-cross-namespace-refs=true",
+                "--default-service-account=default",
+                "--feature-gates=DisableConfigWatchers=true",
+            ],
             False,
             600,
         ),
@@ -1045,14 +1049,12 @@ def cluster_role_rules():
         ),
     ]
     # helm-controller: its own kind, the intermediate HelmChart it creates and
-    # deletes, the OCIRepository secondary informer/direct chartRef read, and the
-    # read-only Secret cache its all-namespaces release-storage informer needs
-    # before the manager can become ready.
+    # deletes, and the OCIRepository secondary informer/direct chartRef read.
+    # Optional ConfigMap/Secret watches are disabled in the Deployment.
     helm_owned = [
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], ["get", "list", "watch", "update", "patch"]),
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases/status"], ["get", "patch", "update"]),
         rule(["helm.toolkit.fluxcd.io"], ["helmreleases/finalizers"], ["update"]),
-        rule([""], ["secrets"], ["get", "list", "watch"]),
         rule(
             ["source.toolkit.fluxcd.io"],
             ["helmcharts"],
@@ -1671,6 +1673,7 @@ grep -q -- '--feature-gates=DisableConfigWatchers=true' <<<"${kustomize_args}" |
 helm_args="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get deployment helm-controller -o jsonpath='{.spec.template.spec.containers[0].args}')" || fail
 grep -q -- '--no-cross-namespace-refs=true' <<<"${helm_args}" || fail
 grep -q -- '--default-service-account=default' <<<"${helm_args}" || fail
+grep -q -- '--feature-gates=DisableConfigWatchers=true' <<<"${helm_args}" || fail
 for namespace in flux-system cloudflare-public naranjo-online; do
   "${kubectl}" "${kubectl_target_args[@]}" auth can-i create deployments \
     --as="system:serviceaccount:${namespace}:default" -n "${namespace}" | \

@@ -110,14 +110,14 @@ class MatrixContractTests(unittest.TestCase):
         self.assertEqual(len(acceptance.CROSSING_ROWS), 18)
         self.assertEqual(len(acceptance.OWNED_ROWS), 9)
         self.assertEqual(len(acceptance.GENERAL_DENIED_ROWS), 6)
-        self.assertEqual(len(acceptance.HELM_SECRET_ROWS), 3)
+        self.assertEqual(len(acceptance.HELM_SECRET_DENIED_ROWS), 3)
         self.assertEqual(len(acceptance.TENANT_ALLOWED_ROWS), 18)
         self.assertEqual(len(acceptance.TENANT_DENIED_ROWS), 12)
         for matrix in (
             acceptance.CROSSING_ROWS,
             acceptance.OWNED_ROWS,
             acceptance.GENERAL_DENIED_ROWS,
-            acceptance.HELM_SECRET_ROWS,
+            acceptance.HELM_SECRET_DENIED_ROWS,
             acceptance.TENANT_ALLOWED_ROWS,
             acceptance.TENANT_DENIED_ROWS,
         ):
@@ -887,26 +887,6 @@ class PureContractTests(unittest.TestCase):
                 release, generation=4, failure_resource_version="100"
             )
         )
-
-    def test_same_pod_retry_requires_restart_advance_and_ready_container(self):
-        failed = {
-            "metadata": {"uid": "pod-1"},
-            "status": {"containerStatuses": [{"restartCount": 2, "ready": False}]},
-        }
-        recovered = {
-            "metadata": {"uid": "pod-1"},
-            "status": {
-                "phase": "Running",
-                "containerStatuses": [{"restartCount": 3, "ready": True}],
-                "conditions": [{"type": "Ready", "status": "True"}],
-            },
-        }
-        self.assertTrue(acceptance.same_pod_kubelet_retry_bound(failed, recovered))
-        recovered["status"]["containerStatuses"][0]["restartCount"] = 2
-        self.assertFalse(acceptance.same_pod_kubelet_retry_bound(failed, recovered))
-        recovered["status"]["containerStatuses"][0]["restartCount"] = 3
-        recovered["metadata"]["uid"] = "replacement-pod"
-        self.assertFalse(acceptance.same_pod_kubelet_retry_bound(failed, recovered))
 
     def test_controller_zero_transform_changes_exactly_two_replica_fields(self):
         original = acceptance.STOCK_COMPONENTS.read_bytes()
@@ -1747,16 +1727,18 @@ class ReceiptTests(unittest.TestCase):
                 "singleReadyPod": True,
                 "managerRestartCount": 0,
                 "helmRemainedZero": True,
-                "podUidPreservedAfterHelmRestore": True,
+                "podUidPreservedAfterHelmStart": True,
                 "destructiveWorkloadAction": False,
                 "initialCreationOnly": True,
             },
-            "helmSecretColdStart": {
-                "negativeCacheSyncDenied": True,
-                "positiveKubeletRetryReady": True,
-                "readVerbsAllowed": len(acceptance.HELM_SECRET_ROWS),
-                "writeDenied": True,
-                "samePodRecovered": True,
+            "helmFinalRbacColdStart": {
+                "zeroPodsBeforeStart": True,
+                "finalRbacOnly": True,
+                "currentGenerationReady": True,
+                "singleReadyPod": True,
+                "managerRestartCount": 0,
+                "secretReadVerbsDenied": len(acceptance.HELM_SECRET_DENIED_ROWS),
+                "secretUpdateDenied": True,
                 "destructiveWorkloadAction": False,
                 "initialCreationOnly": True,
             },
@@ -1811,6 +1793,7 @@ class ReceiptTests(unittest.TestCase):
         receipt = self.receipt()
         encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
         self.assertLess(len(encoded), acceptance.MAX_RECEIPT_BYTES)
+        self.assertEqual(receipt["schemaVersion"], acceptance.RECEIPT_SCHEMA)
         self.assertEqual(receipt["result"], "PASS")
         self.assertEqual(
             receipt["scope"],
@@ -1866,7 +1849,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_pass_receipt_rejects_missing_false_and_foreign_fields(self):
         missing = self.values()
-        missing["evidence"].pop("helmSecretColdStart")
+        missing["evidence"].pop("helmFinalRbacColdStart")
         with self.assertRaisesRegex(acceptance.AcceptanceError, "RECEIPT_PASS_SCHEMA_INVALID"):
             acceptance.build_receipt(**missing)
         missing_kustomize = self.values()
@@ -1877,12 +1860,20 @@ class ReceiptTests(unittest.TestCase):
             acceptance.build_receipt(**missing_kustomize)
         false_preservation = self.values()
         false_preservation["evidence"]["kustomizeFinalRbacColdStart"][
-            "podUidPreservedAfterHelmRestore"
+            "podUidPreservedAfterHelmStart"
         ] = False
         with self.assertRaisesRegex(
             acceptance.AcceptanceError, "RECEIPT_LIFECYCLE_SCHEMA_INVALID"
         ):
             acceptance.build_receipt(**false_preservation)
+        false_secret_denial = self.values()
+        false_secret_denial["evidence"]["helmFinalRbacColdStart"][
+            "secretUpdateDenied"
+        ] = False
+        with self.assertRaisesRegex(
+            acceptance.AcceptanceError, "RECEIPT_LIFECYCLE_SCHEMA_INVALID"
+        ):
+            acceptance.build_receipt(**false_secret_denial)
         foreign_kustomize = self.values()
         foreign_kustomize["evidence"]["kustomizeFinalRbacColdStart"]["podUid"] = "private"
         with self.assertRaisesRegex(
@@ -2420,8 +2411,8 @@ class HarnessContractTests(unittest.TestCase):
         )[0]
         kustomize_cold = script.split(
             "    def kustomize_final_rbac_cold_start", 1
-        )[1].split("    def helm_secret_cold_start", 1)[0]
-        helm_cold = script.split("    def helm_secret_cold_start", 1)[1].split(
+        )[1].split("    def helm_final_rbac_cold_start", 1)[0]
+        helm_cold = script.split("    def helm_final_rbac_cold_start", 1)[1].split(
             "    @property\n    def chart_url", 1
         )[0]
         self.assertIn(
@@ -2446,18 +2437,18 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("BROAD_BINDING_ABSENCE_UNPROVEN", kustomize_cold)
         self.assertIn('"kustomize-controller"', kustomize_cold)
         self.assertIn('"helmRemainedZero": True', kustomize_cold)
-        self.assertLess(
-            helm_cold.index("zero_replica_without_pods"),
-            helm_cold.index("remove_exact_rule"),
-        )
-        self.assertLess(
-            helm_cold.index("remove_exact_rule"),
-            helm_cold.index("'{\"spec\":{\"replicas\":1}}'"),
-        )
+        scale = helm_cold.index("'{\"spec\":{\"replicas\":1}}'")
+        self.assertLess(helm_cold.index("zero_replica_without_pods"), scale)
+        self.assertLess(helm_cold.index("HELM_SECRET_DENIED_ROWS"), scale)
+        self.assertLess(helm_cold.index('AccessRow("helm-secret-update"'), scale)
+        self.assertIn("controller_cold_start_ready_bound", helm_cold)
+        self.assertNotIn("remove_exact_rule", helm_cold)
+        self.assertNotIn('"logs"', helm_cold)
+        self.assertNotIn("same_pod_kubelet_retry_bound", helm_cold)
         for cold in (kustomize_cold, helm_cold):
             self.assertIn('"destructiveWorkloadAction": False', cold)
             self.assertIn('"initialCreationOnly": True', cold)
-        self.assertIn("KUSTOMIZE_POD_CHANGED_DURING_HELM_RESTORE", helm_cold)
+        self.assertIn("KUSTOMIZE_POD_CHANGED_DURING_HELM_COLD_START", helm_cold)
 
     def test_recovery_precedes_publication_gates_and_kubectl_is_owned_only(self):
         script = (ROOT / "scripts" / "flux_rbac_kind_acceptance.py").read_text()
@@ -2528,7 +2519,7 @@ class HarnessContractTests(unittest.TestCase):
             def kustomize_final_rbac_cold_start(self):
                 called.append("kustomize-cold-start")
 
-            def helm_secret_cold_start(self):
+            def helm_final_rbac_cold_start(self):
                 called.append("helm-cold-start")
 
             def readiness_negatives(self):

@@ -31,9 +31,7 @@ repository now:
    (`kubernetes/flux-system/controllers/per-controller-rbac.yaml`, a resource
    of the controller install root rather than `access.yaml`). Kustomize watches
    Bucket, GitRepository, and OCIRepository read-only; Helm watches HelmChart
-   and OCIRepository. The Helm role alone also carries the exact cluster-scoped
-   Secret `get`/`list`/`watch` required by its all-namespaces release-storage
-   informer;
+   and OCIRepository. Neither role can read Secrets at cluster scope;
 5. adds the namespaced authority the controllers still need — leader election,
    controller-owned ConfigMaps, an exact `get` of the named SOPS age key, and one name-restricted
    impersonation Role per namespace holding reconciler accounts
@@ -41,21 +39,17 @@ repository now:
 6. corrects both site release reconcilers from `gitrepositories` to
    `ocirepositories`, the kind their own source objects declare.
 
-The Helm Secret read is a deliberate residual, not an assertion that Secrets
-are harmless. Kubernetes cannot express `list`/`watch` through
-`resourceNames`, and the pinned controller builds one all-namespaces informer
-before it becomes ready. The result is cluster-wide read-only Secret visibility
-for `helm-controller`; every Secret write remains denied. That is materially
-narrower than `cluster-admin`, but it must remain visible in review and in the
-live authorization receipt.
-
-Kustomize's optional ConfigMap/Secret event watchers are disabled with the
-exact `--feature-gates=DisableConfigWatchers=true` argument. Kubernetes cannot
-grant metadata-only Secret watch authority, so the alternative would expose
-every namespace's Secret names and metadata plus any data returned by `get`.
-Referenced inputs are still fetched by exact name during reconciliation; a
-change is observed on the next interval, retry, source event, or manual
-reconciliation instead of by an immediate ConfigMap/Secret event.
+Kustomize and Helm optional ConfigMap/Secret event watchers are disabled with
+the exact `--feature-gates=DisableConfigWatchers=true` argument. Kubernetes
+cannot grant metadata-only Secret watch authority, so the alternative would
+expose every namespace's Secret names and metadata plus any data returned by
+`get`. Kustomize referenced inputs are fetched by exact name during
+reconciliation; a change is observed on the next interval, retry, source event,
+or manual reconciliation instead of by an immediate ConfigMap/Secret event.
+The closed Helm contract allows only inline values and the local release
+namespace: `valuesFrom`, `kubeConfig`, `storageNamespace`, and `targetNamespace`
+are rejected. Helm release storage remains available through each impersonated
+tenant reconciler's namespaced Role.
 
 **The live cluster still carries the broad binding.** The Flux controllers were
 installed from the pre-narrowing render, so from the moment this change merges
@@ -597,17 +591,16 @@ workload boundary.
 REPLACES `rules` and `subjects` wholesale. So the moment step 4 applies it, the
 live shared ClusterRole loses its wildcard rules, its cluster-wide Secret read,
 and `serviceaccounts/token` creation, and the live binding loses four of its
-seven subjects. The dedicated Helm ClusterRole must already preserve the exact
-Secret `get`/`list`/`watch` needed for startup. This is a removal, not an
-addition, and it happens before the "destructive" step.
+seven subjects. The dedicated per-controller ClusterRoles must already preserve
+the own-resource and secondary-informer authority needed for startup. This is a
+removal, not an addition, and it happens before the "destructive" step.
 
 Issue #98 makes that replacement narrower again: the shared role loses every
 Flux API group, while six new install-root objects carry the replacement —
 three ClusterRoles and their three exactly-one-ServiceAccount bindings. The six
 must exist before the shared-role replacement lands. Applying the replacement
-without them removes all 24 primary/secondary informer list/watch grants plus
-Helm's three Secret startup-cache grants from the controller install and cannot
-reach readiness.
+without them removes all 24 primary/secondary informer list/watch grants from
+the controller install and cannot reach readiness.
 
 That transaction boundary is why the six live in
 `kubernetes/flux-system/controllers/per-controller-rbac.yaml`, a resource of
@@ -655,17 +648,31 @@ would create dormant identities and is not an acceptable shortcut.
    Binding; the legacy broad Binding deletion; the `flux-controller-runtime`
    Role/Binding; and, in each of the two namespaces with an active HelmRelease,
    the `flux-controller-impersonation` Role/Binding plus the
-   `helm-reconciler` ServiceAccount/Role/Binding. The equivalent five
+   `helm-reconciler` ServiceAccount/Role/Binding; and the exact reconciler
+   Deployment argument updates needed wherever live prestate lacks the reviewed
+   config-watcher gate.
+   The equivalent five
    `cloudflare-public` objects are excluded unless a separately reviewed plan
    establishes that dormant connector readiness belongs in this transaction.
-3. **Create replacement authority first.** Create the six split objects,
-   including Helm's cluster Secret `get`/`list`/`watch`, then create or replace
-   the closed namespaced subset, including tenant-local Pod and ReplicaSet
+3. **Create replacement authority first.** Create the six split objects, which
+   grant no cluster-wide Secret access, then create or replace the closed
+   namespaced subset, including tenant-local Pod and ReplicaSet
    `get`/`list`/`watch`. Record every created UID/resourceVersion and require the
    exact target semantic bytes. Before removing anything, require all owned
    controls `ALLOWED`, all tenant read-back writes and cross-tenant reads
-   `DENIED`, Helm Secret writes `DENIED`, and the existing controllers and four
-   Flux objects unchanged from prestate.
+   `DENIED`, and the existing controllers and four Flux objects unchanged from
+   prestate. The still-present broad binding temporarily keeps controller
+   Secret probes allowed; do not misreport them as final denials yet.
+   **Before step 4, disable optional config watchers while broad authority still
+   exists.** For each of `kustomize-controller` and `helm-controller`, first
+   compare live arguments with the reviewed set. If the exact
+   `--feature-gates=DisableConfigWatchers=true` flag is absent, update only that
+   Deployment's reviewed arguments under its captured UID/resourceVersion, one
+   controller at a time. Require a new current generation with exactly one
+   Ready, zero-restart manager Pod and the exact reviewed argument set before
+   moving to the next controller. If either rollout fails, restore captured
+   Deployment prestate before changing RBAC. This ordering prevents an old
+   process from retaining a Secret informer after its permission is removed.
 4. **Replace the shared objects.** Replace the shared ClusterRole and
    subject-pinned Binding under captured resourceVersion preconditions. Run the
    mixed-phase authorization matrix. The seven source-controller crossings must
@@ -677,18 +684,19 @@ would create dormant identities and is not an acceptable shortcut.
    `cluster-reconciler-flux-system` UID/resourceVersion. Require every owned row
    `ALLOWED`, all 18 cross-controller rows and every general forbidden row
    `DENIED`, the exact expected binding graph, and no unexpected binding that
-   reaches a controller account.
-6. **Prove both issue-186 findings without terminating an operator.** The
+   reaches a controller account. Helm controller cluster-wide Secret
+   `get`/`list`/`watch` and writes must now all be `DENIED`.
+6. **Prove both issue-186 findings.** The
    disposable kind lane initially creates both Kustomize and Helm at zero.
    Kustomize's sole zero-to-one creation occurs only after final RBAC and must
    reach current-generation readiness with one zero-restart Pod while Helm
-   remains absent. Helm's later sole zero-to-one creation observes the missing
-   Secret-read failure, and the same Pod's ordinary kubelet retry becomes ready
-   after the reviewed rule is restored; Kustomize's exact Pod must remain
+   remains absent. Helm's later sole zero-to-one creation must reach
+   current-generation readiness with one zero-restart Pod while all three
+   cluster-wide Secret read probes deny; Kustomize's exact Pod must remain
    unchanged and ready throughout.
-   The protected transaction performs no controller restart, Pod deletion,
-   eviction, or scale-down. Observe the existing helm-controller Deployment at
-   its current generation and fully ready without `cluster-admin`, then perform
+   The protected transaction uses only the reviewed step-3 reconciler rollouts; it
+   performs no ad-hoc Pod deletion, eviction, or scale-down. Reconfirm that
+   rolled-out Deployment is fully ready without `cluster-admin`, then perform
    the separately plan-bound controlled upgrade of one existing HelmRelease
    using only a collision-free
    `spec.commonMetadata.annotations` change. Require current observed generation,
@@ -701,22 +709,25 @@ would create dormant identities and is not an acceptable shortcut.
 ## Rollback
 
 Rollback is per boundary, and it restores **objects**, not just the deletion.
-RBAC restoration is evaluated per request and takes effect immediately without
-a restart or drain. Runtime-proof rollback separately restores the captured
-HelmRelease spec and verifies its workload; it does have workload impact.
+RBAC restoration is evaluated per request and takes effect immediately. The
+Deployment argument change is a separate rollout boundary and must be restored
+from captured prestate if its step fails. Runtime-proof rollback separately
+restores the captured HelmRelease spec and verifies its workload; it does have
+workload impact.
 
 | Failed at | Restore |
 |---|---|
-| after additive objects, before shared replacement | restore every modified namespaced object from the journal, then remove only transaction-created objects whose UID, resourceVersion, semantic hash, labels, roleRef, and subjects still match |
-| after shared replacement, before broad deletion | restore the captured shared ClusterRole and Binding first, restore namespaced prestate, then remove exact transaction-created matches |
-| after broad deletion or during runtime proof | re-create the captured broad Binding first, restore the shared ClusterRole/Binding and namespaced prestate, then remove exact transaction-created matches; if the HelmRelease proof mutation began, restore its captured spec only under the journaled UID/resourceVersion transition and verify release plus workload poststate |
+| during a step-3 watcher-disable rollout | restore each changed reconciler Deployment under its journaled identity, prove its rollout, restore modified namespaced objects, then remove exact transaction-created matches |
+| after additive objects and reconciler rollouts, before shared replacement | restore each changed reconciler Deployment and every modified namespaced object from the journal, then remove only transaction-created objects whose UID, resourceVersion, semantic hash, labels, roleRef, and subjects still match |
+| after shared replacement, before broad deletion | restore the captured shared ClusterRole and Binding first, then restore changed reconciler Deployments and namespaced prestate before removing exact transaction-created matches |
+| after broad deletion or during runtime proof | re-create the captured broad Binding first, restore the shared ClusterRole/Binding, changed reconciler Deployments, and namespaced prestate, then remove exact transaction-created matches; if the HelmRelease proof mutation began, restore its captured spec only under the journaled UID/resourceVersion transition and verify release plus workload poststate |
 | interrupted anywhere, state unknown | recover in the same reverse order, including the captured HelmRelease spec when its proof boundary began; any missing or changed identity is `recovery-required`, never permission to delete or overwrite by name |
 
 Re-creating the deleted binding alone is **not** a full rollback: it restores
 `cluster-admin` for kustomize-controller and helm-controller, and nothing at all
 for source-controller, whose pre-change authority lived only in the shared
 ClusterRole this migration replaced. Roll back all three objects, then re-run
-the "must be yes" block plus the source-controller check from step 4 to confirm
+the "must be yes" block plus the source-controller check from step 5 to confirm
 the cluster is back where it started. Namespaced objects created by this
 transaction are part of the rollback boundary; leaving them behind is residue,
 not a harmless shortcut.
@@ -767,8 +778,9 @@ This apply is deferred and stays deferred until ALL of the following hold:
   all required checks are green, and independent review binds the exact head;
 - the disposable real-API acceptance uses the real pinned Flux controllers and
   cold-starts Kustomize under final RBAC with one zero-restart Pod while Helm
-  remains at zero, preserves that exact Pod through the Helm proof, proves the
-  Helm cache failure without Secret read, one install failure and one upgrade
+  remains at zero, then cold-starts Helm with one zero-restart Pod while
+  preserving that exact Kustomize Pod and denying Helm cluster-wide Secret
+  reads, one install failure and one upgrade
   failure, each with a healthy workload, across the two missing readiness
   rules, successful install plus
   upgrade with all rules, acceptance-only Helm remediation rollback, and zero

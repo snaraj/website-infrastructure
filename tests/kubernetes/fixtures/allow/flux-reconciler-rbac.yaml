@@ -2,9 +2,9 @@
 # and its per-controller split (issue #98). These are focused positive controls
 # for the individual policy shapes, not a second complete controller render:
 # the real render supplies the full primary/status/finalizer inventories. This
-# fixture covers the shared role and binding, the exact secondary-source and
-# Secret rules, one-owner bindings, name-restricted impersonation, the exact
-# decryption Secret name, and the Kustomize config-watcher gate. If a rule added
+# fixture covers the shared role and binding, the exact secondary-source rules,
+# one-owner bindings, name-restricted impersonation, the exact decryption Secret
+# name, and a reconciler config-watcher gate. If a rule added
 # to policies/conftest/kubernetes.rego is broader than the property it is meant
 # to enforce, it fails here rather than silently rejecting the real manifests.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -70,16 +70,13 @@ subjects:
     name: kustomize-controller
     namespace: flux-system
 ---
-# helm-controller's one non-Flux startup cache: exact cluster-wide read-only
-# Secret metadata for Helm release storage, never Secret write authority.
+# helm-controller's source authority contains no cluster-wide Secret access;
+# release storage belongs to the impersonated tenant reconciler.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: crd-controller-helm-flux-system
 rules:
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   - apiGroups: [source.toolkit.fluxcd.io]
     resources: [helmcharts]
     verbs: [get, list, watch, create, update, patch, delete]

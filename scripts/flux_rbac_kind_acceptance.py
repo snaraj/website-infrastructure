@@ -137,6 +137,7 @@ TOOL_RECEIPT_KEYS = {
 } | {"dockerContextSha256", "dockerEndpointSha256", "dockerDaemonIdSha256"}
 DOCKER_CUSTODY_KEYS = {"context", "endpoint", "daemonId"}
 JOURNAL_SCHEMA = 4
+RECEIPT_SCHEMA = 2
 JOURNAL_KEYS = {
     "schemaVersion",
     "owner",
@@ -181,7 +182,7 @@ PASS_EVIDENCE_KEYS = {
     "tenantBoundariesDenied",
     "controllerInitialCreation",
     "kustomizeFinalRbacColdStart",
-    "helmSecretColdStart",
+    "helmFinalRbacColdStart",
     "readinessNegatives",
     "releaseLifecycle",
 }
@@ -629,7 +630,7 @@ GENERAL_DENIED_ROWS = (
     AccessRow("helm-secret-write", HELM, "update", "", "secrets", namespace="flux-system"),
 )
 
-HELM_SECRET_ROWS = tuple(
+HELM_SECRET_DENIED_ROWS = tuple(
     AccessRow(f"helm-secret-{verb}", HELM, verb, "", "secrets")
     for verb in ("get", "list", "watch")
 )
@@ -1907,63 +1908,6 @@ def rollback_after_failure_bound(
     )
 
 
-def same_pod_kubelet_retry_bound(
-    failed: Mapping[str, object], recovered: Mapping[str, object]
-) -> bool:
-    """Prove kubelet retried the same failed container and it became Ready."""
-
-    failed_metadata = failed.get("metadata")
-    recovered_metadata = recovered.get("metadata")
-    failed_status = failed.get("status")
-    recovered_status = recovered.get("status")
-    failed_containers = (
-        failed_status.get("containerStatuses")
-        if isinstance(failed_status, dict)
-        else None
-    )
-    recovered_containers = (
-        recovered_status.get("containerStatuses")
-        if isinstance(recovered_status, dict)
-        else None
-    )
-    ready_conditions = (
-        [
-            item
-            for item in recovered_status.get("conditions", [])
-            if isinstance(item, dict) and item.get("type") == "Ready"
-        ]
-        if isinstance(recovered_status, dict)
-        and isinstance(recovered_status.get("conditions", []), list)
-        else []
-    )
-    if (
-        not isinstance(failed_metadata, dict)
-        or not isinstance(recovered_metadata, dict)
-        or not isinstance(failed_containers, list)
-        or len(failed_containers) != 1
-        or not isinstance(failed_containers[0], dict)
-        or not isinstance(recovered_containers, list)
-        or len(recovered_containers) != 1
-        or not isinstance(recovered_containers[0], dict)
-    ):
-        return False
-    failed_restarts = failed_containers[0].get("restartCount")
-    recovered_restarts = recovered_containers[0].get("restartCount")
-    return (
-        isinstance(failed_metadata.get("uid"), str)
-        and failed_metadata["uid"] == recovered_metadata.get("uid")
-        and type(failed_restarts) is int
-        and failed_restarts >= 0
-        and type(recovered_restarts) is int
-        and recovered_restarts > failed_restarts
-        and recovered_containers[0].get("ready") is True
-        and isinstance(recovered_status, dict)
-        and recovered_status.get("phase") == "Running"
-        and len(ready_conditions) == 1
-        and ready_conditions[0].get("status") == "True"
-    )
-
-
 def zero_replica_without_pods(
     deployment: Mapping[str, object], pods: object
 ) -> bool:
@@ -2816,7 +2760,6 @@ class AcceptanceHarness:
     registry_ip: str | None = None
     registry_port: str | None = None
     workload_reference: str | None = None
-    final_render: bytes | None = None
     acceptance_egress_document: dict[str, object] | None = None
     kustomize_pod_uid: str | None = None
     snapshot_root: Path | None = None
@@ -2989,10 +2932,6 @@ class AcceptanceHarness:
         self.assert_matrix(GENERAL_DENIED_ROWS, False)
         self.assert_matrix(TENANT_ALLOWED_ROWS, True)
         self.assert_matrix(TENANT_DENIED_ROWS, False)
-        self.assert_matrix(HELM_SECRET_ROWS, True)
-        self.assert_review(
-            AccessRow("helm-secret-update", HELM, "update", "", "secrets"), False
-        )
         self.evidence.update(
             {
                 "finalOwnedAllowed": len(OWNED_ROWS),
@@ -3004,7 +2943,7 @@ class AcceptanceHarness:
         )
         self.machine.advance(State.STOCK, State.FINAL_RBAC)
         self.kustomize_final_rbac_cold_start()
-        self.helm_secret_cold_start()
+        self.helm_final_rbac_cold_start()
         self.machine.advance(State.FINAL_RBAC, State.COLD_START)
         self.readiness_negatives()
         self.machine.advance(State.COLD_START, State.READINESS_NEGATIVES)
@@ -3489,7 +3428,6 @@ class AcceptanceHarness:
             or any(text.count(image) != 1 for image in images)
         ):
             raise AcceptanceError("FINAL_RENDER_INVALID")
-        self.final_render = rendered
         # The final controller root deliberately turns upstream's allow-all
         # egress policy into a deny. Install the disposable test's exact API,
         # DNS, artifact, and local-registry flows first so a NetworkPolicy-
@@ -3654,12 +3592,12 @@ class AcceptanceHarness:
             "singleReadyPod": True,
             "managerRestartCount": 0,
             "helmRemainedZero": True,
-            "podUidPreservedAfterHelmRestore": False,
+            "podUidPreservedAfterHelmStart": False,
             "destructiveWorkloadAction": False,
             "initialCreationOnly": True,
         }
 
-    def helm_secret_cold_start(self) -> None:
+    def helm_final_rbac_cold_start(self) -> None:
         if self.kustomize_pod_uid is None:
             raise AcceptanceError("KUSTOMIZE_COLD_START_NOT_PROVEN")
         kustomize_deployment, kustomize_pods = self.controller_deployment_and_pods(
@@ -3678,15 +3616,10 @@ class AcceptanceHarness:
         initial = self.evidence.get("controllerInitialCreation")
         if not isinstance(initial, dict):
             raise AcceptanceError("HELM_INITIAL_ZERO_INVALID")
-        self.remove_exact_rule(
-            "clusterrole",
-            "crd-controller-helm-flux-system",
-            group="",
-            resource="secrets",
-            verbs=("get", "list", "watch"),
+        self.assert_matrix(HELM_SECRET_DENIED_ROWS, False)
+        self.assert_review(
+            AccessRow("helm-secret-update", HELM, "update", "", "secrets"), False
         )
-        for row in HELM_SECRET_ROWS:
-            self.assert_review(row, False)
         self.kube(
             "-n",
             "flux-system",
@@ -3698,72 +3631,23 @@ class AcceptanceHarness:
             '{"spec":{"replicas":1}}',
         )
 
-        def cache_failure() -> dict[str, object] | None:
-            deployment = self.kube_json(
-                "-n", "flux-system", "get", "deployment", "helm-controller", "-o", "json"
+        def ready() -> dict[str, object] | None:
+            current_deployment, current_pods = self.controller_deployment_and_pods(
+                "helm-controller"
             )
-            current_pods = self.kube_json(
-                "-n", "flux-system", "get", "pods", "-l", "app=helm-controller", "-o", "json"
-            ).get("items")
-            logs = self.kube(
-                "-n",
-                "flux-system",
-                "logs",
-                "-l",
-                "app=helm-controller",
-                "--all-containers=true",
-                "--tail=200",
-                check=False,
-                timeout=30,
-            )
-            combined = (logs.stdout + logs.stderr).decode("utf-8", errors="replace").lower()
-            status = deployment.get("status")
-            unavailable = not isinstance(status, dict) or status.get("availableReplicas", 0) == 0
-            forbidden = "secrets is forbidden" in combined and (
-                "cannot list resource" in combined or "failed to list" in combined
-            )
-            if (
-                unavailable
-                and forbidden
-                and isinstance(current_pods, list)
-                and len(current_pods) == 1
-                and isinstance(current_pods[0], dict)
+            if controller_cold_start_ready_bound(
+                current_deployment, current_pods, "helm-controller"
             ):
-                failed_status = current_pods[0].get("status")
-                failed_containers = (
-                    failed_status.get("containerStatuses")
-                    if isinstance(failed_status, dict)
-                    else None
-                )
-                if (
-                    isinstance(current_pods[0].get("metadata", {}).get("uid"), str)
-                    and isinstance(failed_containers, list)
-                    and len(failed_containers) == 1
-                    and isinstance(failed_containers[0], dict)
-                    and type(failed_containers[0].get("restartCount")) is int
-                ):
-                    return current_pods[0]
+                assert isinstance(current_pods, list)
+                assert isinstance(current_pods[0], dict)
+                return current_pods[0]
             return None
 
-        failed_pod = self.wait_until(
-            cache_failure, timeout=75, code="HELM_SECRET_NEGATIVE_NOT_OBSERVED"
+        pod = self.wait_until(
+            ready, timeout=180, code="HELM_FINAL_RBAC_COLD_START_INVALID"
         )
-        if not isinstance(failed_pod, dict):
-            raise AcceptanceError("HELM_SECRET_NEGATIVE_NOT_OBSERVED")
-        if self.final_render is None:
-            raise AcceptanceError("FINAL_RENDER_MISSING")
-        self.kube("apply", "-f", "-", input_bytes=self.final_render, timeout=300)
-        self.wait_controllers(("helm-controller",))
-        new_pods = self.kube_json(
-            "-n", "flux-system", "get", "pods", "-l", "app=helm-controller", "-o", "json"
-        ).get("items")
-        if (
-            not isinstance(new_pods, list)
-            or len(new_pods) != 1
-            or not isinstance(new_pods[0], dict)
-            or not same_pod_kubelet_retry_bound(failed_pod, new_pods[0])
-        ):
-            raise AcceptanceError("HELM_POSITIVE_COLD_START_INVALID")
+        if not isinstance(pod, dict):
+            raise AcceptanceError("HELM_FINAL_RBAC_COLD_START_INVALID")
         kustomize_deployment, kustomize_pods = self.controller_deployment_and_pods(
             "kustomize-controller"
         )
@@ -3773,21 +3657,19 @@ class AcceptanceHarness:
             "kustomize-controller",
             expected_pod_uid=self.kustomize_pod_uid,
         ):
-            raise AcceptanceError("KUSTOMIZE_POD_CHANGED_DURING_HELM_RESTORE")
+            raise AcceptanceError("KUSTOMIZE_POD_CHANGED_DURING_HELM_COLD_START")
         kustomize_evidence = self.evidence.get("kustomizeFinalRbacColdStart")
         if not isinstance(kustomize_evidence, dict):
             raise AcceptanceError("KUSTOMIZE_COLD_START_NOT_PROVEN")
-        kustomize_evidence["podUidPreservedAfterHelmRestore"] = True
-        self.assert_matrix(HELM_SECRET_ROWS, True)
-        self.assert_review(
-            AccessRow("helm-secret-update", HELM, "update", "", "secrets"), False
-        )
-        self.evidence["helmSecretColdStart"] = {
-            "negativeCacheSyncDenied": True,
-            "positiveKubeletRetryReady": True,
-            "readVerbsAllowed": len(HELM_SECRET_ROWS),
-            "writeDenied": True,
-            "samePodRecovered": True,
+        kustomize_evidence["podUidPreservedAfterHelmStart"] = True
+        self.evidence["helmFinalRbacColdStart"] = {
+            "zeroPodsBeforeStart": True,
+            "finalRbacOnly": True,
+            "currentGenerationReady": True,
+            "singleReadyPod": True,
+            "managerRestartCount": 0,
+            "secretReadVerbsDenied": len(HELM_SECRET_DENIED_ROWS),
+            "secretUpdateDenied": True,
             "destructiveWorkloadAction": False,
             "initialCreationOnly": True,
         }
@@ -4453,17 +4335,19 @@ def validate_pass_components(
         "singleReadyPod": True,
         "managerRestartCount": 0,
         "helmRemainedZero": True,
-        "podUidPreservedAfterHelmRestore": True,
+        "podUidPreservedAfterHelmStart": True,
         "destructiveWorkloadAction": False,
         "initialCreationOnly": True,
     }:
         raise AcceptanceError("RECEIPT_LIFECYCLE_SCHEMA_INVALID")
-    if evidence.get("helmSecretColdStart") != {
-        "negativeCacheSyncDenied": True,
-        "positiveKubeletRetryReady": True,
-        "readVerbsAllowed": len(HELM_SECRET_ROWS),
-        "writeDenied": True,
-        "samePodRecovered": True,
+    if evidence.get("helmFinalRbacColdStart") != {
+        "zeroPodsBeforeStart": True,
+        "finalRbacOnly": True,
+        "currentGenerationReady": True,
+        "singleReadyPod": True,
+        "managerRestartCount": 0,
+        "secretReadVerbsDenied": len(HELM_SECRET_DENIED_ROWS),
+        "secretUpdateDenied": True,
         "destructiveWorkloadAction": False,
         "initialCreationOnly": True,
     }:
@@ -4531,7 +4415,7 @@ def build_receipt(
             cleanup=cleanup,
         )
     receipt: dict[str, object] = {
-        "schemaVersion": 1,
+        "schemaVersion": RECEIPT_SCHEMA,
         "kind": "FluxRbacKindAcceptanceReceipt",
         "commit": expected_commit,
         "result": result,

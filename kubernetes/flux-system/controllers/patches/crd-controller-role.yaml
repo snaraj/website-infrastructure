@@ -41,11 +41,11 @@
 #     source.extensions.fluxcd.io — the reviewed component set is
 #     source-controller, kustomize-controller, helm-controller, so those CRDs
 #     are never installed and no object of those groups can exist.
-#   * secrets (shared cluster-wide read) — kustomize-controller receives only
-#     the flux-system SOPS read in ../../access.yaml. helm-controller separately
-#     receives read-only cluster scope in per-controller-rbac.yaml because its
-#     Secret-backed release-storage metadata informer must sync before startup.
-#     Every source remains anonymous; neither controller receives Secret write.
+#   * secrets (shared cluster-wide read) — both reconcilers disable optional
+#     ConfigMap/Secret event watchers rather than receiving cluster-wide Secret
+#     list/watch. kustomize-controller retains only the exact flux-system SOPS
+#     read in ../../access.yaml. Helm release storage uses each impersonated
+#     tenant reconciler's namespaced Role. Every source remains anonymous.
 #   * serviceaccounts/token (create) — Flux uses it for cloud-provider workload
 #     identity. This cluster authenticates to no provider, and the verb is a
 #     cluster-wide privilege-escalation primitive.
@@ -59,8 +59,8 @@ metadata:
   name: crd-controller-flux-system
 rules:
   # Read-only, non-credential cluster metadata. Namespace reads back the
-  # health-check and pruning paths; ConfigMap reads back `postBuild.substituteFrom`
-  # and Helm `valuesFrom` in any tenant namespace; ServiceAccount reads let a
+  # health-check and pruning paths; ConfigMap reads back
+  # `postBuild.substituteFrom`; ServiceAccount reads let a
   # controller resolve the account it is about to impersonate. None of the three
   # carries a credential in this cluster: every ServiceAccount here has
   # `automountServiceAccountToken: false` and no bound Secret. All three

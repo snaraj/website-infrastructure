@@ -314,8 +314,8 @@ spec:
         - emptyDir: {}
           name: temp
 ---
-# Issue #186 finding 1 over-corrected into cluster-wide Secret mutation. The
-# source rules remain exact so this document isolates the Secret mutation.
+# Cluster-wide Secret mutation is never controller authority. The source rules
+# remain exact so this document isolates the Secret access.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -331,9 +331,8 @@ rules:
     resources: [ocirepositories]
     verbs: [get, list, watch]
 ---
-# Even read-only verbs are not the reviewed cache rule when an extra field
-# narrows or otherwise changes its shape. Keep the exception byte-for-byte
-# semantic rather than teaching the policy to ignore unreviewed fields.
+# Even read-only cluster-wide Secret access is forbidden. A resourceNames field
+# does not narrow list/watch authorization and must not create an exception.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -356,9 +355,6 @@ kind: ClusterRole
 metadata:
   name: crd-controller-helm-flux-system
 rules:
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   - apiGroups: [source.toolkit.fluxcd.io]
     resources: [helmcharts]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -368,9 +364,6 @@ kind: ClusterRole
 metadata:
   name: crd-controller-helm-flux-system
 rules:
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   - apiGroups: [source.toolkit.fluxcd.io]
     resources: [helmcharts]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -383,9 +376,6 @@ kind: ClusterRole
 metadata:
   name: crd-controller-helm-flux-system
 rules:
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   - apiGroups: [source.toolkit.fluxcd.io]
     resources: [helmcharts]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -393,8 +383,8 @@ rules:
     resources: [ocirepositories, gitrepositories]
     verbs: [get, list, watch]
 ---
-# The same read-only cache grant on source-controller is still cluster-wide
-# credential visibility. The exception belongs only to helm-controller.
+# Any read-only cluster Secret grant is still credential visibility. No
+# controller identity receives an exception.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

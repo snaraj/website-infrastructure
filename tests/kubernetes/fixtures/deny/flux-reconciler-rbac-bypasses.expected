@@ -8,8 +8,8 @@ ClusterRole crd-controller-flux-system must not grant a wildcard resources
 ClusterRole crd-controller-flux-system must not grant a wildcard verbs
 ClusterRole flux-cluster-impersonator must not grant impersonate at cluster scope
 ClusterRole flux-token-minter must not grant ServiceAccount token creation
-ClusterRole crd-controller-helm-flux-system must grant only exact Secret get/list/watch
-ClusterRole crd-controller-helm-flux-system must grant only exact Secret get/list/watch
+ClusterRole crd-controller-helm-flux-system must not grant cluster-wide Secret access
+ClusterRole crd-controller-helm-flux-system must not grant cluster-wide Secret access
 ClusterRole crd-controller-helm-flux-system must grant exact HelmChart lifecycle and read-only OCIRepository secondary watch authority
 ClusterRole crd-controller-helm-flux-system must grant exact HelmChart lifecycle and read-only OCIRepository secondary watch authority
 ClusterRole crd-controller-helm-flux-system must grant exact HelmChart lifecycle and read-only OCIRepository secondary watch authority

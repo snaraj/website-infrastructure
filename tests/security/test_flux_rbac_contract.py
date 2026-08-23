@@ -773,40 +773,20 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
             },
         )
 
-    def test_helm_controller_secret_storage_cache_is_cluster_read_only(self):
-        """Issue #186: the manager cannot start until its Secret cache syncs."""
+    def test_controller_identities_have_no_cluster_secret_authority(self):
+        """Optional config watchers are disabled; tenant Helm storage is separate."""
 
-        cache = [
-            requirement
-            for requirement in self.controller_requirements
-            if requirement.owner == ("Controller", "startup-cache")
-        ]
-        self.assertEqual(
-            {
-                (
-                    str(requirement.subject), requirement.verb, requirement.group,
-                    requirement.resource, requirement.namespace,
-                )
-                for requirement in cache
-            },
-            {
-                (
-                    "system:serviceaccount:flux-system:helm-controller",
-                    verb, "", "secrets", None,
-                )
-                for verb in ("get", "list", "watch")
-            },
-        )
-        for requirement in cache:
-            self.assertTrue(
-                self.authorizer.allows(
-                    requirement.subject, requirement.verb, requirement.group,
-                    requirement.resource, requirement.namespace,
-                ),
-                requirement.describe(),
+        self.assertFalse(
+            any(
+                requirement.owner == ("Controller", "startup-cache")
+                for requirement in self.controller_requirements
             )
-        for subject in (SOURCE_CONTROLLER, KUSTOMIZE_CONTROLLER):
-            for verb in ("get", "list", "watch"):
+        )
+        for subject in (SOURCE_CONTROLLER, KUSTOMIZE_CONTROLLER, HELM_CONTROLLER):
+            for verb in (
+                "get", "list", "watch", "create", "update", "patch", "delete",
+                "deletecollection",
+            ):
                 with self.subTest(subject=str(subject), verb=verb):
                     self.assertFalse(
                         self.authorizer.allows(subject, verb, "", "secrets", None)
@@ -1386,7 +1366,7 @@ class FluxRbacNarrownessTests(unittest.TestCase):
         # would make the loop above vacuous. The exclusive and exempted counts
         # are pinned separately so neither the write half can shrink to nothing
         # nor the handoff become the place exclusivity goes to die.
-        self.assertEqual(checked, 94)
+        self.assertEqual(checked, 91)
         self.assertEqual(exclusive, 98)
         self.assertEqual(exempted, 6)
 
@@ -2411,64 +2391,21 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                     errors,
                 )
 
-    def test_helm_controller_secret_cache_grant_is_required_and_read_only(self):
+    def test_per_controller_roles_cannot_gain_cluster_secret_access(self):
         relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
         rule = (
             '  - apiGroups: [""]\n'
             "    resources: [secrets]\n"
             "    verbs: [get, list, watch]\n"
         )
-        missing = self.mutate(relative, rule, "")
-        self.assertTrue(
-            any("exactly one cluster-wide Secret" in error for error in missing), missing
-        )
-        writable = self.mutate(
-            relative,
-            rule,
-            rule.replace("get, list, watch", "get, list, watch, update"),
-        )
-        self.assertTrue(
-            any("exactly one cluster-wide Secret" in error for error in writable), writable
-        )
-        for field in ("resourceNames", '"resourceNames"'):
-            with self.subTest(extra_field=field):
-                name_restricted = self.mutate(
-                    relative,
-                    rule,
-                    rule.replace(
-                        "    verbs: [get, list, watch]\n",
-                        "    verbs: [get, list, watch]\n"
-                        "    {}: [release]\n".format(field),
-                    ),
-                )
-                self.assertTrue(
-                    any(
-                        "exactly one cluster-wide Secret" in error
-                        for error in name_restricted
-                    ),
-                    name_restricted,
-                )
-        duplicated = self.mutate(relative, rule, rule + rule)
-        self.assertTrue(
-            any("exactly one cluster-wide Secret" in error for error in duplicated),
-            duplicated,
-        )
-
-    def test_secret_cache_rule_cannot_be_copied_to_another_controller(self):
-        relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
-        rule = (
-            '  - apiGroups: [""]\n'
-            "    resources: [secrets]\n"
-            "    verbs: [get, list, watch]\n"
-        )
-        for controller in ("source", "kustomize"):
+        for controller in ("source", "kustomize", "helm"):
             anchor = (
                 "  name: crd-controller-{}-flux-system\nrules:\n".format(controller)
             )
             with self.subTest(controller=controller):
                 errors = self.mutate(relative, anchor, anchor + rule)
                 self.assertTrue(
-                    any("only helm-controller may receive cluster-wide Secret read"
+                    any("must not grant cluster-wide Secret access"
                         in error for error in errors),
                     errors,
                 )
@@ -2577,34 +2514,37 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
             any("exactly the installed controllers" in error for error in errors), errors
         )
 
-    def test_kustomize_config_watcher_gate_is_exact_and_unique(self):
-        relative = (
-            "kubernetes/flux-system/controllers/patches/kustomize-controller.yaml"
-        )
+    def test_reconciler_config_watcher_gates_are_exact_and_unique(self):
         operation = (
             "- op: add\n"
             "  path: /spec/template/spec/containers/0/args/-\n"
             "  value: --feature-gates=DisableConfigWatchers=true\n"
         )
-        for label, replacement in (
-            ("missing", ""),
-            ("false", operation.replace("=true", "=false")),
-            ("combined", operation.replace("=true", "=true,ExternalArtifact=true")),
-            (
-                "selector substitute",
-                operation.replace(
-                    "--feature-gates=DisableConfigWatchers=true",
-                    "--watch-configs-label-selector=flux-watch=enabled",
+        for controller in ("kustomize", "helm"):
+            relative = (
+                "kubernetes/flux-system/controllers/patches/"
+                + controller
+                + "-controller.yaml"
+            )
+            for label, replacement in (
+                ("missing", ""),
+                ("false", operation.replace("=true", "=false")),
+                ("combined", operation.replace("=true", "=true,ExternalArtifact=true")),
+                (
+                    "selector substitute",
+                    operation.replace(
+                        "--feature-gates=DisableConfigWatchers=true",
+                        "--watch-configs-label-selector=flux-watch=enabled",
+                    ),
                 ),
-            ),
-            ("duplicate", operation + operation),
-        ):
-            with self.subTest(mutation=label):
-                errors = self.mutate(relative, operation, replacement)
-                self.assertTrue(
-                    any("feature-gate args must be exactly" in error for error in errors),
-                    errors,
-                )
+                ("duplicate", operation + operation),
+            ):
+                with self.subTest(controller=controller, mutation=label):
+                    errors = self.mutate(relative, operation, replacement)
+                    self.assertTrue(
+                        any("feature-gate args must be exactly" in error for error in errors),
+                        errors,
+                    )
 
     def test_secondary_source_rules_are_exact_read_only_and_closed(self):
         relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
@@ -3146,15 +3086,11 @@ class FluxRbacControllerRootSufficiencyTests(unittest.TestCase):
         ]
         self.assertEqual(denied, [], "the install root does not authorize its own controllers")
 
-    def test_helm_secret_cache_is_authorized_by_the_install_alone(self):
-        for verb in ("get", "list", "watch"):
-            with self.subTest(verb=verb):
-                self.assertTrue(
-                    self.authorizer.allows(
-                        HELM_CONTROLLER, verb, "", "secrets", namespace=None
-                    )
-                )
-        for verb in ("create", "update", "patch", "delete", "deletecollection"):
+    def test_helm_cluster_secret_access_is_denied_by_the_install_alone(self):
+        for verb in (
+            "get", "list", "watch", "create", "update", "patch", "delete",
+            "deletecollection",
+        ):
             with self.subTest(verb=verb):
                 self.assertFalse(
                     self.authorizer.allows(
@@ -3180,25 +3116,20 @@ class FluxRbacControllerRootSufficiencyTests(unittest.TestCase):
                     arguments[Subject("flux-system", controller)],
                 )
 
-    def test_kustomize_config_watchers_are_disabled_exactly(self):
+    def test_reconciler_config_watchers_are_disabled_exactly(self):
         """Avoid cluster-wide Secret list/watch without enabling other gates."""
 
         arguments = model.controller_arguments(ROOT)
-        kustomize = arguments[KUSTOMIZE_CONTROLLER]
-        feature_gates = [
-            argument for argument in kustomize
-            if argument.startswith("--feature-gates=")
-        ]
-        self.assertEqual(
-            feature_gates,
-            [model.KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG],
-        )
-        for controller in (SOURCE_CONTROLLER, HELM_CONTROLLER):
+        for controller in (KUSTOMIZE_CONTROLLER, HELM_CONTROLLER):
             with self.subTest(controller=str(controller)):
-                self.assertNotIn(
-                    model.KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG,
-                    arguments[controller],
+                self.assertEqual(
+                    [
+                        argument for argument in arguments[controller]
+                        if argument.startswith("--feature-gates=")
+                    ],
+                    [model.DISABLE_CONFIG_WATCHERS_FLAG],
                 )
+        self.assertNotIn(model.DISABLE_CONFIG_WATCHERS_FLAG, arguments[SOURCE_CONTROLLER])
 
     def test_the_six_objects_are_rendered_by_the_install_root(self):
         """Placement, not just presence: they must be IN the applied transaction.

@@ -8,9 +8,9 @@
 # `crd-controller-flux-system` ClusterRole, so if the replacement authority
 # lived only in access.yaml a fresh `--apply` would create three controllers
 # with no informer authority over their primary and secondary watched custom
-# resources at all: all twenty-four list/watch probes deny and helm-controller cannot
-# sync its Secret-backed release-storage cache. The controllers cannot start an
-# informer, and the readiness gate can never pass. The replacements have to be
+# resources at all: all twenty-four list/watch probes deny. The controllers
+# cannot start their required informers, and the readiness gate can never pass.
+# The replacements have to be
 # created by the same transaction that removes what they replace.
 #
 # `--watch-all-namespaces=true` makes every registered informer a CLUSTER-wide
@@ -182,14 +182,6 @@ rules:
   - apiGroups: [helm.toolkit.fluxcd.io]
     resources: [helmreleases/finalizers]
     verbs: [update]
-  # Helm release storage is Secret-backed. helm-controller constructs a
-  # cluster-scoped PartialObjectMetadata Secret informer before any
-  # reconciliation, so a namespaced Role cannot satisfy startup. This rule is
-  # deliberately isolated from mutable rules and stops at read-only cache
-  # verbs; list/watch cannot be narrowed with resourceNames.
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [get, list, watch]
   # The one controller that creates and deletes a source object under its own
   # identity: helm-controller derives an intermediate HelmChart from a
   # HelmRelease whose chart comes from a source object, and removes it when the

@@ -1,0 +1,75 @@
+# Two current-shape HelmReleases isolate the controller-side input and
+# namespace-redirection guards without introducing unrelated policy findings.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudflare-public
+  namespace: cloudflare-public
+spec:
+  suspend: true
+  interval: 10m0s
+  releaseName: cloudflare-public
+  serviceAccountName: helm-reconciler
+  valuesFrom:
+    - kind: Secret
+      name: runtime-values
+  kubeConfig:
+    secretRef:
+      name: remote-cluster
+  chart:
+    spec:
+      chart: ./kubernetes/platform/cloudflare-public/chart
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: cloudflare-public-source
+      interval: 10m0s
+  install:
+    remediation:
+      retries: 0
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    connectors:
+      naranjo-online:
+        tokenRevision: not-configured
+      lidersea-com:
+        tokenRevision: not-configured
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudflare-public
+  namespace: cloudflare-public
+spec:
+  suspend: true
+  interval: 10m0s
+  releaseName: cloudflare-public
+  serviceAccountName: helm-reconciler
+  storageNamespace: other
+  targetNamespace: other
+  chart:
+    spec:
+      chart: ./kubernetes/platform/cloudflare-public/chart
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: cloudflare-public-source
+      interval: 10m0s
+  install:
+    remediation:
+      retries: 0
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 0
+      strategy: rollback
+  values:
+    connectors:
+      naranjo-online:
+        tokenRevision: not-configured
+      lidersea-com:
+        tokenRevision: not-configured

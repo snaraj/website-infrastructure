@@ -269,7 +269,11 @@ class ControllerFlagScopeTests(unittest.TestCase):
             ),
             (
                 "helm-controller",
-                ("--no-cross-namespace-refs=true", "--default-service-account=default"),
+                (
+                    "--no-cross-namespace-refs=true",
+                    "--default-service-account=default",
+                    "--feature-gates=DisableConfigWatchers=true",
+                ),
             ),
         ):
             patch = read(CONTROLLERS / "patches" / (name + ".yaml"))
@@ -277,12 +281,12 @@ class ControllerFlagScopeTests(unittest.TestCase):
                 with self.subTest(controller=name, flag=flag):
                     self.assertIn("value: " + flag, patch)
 
-    def test_kustomize_config_watcher_gate_is_exact_and_unique(self):
+    def test_reconciler_config_watcher_gates_are_exact_and_unique(self):
         expected = "--feature-gates=DisableConfigWatchers=true"
         for name, wanted in (
             ("source-controller", []),
             ("kustomize-controller", [expected]),
-            ("helm-controller", []),
+            ("helm-controller", [expected]),
         ):
             patch = read(CONTROLLERS / "patches" / (name + ".yaml"))
             feature_gates = [

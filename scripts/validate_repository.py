@@ -188,14 +188,14 @@ SITE_RELEASE_CONTRACTS = (
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "44ef0045307cc5ade67255be4125132b9fc6fe0b9b71682b516616435cc4b056"
+    "23c5238d98aec9e5a61c27695b159afcd623af5565a6f0a92ac5c32c8c1803b6"
 )
 
 # The same coupling for the six cluster-scoped per-controller objects, which
 # live in the install root rather than access.yaml (issue #98). Cluster-wide
 # authority does not get a weaker review gate than namespaced authority.
 FLUX_PER_CONTROLLER_CONTRACT_SHA256 = (
-    "ba428e764b8259fd82e5c2f1310096395364a0cb0d2f2b59649a1fe2d30e0b1c"
+    "b9b7a1f0626a203967f7f874699303367dd77ac9aeb934aeb61d4abd7215dd5a"
 )
 
 EMAIL_ADDRESS = re.compile(
@@ -1029,6 +1029,14 @@ def check_media(root):
             if pattern.search(text):
                 errors.append("{} before media discovery in {}".format(label, rel))
         for document in re.split(r"(?m)^---\s*$", text):
+            if re.search(r"(?m)^kind:\s*HelmRelease\s*$", document) and re.search(
+                r"(?m)^  (?:valuesFrom|kubeConfig|storageNamespace|targetNamespace):",
+                document,
+            ):
+                errors.append(
+                    "HelmRelease must not use controller-side external inputs or namespace redirects in "
+                    + rel
+                )
             if re.search(r"(?m)^kind:\s*GitRepository\s*$", document):
                 # A per-source override is allowed only as a second, narrower
                 # boundary paired with sparse checkout. Broad re-inclusion would
@@ -1578,7 +1586,7 @@ FLUX_CONTROLLER_ROLE_NAMESPACES = {
 
 RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
 RBAC_READ_VERBS = ("get", "list", "watch")
-KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG = (
+DISABLE_CONFIG_WATCHERS_FLAG = (
     "--feature-gates=DisableConfigWatchers=true"
 )
 
@@ -1729,13 +1737,13 @@ def flux_rbac_contract_errors(root):
         errors.append("cluster-admin binding patch must delete the binding, not repoint it")
 
     # Feature gates are an exact Deployment argument, not a substring. The
-    # Kustomize manager's default ConfigMap/Secret metadata watches would need
+    # Both reconcilers' default ConfigMap/Secret metadata watches would need
     # cluster-wide Secret list/watch; disable those watches instead. No other
-    # controller or optional feature gate is enabled by this recut.
+    # optional feature gate is enabled by this recut.
     expected_feature_gates = {
         "source-controller.yaml": (),
-        "kustomize-controller.yaml": (KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG,),
-        "helm-controller.yaml": (),
+        "kustomize-controller.yaml": (DISABLE_CONFIG_WATCHERS_FLAG,),
+        "helm-controller.yaml": (DISABLE_CONFIG_WATCHERS_FLAG,),
     }
     for patch_name, expected in expected_feature_gates.items():
         path = controllers / "patches" / patch_name
@@ -2008,22 +2016,10 @@ def flux_rbac_contract_errors(root):
             block for block in _rbac_rule_blocks(document)
             if "secrets" in _rbac_rule_list(block, "resources")
         ]
-        if name == "crd-controller-helm-flux-system":
-            exact = [
-                block for block in secret_blocks
-                if tuple(_rbac_rule_list(block, "apiGroups")) == ("",)
-                and tuple(_rbac_rule_list(block, "resources")) == ("secrets",)
-                and tuple(_rbac_rule_list(block, "verbs")) == RBAC_READ_VERBS
-                and _rbac_rule_fields(block) == {"apiGroups", "resources", "verbs"}
-            ]
-            if len(secret_blocks) != 1 or len(exact) != 1:
-                errors.append(
-                    "helm-controller must have exactly one cluster-wide Secret "
-                    "get/list/watch rule and no Secret write"
-                )
-        elif secret_blocks:
+        if secret_blocks:
             errors.append(
-                "only helm-controller may receive cluster-wide Secret read: " + name
+                "per-controller ClusterRole must not grant cluster-wide Secret access: "
+                + name
             )
     return errors
 
@@ -2085,11 +2081,12 @@ def check_kubernetes(root):
             "flux-system/controllers/patches/kustomize-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--no-remote-bases=true",
                 "--default-service-account=default",
-                KUSTOMIZE_DISABLE_CONFIG_WATCHERS_FLAG,
+                DISABLE_CONFIG_WATCHERS_FLAG,
                 "runAsNonRoot", "RuntimeDefault",
             ],
             "flux-system/controllers/patches/helm-controller.yaml": [
                 "--no-cross-namespace-refs=true", "--default-service-account=default",
+                DISABLE_CONFIG_WATCHERS_FLAG,
                 "runAsNonRoot", "RuntimeDefault",
             ],
             "flux-system/controllers/patches/allow-egress.yaml": [

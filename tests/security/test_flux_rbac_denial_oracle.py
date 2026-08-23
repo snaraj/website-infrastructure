@@ -257,7 +257,7 @@ class OracleApiState:
                     None,
                     "reviewed",
                 )
-            ] = True
+            ] = False
         self.decisions[
             (
                 helm,
@@ -1109,15 +1109,15 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
             },
         )
 
-    def test_issue_186_helm_cache_and_tenant_readback_matrix(self) -> None:
+    def test_issue_186_helm_secret_denial_and_tenant_readback_matrix(self) -> None:
         helm = "system:serviceaccount:flux-system:helm-controller"
         naranjo = "system:serviceaccount:naranjo-online:helm-reconciler"
         lidersea = "system:serviceaccount:lidersea-com:helm-reconciler"
         cloudflare = "system:serviceaccount:cloudflare-public:helm-reconciler"
         cases = (
-            ("helm-secret-get", helm, "get", "", "secrets", None, True, "ALLOWED"),
-            ("helm-secret-list", helm, "list", "", "secrets", None, True, "ALLOWED"),
-            ("helm-secret-watch", helm, "watch", "", "secrets", None, True, "ALLOWED"),
+            ("helm-secret-get", helm, "get", "", "secrets", None, True, "DENIED"),
+            ("helm-secret-list", helm, "list", "", "secrets", None, True, "DENIED"),
+            ("helm-secret-watch", helm, "watch", "", "secrets", None, True, "DENIED"),
             ("naranjo-pod-get", naranjo, "get", "", "pods", "naranjo-online", False, "ALLOWED"),
             ("naranjo-pod-list", naranjo, "list", "", "pods", "naranjo-online", False, "ALLOWED"),
             ("naranjo-pod-watch", naranjo, "watch", "", "pods", "naranjo-online", False, "ALLOWED"),
@@ -1151,8 +1151,8 @@ class FluxRbacOracleProtocolTests(unittest.TestCase):
             ("cloudflare-cross-rs-list", cloudflare, "list", "apps", "replicasets", "naranjo-online", False, "DENIED"),
         )
         self.assertEqual(len(cases), 34)
-        self.assertEqual(sum(case[-1] == "ALLOWED" for case in cases), 21)
-        self.assertEqual(sum(case[-1] == "DENIED" for case in cases), 13)
+        self.assertEqual(sum(case[-1] == "ALLOWED" for case in cases), 18)
+        self.assertEqual(sum(case[-1] == "DENIED" for case in cases), 16)
 
         for label, subject, verb, group, resource, namespace, all_namespaces, expected in cases:
             with self.subTest(case=label):

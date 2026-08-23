@@ -88,17 +88,14 @@ broad authority.
 The pinned Kustomize manager also starts read-only secondary informers for
 Bucket, GitRepository, and OCIRepository, and Helm starts secondary informers
 for HelmChart and OCIRepository. Those list/watch grants are part of the same
-install transaction even when no current object uses a kind. Kustomize's
+install transaction even when no current object uses a kind. Both reconcilers'
 ConfigMap/Secret event watchers are disabled rather than granting cluster-wide
-Secret list/watch; the exact `sops-age` Secret remains available by named
-`get`, with changes observed on interval, retry, source event, or manual
-reconciliation.
-
-The Helm split ClusterRole also carries cluster-scoped Secret
-`get`/`list`/`watch`. The pinned controller creates one all-namespaces
-release-storage informer during startup, before namespaced access can be
-reconciled. This read-only residual is required for readiness and cannot be
-restricted with `resourceNames`; Secret writes remain denied.
+Secret list/watch. The exact `sops-age` Secret remains available to Kustomize
+by named `get`, while Helm release storage uses the impersonated tenant
+reconciler's namespaced Role. Kustomize referenced inputs are fetched by exact
+name during reconciliation, with changes observed on interval, retry, source
+event, or manual reconciliation. Helm permits only inline values and the local
+release namespace; external inputs and namespace redirects are rejected.
 
 The root sync objects live in
 [`kubernetes/flux-system/gotk-sync.yaml`](../../kubernetes/flux-system/gotk-sync.yaml).
@@ -567,18 +564,18 @@ point is that transaction. `install-flux-controllers.sh --apply` is deliberately
 fresh-only, and `bootstrap/flux/bootstrap.sh` blocks live modes pending a
 trusted launcher. Do not bypass either refusal.
 
-The in-place RBAC transaction must create the six split controller objects
-first, including Helm's Secret cache read; create or replace only the reviewed
-runtime, impersonation, and active-tenant objects; verify their exact semantic
-poststate and closed authorization controls; replace the shared role and
+The in-place RBAC transaction must create the six split controller objects with
+no cluster-wide Secret access; create or replace only the reviewed runtime,
+impersonation, and active-tenant objects; while the broad binding still exists,
+roll out the exact `DisableConfigWatchers=true` argument on each reconciler
+whose live prestate lacks it; verify each new zero-restart generation; replace the shared role and
 subject-pinned binding; canary source-controller; and only then delete the broad
 binding with UID/resourceVersion preconditions. The disposable kind acceptance
 first proves a final-RBAC Kustomize cold start while Helm remains at zero, then
-proves Helm's Secret informer from its initial zero-to-one creation while the
-same Kustomize Pod remains ready. The protected transaction does not restart,
-delete, evict, or scale down either controller. It
-instead observes the existing helm-controller Deployment at its current
-generation and fully ready without `cluster-admin`, then performs the separately
+proves Helm's final-RBAC zero-restart cold start and cluster-wide Secret denials
+while the same Kustomize Pod remains ready. The protected transaction performs
+no ad-hoc Pod deletion, eviction, or scale-down. After the reviewed Helm rollout,
+it observes the Deployment fully ready without `cluster-admin`, then performs the separately
 plan-bound HelmRelease upgrade described in the narrowing runbook. NetworkPolicy
 and Namespace-label drift should be separate reviewed transactions rather than
 extra mutations hidden in the RBAC rollback boundary.

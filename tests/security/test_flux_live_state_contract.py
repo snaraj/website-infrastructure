@@ -267,7 +267,11 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             ),
             "helm-controller": (
                 cls.base_environment["FLUX_EXPECTED_HELM_IMAGE"],
-                ["--no-cross-namespace-refs=true", "--default-service-account=default"],
+                [
+                    "--no-cross-namespace-refs=true",
+                    "--default-service-account=default",
+                    "--feature-gates=DisableConfigWatchers=true",
+                ],
                 False,
                 600,
             ),
@@ -513,23 +517,24 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             {"name": "TOKEN", "valueFrom": {"secretKeyRef": {"name": "unexpected", "key": "token"}}}
         )
         mutations.append(secret_env)
-        for replacement in (
-            None,
-            "--feature-gates=DisableConfigWatchers=false",
-            "--feature-gates=DisableConfigWatchers=true,ExternalArtifact=true",
-        ):
-            feature_drift = copy.deepcopy(self.fixture)
-            kustomize = next(
-                item for item in feature_drift["deployments"]["items"]
-                if item["metadata"]["name"] == "kustomize-controller"
-            )
-            args = kustomize["spec"]["template"]["spec"]["containers"][0]["args"]
-            index = args.index("--feature-gates=DisableConfigWatchers=true")
-            if replacement is None:
-                args.pop(index)
-            else:
-                args[index] = replacement
-            mutations.append(feature_drift)
+        for controller in ("kustomize-controller", "helm-controller"):
+            for replacement in (
+                None,
+                "--feature-gates=DisableConfigWatchers=false",
+                "--feature-gates=DisableConfigWatchers=true,ExternalArtifact=true",
+            ):
+                feature_drift = copy.deepcopy(self.fixture)
+                deployment = next(
+                    item for item in feature_drift["deployments"]["items"]
+                    if item["metadata"]["name"] == controller
+                )
+                args = deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+                index = args.index("--feature-gates=DisableConfigWatchers=true")
+                if replacement is None:
+                    args.pop(index)
+                else:
+                    args[index] = replacement
+                mutations.append(feature_drift)
         for fixture in mutations:
             with self.subTest(mutation=len(mutations)):
                 self.assertNotEqual(self.run_fixture(fixture).returncode, 0)
