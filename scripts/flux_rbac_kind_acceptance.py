@@ -3003,6 +3003,10 @@ class AcceptanceHarness:
             extra_environment={"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": go_arch},
             timeout=180,
         )
+        try:
+            os.chmod(binary, 0o555)
+        except OSError:
+            raise AcceptanceError("WORKLOAD_BINARY_MODE_INVALID") from None
         shutil.copyfile(
             self.held_path(f"{FIXTURE_RELATIVE}/workload/Dockerfile"),
             context / "Dockerfile",

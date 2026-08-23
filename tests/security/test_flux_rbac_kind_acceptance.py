@@ -2353,6 +2353,10 @@ class HarnessContractTests(unittest.TestCase):
         build = script.split("    def build_artifacts", 1)[1].split(
             "    def install_stock", 1
         )[0]
+        self.assertLess(
+            build.index("os.chmod(binary, 0o555)"),
+            build.index('"docker",\n                "build"'),
+        )
         self.assertIn("self.workload_reference = tag", build)
         self.assertIn(
             '("kind", "load", "docker-image", "--name", self.owned.cluster, tag)',
