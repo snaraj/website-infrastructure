@@ -8,6 +8,16 @@ metadata:
 spec:
   suspend: true
   interval: 10m0s
+  # Helm keeps every release revision as a Secret in this namespace, and
+  # helm-controller retains five when this field is unset. `storage.Create`
+  # prunes history to maxHistory-1 BEFORE writing the new revision, so any
+  # retention default at or above the namespace secret budget wedges the
+  # release permanently: the prune frees nothing, the create is denied by
+  # quota, and no retry can recover it. Observed on this site at revision v5
+  # against a four-Secret budget (issue #198). Two keeps steady-state history
+  # strictly inside that budget while still preserving one rollback target for
+  # the `strategy: rollback` remediation below.
+  maxHistory: 2
   releaseName: naranjo-online
   serviceAccountName: helm-reconciler
   driftDetection:

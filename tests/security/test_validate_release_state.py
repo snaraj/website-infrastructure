@@ -47,8 +47,14 @@ def website_release_text(
     tag=MODULE.ZERO_TAG,
     repository=None,
     extra_values="",
+    max_history: "str | None" = "2",
 ):
-    """Return one complete canonical website HelmRelease fixture."""
+    """Return one complete canonical website HelmRelease fixture.
+
+    ``max_history`` is parameterised, and ``None`` omits the line entirely, so
+    the retention guard can be shown to reject both a raised value and an
+    absent one rather than merely accepting the canonical fixture.
+    """
 
     domain = SITE_DOMAINS[name]
     repository = repository or "ghcr.io/snaraj/{}".format(name)
@@ -63,6 +69,7 @@ def website_release_text(
         "spec:\n"
         "  suspend: {suspended}\n"
         "  interval: 10m0s\n"
+        "{max_history}"
         "  releaseName: {name}\n"
         "  serviceAccountName: helm-reconciler\n"
         "  driftDetection:\n"
@@ -95,11 +102,23 @@ def website_release_text(
         tag=tag,
         digest=digest,
         extra_values=extra_values,
+        max_history=(
+            "" if max_history is None else "  maxHistory: {}\n".format(max_history)
+        ),
     )
 
 
-def cloudflare_release_text(*, suspended=True, token_revision="not-configured"):
-    """Return the complete canonical non-image HelmRelease fixture."""
+def cloudflare_release_text(
+    *,
+    suspended=True,
+    token_revision="not-configured",
+    max_history: "str | None" = "2",
+):
+    """Return the complete canonical non-image HelmRelease fixture.
+
+    ``max_history`` is parameterised, and ``None`` omits the line entirely, for
+    the same reason as the website fixture above.
+    """
 
     return (
         "apiVersion: helm.toolkit.fluxcd.io/v2\n"
@@ -113,6 +132,7 @@ def cloudflare_release_text(*, suspended=True, token_revision="not-configured"):
         "spec:\n"
         "  suspend: {suspended}\n"
         "  interval: 10m0s\n"
+        "{max_history}"
         "  releaseName: cloudflare-public\n"
         "  serviceAccountName: helm-reconciler\n"
         "  chart:\n"
@@ -139,6 +159,9 @@ def cloudflare_release_text(*, suspended=True, token_revision="not-configured"):
         )
     ).format(
         suspended=str(suspended).lower(),
+        max_history=(
+            "" if max_history is None else "  maxHistory: {}\n".format(max_history)
+        ),
     )
 
 
@@ -689,6 +712,50 @@ class StrictReleaseStateTests(unittest.TestCase):
                             state.values[("connectors", site, "tokenRevision")],
                             token,
                         )
+
+    def test_release_retention_must_be_the_exact_bounded_literal(self):
+        """Every retention form but the reviewed literal must fail closed.
+
+        Helm stores each release revision as a Secret in the release namespace
+        and prunes history to maxHistory-1 BEFORE writing the new revision, so
+        retention that can reach the namespace Secret budget makes the prune
+        free nothing and the create fail against quota — wedging that release
+        permanently, with no reconcile able to recover it. Omitting the field
+        is the same failure by another route, because helm-controller then
+        applies its own five-revision default. Each identity is asserted
+        separately: a Secret budget is a per-namespace fact, so one release
+        passing proves nothing about another.
+        """
+
+        for name in ("naranjo-online", "lidersea-com", "cloudflare-public"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                release = release_path(root, name)
+
+                # Absent, unbounded, and merely-different values alike: the
+                # contract pins one reviewed literal, so drift in either
+                # direction is a hard failure rather than a release that stops
+                # working several deploys later. `1` is rejected too — it is
+                # inside any budget but retains no rollback target for the
+                # `strategy: rollback` remediation these releases declare.
+                for mutation in (None, "0", "1", "3", "5"):
+                    with self.subTest(name=name, max_history=mutation):
+                        if name == "cloudflare-public":
+                            text = cloudflare_release_text(max_history=mutation)
+                        else:
+                            text = website_release_text(name, max_history=mutation)
+                        write_lf(release, text)
+                        with self.assertRaises(MODULE.CanonicalYamlError):
+                            MODULE.load_helm_release(name, root)
+
+                # Vacuity control: the same fixture builder at the reviewed
+                # value must load, so the rejections above are the retention
+                # guard firing and not some unrelated shape error.
+                if name == "cloudflare-public":
+                    write_lf(release, cloudflare_release_text())
+                else:
+                    write_lf(release, website_release_text(name))
+                self.assertTrue(MODULE.load_helm_release(name, root).suspended)
 
     def test_reader_rejects_non_regular_and_oversized_inputs(self):
         with tempfile.TemporaryDirectory() as directory:

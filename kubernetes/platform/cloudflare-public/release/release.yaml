@@ -8,6 +8,16 @@ metadata:
 spec:
   suspend: true
   interval: 10m0s
+  # Helm keeps every release revision as a Secret in this namespace, and
+  # helm-controller retains five when this field is unset. `storage.Create`
+  # prunes history to maxHistory-1 BEFORE writing the new revision, so a
+  # retention default that can reach the namespace Secret budget wedges the
+  # release permanently: the prune frees nothing, the create is denied by
+  # quota, and no reconcile can recover it (issue #198, measured on the site
+  # releases). This namespace's budget must also hold the reviewed SOPS tunnel
+  # credential for each connector, so retention is bounded here for the same
+  # reason rather than left to consume the margin those Secrets need.
+  maxHistory: 2
   releaseName: cloudflare-public
   serviceAccountName: helm-reconciler
   chart:
