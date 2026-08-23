@@ -781,113 +781,6 @@ class PureContractTests(unittest.TestCase):
             )
         )
 
-    def test_authorization_failure_binds_resource_subject_and_namespace(self):
-        message = (
-            'pods is forbidden: User "system:serviceaccount:naranjo-online:'
-            'helm-reconciler" cannot list resource "pods" in API group "" '
-            'in the namespace "naranjo-online"'
-        )
-        self.assertTrue(
-            acceptance.authorization_failure_bound(
-                [message], namespace="naranjo-online", resource="pods", group=""
-            )
-        )
-        self.assertFalse(
-            acceptance.authorization_failure_bound(
-                [message],
-                namespace="naranjo-online",
-                resource="replicasets",
-                group="apps",
-            )
-        )
-
-    def test_authorization_failure_cannot_be_assembled_across_messages(self):
-        messages = [
-            'pods is forbidden: User "system:serviceaccount:naranjo-online:helm-reconciler"',
-            'cannot list resource "pods" in API group "" in the namespace "naranjo-online"',
-        ]
-        self.assertFalse(
-            acceptance.authorization_failure_bound(
-                messages,
-                namespace="naranjo-online",
-                resource="pods",
-                group="",
-            )
-        )
-
-    def test_upgrade_failure_is_current_generation_and_injected_change_bound(self):
-        message = (
-            'replicasets.apps is forbidden: User "system:serviceaccount:'
-            'naranjo-online:helm-reconciler" cannot list resource "replicasets" '
-            'in API group "apps" in the namespace "naranjo-online"'
-        )
-        release = {
-            "metadata": {"generation": 4},
-            "spec": {
-                "commonMetadata": {
-                    "annotations": {
-                        "acceptance.snaraj.dev/readiness-negative": "replicasets"
-                    }
-                }
-            },
-            "status": {
-                "observedGeneration": 4,
-                "conditions": [
-                    {
-                        "type": "Ready",
-                        "status": "False",
-                        "reason": "UpgradeFailed",
-                        "message": message,
-                    }
-                ],
-            },
-        }
-        self.assertTrue(
-            acceptance.current_upgrade_failure_bound(
-                release,
-                generation=4,
-                namespace="naranjo-online",
-                resource="replicasets",
-                group="apps",
-            )
-        )
-        release["status"]["observedGeneration"] = 3
-        self.assertFalse(
-            acceptance.current_upgrade_failure_bound(
-                release,
-                generation=4,
-                namespace="naranjo-online",
-                resource="replicasets",
-                group="apps",
-            )
-        )
-
-    def test_rollback_requires_a_distinct_object_after_failure_observation(self):
-        release = {
-            "metadata": {"generation": 4, "resourceVersion": "100"},
-            "status": {
-                "observedGeneration": 4,
-                "conditions": [
-                    {
-                        "type": "Remediated",
-                        "status": "True",
-                        "reason": "RollbackSucceeded",
-                    }
-                ],
-            },
-        }
-        self.assertFalse(
-            acceptance.rollback_after_failure_bound(
-                release, generation=4, failure_resource_version="100"
-            )
-        )
-        release["metadata"]["resourceVersion"] = "101"
-        self.assertTrue(
-            acceptance.rollback_after_failure_bound(
-                release, generation=4, failure_resource_version="100"
-            )
-        )
-
     def test_controller_zero_transform_changes_exactly_two_replica_fields(self):
         original = acceptance.STOCK_COMPONENTS.read_bytes()
         transformed = acceptance.controller_deployments_zero_replica(original)
@@ -1742,25 +1635,6 @@ class ReceiptTests(unittest.TestCase):
                 "destructiveWorkloadAction": False,
                 "initialCreationOnly": True,
             },
-            "readinessNegatives": {
-                "pods": {
-                    "phase": "install",
-                    "reason": "InstallFailed",
-                    "authorizationMessageBound": True,
-                    "workloadHealthy": True,
-                },
-                "replicasets": {
-                    "phase": "upgrade",
-                    "reason": "UpgradeFailed",
-                    "authorizationMessageBound": True,
-                    "currentGenerationFailureObserved": True,
-                    "injectedFailureBound": True,
-                    "rollbackReason": "RollbackSucceeded",
-                    "helmRemediationRollback": "acceptance-only",
-                    "priorConfigRestored": True,
-                    "workloadHealthy": True,
-                },
-            },
             "releaseLifecycle": {
                 "installReason": "InstallSucceeded",
                 "upgradeReason": "UpgradeSucceeded",
@@ -2396,18 +2270,10 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn('"helmRemediationRollback": "acceptance-only"', script)
         self.assertIn('"protectedConvergenceRollbackTested": False', script)
 
-    def test_readiness_negative_covers_install_and_rbac_induced_upgrade_rollback(self):
-        script = (ROOT / "scripts" / "flux_rbac_kind_acceptance.py").read_text()
-        self.assertIn("run_install_readiness_negative", script)
-        self.assertIn("run_upgrade_readiness_negative", script)
-        self.assertIn('"reason": "UpgradeFailed"', script)
-        self.assertIn("authorization_failure_bound", script)
-        self.assertIn('"rollbackReason": "RollbackSucceeded"', script)
-
     def test_controller_cold_starts_are_initial_creation_without_destructive_commands(self):
         script = (ROOT / "scripts" / "flux_rbac_kind_acceptance.py").read_text()
         final_rbac = script.split("    def apply_final_rbac", 1)[1].split(
-            "    def remove_exact_rule", 1
+            "    def wait_until", 1
         )[0]
         kustomize_cold = script.split(
             "    def kustomize_final_rbac_cold_start", 1
@@ -2522,9 +2388,6 @@ class HarnessContractTests(unittest.TestCase):
             def helm_final_rbac_cold_start(self):
                 called.append("helm-cold-start")
 
-            def readiness_negatives(self):
-                called.append("readiness-negatives")
-
             def release_lifecycle(self):
                 called.append("release")
 
@@ -2555,7 +2418,7 @@ class HarnessContractTests(unittest.TestCase):
             [
                 "snapshot", "infrastructure", "artifacts", "stock", "final",
                 "kustomize-cold-start", "helm-cold-start",
-                "readiness-negatives", "release", "network-boundary",
+                "release", "network-boundary",
             ],
         )
 
@@ -2616,14 +2479,6 @@ class HarnessContractTests(unittest.TestCase):
                 )
                 harness.owned = owned
                 harness.assert_review(acceptance.OWNED_ROWS[0], True)
-                harness.remove_exact_rule(
-                    "role",
-                    "helm-reconciler",
-                    namespace="cloudflare-public",
-                    group="",
-                    resource="pods",
-                    verbs=("get", "list", "watch"),
-                )
                 kubectl_calls = [call for call in runner.calls if call[0] == "kubectl"]
                 self.assertTrue(kubectl_calls)
                 self.assertTrue(

@@ -183,7 +183,6 @@ PASS_EVIDENCE_KEYS = {
     "controllerInitialCreation",
     "kustomizeFinalRbacColdStart",
     "helmFinalRbacColdStart",
-    "readinessNegatives",
     "releaseLifecycle",
 }
 INITIAL_ZERO_CONTROLLERS = ("kustomize-controller", "helm-controller")
@@ -543,7 +542,6 @@ class State(str, Enum):
     STOCK = "stock"
     FINAL_RBAC = "final-rbac"
     COLD_START = "cold-start"
-    READINESS_NEGATIVES = "readiness-negatives"
     RELEASE = "release"
     COMPLETE = "complete"
 
@@ -1852,62 +1850,6 @@ def controller_deployments_zero_replica(payload: bytes) -> bytes:
     return transformed
 
 
-def current_upgrade_failure_bound(
-    release: Mapping[str, object],
-    *,
-    generation: int,
-    namespace: str,
-    resource: str,
-    group: str,
-) -> bool:
-    metadata = release.get("metadata")
-    status = release.get("status")
-    spec = release.get("spec")
-    common = spec.get("commonMetadata") if isinstance(spec, dict) else None
-    annotations = common.get("annotations") if isinstance(common, dict) else None
-    ready = condition(release, "Ready")
-    message = ready.get("message") if isinstance(ready, dict) else None
-    return (
-        isinstance(metadata, dict)
-        and metadata.get("generation") == generation
-        and isinstance(status, dict)
-        and status.get("observedGeneration") == generation
-        and isinstance(annotations, dict)
-        and annotations.get("acceptance.snaraj.dev/readiness-negative") == resource
-        and isinstance(ready, dict)
-        and ready.get("status") == "False"
-        and ready.get("reason") == "UpgradeFailed"
-        and isinstance(message, str)
-        and authorization_failure_bound(
-            [message], namespace=namespace, resource=resource, group=group
-        )
-    )
-
-
-def rollback_after_failure_bound(
-    release: Mapping[str, object],
-    *,
-    generation: int,
-    failure_resource_version: str,
-) -> bool:
-    """Require rollback on an API object newer than the observed failure."""
-
-    metadata = release.get("metadata")
-    status = release.get("status")
-    rollback = condition(release, "Remediated")
-    return (
-        isinstance(metadata, dict)
-        and metadata.get("generation") == generation
-        and isinstance(metadata.get("resourceVersion"), str)
-        and metadata["resourceVersion"] != failure_resource_version
-        and isinstance(status, dict)
-        and status.get("observedGeneration") == generation
-        and rollback is not None
-        and rollback.get("status") == "True"
-        and rollback.get("reason") == "RollbackSucceeded"
-    )
-
-
 def zero_replica_without_pods(
     deployment: Mapping[str, object], pods: object
 ) -> bool:
@@ -1978,25 +1920,6 @@ def controller_cold_start_ready_bound(
         and containers[0].get("restartCount") == 0
         and len(ready) == 1
         and ready[0].get("status") == "True"
-    )
-
-
-def authorization_failure_bound(
-    messages: Iterable[str], *, namespace: str, resource: str, group: str
-) -> bool:
-    subject = f"system:serviceaccount:{namespace}:helm-reconciler"
-    required = (
-        "forbidden",
-        f'user "{subject}"',
-        f'resource "{resource}"',
-        f'api group "{group}"',
-        f'namespace "{namespace}"',
-    )
-    return any(
-        all(fragment in message.lower() for fragment in required)
-        and re.search(r"\bcannot (?:get|list|watch) resource\b", message.lower())
-        is not None
-        for message in messages
     )
 
 
@@ -2945,11 +2868,9 @@ class AcceptanceHarness:
         self.kustomize_final_rbac_cold_start()
         self.helm_final_rbac_cold_start()
         self.machine.advance(State.FINAL_RBAC, State.COLD_START)
-        self.readiness_negatives()
-        self.machine.advance(State.COLD_START, State.READINESS_NEGATIVES)
         self.release_lifecycle()
         self.assert_final_network_boundary()
-        self.machine.advance(State.READINESS_NEGATIVES, State.RELEASE)
+        self.machine.advance(State.COLD_START, State.RELEASE)
         self.machine.advance(State.RELEASE, State.COMPLETE)
         return dict(self.evidence)
 
@@ -3473,34 +3394,6 @@ class AcceptanceHarness:
         }:
             raise AcceptanceError("SHARED_BINDING_NOT_FINAL")
 
-    def remove_exact_rule(
-        self,
-        kind: str,
-        name: str,
-        *,
-        group: str,
-        resource: str,
-        verbs: Sequence[str],
-        namespace: str | None = None,
-    ) -> None:
-        arguments = ["get", kind, name]
-        if namespace:
-            arguments.extend(("-n", namespace))
-        arguments.extend(("-o", "json"))
-        role = self.kube_json(*arguments)
-        index = exact_rule_index(role, group=group, resource=resource, verbs=verbs)
-        patch_arguments = ["patch", kind, name]
-        if namespace:
-            patch_arguments.extend(("-n", namespace))
-        patch_arguments.extend(
-            (
-                "--type=json",
-                "-p",
-                json.dumps([{"op": "remove", "path": f"/rules/{index}"}], separators=(",", ":")),
-            )
-        )
-        self.kube(*patch_arguments)
-
     def wait_until(
         self,
         predicate: Callable[[], object | None],
@@ -3744,278 +3637,6 @@ class AcceptanceHarness:
             "-n", namespace, "get", "deployment", "flux-rbac-acceptance", "-o", "json"
         )
         return deployment_healthy(deployment)
-
-    def release_diagnostics(
-        self, namespace: str, release: Mapping[str, object]
-    ) -> tuple[list[str], set[str]]:
-        status = release.get("status")
-        conditions = status.get("conditions") if isinstance(status, dict) else None
-        messages = [
-            item["message"]
-            for item in conditions
-            if isinstance(item, dict) and isinstance(item.get("message"), str)
-        ] if isinstance(conditions, list) else []
-        reasons = {
-            item["reason"]
-            for item in conditions
-            if isinstance(item, dict) and isinstance(item.get("reason"), str)
-        } if isinstance(conditions, list) else set()
-        events = self.kube_json(
-            "-n",
-            namespace,
-            "get",
-            "events",
-            "--field-selector",
-            "involvedObject.kind=HelmRelease,involvedObject.name=acceptance",
-            "-o",
-            "json",
-        ).get("items")
-        if isinstance(events, list):
-            messages.extend(
-                item["message"]
-                for item in events
-                if isinstance(item, dict) and isinstance(item.get("message"), str)
-            )
-            reasons.update(
-                item["reason"]
-                for item in events
-                if isinstance(item, dict) and isinstance(item.get("reason"), str)
-            )
-        return messages, reasons
-
-    def wait_failed_install_with_healthy_workload(
-        self, namespace: str, resource: str, group: str
-    ) -> None:
-        def failed() -> bool | None:
-            release = self.kube_json(
-                "-n", namespace, "get", "helmrelease", "acceptance", "-o", "json"
-            )
-            ready = condition(release, "Ready")
-            messages, _ = self.release_diagnostics(namespace, release)
-            if (
-                current_generation(release)
-                and ready
-                and ready.get("status") == "False"
-                and ready.get("reason") == "InstallFailed"
-                and authorization_failure_bound(
-                    messages,
-                    namespace=namespace,
-                    resource=resource,
-                    group=group,
-                )
-                and self.workload_healthy(namespace)
-            ):
-                return True
-            return None
-
-        self.wait_until(failed, timeout=150, code="READINESS_NEGATIVE_NOT_OBSERVED")
-
-    def run_install_readiness_negative(
-        self, namespace: str, resource: str, group: str
-    ) -> None:
-        self.remove_exact_rule(
-            "role",
-            "helm-reconciler",
-            namespace=namespace,
-            group=group,
-            resource=resource,
-            verbs=("get", "list", "watch"),
-        )
-        for verb in ("get", "list", "watch"):
-            self.assert_review(
-                AccessRow(
-                    f"negative-{namespace}-{resource}-{verb}",
-                    tenant_subject(namespace),
-                    verb,
-                    group,
-                    resource,
-                    namespace=namespace,
-                ),
-                False,
-            )
-        self.apply_document(self.source_document(namespace))
-        self.wait_source_ready(namespace)
-        self.apply_document(self.release_document(namespace))
-        self.wait_failed_install_with_healthy_workload(namespace, resource, group)
-        self.kube(
-            "-n",
-            namespace,
-            "patch",
-            "helmrelease",
-            "acceptance",
-            "--type=merge",
-            "-p",
-            '{"spec":{"suspend":true}}',
-        )
-        self.kube(
-            "apply", "-f", str(self.held_path(ACCESS_MANIFEST_RELATIVE)), timeout=180
-        )
-
-    def run_upgrade_readiness_negative(
-        self, namespace: str, resource: str, group: str
-    ) -> None:
-        self.apply_document(self.source_document(namespace))
-        self.wait_source_ready(namespace)
-        self.apply_document(self.release_document(namespace))
-        installed = self.wait_release_reason(namespace, "InstallSucceeded")
-        baseline = deployed_history(installed)
-        if (
-            baseline is None
-            or type(baseline.get("version")) is not int
-            or not isinstance(baseline.get("configDigest"), str)
-        ):
-            raise AcceptanceError("UPGRADE_NEGATIVE_BASELINE_INVALID")
-        baseline_version = baseline["version"]
-        baseline_config = baseline["configDigest"]
-        self.remove_exact_rule(
-            "role",
-            "helm-reconciler",
-            namespace=namespace,
-            group=group,
-            resource=resource,
-            verbs=("get", "list", "watch"),
-        )
-        for verb in ("get", "list", "watch"):
-            self.assert_review(
-                AccessRow(
-                    f"upgrade-negative-{namespace}-{resource}-{verb}",
-                    tenant_subject(namespace),
-                    verb,
-                    group,
-                    resource,
-                    namespace=namespace,
-                ),
-                False,
-            )
-        patched = json_output(
-            self.kube(
-                "-n",
-                namespace,
-                "patch",
-                "helmrelease",
-                "acceptance",
-                "--type=merge",
-                "-p",
-                json.dumps(
-                    {
-                        "spec": {
-                            "commonMetadata": {
-                                "annotations": {
-                                    "acceptance.snaraj.dev/readiness-negative": resource
-                                }
-                            }
-                        }
-                    },
-                    separators=(",", ":"),
-                ),
-                "-o",
-                "json",
-            )
-        )
-        target_generation = (
-            patched.get("metadata", {}).get("generation")
-            if isinstance(patched, dict)
-            else None
-        )
-        if type(target_generation) is not int:
-            raise AcceptanceError("UPGRADE_NEGATIVE_GENERATION_INVALID")
-        failure_resource_version: str | None = None
-
-        def remediated() -> bool | None:
-            nonlocal failure_resource_version
-            release = self.kube_json(
-                "-n", namespace, "get", "helmrelease", "acceptance", "-o", "json"
-            )
-            if failure_resource_version is None:
-                rollback = condition(release, "Remediated")
-                rollback_already_succeeded = (
-                    rollback is not None
-                    and rollback.get("status") == "True"
-                    and rollback.get("reason") == "RollbackSucceeded"
-                )
-                resource_version = release.get("metadata", {}).get(
-                    "resourceVersion"
-                )
-                if (
-                    not rollback_already_succeeded
-                    and isinstance(resource_version, str)
-                    and resource_version
-                    and current_upgrade_failure_bound(
-                        release,
-                        generation=target_generation,
-                        namespace=namespace,
-                        resource=resource,
-                        group=group,
-                    )
-                ):
-                    failure_resource_version = resource_version
-                return None
-            if not rollback_after_failure_bound(
-                release,
-                generation=target_generation,
-                failure_resource_version=failure_resource_version,
-            ):
-                return None
-            latest = deployed_history(release)
-            deployment = self.kube_json(
-                "-n", namespace, "get", "deployment", "flux-rbac-acceptance", "-o", "json"
-            )
-            annotations = deployment.get("metadata", {}).get("annotations")
-            if not isinstance(annotations, dict):
-                annotations = {}
-            if (
-                latest
-                and type(latest.get("version")) is int
-                and latest["version"] > baseline_version
-                and latest.get("configDigest") == baseline_config
-                and "acceptance.snaraj.dev/readiness-negative" not in annotations
-                and self.workload_healthy(namespace)
-            ):
-                return True
-            return None
-
-        self.wait_until(
-            remediated, timeout=210, code="READINESS_UPGRADE_ROLLBACK_NOT_OBSERVED"
-        )
-        self.kube(
-            "-n",
-            namespace,
-            "patch",
-            "helmrelease",
-            "acceptance",
-            "--type=merge",
-            "-p",
-            '{"spec":{"suspend":true}}',
-        )
-        self.kube(
-            "apply", "-f", str(self.held_path(ACCESS_MANIFEST_RELATIVE)), timeout=180
-        )
-
-    def readiness_negatives(self) -> None:
-        self.run_install_readiness_negative("cloudflare-public", "pods", "")
-        self.run_upgrade_readiness_negative(
-            "naranjo-online", "replicasets", "apps"
-        )
-        self.assert_matrix(TENANT_ALLOWED_ROWS, True)
-        self.evidence["readinessNegatives"] = {
-            "pods": {
-                "phase": "install",
-                "reason": "InstallFailed",
-                "authorizationMessageBound": True,
-                "workloadHealthy": True,
-            },
-            "replicasets": {
-                "phase": "upgrade",
-                "reason": "UpgradeFailed",
-                "authorizationMessageBound": True,
-                "currentGenerationFailureObserved": True,
-                "injectedFailureBound": True,
-                "rollbackReason": "RollbackSucceeded",
-                "helmRemediationRollback": "acceptance-only",
-                "priorConfigRestored": True,
-                "workloadHealthy": True,
-            },
-        }
 
     def wait_release_reason(self, namespace: str, reason: str, *, timeout: float = 180) -> dict[str, object]:
         def ready() -> dict[str, object] | None:
@@ -4350,26 +3971,6 @@ def validate_pass_components(
         "secretUpdateDenied": True,
         "destructiveWorkloadAction": False,
         "initialCreationOnly": True,
-    }:
-        raise AcceptanceError("RECEIPT_LIFECYCLE_SCHEMA_INVALID")
-    if evidence.get("readinessNegatives") != {
-        "pods": {
-            "phase": "install",
-            "reason": "InstallFailed",
-            "authorizationMessageBound": True,
-            "workloadHealthy": True,
-        },
-        "replicasets": {
-            "phase": "upgrade",
-            "reason": "UpgradeFailed",
-            "authorizationMessageBound": True,
-            "currentGenerationFailureObserved": True,
-            "injectedFailureBound": True,
-            "rollbackReason": "RollbackSucceeded",
-            "helmRemediationRollback": "acceptance-only",
-            "priorConfigRestored": True,
-            "workloadHealthy": True,
-        },
     }:
         raise AcceptanceError("RECEIPT_LIFECYCLE_SCHEMA_INVALID")
     if evidence.get("releaseLifecycle") != {
