@@ -45,8 +45,18 @@ automountServiceAccountToken: false
 # controllers/patches/: cluster-reconciler.yaml deletes the generated
 # cluster-admin binding, and crd-controller-role.yaml replaces the shared
 # ClusterRole's wildcards, cluster-wide Secret reads, and
-# `serviceaccounts/token` creation with an enumerated set. What the controllers
-# still need is namespaced, so it is granted here.
+# `serviceaccounts/token` creation with an enumerated set. The namespaced
+# remainder is granted here.
+#
+# The parts that CANNOT be namespaced live elsewhere on purpose. Each
+# controller's authority over its own custom resources is a cluster-wide
+# list/watch (`--watch-all-namespaces=true`). Those have to be ClusterRole
+# rules. Because crd-controller-role.yaml strips that authority
+# from the shared role inside the install transaction, the replacement must be
+# created by that same transaction or a fresh install starts controllers that
+# cannot sync their caches. Those six objects are therefore part of the install
+# root, in controllers/per-controller-rbac.yaml (issues #98 and #186), not this
+# file. This file is reconciled later by Flux and is not applied by the installer.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -61,8 +71,8 @@ rules:
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
   # The only ConfigMaps a controller writes are its own, in its own namespace.
-  # Cluster-wide read stays in the shared ClusterRole for `substituteFrom` and
-  # Helm `valuesFrom`; the write half is confined here.
+  # Cluster-wide read stays in the shared ClusterRole for `substituteFrom`;
+  # the write half is confined here.
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -90,13 +100,13 @@ subjects:
     name: helm-controller
     namespace: flux-system
 ---
-# The single Secret any controller reads under its own identity: the SOPS age
-# key the platform-services Kustomization decrypts with. Read verbs only — a
-# controller that could write Secrets could rewrite the key it decrypts with.
-# The grant is namespaced instead of name-restricted because `list` and `watch`
-# cannot be limited by `resourceNames`, and flux-system is designed to hold no
-# other Secret; the rendered-output policy and the live-state verifier both
-# refuse a write verb here.
+# The one controller-identity Secret grant: the SOPS age key the
+# platform-services Kustomization decrypts with. Read verbs only — a controller
+# that could write Secrets could rewrite the key it decrypts with. Both
+# reconcilers' broad ConfigMap/Secret event watchers are disabled, so the
+# decryptor needs only an exact `get`; the resource name is bound here rather
+# than trusting namespace contents. The rendered-output policy and live-state
+# verifier both refuse a broader name or verb set.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -105,7 +115,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch]
+    resourceNames: [sops-age]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -573,9 +584,17 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, secrets, services, serviceaccounts]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Helm's readiness wait reads the Deployment ownership chain. Keep these
+  # read-back resources out of the mutable chart-object rules.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -603,9 +622,15 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, secrets, services, serviceaccounts]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
     verbs: [get, list, watch, create, update, patch, delete]
@@ -633,9 +658,15 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, secrets, services, serviceaccounts]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
     verbs: [get, list, watch, create, update, patch, delete]
