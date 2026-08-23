@@ -1,21 +1,17 @@
-# Positive control for the narrowed Flux controller authorization (AUDIT S12).
-# These are the shapes the rendered desired state actually produces: an
-# enumerated shared ClusterRole, a binding naming only the three installed
-# controllers, name-restricted impersonation Roles, and a read-only Secret grant
-# in flux-system. If a rule added to policies/conftest/kubernetes.rego is broader
-# than the property it is meant to enforce, it fails here rather than silently
-# rejecting the real manifests at render time.
+# Positive control for the narrowed Flux controller authorization (AUDIT S12)
+# and its per-controller split (issue #98). These are focused positive controls
+# for the individual policy shapes, not a second complete controller render:
+# the real render supplies the full primary/status/finalizer inventories. This
+# fixture covers the shared role and binding, the exact secondary-source rules,
+# one-owner bindings, name-restricted impersonation, the exact decryption Secret
+# name, and a reconciler config-watcher gate. If a rule added
+# to policies/conftest/kubernetes.rego is broader than the property it is meant
+# to enforce, it fails here rather than silently rejecting the real manifests.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: crd-controller-flux-system
 rules:
-  - apiGroups: [source.toolkit.fluxcd.io]
-    resources: [gitrepositories, ocirepositories]
-    verbs: [get, list, watch, update, patch]
-  - apiGroups: [kustomize.toolkit.fluxcd.io]
-    resources: [kustomizations]
-    verbs: [get, list, watch, update, patch]
   - apiGroups: [""]
     resources: [namespaces, serviceaccounts, configmaps]
     verbs: [get, list, watch]
@@ -43,6 +39,78 @@ subjects:
   - kind: ServiceAccount
     name: helm-controller
     namespace: flux-system
+---
+# One controller's own authority, bound to one ServiceAccount. The Flux API
+# groups the shared role above may no longer name are exactly what belongs here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-kustomize-flux-system
+rules:
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [kustomize.toolkit.fluxcd.io]
+    resources: [kustomizations/status]
+    verbs: [get, patch, update]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [buckets, gitrepositories, ocirepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-kustomize-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-kustomize-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: kustomize-controller
+    namespace: flux-system
+---
+# helm-controller's source authority contains no cluster-wide Secret access;
+# release storage belongs to the impersonated tenant reconciler.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crd-controller-helm-flux-system
+rules:
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [helmcharts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [ocirepositories]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crd-controller-helm-flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crd-controller-helm-flux-system
+subjects:
+  - kind: ServiceAccount
+    name: helm-controller
+    namespace: flux-system
+---
+# Helm readiness may inspect the workload ownership chain, but these exact
+# per-tenant rules carry no workload write verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helm-reconciler
+  namespace: naranjo-online
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -88,7 +156,107 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, watch]
+    resourceNames: [sops-age]
+    verbs: [get]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: kustomize-controller
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+    app.kubernetes.io/version: v2.9.3
+    control-plane: controller
+  name: kustomize-controller
+  namespace: flux-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kustomize-controller
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app: kustomize-controller
+        app.kubernetes.io/component: kustomize-controller
+        app.kubernetes.io/instance: flux-system
+        app.kubernetes.io/part-of: flux
+        app.kubernetes.io/version: v2.9.3
+    spec:
+      containers:
+        - args:
+            - --events-addr=
+            - --watch-all-namespaces=true
+            - --log-level=info
+            - --log-encoding=json
+            - --enable-leader-election
+            - --no-cross-namespace-refs=true
+            - --no-remote-bases=true
+            - --default-service-account=default
+            - --feature-gates=DisableConfigWatchers=true
+          env:
+            - name: RUNTIME_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  containerName: manager
+                  resource: limits.memory
+          image: ghcr.io/fluxcd/kustomize-controller:v1.9.4@sha256:2b8bec54ffb6caf421bd2a6c005d27f567d5dd4db7feb55794fb51fcabd69b8f
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+          name: manager
+          ports:
+            - containerPort: 8080
+              name: http-prom
+              protocol: TCP
+            - containerPort: 9440
+              name: healthz
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /tmp
+              name: temp
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-cluster-critical
+      securityContext:
+        fsGroup: 1337
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: kustomize-controller
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - emptyDir: {}
+          name: temp
 #
 # The two wildcard aggregation ClusterRoles the generated export ships
 # (flux-edit-flux-system, flux-view-flux-system) are deliberately NOT reproduced

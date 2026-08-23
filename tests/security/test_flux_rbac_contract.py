@@ -12,10 +12,18 @@ battery is the evidence that removing it is safe in both directions:
 * NARROW — an enumerated set of requests the reconcilers must never be able to
   make is asserted denied, ``cluster-admin`` cannot reappear, no wildcard rule
   can reach a Flux account, and impersonation stays restricted by name.
+* PER CONTROLLER — the authority each controller holds over its own custom
+  resources is a ClusterRole bound to ONE ServiceAccount (issue #98). The one
+  role still bound to all three grants no Flux API group at all, so no
+  controller can rewrite another's reconciliation specification and have that
+  controller apply the result under an impersonated identity. Both directions
+  are asserted: every split grant reaches its owner, and every cross-controller
+  write is denied.
 
 What is modelled rather than observed is stated in the module docstring of
-``testsupport/rbac_model.py``. The live half of the proof is
-``bootstrap/flux/bootstrap.sh --verify`` and the ``kubectl auth can-i`` sweep in
+``testsupport/rbac_model.py``. The live half is the live-state comparison in
+``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound, fail-closed
+authorization oracle and disposable real-API-server matrix described in
 ``docs/runbooks/flux-rbac-narrowing.md``.
 """
 
@@ -29,6 +37,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import NamedTuple
+
+from scripts import flux_rbac_denial_oracle as denial_oracle
 
 from .support import load_script
 from .testsupport import rbac_model as model
@@ -57,20 +67,10 @@ DECLARED_INSUFFICIENCIES = {
     ("Kustomization", "admission", "kyverno.io", "clusterpolicies"),
     ("Kustomization", "admission", "admissionregistration.k8s.io",
      "validatingwebhookconfigurations"),
-    # READINESS READ-BACK, pre-existing and NOT introduced by the narrowing
-    # (these Roles are unchanged from main). A `wait: true` Kustomization and a
-    # HelmRelease that has not disabled Helm's wait both evaluate readiness by
-    # walking a workload down to its Pods, under the impersonated identity — so
-    # each needs `get`/`list` on replicasets and pods in the target namespace.
-    #
-    # This CANNOT simply be granted: policies/conftest/kubernetes.rego denies
-    # any Role in cloudflare-public, naranjo-online, lidersea-com, or kyverno
-    # that names pods or replicasets AT ALL — the rule is verb-agnostic, so even
-    # a read grant is refused as "direct workload control". Closing the gap is
-    # therefore a reviewed decision between narrowing that policy to write verbs
-    # and turning the waits off, not something this change may quietly pick.
-    # Until then every affected object stays suspended, which the test below
-    # requires.
+    # The remaining readiness read-back staging stop belongs only to the inert
+    # admission Kustomization. Issue #186 closes the HelmRelease half with exact
+    # per-tenant pods/replicasets get/list/watch rules; keeping those rows here
+    # would let a regression masquerade as a declared gap.
     #
     # The owner is a (kind, name) PAIR, not a name: a Kustomization and a
     # HelmRelease may share a name — both sites do — and each is suspended by
@@ -79,12 +79,6 @@ DECLARED_INSUFFICIENCIES = {
     # Kustomization satisfying the check, and the mutation survived.
     ("Kustomization", "admission", "apps", "replicasets"),
     ("Kustomization", "admission", "", "pods"),
-    ("HelmRelease", "cloudflare-public", "apps", "replicasets"),
-    ("HelmRelease", "cloudflare-public", "", "pods"),
-    ("HelmRelease", "naranjo-online", "apps", "replicasets"),
-    ("HelmRelease", "naranjo-online", "", "pods"),
-    ("HelmRelease", "lidersea-com", "apps", "replicasets"),
-    ("HelmRelease", "lidersea-com", "", "pods"),
 }
 
 # ---------------------------------------------------------------------------
@@ -134,21 +128,29 @@ HELM_GROUP = "helm.toolkit.fluxcd.io"
 NETWORKING_GROUP = "networking.k8s.io"
 CLUSTER = (None,)
 
-# Reason 1 — THE CONFUSED DEPUTY, and the one residual in this table that is a
-# real authorization finding rather than surplus verbs. `crd-controller-flux-system`
-# is one ClusterRole bound to all three controllers, so each controller holds
-# the other two's write authority over their execution objects and sources.
-# Splitting it into three role/binding pairs is tracked as its own change; until
-# then the residual is enumerated here exactly, so it cannot grow silently and
-# the split can be verified by watching these rows disappear.
+# Reason 1 — THE CONFUSED DEPUTY, RETIRED (issue #98). It used to read: the one
+# `crd-controller-flux-system` ClusterRole was bound to all three controllers,
+# so each held the other two's write authority over their execution objects and
+# sources, and 135 rows of this table were exactly that residual.
+#
+# The role is now split — the shared role grants no Flux API group at all, and
+# each controller's own authority is a ClusterRole bound to ONE ServiceAccount
+# in `kubernetes/flux-system/controllers/per-controller-rbac.yaml` — so the
+# residual is gone and no row below cites this reason. The constant SURVIVES the
+# split deliberately: it is
+# what `test_the_declared_slack_is_bounded_and_attributed` counts, and the count
+# it now asserts is ZERO. Re-broadening the shared role produces ungrounded
+# cross-controller grants, which the exact-set assertion refuses until they are
+# declared here, and declaring them with this reason fails the zero. Deleting
+# the constant instead would delete the guard, so it stays.
 SHARED_ROLE = (
     "the shared crd-controller-flux-system ClusterRole is bound to all three "
     "controllers, so this controller holds authority derived for another one "
-    "(tracked: per-controller role split, issue #98)"
+    "(RETIRED by the per-controller role split, issue #98: no row may cite this)"
 )
 # Reason 2 — the generated export grants a source kind whose reconciler
 # registration at the pinned version this repository cannot confirm, so it is
-# declared rather than asserted as required in REGISTERED_CONTROLLERS.
+# declared rather than asserted as required in OWNED_CONTROLLER_KINDS.
 UNCONFIRMED_KIND = (
     "the generated export grants ExternalArtifact, a kind no reviewed object "
     "uses and whose reconciler registration at the pinned version this "
@@ -161,66 +163,12 @@ APPLIED_WATCH = (
     "APPLY_VERBS omits watch because Flux polls managed objects; the Role "
     "grants one verb set per rule rather than trimming watch per resource"
 )
-
 DECLARED_SLACK = (
-    # ---- the shared controller ClusterRole -------------------------------
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations/status",), ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations/finalizers",), ("update",), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases/status",), ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases/finalizers",), ("update",), SHARED_ROLE),
-    SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("helmcharts",), ("create", "delete"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases/status",), ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, HELM_GROUP,
-             ("helmreleases/finalizers",), ("update",), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets", "helmrepositories", "ocirepositories"),
-             ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("gitrepositories",), ("update", "patch"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("helmcharts",), ("get", "list", "watch", "create", "update", "patch", "delete"),
-             SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets/status", "gitrepositories/status", "helmcharts/status",
-              "helmrepositories/status", "ocirepositories/status"),
-             ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets/finalizers", "gitrepositories/finalizers", "helmcharts/finalizers",
-              "helmrepositories/finalizers", "ocirepositories/finalizers"),
-             ("update",), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations",), ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations/status",), ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, KUSTOMIZE_GROUP,
-             ("kustomizations/finalizers",), ("update",), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets", "helmrepositories"),
-             ("get", "list", "watch", "update", "patch"), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("gitrepositories", "ocirepositories"), ("update", "patch"), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP, ("helmcharts",), ("watch",), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets/status", "gitrepositories/status", "helmcharts/status",
-              "helmrepositories/status", "ocirepositories/status"),
-             ("get", "patch", "update"), SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("buckets/finalizers", "gitrepositories/finalizers", "helmcharts/finalizers",
-              "helmrepositories/finalizers", "ocirepositories/finalizers"),
-             ("update",), SHARED_ROLE),
     # ---- a kind the export grants and this repository does not use --------
+    # Only source-controller now: the kind belongs to the source group, and
+    # after the split no other controller holds any authority over it. The three
+    # kustomize-controller rows and the three helm-controller rows that used to
+    # sit here were cross-controller residue and are gone with the shared role.
     SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
              ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
              UNCONFIRMED_KIND),
@@ -228,24 +176,6 @@ DECLARED_SLACK = (
              ("externalartifacts/status",), ("get", "patch", "update"), UNCONFIRMED_KIND),
     SlackRow(SOURCE_CONTROLLER, CLUSTER, SOURCE_GROUP,
              ("externalartifacts/finalizers",), ("update",), UNCONFIRMED_KIND),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts/status",), ("get", "patch", "update"),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
-    SlackRow(KUSTOMIZE_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts/finalizers",), ("update",),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts",), ("get", "list", "watch", "update", "patch"),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts/status",), ("get", "patch", "update"),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
-    SlackRow(HELM_CONTROLLER, CLUSTER, SOURCE_GROUP,
-             ("externalartifacts/finalizers",), ("update",),
-             UNCONFIRMED_KIND + "; " + SHARED_ROLE),
     # ---- controller runtime ----------------------------------------------
     SlackRow(SOURCE_CONTROLLER, ("flux-system",), "coordination.k8s.io", ("leases",),
              ("list", "watch", "patch", "delete"),
@@ -259,11 +189,6 @@ DECLARED_SLACK = (
              ("list", "watch", "patch", "delete"),
              "client-go's LeaseLock issues get/create/update only; the surplus "
              "matches the verb set the generated export grants"),
-    SlackRow(KUSTOMIZE_CONTROLLER, ("flux-system",), "", ("secrets",),
-             ("get", "list", "watch"),
-             "the SOPS age key is the only Secret derived here, but resourceNames "
-             "cannot restrict list or watch, so the read is granted namespace-wide "
-             "in a namespace designed to hold no other Secret"),
     # ---- reconciler Roles: surplus that predates this change --------------
     SlackRow(Subject("flux-system", "platform-prerequisites-reconciler"),
              ("cloudflare-public", "naranjo-online", "lidersea-com"), "",
@@ -349,7 +274,7 @@ DECLARED_SLACK_REQUESTS = _slack_requests(DECLARED_SLACK)
 # Requests the narrowed authorization must refuse. Each row is the concrete
 # shape of a way the deleted cluster-admin binding used to let a compromised
 # controller, or a mistaken manifest, reach past its boundary.
-FORBIDDEN_REQUESTS = (
+GENERAL_FORBIDDEN_REQUESTS = (
     (KUSTOMIZE_CONTROLLER, "create", "apps", "deployments", "kube-system", None,
      "a controller must not apply workloads under its own identity"),
     (KUSTOMIZE_CONTROLLER, "get", "", "secrets", "kube-system", None,
@@ -366,8 +291,6 @@ FORBIDDEN_REQUESTS = (
      "helm-reconciler", "kustomize-controller impersonates only in flux-system"),
     (HELM_CONTROLLER, "impersonate", "", "serviceaccounts", "flux-system", "root-reconciler",
      "helm-controller must not reach the root reconciler's authority"),
-    (HELM_CONTROLLER, "get", "", "secrets", "flux-system", "sops-age",
-     "only the decrypting controller reads the age key"),
     (HELM_CONTROLLER, "create", "", "secrets", "flux-system", None,
      "no controller writes Secrets in flux-system"),
     (SOURCE_CONTROLLER, "get", "", "secrets", "naranjo-online", None,
@@ -383,6 +306,90 @@ FORBIDDEN_REQUESTS = (
     (Subject("flux-system", "admission-reconciler"), "create", "kyverno.io",
      "clusterpolicies", None, None, "the admission staging stop is authorization, not prose"),
 )
+
+ISSUE_98_CROSS_CONTROLLER_REQUESTS = (
+    # ---- the confused deputy, refused by name (issue #98) -----------------
+    #
+    # Every row below was ALLOWED on main and is denied here. They are written
+    # literally, one per crossing the issue names, so the split is asserted in
+    # the deny direction and not only in the "these slack rows disappeared"
+    # direction — a role file that reverted would fail here even if somebody
+    # also re-declared the slack. `test_no_controller_can_write_another_controllers_objects`
+    # below closes the same property exhaustively; this table is the readable
+    # statement of it.
+    #
+    # Cluster scope is asserted (namespace None) because every one of these
+    # grants would arrive through a ClusterRoleBinding, and `Authorizer.allows`
+    # at cluster scope consults exactly those.
+    (SOURCE_CONTROLLER, "patch", KUSTOMIZE_GROUP, "kustomizations", None, None,
+     "source-controller must not rewrite a Kustomization's reconciliation spec"),
+    (SOURCE_CONTROLLER, "update", KUSTOMIZE_GROUP, "kustomizations/status", None, None,
+     "source-controller must not forge a Kustomization's observed state"),
+    (SOURCE_CONTROLLER, "update", KUSTOMIZE_GROUP, "kustomizations/finalizers", None, None,
+     "source-controller must not release another controller's finalizer"),
+    (SOURCE_CONTROLLER, "patch", HELM_GROUP, "helmreleases", None, None,
+     "source-controller must not rewrite a HelmRelease, including its suspend flag"),
+    (SOURCE_CONTROLLER, "update", HELM_GROUP, "helmreleases/status", None, None,
+     "source-controller must not forge a HelmRelease's observed state"),
+    (SOURCE_CONTROLLER, "create", SOURCE_GROUP, "helmcharts", None, None,
+     "the intermediate HelmChart is created by helm-controller alone"),
+    (SOURCE_CONTROLLER, "delete", SOURCE_GROUP, "helmcharts", None, None,
+     "the intermediate HelmChart is deleted by helm-controller alone"),
+    (KUSTOMIZE_CONTROLLER, "patch", HELM_GROUP, "helmreleases", None, None,
+     "kustomize-controller must not rewrite a HelmRelease it does not own"),
+    (KUSTOMIZE_CONTROLLER, "update", HELM_GROUP, "helmreleases/status", None, None,
+     "kustomize-controller must not forge a HelmRelease's observed state"),
+    (KUSTOMIZE_CONTROLLER, "patch", SOURCE_GROUP, "ocirepositories", None, None,
+     "kustomize-controller resolves sources and never writes one"),
+    (KUSTOMIZE_CONTROLLER, "patch", SOURCE_GROUP, "gitrepositories", None, None,
+     "kustomize-controller reads the repository it syncs from and never writes it"),
+    (KUSTOMIZE_CONTROLLER, "create", SOURCE_GROUP, "helmcharts", None, None,
+     "kustomize-controller has no HelmChart authority at all after the split"),
+    (HELM_CONTROLLER, "patch", KUSTOMIZE_GROUP, "kustomizations", None, None,
+     "helm-controller must not rewrite the Kustomization that delivers it"),
+    (HELM_CONTROLLER, "update", KUSTOMIZE_GROUP, "kustomizations/status", None, None,
+     "helm-controller must not forge a Kustomization's observed state"),
+    (HELM_CONTROLLER, "update", KUSTOMIZE_GROUP, "kustomizations/finalizers", None, None,
+     "helm-controller must not release kustomize-controller's finalizer"),
+    (HELM_CONTROLLER, "patch", SOURCE_GROUP, "gitrepositories", None, None,
+     "helm-controller resolves sources and never writes one"),
+    (HELM_CONTROLLER, "patch", SOURCE_GROUP, "ocirepositories", None, None,
+     "helm-controller resolves the site chart artifact and never writes its source"),
+    (HELM_CONTROLLER, "update", SOURCE_GROUP, "buckets/status", None, None,
+     "helm-controller owns no source object's status"),
+)
+
+FORBIDDEN_REQUESTS = (
+    GENERAL_FORBIDDEN_REQUESTS + ISSUE_98_CROSS_CONTROLLER_REQUESTS
+)
+
+# The split, stated once: which ClusterRole carries each controller's own
+# authority, and which ServiceAccount that role's binding may name. The manifest,
+# the bootstrap mirror, and the additive rendered-output Conftest rules are
+# checked for semantic equality with this table. Conftest is a separate
+# defence-in-depth engine, not a replacement for the model or fast validator.
+PER_CONTROLLER_CLUSTER_ROLES = {
+    "crd-controller-source-flux-system": "source-controller",
+    "crd-controller-kustomize-flux-system": "kustomize-controller",
+    "crd-controller-helm-flux-system": "helm-controller",
+}
+
+# The API groups whose objects ARE a controller's reconciliation specification.
+# A verb one controller holds over another's object in one of these groups is
+# the confused deputy; the same verb over cluster metadata is not.
+FLUX_API_GROUPS = (SOURCE_GROUP, KUSTOMIZE_GROUP, HELM_GROUP)
+
+# HelmChart is the ONE kind two controllers legitimately touch, and it is not a
+# shared role: helm-controller CREATES the intermediate chart it derives from a
+# HelmRelease, and source-controller — which registers the reconciler for it —
+# turns it into an artifact. They are the two ends of one handoff. Declared once
+# here and consumed by both directions of the evidence below, so widening the
+# exemption widens it visibly in one place instead of twice by hand.
+#
+# The exemption is per KIND and covers only the object itself: `helmcharts/status`
+# and `helmcharts/finalizers` stay source-controller's alone, which is why the
+# split's helm role grants neither.
+HANDOFF_KIND_HOLDERS = {"HelmChart": ("source-controller", "helm-controller")}
 
 # The ServiceAccounts the reviewed three-controller component set creates. Any
 # other subject on the shared ClusterRoleBinding names an account that does not
@@ -515,7 +522,7 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                     )
                 )
 
-    def test_source_resolution_is_derived_for_every_custom_resource(self):
+    def test_source_resolution_is_derived_for_direct_controller_reads(self):
         """The authority every reconciliation starts with (P1-1).
 
         A reconciler resolves `spec.sourceRef`/`spec.chartRef` through its own
@@ -532,8 +539,10 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
             if "resolves its" in requirement.reason
         ]
         self.assertTrue(reads)
-        # Every Kustomization and every HelmRelease resolves exactly one source,
-        # and does it as the controller rather than as the impersonated account.
+        # Every Kustomization and direct chartRef HelmRelease resolves a source
+        # as the controller rather than as the impersonated account. A legacy
+        # chart.spec.sourceRef is copied into HelmChart for source-controller to
+        # resolve; helm-controller does not read that source object.
         self.assertEqual(
             {str(requirement.subject) for requirement in reads},
             {
@@ -553,7 +562,6 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                 ("Kustomization", "lidersea-com"),
                 ("HelmRelease", "naranjo-online"),
                 ("HelmRelease", "lidersea-com"),
-                ("HelmRelease", "cloudflare-public"),
             },
         )
         for requirement in reads:
@@ -665,8 +673,8 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                     requirement.describe(),
                 )
 
-    def test_every_registered_controller_kind_is_authorized_without_an_object(self):
-        """A kind with no object today is still a running informer.
+    def test_every_owned_controller_kind_is_authorized_without_an_object(self):
+        """A primary kind with no object today is still a running informer.
 
         source-controller registers a reconciler per source kind whatever the
         desired state contains, and every controller runs with
@@ -710,6 +718,117 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                     ),
                     requirement.describe(),
                 )
+
+    def test_secondary_informer_model_is_exact_cluster_wide_and_read_only(self):
+        """Pinned managers start secondary caches independently of desired state."""
+
+        self.assertEqual(
+            model.OWNED_CONTROLLER_KINDS,
+            {
+                "source-controller": (
+                    "Bucket", "GitRepository", "HelmChart", "HelmRepository",
+                    "OCIRepository",
+                ),
+                "kustomize-controller": ("Kustomization",),
+                "helm-controller": ("HelmRelease",),
+            },
+        )
+        self.assertEqual(
+            model.CONTROLLER_SECONDARY_WATCH_KINDS,
+            {
+                "kustomize-controller": (
+                    "Bucket", "GitRepository", "OCIRepository",
+                ),
+                "helm-controller": ("HelmChart", "OCIRepository"),
+            },
+        )
+        secondary = [
+            requirement
+            for requirement in self.controller_requirements
+            if requirement.owner == ("Controller", "secondary-informer")
+        ]
+        expected = set()
+        for controller, kinds in model.CONTROLLER_SECONDARY_WATCH_KINDS.items():
+            for kind in kinds:
+                group, resource = model.KIND_RESOURCES[kind][:2]
+                for verb in ("get", "list", "watch"):
+                    expected.add((controller, verb, group, resource, None))
+        self.assertEqual(
+            {
+                (
+                    requirement.subject.name, requirement.verb,
+                    requirement.group, requirement.resource,
+                    requirement.namespace,
+                )
+                for requirement in secondary
+            },
+            expected,
+        )
+        self.assertNotIn(
+            "ExternalArtifact",
+            {
+                kind
+                for kinds in model.CONTROLLER_SECONDARY_WATCH_KINDS.values()
+                for kind in kinds
+            },
+        )
+
+    def test_controller_identities_have_no_cluster_secret_authority(self):
+        """Optional config watchers are disabled; tenant Helm storage is separate."""
+
+        self.assertFalse(
+            any(
+                requirement.owner == ("Controller", "startup-cache")
+                for requirement in self.controller_requirements
+            )
+        )
+        for subject in (SOURCE_CONTROLLER, KUSTOMIZE_CONTROLLER, HELM_CONTROLLER):
+            for verb in (
+                "get", "list", "watch", "create", "update", "patch", "delete",
+                "deletecollection",
+            ):
+                with self.subTest(subject=str(subject), verb=verb):
+                    self.assertFalse(
+                        self.authorizer.allows(subject, verb, "", "secrets", None)
+                    )
+
+    def test_helm_release_readiness_readback_is_tenant_local_and_read_only(self):
+        """Issue #186: Helm install and upgrade waits need the full read chain."""
+
+        tenants = ("cloudflare-public", "naranjo-online", "lidersea-com")
+        for namespace in tenants:
+            subject = Subject(namespace, "helm-reconciler")
+            for group, resource in model.READ_BACK_RESOURCES:
+                for verb in model.READ_BACK_VERBS:
+                    with self.subTest(
+                        namespace=namespace, group=group, resource=resource, verb=verb,
+                    ):
+                        self.assertTrue(
+                            self.authorizer.allows(
+                                subject, verb, group, resource, namespace
+                            )
+                        )
+                        for foreign in {
+                            None,
+                            "flux-system",
+                            "kyverno",
+                            "kube-system",
+                            *(set(tenants) - {namespace}),
+                        }:
+                            self.assertFalse(
+                                self.authorizer.allows(
+                                    subject, verb, group, resource, foreign
+                                )
+                            )
+                for verb in ("create", "update", "patch", "delete", "deletecollection"):
+                    with self.subTest(
+                        namespace=namespace, resource=resource, forbidden=verb,
+                    ):
+                        self.assertFalse(
+                            self.authorizer.allows(
+                                subject, verb, group, resource, namespace
+                            )
+                        )
 
     def test_controllers_can_probe_the_api_server_liveness_endpoint(self):
         # The one grant a Role cannot express, so it stays cluster-scoped and is
@@ -782,7 +901,13 @@ class FluxRbacNarrownessTests(unittest.TestCase):
 
         # The enumeration itself is pinned: an empty or tiny granted set would
         # satisfy the subset assertion while proving nothing.
-        self.assertGreater(len(self.granted), 500)
+        #
+        # The floor moved 500 -> 450 with the per-controller split (issue #98),
+        # which deleted 134 granted requests outright — the cross-controller
+        # authority the shared role conferred. It is a TIGHTER floor than it
+        # was: 450 of 479 today against 500 of 613 before, so the headroom an
+        # accidental deletion could hide in shrank from 113 grants to 29.
+        self.assertGreater(len(self.granted), 450)
         self.assertEqual(
             {str(subject) for subject in self.subjects} & {
                 "system:serviceaccount:flux-system:source-controller",
@@ -828,22 +953,18 @@ class FluxRbacNarrownessTests(unittest.TestCase):
             with self.subTest(subject=str(row.subject), resources=row.resources):
                 self.assertTrue(row.verbs and row.resources and row.scopes)
                 self.assertGreater(len(row.reason), 40, "every slack row states why")
-        # The confused-deputy residual is the one finding in the table rather
-        # than surplus verbs, so it is counted separately: it may shrink to zero
-        # when the shared role is split, and it must never grow silently.
+        # The confused-deputy residual was 135 requests on main and is ZERO here
+        # (issue #98). The count is asserted rather than the rows quietly
+        # deleted, because the two assertions above are what make zero mean
+        # something: a re-broadened shared role produces ungrounded
+        # cross-controller grants, the exact-set assertion refuses them until
+        # they are declared, and declaring them with this reason fails here.
+        # Removing SHARED_ROLE instead of asserting against it would remove the
+        # guard along with the finding.
         shared = _slack_requests(
             tuple(row for row in DECLARED_SLACK if SHARED_ROLE in row.reason)
         )
-        self.assertEqual(len(shared), 135)
-        self.assertEqual(
-            {str(request.subject) for request in shared},
-            {
-                "system:serviceaccount:flux-system:source-controller",
-                "system:serviceaccount:flux-system:kustomize-controller",
-                "system:serviceaccount:flux-system:helm-controller",
-            },
-        )
-
+        self.assertEqual(shared, set())
     def test_the_cluster_scope_exemption_belongs_to_the_controllers_alone(self):
         """A reconciler never gets the informer-cache excuse.
 
@@ -1001,6 +1122,254 @@ class FluxRbacNarrownessTests(unittest.TestCase):
                     "{} may {} {}/{}: {}".format(subject, verb, group or "core", resource, why),
                 )
 
+    def test_all_18_issue_98_rows_fit_the_closed_live_oracle(self):
+        """The readable deputy matrix is executable evidence, not prose.
+
+        #184 deliberately closed the oracle over reviewed verbs and resource
+        identities. Issue #98 adds no second authorization path: every one of
+        its literal crossing rows must fit that existing closed contract, with
+        the exact ServiceAccount grammar and the one declared finalizer
+        discovery exception.
+        """
+
+        self.assertEqual(len(ISSUE_98_CROSS_CONTROLLER_REQUESTS), 18)
+        for subject, verb, group, resource, namespace, name, _ in (
+            ISSUE_98_CROSS_CONTROLLER_REQUESTS
+        ):
+            with self.subTest(subject=str(subject), verb=verb, resource=resource):
+                denial_oracle.canonical_service_account(str(subject))
+                self.assertIn(verb, denial_oracle.VERBS)
+                self.assertIn((group, resource), denial_oracle.RESOURCE_IDENTITIES)
+                identity = denial_oracle.RESOURCE_IDENTITIES[(group, resource)]
+                self.assertTrue(identity.namespaced)
+                self.assertIsNone(namespace)
+                self.assertIsNone(name)
+                request = (verb, group, identity.resource, identity.subresource)
+                if identity.subresource == "finalizers":
+                    self.assertIn(
+                        request,
+                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
+                    )
+                else:
+                    self.assertNotIn(
+                        request,
+                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
+                    )
+
+    def test_the_shared_controller_role_grants_no_flux_api_group(self):
+        """The structural half of the split (issue #98).
+
+        `crd-controller-flux-system` is bound to all three controller
+        ServiceAccounts, so any rule in it naming a Flux API group is authority
+        every controller holds over every other one's execution objects — the
+        confused deputy, whatever the verb. The deny rows above catch the
+        specific crossings; this catches the SHAPE, so a rule re-added with a
+        verb nobody enumerated still fails.
+
+        The positive half is asserted with it: the role must still carry the
+        metadata reads, event reporting, and liveness probe, or "grants no Flux
+        group" would also be satisfied by an empty rule list.
+        """
+
+        role = next(
+            document
+            for document in self.documents
+            if document.get("kind") == "ClusterRole"
+            and document["metadata"]["name"] == "crd-controller-flux-system"
+        )
+        for rule in role.get("rules") or []:
+            for group in rule.get("apiGroups") or []:
+                with self.subTest(group=group, verbs=tuple(rule.get("verbs") or ())):
+                    self.assertNotIn(
+                        group,
+                        FLUX_API_GROUPS,
+                        "the shared role is bound to all three controllers, so a "
+                        "{} rule in it is authority over the other controllers' "
+                        "objects".format(group),
+                    )
+        for verb, resource in (
+            ("get", "namespaces"), ("list", "serviceaccounts"), ("watch", "configmaps"),
+            ("create", "events"), ("patch", "events"),
+        ):
+            for name in INSTALLED_CONTROLLERS:
+                with self.subTest(shared=resource, verb=verb, subject=name):
+                    self.assertTrue(
+                        self.authorizer.allows(
+                            Subject("flux-system", name), verb, "", resource, None
+                        )
+                    )
+        for name in INSTALLED_CONTROLLERS:
+            with self.subTest(liveness=name):
+                self.assertTrue(
+                    self.authorizer.allows_non_resource(
+                        Subject("flux-system", name), "head", "/livez/ping"
+                    )
+                )
+
+    def test_each_per_controller_role_binds_exactly_its_own_controller(self):
+        """One role, one binding, one ServiceAccount — asserted per pair.
+
+        A per-controller role that grew a second subject would re-create the
+        shared role under a new name, and every request-level assertion in this
+        class would keep passing for the controller that legitimately owns the
+        authority. So the subject SET is pinned, not just the presence of the
+        owner.
+        """
+
+        roles = {
+            document["metadata"]["name"]: document
+            for document in self.documents
+            if document.get("kind") == "ClusterRole"
+        }
+        bindings = {
+            document["metadata"]["name"]: document
+            for document in self.documents
+            if document.get("kind") == "ClusterRoleBinding"
+        }
+        for name, owner in sorted(PER_CONTROLLER_CLUSTER_ROLES.items()):
+            with self.subTest(role=name):
+                self.assertIn(name, roles, "the split's per-controller role is missing")
+                self.assertTrue(roles[name].get("rules"), "an empty role grants nothing")
+                self.assertIn(name, bindings)
+                self.assertEqual(
+                    bindings[name]["roleRef"],
+                    {
+                        "apiGroup": "rbac.authorization.k8s.io",
+                        "kind": "ClusterRole",
+                        "name": name,
+                    },
+                )
+                self.assertEqual(
+                    {
+                        (entry["namespace"], entry["name"])
+                        for entry in bindings[name]["subjects"]
+                    },
+                    {("flux-system", owner)},
+                    "a second subject here rebuilds the shared role under a new name",
+                )
+
+    def test_no_controller_can_write_another_controllers_objects(self):
+        """The confused deputy, refused exhaustively rather than by example.
+
+        The matrix comes from ``OWNED_CONTROLLER_KINDS`` — a MODEL constant
+        declaring which kinds each controller reconciles — and not from the
+        manifests, so it cannot agree with whatever the manifests happen to say.
+        `test_every_per_controller_grant_is_owned_and_exclusive` is the other
+        direction, reading the manifests; between them a grant has to be both
+        derived for its owner and denied to everyone else.
+        """
+
+        self.assertEqual(
+            HANDOFF_KIND_HOLDERS,
+            {"HelmChart": ("source-controller", "helm-controller")},
+            "the handoff exemption is exactly one kind; widening it here would "
+            "silently widen the matrix below",
+        )
+        write_verbs = ("create", "update", "patch", "delete", "deletecollection")
+        namespaces = (
+            None, "flux-system", "cloudflare-public", "naranjo-online",
+            "lidersea-com", "kyverno", "kube-system",
+        )
+        checked = 0
+        for owner, kinds in sorted(model.OWNED_CONTROLLER_KINDS.items()):
+            for kind in kinds:
+                group, resource, _ = model.KIND_RESOURCES[kind]
+                for other in INSTALLED_CONTROLLERS:
+                    if other == owner or other in HANDOFF_KIND_HOLDERS.get(kind, ()):
+                        continue
+                    subject = Subject("flux-system", other)
+                    for target in (resource, resource + "/status", resource + "/finalizers"):
+                        for verb in write_verbs:
+                            for namespace in namespaces:
+                                checked += 1
+                                if not self.authorizer.allows(
+                                    subject, verb, group, target, namespace
+                                ):
+                                    continue
+                                self.fail(
+                                    "{} may {} {}/{} in {}: that is {}'s object, and "
+                                    "impersonation does not contain the write because "
+                                    "{} performs the resulting reconciliation".format(
+                                        subject, verb, group, target,
+                                        namespace or "cluster scope", owner, owner,
+                                    )
+                                )
+        # The enumeration is pinned: a matrix that checked nothing would pass.
+        # 7 kinds x 2 non-owners each, minus the one by-design pair, x 3 targets
+        # x 5 write verbs x 7 scopes.
+        self.assertEqual(checked, 1365)
+
+    def test_every_per_controller_grant_is_owned_and_exclusive(self):
+        """Two-sided evidence per GRANT, read out of the manifests themselves.
+
+        For every atomic request the three split roles confer, the owning
+        controller must hold it — deleting the rule fails here, which is the
+        sufficiency direction at RULE granularity rather than the whole-role
+        granularity `unmet` works at.
+
+        Exclusivity is asserted for the WRITE half only, and that boundary is
+        the finding's boundary rather than a convenience. Reading another
+        controller's source object cannot make that controller do anything:
+        kustomize-controller and helm-controller both resolve a `sourceRef`
+        under their own identity before impersonation is configured, so a read
+        of a GitRepository is shared authority by design (issue #98 says the
+        shared read half may stay common). Writing one is not — a rewritten
+        source, status, or finalizer is a reconciliation the OWNING controller
+        then performs, which is the confused deputy exactly.
+
+        Subresources are treated as writes whatever the verb: `/status` and
+        `/finalizers` are ownership markers, and no controller reads another's.
+        """
+
+        roles = {
+            document["metadata"]["name"]: document
+            for document in self.documents
+            if document.get("kind") == "ClusterRole"
+        }
+        # The handoff exemption, resolved from kinds to the resource strings the
+        # rules actually name. Only the object itself, never its subresources.
+        handoff = {
+            model.KIND_RESOURCES[kind][1]: holders
+            for kind, holders in HANDOFF_KIND_HOLDERS.items()
+        }
+        write_verbs = {"create", "update", "patch", "delete", "deletecollection"}
+        checked = 0
+        exclusive = 0
+        exempted = 0
+        for name, owner in sorted(PER_CONTROLLER_CLUSTER_ROLES.items()):
+            for rule in roles[name].get("rules") or []:
+                for verb, group, resource, _ in model._rule_atoms(rule):
+                    checked += 1
+                    with self.subTest(role=name, verb=verb, resource=resource):
+                        self.assertTrue(
+                            self.authorizer.allows(
+                                Subject("flux-system", owner), verb, group, resource, None
+                            ),
+                            "{} does not reach its own {} {}".format(owner, verb, resource),
+                        )
+                        if verb not in write_verbs and "/" not in resource:
+                            continue
+                        for other in INSTALLED_CONTROLLERS:
+                            if other == owner:
+                                continue
+                            if other in handoff.get(resource, ()):
+                                exempted += 1
+                                continue
+                            exclusive += 1
+                            self.assertFalse(
+                                self.authorizer.allows(
+                                    Subject("flux-system", other), verb, group, resource, None
+                                ),
+                                "{} holds {}'s {} on {}".format(other, owner, verb, resource),
+                            )
+        # Every rule of all three roles, expanded: an empty or truncated walk
+        # would make the loop above vacuous. The exclusive and exempted counts
+        # are pinned separately so neither the write half can shrink to nothing
+        # nor the handoff become the place exclusivity goes to die.
+        self.assertEqual(checked, 91)
+        self.assertEqual(exclusive, 98)
+        self.assertEqual(exempted, 6)
+
     def test_no_controller_can_write_secrets_anywhere(self):
         for subject in (KUSTOMIZE_CONTROLLER, HELM_CONTROLLER, SOURCE_CONTROLLER):
             for namespace in (
@@ -1063,18 +1432,14 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 )
             )
         }
+        # `controller_root_rbac` IS the model's account of this root — generated
+        # export, plus the narrowing patches, plus the authored per-controller
+        # resource (issue #98). Comparing against it rather than re-composing
+        # inline means a resource added to the root but not to the model, or the
+        # reverse, fails here instead of silently splitting the two.
         composed = {
             self._identity(document): document
-            for document in model.apply_patches(
-                model.load_rbac_documents(
-                    ROOT / "kubernetes/flux-system/controllers/gotk-components.yaml"
-                ),
-                [
-                    document
-                    for relative in model.FLUX_RBAC_PATCH_FILES
-                    for document in model.load_documents(ROOT / relative)
-                ],
-            )
+            for document in model.controller_root_rbac(ROOT)
         }
         self.assertEqual(sorted(composed), sorted(actual))
         for key in sorted(actual):
@@ -1082,6 +1447,11 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 self.assertEqual(composed[key].get("rules"), actual[key].get("rules"))
                 self.assertEqual(composed[key].get("subjects"), actual[key].get("subjects"))
                 self.assertEqual(composed[key].get("roleRef"), actual[key].get("roleRef"))
+                self.assertEqual(
+                    (composed[key].get("metadata") or {}).get("labels", {}),
+                    (actual[key].get("metadata") or {}).get("labels", {}),
+                    "ownership/provenance labels are part of the rendered RBAC model",
+                )
 
     @staticmethod
     def _identity(document):
@@ -1129,6 +1499,11 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 self.assertEqual(
                     normalize_rules(cluster_roles[name].get("rules")), normalize_rules(expected)
                 )
+                self.assertEqual(
+                    (cluster_roles[name].get("metadata") or {}).get("labels", {}),
+                    contract["MATERIALIZED_CLUSTER_ROLE_LABELS"][name],
+                    "live ClusterRole label expectations must mirror committed semantics",
+                )
 
         bindings = {
             (document["metadata"].get("namespace"), document["metadata"]["name"]): document
@@ -1164,6 +1539,11 @@ class FluxRbacCompositionTests(unittest.TestCase):
                     normalized_subjects(cluster_bindings[name]["subjects"]),
                     normalized_subjects(expected[1]),
                 )
+                self.assertEqual(
+                    (cluster_bindings[name].get("metadata") or {}).get("labels", {}),
+                    contract["MATERIALIZED_CLUSTER_BINDING_LABELS"][name],
+                    "live ClusterRoleBinding label expectations must mirror committed semantics",
+                )
 
     def test_every_role_a_verified_binding_names_is_itself_verified(self):
         """The mirror's own closure, which is what `--verify` can rely on live.
@@ -1194,7 +1574,9 @@ class FluxRbacCompositionTests(unittest.TestCase):
                 self.assertEqual(role_ref["kind"], "ClusterRole")
                 self.assertIn(role_ref["name"], cluster_roles)
                 checked += 1
-        self.assertEqual(checked, 19)
+        # 18 RoleBindings plus FOUR ClusterRoleBindings: the shared
+        # metadata-only one and the three per-controller ones (issue #98).
+        self.assertEqual(checked, 22)
 
     def test_the_live_verifier_sees_every_subject_form_that_reaches_a_controller(self):
         """The live half must not be weaker than the model it mirrors.
@@ -1408,10 +1790,36 @@ class FluxRbacCompositionTests(unittest.TestCase):
         inventory = re.search(r"(?ms)^  expected_inventory='(?P<body>.*?)'$", text)
         if inventory is None:
             self.fail("bootstrap.sh no longer declares a reviewed manifest inventory")
-        listed = {line.split(" ", 1)[1] for line in inventory.group("body").splitlines()}
-        for relative in model.FLUX_RBAC_PATCH_FILES:
-            with self.subTest(patch=relative):
+        listed_lines = tuple(inventory.group("body").splitlines())
+        listed = {line.split(" ", 1)[1] for line in listed_lines}
+        for relative in (
+            model.FLUX_RBAC_PATCH_FILES + model.FLUX_CONTROLLER_ROOT_RBAC_FILES
+        ):
+            with self.subTest(manifest=relative):
                 self.assertIn(relative, listed)
+
+        tracked = subprocess.run(
+            (
+                "git",
+                "ls-files",
+                "--stage",
+                "--",
+                "kubernetes/flux-system/access.yaml",
+                "kubernetes/flux-system/controllers",
+                "kubernetes/flux-system/gotk-sync.yaml",
+                "kubernetes/platform/prerequisites/namespaces.yaml",
+            ),
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        tracked_lines = tuple(
+            "{} {}".format(line.split(" ", 1)[0], line.split("\t", 1)[1])
+            for line in tracked.stdout.splitlines()
+        )
+        self.assertEqual(listed_lines, tracked_lines)
 
     @staticmethod
     def _bootstrap_contract():
@@ -1435,6 +1843,19 @@ class FluxRbacCompositionTests(unittest.TestCase):
         try:
             contract = {}
             exec(compile(definitions, "<flux-live-contract>", "exec"), contract)
+            # Materialize label expectations while the same pinned version
+            # environment the live verifier receives is still present. The
+            # returned functions intentionally read that environment lazily;
+            # calling them after restoring the process environment would test a
+            # KeyError rather than the committed/live semantic parity.
+            contract["MATERIALIZED_CLUSTER_ROLE_LABELS"] = {
+                name: contract["expected_cluster_role_labels"](name)
+                for name in contract["cluster_role_rules"]()
+            }
+            contract["MATERIALIZED_CLUSTER_BINDING_LABELS"] = {
+                name: contract["expected_cluster_binding_labels"](name)
+                for name in contract["expected_cluster_bindings"]()
+            }
         finally:
             os.environ.clear()
             os.environ.update(saved)
@@ -1867,6 +2288,10 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         "kubernetes/flux-system/controllers/patches/cluster-reconciler.yaml",
         "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
         "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
+        "kubernetes/flux-system/controllers/patches/source-controller.yaml",
+        "kubernetes/flux-system/controllers/patches/kustomize-controller.yaml",
+        "kubernetes/flux-system/controllers/patches/helm-controller.yaml",
+        "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
     )
 
     @classmethod
@@ -1897,23 +2322,157 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
         return self.validator.flux_rbac_contract_errors(root)
 
+    def mutate_occurrence(self, relative, old, new, occurrence):
+        root = self.build_tree()
+        path = root / relative
+        text = path.read_text(encoding="utf-8")
+        starts = [match.start() for match in re.finditer(re.escape(old), text)]
+        self.assertGreater(len(starts), occurrence)
+        start = starts[occurrence]
+        path.write_text(
+            text[:start] + new + text[start + len(old):], encoding="utf-8"
+        )
+        return self.validator.flux_rbac_contract_errors(root)
+
     def test_a_wildcard_is_refused_in_both_yaml_styles(self):
-        for replacement in ("    resources: ['*']\n", "    resources:\n      - '*'\n"):
-            with self.subTest(style=replacement.strip()):
-                errors = self.mutate(
-                    "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
-                    "    resources: [kustomizations]\n",
-                    replacement,
-                )
-                self.assertTrue(any("wildcard RBAC rule" in error for error in errors), errors)
+        # Applied to all three authored RBAC files: namespaced access, the
+        # shared-role patch, and the install root where the per-controller roles
+        # now live (issue #98). A wildcard smuggled into any one must fail.
+        for relative, anchor in (
+            (
+                "kubernetes/flux-system/access.yaml",
+                "    resources: [leases]\n",
+            ),
+            (
+                "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+                "    resources: [namespaces, serviceaccounts, configmaps]\n",
+            ),
+            (
+                "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+                "    resources: [kustomizations]\n",
+            ),
+        ):
+            for replacement in ("    resources: ['*']\n", "    resources:\n      - '*'\n"):
+                with self.subTest(file=Path(relative).name, style=replacement.strip()):
+                    errors = self.mutate(relative, anchor, replacement)
+                    self.assertTrue(
+                        any("wildcard RBAC rule" in error for error in errors), errors
+                    )
 
     def test_a_writable_flux_system_secret_grant_is_refused(self):
         errors = self.mutate(
             "kubernetes/flux-system/access.yaml",
-            "    resources: [secrets]\n    verbs: [get, list, watch]",
-            "    resources: [secrets]\n    verbs: [get, list, watch, update]",
+            "    resourceNames: [sops-age]\n    verbs: [get]",
+            "    resourceNames: [sops-age]\n    verbs: [get, update]",
         )
         self.assertTrue(any("must be read-only" in error for error in errors), errors)
+
+    def test_sops_secret_grant_is_exact_name_and_get_only(self):
+        relative = "kubernetes/flux-system/access.yaml"
+        rule = (
+            '  - apiGroups: [""]\n'
+            "    resources: [secrets]\n"
+            "    resourceNames: [sops-age]\n"
+            "    verbs: [get]\n"
+        )
+        for label, replacement in (
+            ("missing", ""),
+            ("all names", rule.replace("    resourceNames: [sops-age]\n", "")),
+            ("wrong name", rule.replace("sops-age", "other")),
+            ("list", rule.replace("verbs: [get]", "verbs: [get, list]")),
+            ("extra field", rule.replace("    verbs: [get]\n", "    verbs: [get]\n    extra: true\n")),
+            ("duplicate", rule + rule),
+        ):
+            with self.subTest(mutation=label):
+                errors = self.mutate(relative, rule, replacement)
+                self.assertTrue(
+                    any("Secret get rule restricted to resourceNames sops-age" in error
+                        for error in errors),
+                    errors,
+                )
+
+    def test_per_controller_roles_cannot_gain_cluster_secret_access(self):
+        relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+        rule = (
+            '  - apiGroups: [""]\n'
+            "    resources: [secrets]\n"
+            "    verbs: [get, list, watch]\n"
+        )
+        for controller in ("source", "kustomize", "helm"):
+            anchor = (
+                "  name: crd-controller-{}-flux-system\nrules:\n".format(controller)
+            )
+            with self.subTest(controller=controller):
+                errors = self.mutate(relative, anchor, anchor + rule)
+                self.assertTrue(
+                    any("must not grant cluster-wide Secret access"
+                        in error for error in errors),
+                    errors,
+                )
+
+    def test_shared_controller_role_cannot_regain_secret_access(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+            "    resources: [namespaces, serviceaccounts, configmaps]\n",
+            "    resources: [namespaces, serviceaccounts, configmaps, secrets]\n",
+        )
+        self.assertTrue(
+            any("shared crd-controller ClusterRole must not grant Secret access" in error
+                for error in errors),
+            errors,
+        )
+
+    def test_tenant_helm_readback_rules_are_required_and_cannot_write(self):
+        relative = "kubernetes/flux-system/access.yaml"
+        tenants = ("cloudflare-public", "naranjo-online", "lidersea-com")
+        for tenant_index, namespace in enumerate(tenants):
+            for group, resource in (("", "pods"), ("apps", "replicasets")):
+                group_text = '""' if group == "" else group
+                rule = (
+                    "  - apiGroups: [{}]\n".format(group_text)
+                    + "    resources: [{}]\n".format(resource)
+                    + "    verbs: [get, list, watch]\n"
+                )
+                with self.subTest(
+                    namespace=namespace, resource=resource, mutation="missing"
+                ):
+                    errors = self.mutate_occurrence(
+                        relative, rule, "", tenant_index
+                    )
+                    self.assertTrue(
+                        any("exact pods and replicasets" in error for error in errors),
+                        errors,
+                    )
+                with self.subTest(
+                    namespace=namespace, resource=resource, mutation="write"
+                ):
+                    errors = self.mutate_occurrence(
+                        relative,
+                        rule,
+                        rule.replace("get, list, watch", "get, list, watch, delete"),
+                        tenant_index,
+                    )
+                    self.assertTrue(
+                        any("exact pods and replicasets" in error for error in errors),
+                        errors,
+                    )
+                with self.subTest(
+                    namespace=namespace, resource=resource, mutation="resourceNames"
+                ):
+                    errors = self.mutate_occurrence(
+                        relative,
+                        rule,
+                        rule.replace(
+                            "    verbs: [get, list, watch]\n",
+                            "    verbs: [get, list, watch]\n"
+                            "    resourceNames: [release]\n",
+                        ),
+                        tenant_index,
+                    )
+                    self.assertTrue(
+                        any("exact pods and replicasets" in error for error in errors),
+                        errors,
+                    )
 
     def test_an_unrestricted_impersonate_grant_is_refused(self):
         errors = self.mutate(
@@ -1926,14 +2485,23 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         )
 
     def test_token_creation_is_refused(self):
-        errors = self.mutate(
-            "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
-            "    resources: [kustomizations]\n",
-            "    resources:\n      - serviceaccounts/token\n",
-        )
-        self.assertTrue(
-            any("serviceaccounts/token" in error for error in errors), errors
-        )
+        for relative, anchor in (
+            (
+                "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+                "    resources: [namespaces, serviceaccounts, configmaps]\n",
+            ),
+            (
+                "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+                "    resources: [kustomizations]\n",
+            ),
+        ):
+            with self.subTest(file=Path(relative).name):
+                errors = self.mutate(
+                    relative, anchor, "    resources:\n      - serviceaccounts/token\n"
+                )
+                self.assertTrue(
+                    any("serviceaccounts/token" in error for error in errors), errors
+                )
 
     def test_a_re_broadened_subject_list_is_refused(self):
         errors = self.mutate(
@@ -1944,6 +2512,153 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
         )
         self.assertTrue(
             any("exactly the installed controllers" in error for error in errors), errors
+        )
+
+    def test_reconciler_config_watcher_gates_are_exact_and_unique(self):
+        operation = (
+            "- op: add\n"
+            "  path: /spec/template/spec/containers/0/args/-\n"
+            "  value: --feature-gates=DisableConfigWatchers=true\n"
+        )
+        for controller in ("kustomize", "helm"):
+            relative = (
+                "kubernetes/flux-system/controllers/patches/"
+                + controller
+                + "-controller.yaml"
+            )
+            for label, replacement in (
+                ("missing", ""),
+                ("false", operation.replace("=true", "=false")),
+                ("combined", operation.replace("=true", "=true,ExternalArtifact=true")),
+                (
+                    "selector substitute",
+                    operation.replace(
+                        "--feature-gates=DisableConfigWatchers=true",
+                        "--watch-configs-label-selector=flux-watch=enabled",
+                    ),
+                ),
+                ("duplicate", operation + operation),
+            ):
+                with self.subTest(controller=controller, mutation=label):
+                    errors = self.mutate(relative, operation, replacement)
+                    self.assertTrue(
+                        any("feature-gate args must be exactly" in error for error in errors),
+                        errors,
+                    )
+
+    def test_secondary_source_rules_are_exact_read_only_and_closed(self):
+        relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+        cases = (
+            (
+                "kustomize",
+                "  - apiGroups: [source.toolkit.fluxcd.io]\n"
+                "    resources: [buckets, gitrepositories, ocirepositories]\n"
+                "    verbs: [get, list, watch]\n",
+            ),
+            (
+                "helm",
+                "  - apiGroups: [source.toolkit.fluxcd.io]\n"
+                "    resources: [ocirepositories]\n"
+                "    verbs: [get, list, watch]\n",
+            ),
+        )
+        for controller, rule in cases:
+            for label, replacement in (
+                ("missing", ""),
+                ("write", rule.replace("get, list, watch", "get, list, watch, patch")),
+                (
+                    "extra kind",
+                    rule.replace(
+                        "ocirepositories]",
+                        "ocirepositories, externalartifacts]",
+                    ),
+                ),
+                (
+                    "extra field",
+                    rule.replace(
+                        "    verbs:",
+                        "    resourceNames: [one]\n    verbs:",
+                    ),
+                ),
+                ("duplicate", rule + rule),
+            ):
+                with self.subTest(controller=controller, mutation=label):
+                    errors = self.mutate(relative, rule, replacement)
+                    self.assertTrue(
+                        any(
+                            "secondary source" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+
+    def test_a_flux_api_group_in_the_shared_role_is_refused(self):
+        """The split's structural guard, shown to fail on the thing it bans.
+
+        Re-adding a Flux group to the shared role is the whole regression: the
+        role is bound to all three controllers, so one rule there hands every
+        controller authority over the others' objects again.
+        """
+
+        for group in (
+            "source.toolkit.fluxcd.io",
+            "kustomize.toolkit.fluxcd.io",
+            "helm.toolkit.fluxcd.io",
+        ):
+            with self.subTest(group=group):
+                errors = self.mutate(
+                    "kubernetes/flux-system/controllers/patches/crd-controller-role.yaml",
+                    '  - apiGroups: [""]\n    resources: [events]\n',
+                    "  - apiGroups: [{}]\n    resources: [events]\n".format(group),
+                )
+                self.assertTrue(
+                    any("must not name " + group in error for error in errors), errors
+                )
+
+    def test_a_second_subject_on_a_per_controller_binding_is_refused(self):
+        """A split role bound twice is the shared role under a new name."""
+
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+            "  name: crd-controller-source-flux-system\nsubjects:\n"
+            "  - kind: ServiceAccount\n    name: source-controller\n",
+            "  name: crd-controller-source-flux-system\nsubjects:\n"
+            "  - kind: ServiceAccount\n    name: helm-controller\n    namespace: flux-system\n"
+            "  - kind: ServiceAccount\n    name: source-controller\n",
+        )
+        self.assertTrue(
+            any("must name only source-controller" in error for error in errors), errors
+        )
+
+    def test_a_missing_per_controller_role_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+            "  name: crd-controller-helm-flux-system\nrules:\n",
+            "  name: crd-controller-renamed\nrules:\n",
+        )
+        self.assertTrue(
+            any(
+                "per-controller ClusterRole missing from the install root: "
+                "crd-controller-helm-flux-system" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_a_repointed_per_controller_binding_is_refused(self):
+        errors = self.mutate(
+            "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+            "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+            "  name: crd-controller-kustomize-flux-system\n",
+            "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+            "  name: crd-controller-source-flux-system\n",
+        )
+        self.assertTrue(
+            any(
+                "crd-controller-kustomize-flux-system must bind ClusterRole" in error
+                for error in errors
+            ),
+            errors,
         )
 
     def test_repointing_the_deletion_patch_is_refused(self):
@@ -1988,16 +2703,57 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
             "rules:\n"
             '  - apiGroups: [""]\n'
             "    resources: [secrets]\n"
-            "    verbs: [get, list, watch]"
+            "    resourceNames: [sops-age]\n"
+            "    verbs: [get]"
         )
         self.assertIn(old, text)
         reindented = (
             "rules:\n"
             '      - apiGroups: [""]\n'
             "        resources: [secrets]\n"
-            "        verbs: [get, list, watch, delete]"
+            "        resourceNames: [sops-age]\n"
+            "        verbs: [get, delete]"
         )
         path.write_text(text.replace(old, reindented, 1), encoding="utf-8")
+        errors = self.validator.flux_rbac_contract_errors(root)
+        self.assertTrue(any("must be read-only" in error for error in errors), errors)
+
+    def test_a_reordered_rule_still_reaches_the_secret_check(self):
+        """The same vacuity class as re-indentation, one axis over.
+
+        `_rbac_rule_blocks` returned each rule with its `- ` item marker still
+        in front of the first field, and `_rbac_rule_list` reads a field only
+        where the marker is not. So the FIRST field of every rule was invisible
+        to every check built on that helper, and RBAC does not care what order
+        a rule's fields are written in: moving `resources:` to the front is
+        valid YAML that grants exactly the same thing and used to evade the
+        flux-system Secret-write check completely.
+
+        Found while adding the shared-role apiGroups check for issue #98, whose
+        field IS first on every rule — it would have been decorative for the
+        same reason. The helper now substitutes the marker with the two spaces
+        it occupied, and this is the proof.
+        """
+
+        root = self.build_tree()
+        path = root / "kubernetes/flux-system/access.yaml"
+        text = path.read_text(encoding="utf-8")
+        old = (
+            "rules:\n"
+            '  - apiGroups: [""]\n'
+            "    resources: [secrets]\n"
+            "    resourceNames: [sops-age]\n"
+            "    verbs: [get]"
+        )
+        self.assertIn(old, text)
+        reordered = (
+            "rules:\n"
+            "  - resources: [secrets]\n"
+            '    apiGroups: [""]\n'
+            "    resourceNames: [sops-age]\n"
+            "    verbs: [get, update]"
+        )
+        path.write_text(text.replace(old, reordered, 1), encoding="utf-8")
         errors = self.validator.flux_rbac_contract_errors(root)
         self.assertTrue(any("must be read-only" in error for error in errors), errors)
 
@@ -2274,6 +3030,158 @@ class FluxRbacAuthorizerSemanticsTests(unittest.TestCase):
                 Subject("flux-system", "stranger"), "get", "", "secrets", "one", "named"
             )
         )
+
+
+class FluxRbacControllerRootSufficiencyTests(unittest.TestCase):
+    """The INSTALL ROOT alone must authorize every primary and secondary informer.
+
+    The rest of this file proves the reviewed desired state is sufficient using
+    the full composition — install root PLUS `access.yaml`. That composition is
+    the steady state, and it hid a real defect: `access.yaml` is reconciled by
+    Flux from `./kubernetes/reconciliation`, so it does not exist yet at the
+    moment `scripts/install-flux-controllers.sh` applies the controllers root.
+
+    While the six per-controller objects lived in `access.yaml`, a fresh
+    `--apply` therefore created three controllers whose shared ClusterRole had
+    just had every Flux API group stripped out of it and whose replacements were
+    nowhere in the transaction. All twenty-four primary/secondary `list`/`watch`
+    probes denied; `--watch-all-namespaces=true` makes each of those a
+    cluster-wide informer the controller cannot start, so the install could
+    never reach readiness. Nothing in the sufficiency proof noticed, because the
+    proof was reading a composition the installer does not apply.
+
+    So this battery builds its authorizer from `controller_root_rbac` — the
+    install transaction and nothing else — and root-composition drift of that
+    class goes red here, by name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.authorizer = Authorizer.from_documents(model.controller_root_rbac(ROOT))
+        cls.full = Authorizer.from_documents(model.effective_flux_rbac(ROOT))
+
+    def informer_probes(self):
+        """Every primary and secondary cluster-wide list/watch, derived once."""
+
+        for controller in sorted(model.OWNED_CONTROLLER_KINDS):
+            kinds = tuple(dict.fromkeys(
+                model.OWNED_CONTROLLER_KINDS.get(controller, ())
+                + model.CONTROLLER_SECONDARY_WATCH_KINDS.get(controller, ())
+            ))
+            for kind in kinds:
+                group, resource = model.KIND_RESOURCES[kind][:2]
+                for verb in ("list", "watch"):
+                    yield controller, kind, group, resource, verb
+
+    def test_every_primary_and_secondary_informer_is_authorized_by_the_install_alone(self):
+        probes = list(self.informer_probes())
+        # Seven primary plus five secondary kind/controller pairs, two verbs each.
+        self.assertEqual(len(probes), 24, "the informer set changed shape")
+        denied = [
+            "{} cannot {} {}".format(controller, verb, kind)
+            for controller, kind, group, resource, verb in probes
+            if not self.authorizer.allows(
+                Subject("flux-system", controller), verb, group, resource, namespace=None
+            )
+        ]
+        self.assertEqual(denied, [], "the install root does not authorize its own controllers")
+
+    def test_helm_cluster_secret_access_is_denied_by_the_install_alone(self):
+        for verb in (
+            "get", "list", "watch", "create", "update", "patch", "delete",
+            "deletecollection",
+        ):
+            with self.subTest(verb=verb):
+                self.assertFalse(
+                    self.authorizer.allows(
+                        HELM_CONTROLLER, verb, "", "secrets", namespace=None
+                    )
+                )
+
+    def test_the_informer_authority_is_cluster_wide_not_namespaced(self):
+        """A Role in flux-system cannot satisfy a `--watch-all-namespaces` informer.
+
+        Asserting the probes pass with `namespace=None` above is only meaningful
+        if that genuinely means cluster scope, so this pins the flag that makes
+        it so: were it dropped, namespaced authority would suffice and the roles
+        could be narrowed — a change that must be made deliberately, not drift
+        into place.
+        """
+
+        arguments = model.controller_arguments(ROOT)
+        for controller in model.OWNED_CONTROLLER_KINDS:
+            with self.subTest(controller=controller):
+                self.assertIn(
+                    model.WATCH_ALL_NAMESPACES_FLAG,
+                    arguments[Subject("flux-system", controller)],
+                )
+
+    def test_reconciler_config_watchers_are_disabled_exactly(self):
+        """Avoid cluster-wide Secret list/watch without enabling other gates."""
+
+        arguments = model.controller_arguments(ROOT)
+        for controller in (KUSTOMIZE_CONTROLLER, HELM_CONTROLLER):
+            with self.subTest(controller=str(controller)):
+                self.assertEqual(
+                    [
+                        argument for argument in arguments[controller]
+                        if argument.startswith("--feature-gates=")
+                    ],
+                    [model.DISABLE_CONFIG_WATCHERS_FLAG],
+                )
+        self.assertNotIn(model.DISABLE_CONFIG_WATCHERS_FLAG, arguments[SOURCE_CONTROLLER])
+
+    def test_the_six_objects_are_rendered_by_the_install_root(self):
+        """Placement, not just presence: they must be IN the applied transaction.
+
+        `controller_root_rbac` reads the file the install root names. If the six
+        objects were moved back to `access.yaml`, or the resource entry were
+        dropped from `controllers/kustomization.yaml`, the authority would still
+        exist in the repository and the full-composition proofs would still
+        pass — and the install would still be broken.
+        """
+
+        kustomization = (
+            ROOT / "kubernetes/flux-system/controllers/kustomization.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("- per-controller-rbac.yaml", kustomization)
+        names = {
+            (document.get("kind"), (document.get("metadata") or {}).get("name"))
+            for document in model.load_documents(
+                ROOT / "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
+            )
+        }
+        for role, owner in sorted(PER_CONTROLLER_CLUSTER_ROLES.items()):
+            with self.subTest(role=role):
+                self.assertIn(("ClusterRole", role), names)
+                self.assertIn(("ClusterRoleBinding", role), names)
+
+    def test_access_yaml_no_longer_carries_cluster_scoped_controller_authority(self):
+        """The move was a MOVE. A copy would drift, and drift silently."""
+
+        access = model.load_documents(ROOT / "kubernetes/flux-system/access.yaml")
+        offenders = [
+            (document.get("kind"), (document.get("metadata") or {}).get("name"))
+            for document in access
+            if document.get("kind") in ("ClusterRole", "ClusterRoleBinding")
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_the_install_root_grants_no_more_than_the_full_model(self):
+        """Moving authority earlier must not have widened it.
+
+        Everything the install root allows, the reviewed full composition must
+        allow too. If the two disagree the narrowness proof — which reads the
+        full composition — is no longer covering what the installer creates.
+        """
+
+        for controller, kind, group, resource, verb in self.informer_probes():
+            subject = Subject("flux-system", controller)
+            with self.subTest(controller=controller, kind=kind, verb=verb):
+                if self.authorizer.allows(subject, verb, group, resource, namespace=None):
+                    self.assertTrue(
+                        self.full.allows(subject, verb, group, resource, namespace=None)
+                    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+### Security
+
+- Split Flux custom-resource authority into three install-root ClusterRoles, each bound to exactly one controller ServiceAccount, while removing every Flux API-group grant from the shared controller role, deriving exact read-only secondary informers, disabling both reconcilers' broad config watchers, and preserving exact cross-controller denial, reviewed rollback design, and bounded live-oracle evidence.
+- Remove controller-identity cluster-wide Secret access while retaining impersonated tenant Helm storage and tenant-local Pod/ReplicaSet readiness read-back; external Helm inputs, namespace redirects, Secret writes, workload writes, and cross-tenant reads remain denied.
+- Add a fail-closed isolated-kind acceptance harness for real pinned Flux controllers, final-RBAC zero-restart Kustomize and Helm cold starts, exact Secret denials and authorization transitions, tenant readiness-read allows, successful install/upgrade, synthetic workload-failure rollback, and deterministic recovery of harness-owned host resources.

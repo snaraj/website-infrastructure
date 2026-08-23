@@ -30,10 +30,11 @@ no admission plugin executes here. Three things are modelled rather than
 observed and are named as such at their definitions: the verb set a Flux apply
 issues (``APPLY_VERBS``), the kinds each Helm chart renders (``SITE_CHART_KINDS``
 for charts that live in the site repositories), and the kind-to-resource mapping
-(``KIND_RESOURCES``). The live half of the proof is
-``bootstrap/flux/bootstrap.sh --verify`` plus the ``kubectl auth can-i`` sweep in
-``docs/runbooks/flux-rbac-narrowing.md``; this module is what makes that sweep
-short enough to trust and repeatable enough to run.
+(``KIND_RESOURCES``). The live half is
+``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound denial oracle
+and disposable real-API-server matrix in
+``docs/runbooks/flux-rbac-narrowing.md``; this module is what makes that matrix
+bounded enough to review and repeat.
 
 This module is support code: unittest discovery only collects ``test_*.py``, and
 the coverage gate measures ``scripts/`` alone, so nothing here enters any
@@ -308,6 +309,14 @@ FLUX_RBAC_PATCH_FILES = (
     "kubernetes/flux-system/controllers/patches/crd-controller-binding.yaml",
 )
 
+# Authored RBAC that is a RESOURCE of the install root rather than a patch of
+# the generated export: the six per-controller objects (issue #98). They live in
+# the install root because the patch above removes the authority they replace in
+# the same transaction — see `controller_root_rbac`.
+FLUX_CONTROLLER_ROOT_RBAC_FILES = (
+    "kubernetes/flux-system/controllers/per-controller-rbac.yaml",
+)
+
 
 def _identity(document):
     metadata = document.get("metadata") or {}
@@ -341,8 +350,23 @@ def apply_patches(base, patches):
     return list(composed.values())
 
 
-def effective_flux_rbac(root=REPO_ROOT):
-    """The RBAC the cluster would hold: generated export + patches + access.yaml."""
+def controller_root_rbac(root=REPO_ROOT):
+    """The RBAC the INSTALLER alone creates: the `controllers` root, rendered.
+
+    Modelled separately from `effective_flux_rbac` because the two are applied
+    by different actors at different times. `scripts/install-flux-controllers.sh`
+    applies THIS root and nothing else; `access.yaml` arrives later, reconciled
+    by Flux from `./kubernetes/reconciliation`, and cannot help a controller that
+    has to start an informer before Flux is running at all.
+
+    That distinction is not academic. The narrowing patch strips every Flux API
+    group from the shared `crd-controller-flux-system` ClusterRole, so while the
+    six per-controller replacements sat in access.yaml this composition denied
+    all twenty-four primary/secondary list/watch probes and a fresh install could
+    never reach readiness. The replacements are part of this root now, and
+    `FluxRbacControllerRootSufficiencyTests` builds an authorizer from exactly
+    this function so that regression is caught by name.
+    """
 
     root = Path(root)
     base = load_rbac_documents(root / "kubernetes/flux-system/controllers/gotk-components.yaml")
@@ -350,7 +374,16 @@ def effective_flux_rbac(root=REPO_ROOT):
     for relative in FLUX_RBAC_PATCH_FILES:
         patches.extend(load_documents(root / relative))
     documents = apply_patches(base, patches)
-    documents.extend(load_documents(root / "kubernetes/flux-system/access.yaml"))
+    for relative in FLUX_CONTROLLER_ROOT_RBAC_FILES:
+        documents.extend(load_documents(root / relative))
+    return documents
+
+
+def effective_flux_rbac(root=REPO_ROOT):
+    """The RBAC the cluster would hold: the install root, then access.yaml."""
+
+    documents = controller_root_rbac(root)
+    documents.extend(load_documents(Path(root) / "kubernetes/flux-system/access.yaml"))
     return documents
 
 
@@ -649,7 +682,7 @@ CONTROLLER_BASELINE_GRANTS = (
     ("", "serviceaccounts", ("get", "list", "watch"),
      "a controller resolves the account it is about to impersonate"),
     ("", "configmaps", ("get", "list", "watch"),
-     "postBuild.substituteFrom and Helm valuesFrom read ConfigMaps"),
+     "the reviewed common controller baseline retains ConfigMap reads"),
 )
 
 # MODEL, declared rather than derived from the desired state, and required of
@@ -665,8 +698,8 @@ CONTROLLER_BASELINE_GRANTS = (
 # costs a red build for an unnecessary permission, while NOT requiring one it
 # does exercise costs a crashloop on a cluster nobody is watching. The peer
 # review of this change asked for the strict side, and this is it. The live
-# confirmation is the `kubectl auth can-i` sweep in the runbook, which carries a
-# row for each.
+# confirmation is the runbook's fail-closed oracle matrix, which carries a row
+# for each and refuses unresolved discovery or authorization.
 CONTROLLER_RUNTIME_GRANTS = (
     ("", "configmaps", ("create", "update", "patch", "delete"),
      "controller-runtime owns ConfigMaps in its own namespace; the generated "
@@ -690,23 +723,39 @@ CONTROLLER_RUNTIME_GRANTS = (
 LEADER_ELECTION_FLAG = "--enable-leader-election"
 LEADER_ELECTION_VERBS = ("get", "create", "update")
 
-# MODEL. The custom resources each controller REGISTERS a reconciler for at the
-# pinned version — not the objects that happen to exist in today's desired
-# state. A controller starts one informer per registered kind at startup and
-# exits if it cannot list/watch it, so "this repository declares no Bucket" is
-# not evidence that the Bucket grant is unused; it is only evidence that no
-# Bucket is reconciled. Deriving from this table instead of from the object
-# inventory is what makes deleting a source grant fail here.
-REGISTERED_CONTROLLERS = {
+# MODEL. The primary custom resources each controller reconciles at the pinned
+# version — not the objects that happen to exist in today's desired state.
+# Primary ownership carries spec/status/finalizer authority. Keep this separate
+# from secondary watches so a read-only informer can never acquire owner writes
+# merely by being added to the controller's startup set.
+OWNED_CONTROLLER_KINDS = {
     "source-controller": ("Bucket", "GitRepository", "HelmChart", "HelmRepository", "OCIRepository"),
     "kustomize-controller": ("Kustomization",),
     "helm-controller": ("HelmRelease",),
+}
+
+# MODEL. Unconditional secondary informers registered by the pinned managers.
+# They are startup requirements even when today's desired state has no object of
+# that kind, but they confer read-only get/list/watch and no ownership. Optional
+# ExternalArtifact watches are feature-gated off and therefore absent.
+CONTROLLER_SECONDARY_WATCH_KINDS = {
+    "kustomize-controller": ("Bucket", "GitRepository", "OCIRepository"),
+    "helm-controller": ("HelmChart", "OCIRepository"),
 }
 
 # With this flag every registered informer is a CLUSTER-wide list/watch, which
 # no Role can satisfy — the reason the own-resource grants stay in a ClusterRole
 # after everything else moved to namespaced Roles.
 WATCH_ALL_NAMESPACES_FLAG = "--watch-all-namespaces=true"
+
+# Kustomize and Helm default ConfigMap/Secret metadata watches are cluster-wide
+# under WATCH_ALL_NAMESPACES_FLAG. RBAC has no metadata-only Secret permission,
+# so the secure configuration disables those event watches instead of granting
+# every Secret. Kustomize retains exact-name reads; the closed Helm contract
+# rejects external values and kubeconfig inputs.
+DISABLE_CONFIG_WATCHERS_FLAG = (
+    "--feature-gates=DisableConfigWatchers=true"
+)
 
 # What a controller does to a custom resource it owns: reconcile it, own its
 # status, and manage its finalizer. Finalizer access is only consulted when the
@@ -730,8 +779,7 @@ LIVENESS_URL = "/livez/ping"
 # authority belongs to the reconciler account, not to the controller.
 WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 READ_BACK_RESOURCES = (("apps", "replicasets"), ("", "pods"))
-READ_BACK_VERBS = ("get", "list")
-
+READ_BACK_VERBS = ("get", "list", "watch")
 
 class FluxResources(NamedTuple):
     """The reviewed desired state's Flux custom resources, by kind.
@@ -929,13 +977,17 @@ def controller_arguments(root=REPO_ROOT):
     """
 
     root = Path(root)
+    appended = {}
     for relative in CONTROLLER_DEPLOYMENT_PATCH_FILES:
         text = (root / relative).read_text(encoding="utf-8")
+        controller = Path(relative).stem
+        seen_args_operations = 0
         for operation, target in re.findall(
             r"(?m)^-\s*op:\s*(\S+)\s*$\n^\s*path:\s*(\S+)\s*$", text
         ):
             if "/args" not in target:
                 continue
+            seen_args_operations += 1
             if operation != "add" or not target.endswith("/args/-"):
                 raise AssertionError(
                     "{} patches the controller argument list with `{} {}`. This "
@@ -945,6 +997,22 @@ def controller_arguments(root=REPO_ROOT):
                         relative, operation, target
                     )
                 )
+        values = re.findall(
+            r"(?m)^-\s*op:\s*add\s*$\n"
+            r"^\s*path:\s*/spec/template/spec/containers/0/args/-\s*$\n"
+            r"^\s*value:\s*(--\S+)\s*$",
+            text,
+        )
+        if len(values) != seen_args_operations:
+            raise AssertionError(
+                "{} contains an unreadable controller argument patch; every "
+                "args append must have one scalar `value: --...`".format(relative)
+            )
+        if len(values) != len(set(values)):
+            raise AssertionError(
+                "{} appends a duplicate controller argument".format(relative)
+            )
+        appended[(FLUX_SYSTEM, controller)] = values
     text = (root / CONTROLLER_EXPORT).read_text(encoding="utf-8")
     arguments = {}
     for chunk in re.split(r"(?m)^---\s*$", text):
@@ -963,6 +1031,19 @@ def controller_arguments(root=REPO_ROOT):
         raise AssertionError(
             "no controller Deployment found in " + CONTROLLER_EXPORT
         )
+    for identity, values in appended.items():
+        if identity not in arguments:
+            raise AssertionError(
+                "controller patch targets no generated Deployment: {}".format(identity)
+            )
+        duplicate = sorted(set(arguments[identity]) & set(values))
+        if duplicate:
+            raise AssertionError(
+                "controller patch duplicates generated argument(s) for {}: {}".format(
+                    identity, ", ".join(duplicate)
+                )
+            )
+        arguments[identity].extend(values)
     return arguments
 
 
@@ -1309,6 +1390,17 @@ def derive_requirements(root=REPO_ROOT):
         owner = ("HelmRelease", name)
         reason = "HelmRelease " + name
 
+        if (
+            spec.get("valuesFrom")
+            or spec.get("kubeConfig") is not None
+            or spec.get("storageNamespace") is not None
+            or spec.get("targetNamespace") is not None
+        ):
+            raise AssertionError(
+                "{} must not use external inputs or namespace redirects under "
+                "the closed controller RBAC contract".format(reason)
+            )
+
         controller.append(
             Requirement(
                 helm_controller, "impersonate", "", "serviceaccounts",
@@ -1332,14 +1424,10 @@ def derive_requirements(root=REPO_ROOT):
         if chart:
             # A chart resolved from a source object makes helm-controller create
             # the intermediate HelmChart under its OWN identity, in the source's
-            # namespace, after reading that source under the same identity.
+            # namespace. It copies sourceRef into that object; source-controller,
+            # not helm-controller, resolves the referenced GitRepository.
             chart_spec = chart["spec"]
             source = (chart_spec.get("sourceRef") or {}).get("namespace", namespace)
-            controller.extend(
-                source_reads(
-                    helm_controller, chart_spec["sourceRef"], namespace, owner, reason
-                )
-            )
             for verb in ("get", "list", "create", "update", "patch", "delete"):
                 controller.append(
                     Requirement(
@@ -1475,16 +1563,15 @@ def derive_requirements(root=REPO_ROOT):
             )
         )
 
-    # The custom resources each controller reconciles under its own identity,
-    # at CLUSTER scope because `--watch-all-namespaces=true` makes every
-    # registered informer a cluster-wide list/watch. Derived from the registered
-    # kinds rather than from the objects that exist, so a source grant cannot be
-    # deleted just because today's desired state happens to contain no object of
-    # that kind — the controller would still fail to start.
+    # The custom resources each controller reconciles or watches under its own
+    # identity, at CLUSTER scope because `--watch-all-namespaces=true` makes
+    # every informer cluster-wide. Primary reconcilers get ownership authority;
+    # secondary informers get read-only cache verbs. Both sets are derived from
+    # the pinned manager registrations rather than today's object inventory.
     watching = set(cluster_watching_controllers(root))
     for namespace, name in sorted(watching):
         subject = Subject(namespace, name)
-        for kind in REGISTERED_CONTROLLERS.get(name, ()):
+        for kind in OWNED_CONTROLLER_KINDS.get(name, ()):
             group, resource, _ = _kind_tuple(kind)
             for verb in OWNED_RESOURCE_VERBS:
                 controller.append(
@@ -1511,7 +1598,17 @@ def derive_requirements(root=REPO_ROOT):
                         "{} manages the finalizer of every {}".format(name, kind),
                     )
                 )
-
+        for kind in CONTROLLER_SECONDARY_WATCH_KINDS.get(name, ()):
+            group, resource, _ = _kind_tuple(kind)
+            for verb in SOURCE_READ_VERBS:
+                controller.append(
+                    Requirement(
+                        subject, verb, group, resource, None, None,
+                        ("Controller", "secondary-informer"),
+                        "{} registers a read-only secondary informer for every "
+                        "{}".format(name, kind),
+                    )
+                )
     # Leader election, derived from the pinned Deployments' own arguments.
     for namespace, name in leader_election_controllers(root):
         subject = Subject(namespace, name)
@@ -1618,23 +1715,23 @@ class GrantedRequest(NamedTuple):
 # authority over every OCIRepository and HelmRelease in the cluster — including
 # the other site's — with every gate green. That is safety invariant 14's exact
 # class, so the predicate takes the subject.
-CLUSTER_SCOPED_BY_DESIGN = {
-    "source.toolkit.fluxcd.io": "a controller's informer cache over its custom "
-    "resources is a cluster-wide list/watch; a namespaced grant cannot satisfy it",
-    "kustomize.toolkit.fluxcd.io": "same informer cache",
-    "helm.toolkit.fluxcd.io": "same informer cache",
-    ("", "events"): "an Event is written in the namespace of the object it "
-    "describes, which is every namespace a reconciliation touches",
-}
-
-
 def _cluster_scope_is_by_design(subject, group, resource):
-    # The subjects with cluster-wide informers are exactly the controllers that
-    # register reconcilers, which is where the justification comes from — so the
-    # set is read from REGISTERED_CONTROLLERS rather than listed a second time.
-    if subject.namespace != FLUX_SYSTEM or subject.name not in REGISTERED_CONTROLLERS:
+    # Event reporting follows reconciled objects across namespaces. Everything
+    # else is accepted only when this exact controller registers this exact
+    # primary or secondary informer; keying on the Flux API group alone would
+    # excuse unrelated cluster-wide authority.
+    if subject.namespace != FLUX_SYSTEM or subject.name not in OWNED_CONTROLLER_KINDS:
         return False
-    return group in CLUSTER_SCOPED_BY_DESIGN or (group, resource) in CLUSTER_SCOPED_BY_DESIGN
+    if (group, resource) == ("", "events"):
+        return True
+    watched = (
+        OWNED_CONTROLLER_KINDS.get(subject.name, ())
+        + CONTROLLER_SECONDARY_WATCH_KINDS.get(subject.name, ())
+    )
+    return (group, resource) in {
+        _kind_tuple(kind)[:2]
+        for kind in watched
+    }
 
 
 def _rule_atoms(rule):

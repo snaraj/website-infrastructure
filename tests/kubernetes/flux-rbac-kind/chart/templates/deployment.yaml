@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-rbac-acceptance
+  labels:
+    app.kubernetes.io/name: flux-rbac-acceptance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flux-rbac-acceptance
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flux-rbac-acceptance
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: workload
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: Never
+          env:
+            - name: FAIL_STARTUP
+              value: {{ .Values.failureMode | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault

@@ -887,6 +887,10 @@ valid_source_controller_storage if {
     some flag in object.get(manager, "args", [])
     startswith(flag, "--no-remote-bases")
   ]) == 0
+  count([flag |
+    some flag in object.get(manager, "args", [])
+    startswith(flag, "--feature-gates=")
+  ]) == 0
 
   volumes := object.get(input.spec.template.spec, "volumes", [])
   count(volumes) == 2
@@ -908,13 +912,26 @@ deny contains msg if {
   msg := sprintf("raw tenant ReplicaSet %s/%s is forbidden; only an exact Deployment may own replicas", [input.metadata.namespace, input.metadata.name])
 }
 
+valid_helm_readback_rule(rule) if {
+  input.metadata.name == "helm-reconciler"
+  input.metadata.namespace in tenant_namespaces
+  rule == {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}
+}
+
+valid_helm_readback_rule(rule) if {
+  input.metadata.name == "helm-reconciler"
+  input.metadata.namespace in tenant_namespaces
+  rule == {"apiGroups": ["apps"], "resources": ["replicasets"], "verbs": ["get", "list", "watch"]}
+}
+
 deny contains msg if {
   input.kind == "Role"
   input.metadata.namespace in restricted_role_namespaces
   some rule in object.get(input, "rules", [])
   some resource in object.get(rule, "resources", [])
   resource in {"pods", "pods/exec", "replicasets", "daemonsets", "statefulsets", "jobs", "cronjobs"}
-  msg := sprintf("Role %s/%s must not grant direct %s workload control", [input.metadata.namespace, input.metadata.name, resource])
+  not valid_helm_readback_rule(rule)
+  msg := sprintf("Role %s/%s must not grant direct %s workload control outside the exact Helm readiness read-back", [input.metadata.namespace, input.metadata.name, resource])
 }
 
 deny contains msg if {
@@ -923,6 +940,27 @@ deny contains msg if {
   input.metadata.name == "source-controller"
   not valid_source_controller_storage
   msg := "source-controller must bound /data and /tmp plus container ephemeral-storage, and must carry no reconciler-only flag it cannot parse"
+}
+
+valid_reconciler_config_watcher_gate if {
+  managers := [container |
+    some container in object.get(input.spec.template.spec, "containers", [])
+    object.get(container, "name", "") == "manager"
+  ]
+  count(managers) == 1
+  feature_gates := [argument |
+    some argument in object.get(managers[0], "args", [])
+    startswith(argument, "--feature-gates=")
+  ]
+  feature_gates == ["--feature-gates=DisableConfigWatchers=true"]
+}
+
+deny contains msg if {
+  input.kind == "Deployment"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name in {"kustomize-controller", "helm-controller"}
+  not valid_reconciler_config_watcher_gate
+  msg := sprintf("%s must disable ConfigMap and Secret event watchers with the exact reviewed feature gate", [input.metadata.name])
 }
 
 deny contains msg if {
@@ -1257,6 +1295,42 @@ deny contains msg if {
   input.metadata.namespace in tenant_namespaces
   object.get(input.spec, "serviceAccountName", "") != "helm-reconciler"
   msg := sprintf("HelmRelease %s must use ServiceAccount helm-reconciler", [input.metadata.name])
+}
+
+# DisableConfigWatchers removes the controller's broad ConfigMap/Secret event
+# informers. Keep the current production contract closed over inline values and
+# the local API server; a future external input needs an explicit namespaced
+# grant and a separately reviewed design.
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "valuesFrom", []) != []
+  msg := sprintf("HelmRelease %s/%s must not use valuesFrom under the closed controller RBAC contract", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "kubeConfig", null) != null
+  msg := sprintf("HelmRelease %s/%s must not use kubeConfig under the closed controller RBAC contract", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "storageNamespace", null) != null
+  msg := sprintf("HelmRelease %s/%s must not redirect Helm storage to another namespace", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in tenant_namespaces
+  object.get(input.spec, "targetNamespace", null) != null
+  msg := sprintf("HelmRelease %s/%s must not redirect rendered workloads to another namespace", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
@@ -2132,6 +2206,46 @@ deny contains msg if {
   msg := sprintf("Role flux-system/%s must not write Secrets", [input.metadata.name])
 }
 
+valid_flux_decryption_role if {
+  object.get(input, "rules", []) == [{
+    "apiGroups": [""],
+    "resources": ["secrets"],
+    "resourceNames": ["sops-age"],
+    "verbs": ["get"],
+  }]
+}
+
+deny contains msg if {
+  input.kind == "Role"
+  input.metadata.namespace == "flux-system"
+  input.metadata.name == "flux-controller-decryption"
+  not valid_flux_decryption_role
+  msg := "Role flux-system/flux-controller-decryption must grant only exact sops-age Secret get"
+}
+
+# Optional ConfigMap/Secret watchers are disabled on both reconcilers. Helm
+# release storage uses the impersonated tenant reconciler, so no controller
+# ClusterRole needs cluster-wide Secret access.
+deny contains msg if {
+  input.kind == "ClusterRole"
+  some rule in object.get(input, "rules", [])
+  "secrets" in object.get(rule, "resources", [])
+  msg := sprintf("ClusterRole %s must not grant cluster-wide Secret access", [input.metadata.name])
+}
+
+# No controller needs to write a Secret under its own identity, and a write verb
+# here would enable credential mutation across every namespace. Keep this
+# independent denial so an attempted widening names both the cluster-scope read
+# and credential-mutation authority.
+deny contains msg if {
+  input.kind == "ClusterRole"
+  some rule in object.get(input, "rules", [])
+  "secrets" in object.get(rule, "resources", [])
+  some verb in object.get(rule, "verbs", [])
+  verb in {"create", "update", "patch", "delete", "deletecollection"}
+  msg := sprintf("ClusterRole %s must not write Secrets", [input.metadata.name])
+}
+
 # The shared controller ClusterRoleBinding must name the ServiceAccounts this
 # install creates and nothing else: a subject for an uninstalled controller
 # activates silently the day that controller arrives.
@@ -2141,4 +2255,105 @@ deny contains msg if {
   subjects := {sprintf("%s/%s", [subject.namespace, subject.name]) | some subject in object.get(input, "subjects", [])}
   subjects != {"flux-system/source-controller", "flux-system/kustomize-controller", "flux-system/helm-controller"}
   msg := "crd-controller-flux-system must bind exactly the three installed controllers"
+}
+
+# THE PER-CONTROLLER SPLIT (issue #98), enforced over the rendered output.
+# These rules are additive defence in depth beside the fast structural validator,
+# RBAC model, and live-state mirror; they replace none of those independent gates.
+#
+# `crd-controller-flux-system` is the one ClusterRole bound to all three
+# controllers, so any Flux API group it names is authority each controller holds
+# over the OTHER two's reconciliation specifications: rewriting or unsuspending
+# another controller's execution object gets it applied BY that controller,
+# under whichever account it impersonates, which impersonation cannot contain.
+# The rule is verb-agnostic on purpose — a read shared this way is harmless, but
+# the shared role has no reason to carry one now that each controller's own role
+# does, and a verb-scoped rule would need updating the day a new verb mattered.
+flux_execution_api_groups := {
+  "source.toolkit.fluxcd.io",
+  "kustomize.toolkit.fluxcd.io",
+  "helm.toolkit.fluxcd.io",
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  input.metadata.name == "crd-controller-flux-system"
+  some rule in object.get(input, "rules", [])
+  some group in object.get(rule, "apiGroups", [])
+  group in flux_execution_api_groups
+  msg := sprintf("ClusterRole crd-controller-flux-system is bound to all three controllers and must not grant %s", [group])
+}
+
+# Each controller's own authority lives in its own ClusterRole, bound to exactly
+# one ServiceAccount. A second subject on one of these rebuilds the shared role
+# under a new name with every rule still reading correctly, so the subject set is
+# pinned rather than merely required to contain its owner.
+per_controller_cluster_roles := {
+  "crd-controller-source-flux-system": "source-controller",
+  "crd-controller-kustomize-flux-system": "kustomize-controller",
+  "crd-controller-helm-flux-system": "helm-controller",
+}
+
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  owner := per_controller_cluster_roles[input.metadata.name]
+  subjects := {sprintf("%s/%s", [subject.namespace, subject.name]) | some subject in object.get(input, "subjects", [])}
+  subjects != {sprintf("flux-system/%s", [owner])}
+  msg := sprintf("ClusterRoleBinding %s must bind only flux-system/%s", [input.metadata.name, owner])
+}
+
+# And it must bind the role it is named for. A per-controller binding repointed
+# at another controller's role passes the subject check above while handing that
+# controller the other one's authority.
+deny contains msg if {
+  input.kind == "ClusterRoleBinding"
+  per_controller_cluster_roles[input.metadata.name]
+  object.get(input, "roleRef", {}).name != input.metadata.name
+  msg := sprintf("ClusterRoleBinding %s must bind ClusterRole %s", [input.metadata.name, input.metadata.name])
+}
+
+valid_kustomize_secondary_source_rules if {
+  source_rules := [rule |
+    some rule in object.get(input, "rules", [])
+    "source.toolkit.fluxcd.io" in object.get(rule, "apiGroups", [])
+  ]
+  source_rules == [{
+    "apiGroups": ["source.toolkit.fluxcd.io"],
+    "resources": ["buckets", "gitrepositories", "ocirepositories"],
+    "verbs": ["get", "list", "watch"],
+  }]
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  input.metadata.name == "crd-controller-kustomize-flux-system"
+  not valid_kustomize_secondary_source_rules
+  msg := "ClusterRole crd-controller-kustomize-flux-system must grant only exact read-only Bucket, GitRepository, and OCIRepository secondary watches"
+}
+
+valid_helm_source_rules if {
+  source_rules := [rule |
+    some rule in object.get(input, "rules", [])
+    "source.toolkit.fluxcd.io" in object.get(rule, "apiGroups", [])
+  ]
+  count(source_rules) == 2
+  some chart_rule in source_rules
+  chart_rule == {
+    "apiGroups": ["source.toolkit.fluxcd.io"],
+    "resources": ["helmcharts"],
+    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+  }
+  some oci_rule in source_rules
+  oci_rule == {
+    "apiGroups": ["source.toolkit.fluxcd.io"],
+    "resources": ["ocirepositories"],
+    "verbs": ["get", "list", "watch"],
+  }
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  input.metadata.name == "crd-controller-helm-flux-system"
+  not valid_helm_source_rules
+  msg := "ClusterRole crd-controller-helm-flux-system must grant exact HelmChart lifecycle and read-only OCIRepository secondary watch authority"
 }

@@ -45,6 +45,36 @@ class MediaContractTests(unittest.TestCase):
                 for error in REPOSITORY_MODULE.check_media(root)
             ))
 
+    def test_helm_releases_cannot_add_controller_side_external_inputs(self):
+        for field in (
+            "  valuesFrom:\n    - kind: Secret\n      name: runtime-values\n",
+            "  kubeConfig:\n    secretRef:\n      name: remote-cluster\n",
+            "  storageNamespace: other\n",
+            "  targetNamespace: other\n",
+        ):
+            with self.subTest(field=field.split(":", 1)[0].strip()):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    root.joinpath(".sourceignore").write_text(
+                        "/*\n!/kubernetes/\n!/policies/kyverno/\n", encoding="utf-8"
+                    )
+                    target = root / "kubernetes" / "websites" / "naranjo-online"
+                    target.mkdir(parents=True)
+                    target.joinpath("release.yaml").write_text(
+                        "apiVersion: helm.toolkit.fluxcd.io/v2\n"
+                        "kind: HelmRelease\n"
+                        "metadata:\n"
+                        "  name: naranjo-online\n"
+                        "spec:\n"
+                        + field,
+                        encoding="utf-8",
+                    )
+                    self.assertTrue(any(
+                        "must not use controller-side external inputs or namespace redirects"
+                        in error
+                        for error in REPOSITORY_MODULE.check_media(root)
+                    ))
+
     def test_architecture_states_current_cloudflare_no_go(self):
         adr = (REPO_ROOT / "docs/adr/0012-heavy-media-storage.md").read_text(
             encoding="utf-8"
