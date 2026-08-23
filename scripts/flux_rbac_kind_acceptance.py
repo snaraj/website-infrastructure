@@ -3055,8 +3055,10 @@ class AcceptanceHarness:
         matches = [value for value in digests if isinstance(value, str) and value.startswith(prefix)]
         if len(matches) != 1 or DIGEST_RE.fullmatch(matches[0].split("@", 1)[1]) is None:
             raise AcceptanceError("WORKLOAD_DIGEST_INVALID")
-        digest = matches[0].split("@", 1)[1]
-        self.workload_reference = f"{tag}@{digest}"
+        # kind imports this exact collision-checked tag into the node. Docker's
+        # RepoDigest is not registered as a CRI image name by that import, so a
+        # digest-qualified reference would fail closed under pullPolicy Never.
+        self.workload_reference = tag
         self.runner.run(
             ("kind", "load", "docker-image", "--name", self.owned.cluster, tag),
             timeout=300,

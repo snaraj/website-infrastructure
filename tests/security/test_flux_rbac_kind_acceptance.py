@@ -2348,6 +2348,18 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("os.Exit(42)", workload)
         self.assertEqual(dockerfile.splitlines()[0], "FROM scratch")
 
+    def test_never_pull_workload_uses_the_exact_tag_loaded_into_kind(self):
+        script = (ROOT / "scripts" / "flux_rbac_kind_acceptance.py").read_text()
+        build = script.split("    def build_artifacts", 1)[1].split(
+            "    def install_stock", 1
+        )[0]
+        self.assertIn("self.workload_reference = tag", build)
+        self.assertIn(
+            '("kind", "load", "docker-image", "--name", self.owned.cluster, tag)',
+            build,
+        )
+        self.assertNotIn('self.workload_reference = f"{tag}@{digest}"', build)
+
     def test_make_target_requires_explicit_commit_and_external_receipt(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         target = makefile.split("flux-rbac-kind-acceptance:", 1)[1]
