@@ -622,6 +622,12 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, secrets, services, serviceaccounts]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Issue #211: the naranjo usage-export chart owns two claims in this
+  # namespace. Claim lifecycle does not confer authority over the backing PV,
+  # StorageClass, node path, or provisioner.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]

@@ -218,6 +218,12 @@ DECLARED_SLACK = (
              ("get", "list", "watch", "create", "update", "patch", "delete"),
              "pre-existing Role slack: the site chart's declared kinds contain no "
              "ConfigMap"),
+    SlackRow(Subject("naranjo-online", "helm-reconciler"), ("naranjo-online",), "",
+             ("persistentvolumeclaims",),
+             ("get", "list", "watch", "create", "update", "patch", "delete"),
+             "issue #211: the reviewed usage-export chart owns two local-pie-ssd "
+             "claims; RBAC cannot name-restrict claim creation, while backing "
+             "storage authority remains absent"),
     SlackRow(Subject("lidersea-com", "helm-reconciler"), ("lidersea-com",), "",
              ("configmaps",),
              ("get", "list", "watch", "create", "update", "patch", "delete"),
@@ -829,6 +835,54 @@ class FluxRbacSufficiencyTests(unittest.TestCase):
                                 subject, verb, group, resource, namespace
                             )
                         )
+
+    def test_naranjo_claim_lifecycle_is_local_without_backing_storage_authority(self):
+        """Issue #211: one exact site may manage claims, never their backing."""
+
+        naranjo = Subject("naranjo-online", "helm-reconciler")
+        lifecycle = ("get", "list", "watch", "create", "update", "patch", "delete")
+        for verb in lifecycle:
+            with self.subTest(subject="naranjo", verb=verb):
+                self.assertTrue(
+                    self.authorizer.allows(
+                        naranjo, verb, "", "persistentvolumeclaims", "naranjo-online"
+                    )
+                )
+            for foreign in (None, "lidersea-com", "cloudflare-public", "flux-system"):
+                with self.subTest(subject="naranjo", verb=verb, foreign=foreign):
+                    self.assertFalse(
+                        self.authorizer.allows(
+                            naranjo, verb, "", "persistentvolumeclaims", foreign
+                        )
+                    )
+
+        for namespace in ("lidersea-com", "cloudflare-public"):
+            subject = Subject(namespace, "helm-reconciler")
+            for verb in lifecycle:
+                with self.subTest(subject=namespace, verb=verb):
+                    self.assertFalse(
+                        self.authorizer.allows(
+                            subject, verb, "", "persistentvolumeclaims", namespace
+                        )
+                    )
+
+        self.assertFalse(
+            self.authorizer.allows(
+                naranjo, "deletecollection", "", "persistentvolumeclaims", "naranjo-online"
+            )
+        )
+        for group, resource in (
+            ("", "persistentvolumes"),
+            ("", "nodes"),
+            ("storage.k8s.io", "storageclasses"),
+            ("storage.k8s.io", "csidrivers"),
+            ("snapshot.storage.k8s.io", "volumesnapshots"),
+        ):
+            for verb in lifecycle:
+                with self.subTest(resource=resource, verb=verb):
+                    self.assertFalse(
+                        self.authorizer.allows(naranjo, verb, group, resource, None)
+                    )
 
     def test_controllers_can_probe_the_api_server_liveness_endpoint(self):
         # The one grant a Role cannot express, so it stays cluster-scoped and is
@@ -2473,6 +2527,45 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                         any("exact pods and replicasets" in error for error in errors),
                         errors,
                     )
+
+    def test_naranjo_pvc_rule_is_required_exact_and_site_local(self):
+        relative = "kubernetes/flux-system/access.yaml"
+        rule = (
+            '  - apiGroups: [""]\n'
+            "    resources: [persistentvolumeclaims]\n"
+            "    verbs: [get, list, watch, create, update, patch, delete]\n"
+        )
+        for label, replacement in (
+            ("missing", ""),
+            (
+                "extra verb",
+                rule.replace("patch, delete", "patch, delete, deletecollection"),
+            ),
+            (
+                "combined backing resource",
+                rule.replace(
+                    "resources: [persistentvolumeclaims]",
+                    "resources: [persistentvolumeclaims, persistentvolumes]",
+                ),
+            ),
+        ):
+            with self.subTest(mutation=label):
+                errors = self.mutate(relative, rule, replacement)
+                self.assertTrue(
+                    any("exact PVC lifecycle" in error for error in errors), errors
+                )
+
+        lidersea_role = (
+            "kind: Role\n"
+            "metadata:\n"
+            "  name: helm-reconciler\n"
+            "  namespace: lidersea-com\n"
+            "rules:\n"
+        )
+        errors = self.mutate(relative, lidersea_role, lidersea_role + rule)
+        self.assertTrue(
+            any("PVC lifecycle must be only" in error for error in errors), errors
+        )
 
     def test_an_unrestricted_impersonate_grant_is_refused(self):
         errors = self.mutate(

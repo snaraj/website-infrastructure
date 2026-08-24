@@ -153,6 +153,20 @@ cross-tenant request remains denied. Helm waits stay enabled; this RBAC proof no
 longer relies on suspending a HelmRelease to hide missing readiness authority.
 It does not by itself authorize any unsuspend.
 
+### Naranjo claim lifecycle boundary
+
+Issue #211 adds `persistentvolumeclaims` lifecycle only to the
+`naranjo-online/helm-reconciler` Role because the reviewed usage-export chart
+owns two claims. Kubernetes cannot restrict PVC `create` by resource name, so
+the compensating boundary is the reviewed render plus the existing storage
+policy: claims must explicitly select the owner-enumerated `local-pie-ssd`
+StorageClass, declare no data source or remote storage mechanism, and remain
+local to the Pi. The Role grants no PersistentVolume, StorageClass, node,
+provisioner, snapshot, host-path, cross-namespace, or cluster-wide authority.
+The same exact rule is carried in `desired-active.json`; therefore the protected
+#141 transaction preserves it rather than replacing the live Role with an older
+shape before #189 begins reconciliation.
+
 ## Live proof, before the deletion
 
 Use the protected kubeconfig ceremony; never a bare `kubectl` against a mutable

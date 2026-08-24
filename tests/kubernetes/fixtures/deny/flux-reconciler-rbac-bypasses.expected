@@ -18,6 +18,7 @@ ClusterRole crd-controller-kustomize-flux-system must grant only exact read-only
 ClusterRole crd-controller-kustomize-flux-system must grant only exact read-only Bucket, GitRepository, and OCIRepository secondary watches
 ClusterRole crd-controller-kustomize-flux-system must grant only exact read-only Bucket, GitRepository, and OCIRepository secondary watches
 ClusterRole crd-controller-source-flux-system must not grant cluster-wide Secret access
+ClusterRole flux-pvc-manager must not grant cluster-wide PVC authority
 ClusterRoleBinding crd-controller-helm-flux-system must bind only flux-system/helm-controller
 ClusterRoleBinding crd-controller-source-flux-system must bind ClusterRole crd-controller-source-flux-system
 ClusterRoleBinding cluster-reconciler-flux-system must not bind cluster-admin
@@ -28,6 +29,7 @@ Role flux-system/flux-controller-decryption must grant only exact sops-age Secre
 Role flux-system/flux-controller-decryption must not write Secrets
 Role flux-system/flux-controller-runtime must not grant a wildcard verbs
 Role kyverno/helm-reconciler must not grant direct replicasets workload control outside the exact Helm readiness read-back
+Role lidersea-com/helm-reconciler must grant PVC lifecycle only as the exact naranjo-online helm-reconciler rule
 Role naranjo-online/helm-reconciler must not grant direct pods workload control outside the exact Helm readiness read-back
 Role naranjo-online/readiness-lookalike must not grant direct replicasets workload control outside the exact Helm readiness read-back
 RoleBinding quiet-escalation must not bind cluster-admin

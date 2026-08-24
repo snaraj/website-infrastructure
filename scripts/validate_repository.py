@@ -202,7 +202,7 @@ REVIEWED_SITE_CAPACITY_HARD = {
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "23c5238d98aec9e5a61c27695b159afcd623af5565a6f0a92ac5c32c8c1803b6"
+    "31bc94ab7d1ef20041c65939c59ea0f412260d48867a42b3cc2908ec8829e621"
 )
 
 # The same coupling for the six cluster-scoped per-controller objects, which
@@ -1833,6 +1833,7 @@ def flux_rbac_contract_errors(root):
         return errors
     documents = _yaml_documents(read(access_path))
     seen_roles = set()
+    exact_naranjo_pvc_rules = 0
     for document in documents:
         if not re.search(r"(?m)^kind:\s*Role\s*$", document):
             continue
@@ -1859,6 +1860,25 @@ def flux_rbac_contract_errors(root):
                     "Secret get rule restricted to resourceNames sops-age"
                 )
         for block in blocks:
+            resources = tuple(_rbac_rule_list(block, "resources"))
+            if "persistentvolumeclaims" in resources:
+                is_exact_naranjo_rule = (
+                    name == "helm-reconciler"
+                    and namespace == "naranjo-online"
+                    and tuple(_rbac_rule_list(block, "apiGroups")) == ("",)
+                    and resources == ("persistentvolumeclaims",)
+                    and tuple(_rbac_rule_list(block, "verbs"))
+                    == RBAC_READ_VERBS + ("create", "update", "patch", "delete")
+                    and _rbac_rule_fields(block)
+                    == {"apiGroups", "resources", "verbs"}
+                )
+                if is_exact_naranjo_rule:
+                    exact_naranjo_pvc_rules += 1
+                else:
+                    errors.append(
+                        "PVC lifecycle must be only the exact namespaced "
+                        "naranjo-online/helm-reconciler rule"
+                    )
             # Impersonation without `resourceNames` is impersonation of every
             # account in the namespace, which re-opens the escalation path the
             # deleted binding used to hold open.
@@ -1904,6 +1924,11 @@ def flux_rbac_contract_errors(root):
                         namespace, name
                     )
                 )
+    if exact_naranjo_pvc_rules != 1:
+        errors.append(
+            "naranjo-online/helm-reconciler must carry exactly one exact PVC "
+            "lifecycle rule"
+        )
     for name, namespaces in sorted(FLUX_CONTROLLER_ROLE_NAMESPACES.items()):
         for namespace in namespaces:
             if (name, namespace) not in seen_roles:

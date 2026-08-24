@@ -919,6 +919,27 @@ valid_helm_readback_rule(rule) if {
   rule == {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}
 }
 
+valid_naranjo_pvc_rule(rule) if {
+  input.metadata.name == "helm-reconciler"
+  input.metadata.namespace == "naranjo-online"
+  rule == {"apiGroups": [""], "resources": ["persistentvolumeclaims"], "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]}
+}
+
+deny contains msg if {
+  input.kind == "Role"
+  some rule in object.get(input, "rules", [])
+  "persistentvolumeclaims" in object.get(rule, "resources", [])
+  not valid_naranjo_pvc_rule(rule)
+  msg := sprintf("Role %s/%s must grant PVC lifecycle only as the exact naranjo-online helm-reconciler rule", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  some rule in object.get(input, "rules", [])
+  "persistentvolumeclaims" in object.get(rule, "resources", [])
+  msg := sprintf("ClusterRole %s must not grant cluster-wide PVC authority", [input.metadata.name])
+}
+
 valid_helm_readback_rule(rule) if {
   input.metadata.name == "helm-reconciler"
   input.metadata.namespace in tenant_namespaces
