@@ -399,7 +399,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-anonymous-pr-verification.md": 0o600,
+            "changelog.d/141-flux-rbac-v023-release-binding.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -1727,8 +1727,14 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.21")
-        for rejected in ("v0.1.0", "v0.1.20", "v0.1.22", "v9.9.9"):
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.23")
+        for rejected in (
+            "v0.1.0",
+            "v0.1.21",
+            "v0.1.22",
+            "v0.1.24",
+            "v9.9.9",
+        ):
             with self.subTest(rejected=rejected), mock.patch.object(
                 transaction, "github_get"
             ) as github_get:
