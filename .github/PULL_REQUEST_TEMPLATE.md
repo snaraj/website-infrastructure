@@ -31,6 +31,19 @@ Closes #<!-- same-repository issue number -->
 - Files deliberately excluded (other lane, e.g. Codex-owned
   `bootstrap/pi/**`, `versions.env`, platform ADRs, `capacity.md`):
 
+## Lane crossings declared
+
+<!-- Any path this PR touches that the Delivery lane section's rulings do
+not assign to this lane. AGENTS.md: a path in neither list is NOT
+implicitly delivery. One row per path; write "none" where empty. -->
+
+| Path | Why this PR touches it | Authorization | Ruling sought / recorded |
+| --- | --- | --- | --- |
+| none | | | |
+
+- Rulings above amended back into AGENTS.md's Delivery lane section (same
+  PR or the next one opened): yes/no/n/a
+
 ## Evidence
 
 <!-- Exact commands run and their results, e.g.:

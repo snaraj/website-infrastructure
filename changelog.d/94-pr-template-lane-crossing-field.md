@@ -1,0 +1,3 @@
+### Added
+
+- Add a "Lane crossings declared" table to `.github/PULL_REQUEST_TEMPLATE.md`, adjacent to the existing "Files owned / files excluded" block, so the obligation AGENTS.md's Delivery lane section already states in prose — "declare the crossing in the pull request body before touching the path" for any path a PR touches that the lane rulings do not assign to it — has an artifact slot instead of landing wherever an author happens to put it or nowhere at all. The table records the path, why the PR touches it, its authorization, and the ruling sought or recorded, plus a line for whether the Delivery lane rulings were amended back with the answer, the amendment half of the same rule that historically gets dropped.
