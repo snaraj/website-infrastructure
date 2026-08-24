@@ -58,20 +58,23 @@ bootstrap website GitOps objects, or touch Cloudflare. Do not substitute
 
 The live Flux inventory is closed, not sampled. Bucket, ExternalArtifact,
 GitRepository, HelmChart, HelmRepository, and Kustomization inventories must
-each be empty. Exactly these two source/release pairs may exist:
+each be empty. Exactly these two source/release identity pairs may exist:
 
 - `naranjo-online/naranjo-online-chart` OCIRepository to
-  `naranjo-online/naranjo-online` HelmRelease at chart version `0.1.30`;
+  `naranjo-online/naranjo-online` HelmRelease;
 - `lidersea-com/lidersea-com-chart` OCIRepository to
-  `lidersea-com/lidersea-com` HelmRelease at chart version `0.1.26`.
+  `lidersea-com/lidersea-com` HelmRelease.
 
 For each pair, the OCIRepository must have the exact credentialless,
 same-site, Cosign-verified spec in the custodied transaction implementation.
 Its current generation must be `Ready=True` and `SourceVerified=True`, both with
-`reason=Succeeded`. The artifact revision supplies the exact chart version and
-nonzero upstream `sha256:` digest; the stored artifact digest is captured
-separately. The HelmRelease must use only `chartRef.kind=OCIRepository` and the
-same namespace's `<site>-chart`, with the exact release name,
+`reason=Succeeded`. At plan time, the artifact revision supplies the exact
+canonical release SemVer and nonzero upstream `sha256:` digest. The version
+must satisfy the source's exact `>=0.1.9 <1.0.0` range; prerelease, build,
+noncanonical, and out-of-range versions fail closed. The stored artifact digest
+is captured separately. The HelmRelease must use only
+`chartRef.kind=OCIRepository` and the same namespace's `<site>-chart`, with the
+exact release name,
 `helm-reconciler` ServiceAccount, and inline
 `values={"deploymentReady":true}`. Its attempted
 revision digest must equal the OCI upstream digest, and its attempted revision
@@ -81,6 +84,10 @@ exactly one same-namespace Deployment, Service, ServiceAccount, and
 NetworkPolicy, and those four identities must equal the live Helm-owned
 workload inventory. Any missing, extra, cross-site, stale, suspended,
 terminating, unverified, or digest-disconnected object stops the transaction.
+The immutable plan records each derived version, source revision, upstream
+digest, stored digest, and matching Helm status. Any chart movement after plan
+creation changes that baseline and stops apply or verification; it cannot be
+reinterpreted through the existing plan.
 
 ## Immutable bindings
 
@@ -99,8 +106,8 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.23`, the next
-release after its reviewed `v0.1.22` protected base. `target.json` cannot select
+This one-time executable authorizes exactly platform tag `v0.1.24`, the next
+release after its reviewed `v0.1.23` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
@@ -128,7 +135,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.23`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.24`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
