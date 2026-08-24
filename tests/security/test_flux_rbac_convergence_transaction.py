@@ -27,6 +27,7 @@ if TEST_TEMP_ROOT == ROOT or ROOT in TEST_TEMP_ROOT.parents:
 TRANSACTION_PATH = ROOT / "bootstrap/flux/rbac-convergence/transaction.py"
 DESIRED_PATH = ROOT / "bootstrap/flux/rbac-convergence/desired-active.json"
 SOURCE_MANIFEST_PATH = ROOT / "bootstrap/flux/rbac-convergence/source-manifest.v1"
+RUNBOOK_PATH = ROOT / "docs/runbooks/flux-rbac-narrowing.md"
 
 
 def _load_transaction():
@@ -710,6 +711,41 @@ class HelmChainContractTests(unittest.TestCase):
                 return {"items": copy.deepcopy(paths[path])}
 
         return transaction.flux_snapshot(Client())
+
+    def test_runbook_binds_dynamic_site_chart_identity_to_immutable_plan(self):
+        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+        procedure_marker = "## Procedure"
+        step_marker = "1. **Freeze the live prestate without Secret data.**"
+        next_step_marker = "2. **Close the mutation inventory.**"
+        self.assertEqual(runbook.count(procedure_marker), 1)
+        procedure = runbook.split(procedure_marker, 1)[1]
+        self.assertEqual(procedure.count(step_marker), 1)
+        self.assertEqual(procedure.count(next_step_marker), 1)
+        step_one = procedure.split(step_marker, 1)[1].split(next_step_marker, 1)[0]
+        contract = " ".join(step_one.split())
+
+        for required in (
+            "`naranjo-online/naranjo-online-chart` to "
+            "`naranjo-online/naranjo-online`",
+            "`lidersea-com/lidersea-com-chart` to `lidersea-com/lidersea-com`",
+            "derive `chartVersion` only during `--plan` from the exact current "
+            "Cosign-verified OCI artifact `revision`",
+            "canonical stable release SemVer inside the exact "
+            "`>=0.1.9 <1.0.0` source range",
+            "its nonzero upstream `sha256:` `upstreamDigest`",
+            "`attemptedRevision=<chartVersion>+<first-12-upstreamDigest-hex>`",
+            "`attemptedRevisionDigest=<upstreamDigest>`",
+            "`historyChartVersion=<attemptedRevision>`",
+            "`historyOciDigest` either absent or exactly `<upstreamDigest>`",
+            "must remain exactly equal to its recorded immutable plan baseline",
+            "A later chart version, even when canonical, stable, and in range, "
+            "is drift; do not recapture or replan it into this transaction.",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+        for former_fixed_version in ("`0.1.30`", "`0.1.26`"):
+            with self.subTest(former_fixed_version=former_fixed_version):
+                self.assertNotIn(former_fixed_version, contract)
 
     def test_dynamic_source_identity_requires_current_successful_verification(self):
         for label, field, value in (

@@ -694,20 +694,29 @@ or change effective action by editing the plan.
    inventory. The executable inventory requires zero Bucket,
    ExternalArtifact, GitRepository, HelmChart, HelmRepository, and
    Kustomization objects, plus exactly the two site OCIRepositories and two
-   same-site HelmReleases; re-read rather than assume those counts. For
-   naranjo, bind `naranjo-online-chart` version `0.1.30` to the
-   `naranjo-online` release; for lidersea, bind `lidersea-com-chart` version
-   `0.1.26` to the `lidersea-com` release. Each exact, Cosign-verified
-   OCIRepository must be current and supplies the upstream `sha256:` digest.
-   The local HelmRelease must use `helm-reconciler` and only inline
-   `values={"deploymentReady":true}`. Its attempted digest must equal that upstream digest, its
-   attempted revision must be
-   `<version>+<first-12-upstream-digest-hex>`, its latest history entry must be
-   deployed for that revision, and its status inventory must equal exactly one
-   live Helm-owned Deployment, Service, ServiceAccount, and NetworkPolicy in
-   the same namespace. Capture the OCI stored-artifact digest separately from
-   the upstream digest, plus each live object's UID, resourceVersion,
-   generation, suspension, conditions, Helm history, and workload readiness.
+   same-site HelmReleases; re-read rather than assume those counts. For both
+   allowlisted pairs — `naranjo-online/naranjo-online-chart` to
+   `naranjo-online/naranjo-online` and `lidersea-com/lidersea-com-chart` to
+   `lidersea-com/lidersea-com` — derive `chartVersion` only during `--plan`
+   from the exact current Cosign-verified OCI artifact `revision`. Require a
+   canonical stable release SemVer inside the exact `>=0.1.9 <1.0.0` source
+   range, then bind that `revision`, its derived `chartVersion`, its nonzero
+   upstream `sha256:` `upstreamDigest`, and the separately captured OCI
+   stored-artifact digest into the pair's immutable plan baseline. The local
+   HelmRelease must use `helm-reconciler` and only inline
+   `values={"deploymentReady":true}`. Bind its baseline to the exact Helm tuple:
+   `attemptedRevision=<chartVersion>+<first-12-upstreamDigest-hex>`,
+   `attemptedRevisionDigest=<upstreamDigest>`, the positive numeric
+   `historyRevision`, `historyChartVersion=<attemptedRevision>`,
+   `historyStatus=deployed`, and `historyOciDigest` either absent or exactly
+   `<upstreamDigest>`; also capture the history release/config digests. Its
+   status inventory must equal exactly one live Helm-owned Deployment, Service,
+   ServiceAccount, and NetworkPolicy in the same namespace. Capture each live
+   object's UID, resourceVersion, generation, suspension, conditions, complete
+   Helm history, and workload readiness. After plan publication, every current
+   source and Helm identity field must remain exactly equal to its recorded
+   immutable plan baseline. A later chart version, even when canonical, stable,
+   and in range, is drift; do not recapture or replan it into this transaction.
    Capture canonical semantic bytes plus UID/resourceVersion for every touched
    RBAC object. Confirm the six split ClusterRoles/Bindings are absent and
    record the broad binding's exact identity. Never journal Secret content.
