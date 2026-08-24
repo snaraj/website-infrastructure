@@ -656,7 +656,9 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             with self.subTest(artifact=artifact):
                 self.assertGreater(self.script.index(artifact, active_gate), active_gate)
         self.assertIn(
-            "a live or outer-reconcilable website refuses the still-active zero-site-capacity admission policy",
+            "obsolete require-zero-site-capacity.yaml is active; restoration "
+            "requires a coordinated inventory, overlay, render-lock, and "
+            "validator recut",
             self.script,
         )
         self.assertIn("active website parent", self.script)
