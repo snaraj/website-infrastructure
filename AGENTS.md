@@ -270,9 +270,12 @@ and dependency-governed Draft capacity is recorded durably in
   below, not a lane transfer, and grants no standing claim on these paths.
   The same change deactivates `require-zero-site-capacity.yaml` in the
   delivery-owned `policies/kyverno/kustomization.yaml`, because that policy
-  admits only the sentinel shape being replaced; its source remains
-  unmodified so the gate can be restored by re-listing it. Removing it from
-  the rendered set also orphans its report-only patch under
+  admits only the sentinel shape being replaced. Its source remains
+  unmodified as historical material and as a possible input to a separately
+  reviewed restoration; restoration requires a coordinated policy-inventory,
+  report-only-overlay, render-lock, and validator recut, not merely re-listing
+  the source. Removing it from the rendered set also orphans its report-only
+  patch under
   `kubernetes/platform/admission-install/report-only/`, which remains under
   platform (peer) ruling authority; deleting that patch and enumeration is
   the same declared crossing. Under the `policies/**` caveat, the admission

@@ -112,6 +112,14 @@ policy_resource_is_active() {
   ' "$POLICY_KUSTOMIZATION"
 }
 
+# The zero-capacity source is retained only as history and possible input to a
+# separately reviewed restoration. Its overlay and both closed inventory
+# labels have already graduated to the exact no-zero-policy bytes, so merely
+# re-listing the source is always an invalid repository state in every mode.
+if policy_resource_is_active require-zero-site-capacity.yaml; then
+  die 'obsolete require-zero-site-capacity.yaml is active; restoration requires a coordinated inventory, overlay, render-lock, and validator recut'
+fi
+
 declare -a CORE_POLICY_FILES=(
   disallow-public-services
   disallow-tenant-media-payloads
@@ -122,30 +130,10 @@ declare -a CORE_POLICY_FILES=(
   require-replicaset-admission-identity
   require-restricted-workloads
 )
-declare -a SIGNATURE_POLICY_INVENTORY_ARGS=()
-if [[ "$MODE" == '--scaffold' ]]; then
-  # Scaffold state is still allowed before or after the reviewed capacity
-  # graduation. If the dormant sentinel remains active it is a core policy;
-  # once removed, the exact promoted inventory is equally closed and reviewed.
-  if policy_resource_is_active require-zero-site-capacity.yaml; then
-    CORE_POLICY_FILES+=(require-zero-site-capacity)
-  fi
-  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory staging --inventory promoted)
-elif [[ "$any_website_active" == 'true' ]]; then
-  if policy_resource_is_active require-zero-site-capacity.yaml; then
-    die 'a live or outer-reconcilable website refuses the still-active zero-site-capacity admission policy'
-  fi
-  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory promoted)
-elif policy_resource_is_active require-zero-site-capacity.yaml; then
-  # A staged transition may retain the closed capacity gate. If present it is
-  # still a core fail-closed policy and receives the same structural checks.
-  CORE_POLICY_FILES+=(require-zero-site-capacity)
-  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory staging --inventory promoted)
-else
-  # The sentinel may be removed in the same reviewed transition that prepares
-  # activation, but no third inventory or Kustomize transform is permitted.
-  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory staging --inventory promoted)
-fi
+declare -a SIGNATURE_POLICY_INVENTORY_ARGS=(
+  --inventory staging
+  --inventory promoted
+)
 policy_name=''
 for policy_name in "${CORE_POLICY_FILES[@]}"; do
   policy_file="${REPO_ROOT}/policies/kyverno/${policy_name}.yaml"
