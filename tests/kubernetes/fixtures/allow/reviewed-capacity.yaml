@@ -5,11 +5,11 @@ metadata:
   namespace: naranjo-online
   annotations:
     platform.snaraj.dev/readiness: reviewed-pi-capacity
-    platform.snaraj.dev/capacity-evidence-sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
 spec:
   hard:
-    pods: "4"
-    requests.cpu: 200m
-    requests.memory: 256Mi
-    limits.cpu: "1"
-    limits.memory: 512Mi
+    pods: "6"
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi

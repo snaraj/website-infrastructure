@@ -184,6 +184,20 @@ SITE_RELEASE_CONTRACTS = (
     ("lidersea.com", "lidersea-com", "release-publisher.yml"),
 )
 
+# Owner-reviewed capacity is one closed decision, not merely a syntactically
+# valid ResourceQuota.  Bind every site budget to the exact sanitized audit
+# bytes and exact five-field quota map approved in issue #201.
+REVIEWED_SITE_CAPACITY_EVIDENCE = Path(
+    "docs/audits/2026-08-22-site-capacity-evidence.md"
+)
+REVIEWED_SITE_CAPACITY_HARD = {
+    "pods": "6",
+    "requests.cpu": "150m",
+    "requests.memory": "192Mi",
+    "limits.cpu": "1200m",
+    "limits.memory": "768Mi",
+}
+
 # This literal digest couples Trivy's path-scoped AVD-KSV-0056 acceptance to
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
@@ -2538,6 +2552,12 @@ def reviewed_capacity_errors(root):
     """Require one hash-bound reviewed namespace budget for each website."""
 
     errors = []
+    evidence_path = root / REVIEWED_SITE_CAPACITY_EVIDENCE
+    try:
+        expected_evidence = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    except OSError:
+        expected_evidence = None
+        errors.append("reviewed website capacity evidence document is unavailable")
     prerequisites_index = root / "kubernetes/platform/prerequisites/kustomization.yaml"
     resource_controls = root / "kubernetes/platform/prerequisites/resource-controls.yaml"
     if not prerequisites_index.is_file() or not active_kustomization_resource(
@@ -2576,25 +2596,23 @@ def reviewed_capacity_errors(root):
         ))
         if not isinstance(evidence, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence):
             errors.append("reviewed website capacity evidence hash is invalid: " + namespace)
+        elif expected_evidence is not None and evidence != expected_evidence:
+            errors.append(
+                "reviewed website capacity evidence hash does not match document: "
+                + namespace
+            )
         hard = {
             path[-1]: _plain_yaml_scalar(value)
             for path, value in quota.items()
             if len(path) == 3 and path[:2] == ("spec", "hard")
         }
-        if set(hard) != {
-            "pods", "requests.cpu", "requests.memory", "limits.cpu", "limits.memory"
-        }:
+        if set(hard) != set(REVIEWED_SITE_CAPACITY_HARD):
             errors.append("reviewed website capacity limits are incomplete: " + namespace)
-        else:
-            if not re.fullmatch(r"[2-9]|[1-9][0-9]+", str(hard["pods"])):
-                errors.append("reviewed website Pod capacity is invalid: " + namespace)
-            for key in ("requests.cpu", "requests.memory", "limits.cpu", "limits.memory"):
-                if not re.fullmatch(r"[1-9][0-9]*(?:m|Ki|Mi|Gi)?", str(hard[key])):
-                    errors.append(
-                        "reviewed website capacity quantity is invalid: {} {}".format(
-                            namespace, key
-                        )
-                    )
+        elif hard != REVIEWED_SITE_CAPACITY_HARD:
+            errors.append(
+                "reviewed website capacity limits do not match owner decision: "
+                + namespace
+            )
 
     kyverno_index = root / "policies/kyverno/kustomization.yaml"
     if kyverno_index.is_file() and active_kustomization_resource(

@@ -257,6 +257,29 @@ and dependency-governed Draft capacity is recorded durably in
   not a lane transfer. Record the owner or platform (peer) ruling in
   this row when it arrives, including whether ADR 0016 belongs to this
   lane outright given what it governs.
+- `kubernetes/platform/prerequisites/resource-controls.yaml`,
+  `docs/architecture/capacity.md`, and `versions.env` — NOT transferred,
+  ruling PENDING. The lane split assigns capacity documents and
+  `versions.env` to the platform lane, while leaving the rest of
+  `kubernetes/platform/**` unruled. The delivery lane touched these paths
+  under issue #201 on the owner's explicit 2026-08-22 capacity-graduation
+  instruction: replace both zero-Pod sentinels with the exact reviewed
+  namespace budgets, bind them to the sanitized audit bytes, document the
+  measurement, and add a closed Darwin/arm64 renderer pin without changing
+  the Linux live-install tuple. That is a DECLARED CROSSING under the rule
+  below, not a lane transfer, and grants no standing claim on these paths.
+  The same change deactivates `require-zero-site-capacity.yaml` in the
+  delivery-owned `policies/kyverno/kustomization.yaml`, because that policy
+  admits only the sentinel shape being replaced; its source remains
+  unmodified so the gate can be restored by re-listing it. Removing it from
+  the rendered set also orphans its report-only patch under
+  `kubernetes/platform/admission-install/report-only/`, which remains under
+  platform (peer) ruling authority; deleting that patch and enumeration is
+  the same declared crossing. Under the `policies/**` caveat, the admission
+  semantic change still needs independent platform (peer) validation on the
+  eventual pull request. Record the owner or platform ruling here when it
+  arrives, including whether the measured budget and its evidence document
+  belong to this lane because delivery validators enforce them.
 
 **A path in neither list is not implicitly delivery.** Silence is not
 permission. Declare the crossing in the pull request body before touching

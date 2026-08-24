@@ -1,0 +1,101 @@
+# capacity-deny-case: audit-sha256
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: naranjo-online
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
+---
+# capacity-deny-case: pods
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
+spec:
+  hard:
+    pods: "7"
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
+---
+# capacity-deny-case: requests.cpu
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: naranjo-online
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: 151m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
+---
+# capacity-deny-case: requests.memory
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: 150m
+    requests.memory: 193Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
+---
+# capacity-deny-case: limits.cpu
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: naranjo-online
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1201m
+    limits.memory: 768Mi
+---
+# capacity-deny-case: limits.memory
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-budget
+  namespace: lidersea-com
+  annotations:
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
+spec:
+  hard:
+    pods: "6"
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 769Mi

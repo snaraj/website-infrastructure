@@ -129,6 +129,9 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
                     "KUBERNETES_VERSION=v1.36.3",
                     "KUSTOMIZE_LINUX_AMD64_SHA256="
                     + hashlib.sha256(self.kustomize.read_bytes()).hexdigest(),
+                    "KUSTOMIZE_DARWIN_ARM64_ARCHIVE_SHA256=" + ("d" * 64),
+                    "KUSTOMIZE_DARWIN_ARM64_SHA256="
+                    + hashlib.sha256(self.kustomize.read_bytes()).hexdigest(),
                     "KUBECTL_LINUX_AMD64_SHA256="
                     + hashlib.sha256(self.kubectl.read_bytes()).hexdigest(),
                     "",
@@ -243,7 +246,7 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
 
     @REQUIRES_POSIX_PROVENANCE
     def test_hard_linked_candidate_is_refused_before_execution(self):
-        os.link(self.kubectl, self.bin / "kubectl.second-name")
+        os.link(self.kustomize, self.bin / "kustomize.second-name")
         completed = self._run()
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("more than one hard link", completed.stderr)
@@ -279,12 +282,58 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
             '  validate_tool_metadata "$tool" "$before" "$operator_uid"',
             "  : # hostile mutation removes source metadata validation",
         )
-        os.link(self.kubectl, self.bin / "kubectl.second-name")
+        os.link(self.kustomize, self.bin / "kustomize.second-name")
         completed = self._run()
         self.assertEqual(
             completed.returncode,
             0,
             "without the production metadata call the hostile hard link should survive",
+        )
+
+    @REQUIRES_POSIX_PROVENANCE
+    def test_render_never_resolves_kubectl_or_cluster_inputs(self):
+        marker = self.scratch / "hostile-kubectl-ran"
+        self.kubectl.write_text(
+            "#!/bin/bash -p\n"
+            f"printf '%s\\n' invoked >{str(marker)!r}\n"
+            "exit 91\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.kubectl.chmod(0o755)
+        completed = self._run(
+            KUBECONFIG=str(self.scratch / "missing-kubeconfig"),
+            KYVERNO_INSTALL_CONTEXT="hostile-context",
+            KYVERNO_INSTALL_SERVER="https://127.0.0.1:1",
+            KYVERNO_RUNTIME_NETWORK_CONTRACT=str(
+                self.scratch / "missing-runtime-network-contract"
+            ),
+            KYVERNO_REPORT_ONLY_JOURNAL=str(self.scratch / "missing-journal"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("report-only.objects=1", completed.stdout)
+        self.assertFalse(marker.exists(), "render executed ambient kubectl")
+
+    @REQUIRES_POSIX_PROVENANCE
+    def test_absent_kubectl_probe_kills_resolution_before_tool_execution(self):
+        self.kubectl.unlink()
+        completed = self._run(PATH=str(self.bin))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        self._mutate_installer_once(
+            '  pin_key="$(render_kustomize_pin_key)"',
+            "  resolved_tool kubectl >/dev/null\n"
+            '  pin_key="$(render_kustomize_pin_key)"',
+        )
+        execution_log = self.scratch / "mutant-tool-exec.log"
+        mutated = self._run(
+            PATH=str(self.bin), KYVERNO_TOOL_EXEC_LOG=str(execution_log)
+        )
+        self.assertNotEqual(mutated.returncode, 0)
+        self.assertIn("kubectl is required", mutated.stderr)
+        self.assertFalse(
+            execution_log.exists(),
+            "the kubectl-resolution mutant reached kustomize execution",
         )
 
     @REQUIRES_POSIX_PROVENANCE
@@ -443,7 +492,7 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
         self.assertNotRegex(text, r'"\$KUBECTL_BIN"')
         self.assertIn(
             'run_bound_tool kustomize "$KUSTOMIZE_FD" "$KUSTOMIZE_PATH" '
-            'KUSTOMIZE_LINUX_AMD64_SHA256 "$@"',
+            '"$KUSTOMIZE_PIN_KEY" "$@"',
             text.replace("\\\n    ", ""),
         )
         self.assertIn(
@@ -454,6 +503,28 @@ class KyvernoToolProvenanceTests(unittest.TestCase):
         self.assertEqual(
             re.findall(r'"\$path" "\$@"', text),
             ['"$path" "$@"'],
+        )
+
+    def test_darwin_arm64_render_pins_are_exact(self):
+        installer = INSTALLER.read_text(encoding="utf-8")
+        pins = {}
+        for line in (ROOT / "versions.env").read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                pins[key] = value
+        self.assertEqual(
+            pins.get("KUSTOMIZE_DARWIN_ARM64_ARCHIVE_SHA256"),
+            "8886f8a78474e608cc81234f729fda188a9767da23e28925802f00ece2bab288",
+        )
+        self.assertEqual(
+            pins.get("KUSTOMIZE_DARWIN_ARM64_SHA256"),
+            "bc77e3505fbd414551cf7b15d1e772a288bc5afd97e31e49655b10524d1888e9",
+        )
+        self.assertIn(
+            'pinned_version KUSTOMIZE_DARWIN_ARM64_ARCHIVE_SHA256', installer
+        )
+        self.assertIn(
+            "printf '%s' 'KUSTOMIZE_DARWIN_ARM64_SHA256'", installer
         )
 
     def test_fixed_bootstrap_and_closed_helper_path_are_explicit(self):

@@ -17,9 +17,9 @@ Node's reported `status.allocatable`. The budget is calculated in this order:
    sessions and SSH, the independent host-level `pi-admin` connector,
    containerd, kubelet, API server, scheduler, controller manager, stacked etcd,
    and emergency recovery.
-2. Account for Kubernetes platform Pods such as DNS, Flux, desired-state
-   admission, and the public connector with explicit requests/limits and
-   operational headroom.
+2. Account for the Kubernetes platform Pods actually observed in the
+   measurement, then separately reserve explicit operational headroom for
+   desired-but-not-installed platform components.
 3. Define the remaining **safe website workload pool** from measured
    Allocatable rather than current utilization.
 4. When the operator explicitly chooses, the two sites and public connector may be
@@ -27,11 +27,41 @@ Node's reported `status.allocatable`. The budget is calculated in this order:
    is mandatory; “90%” never means 90% of raw hardware or permission to starve
    control-plane/administration services.
 
-The small chart defaults are local scaffold values, not a 1 CPU/1 GiB product
-ceiling. Until discovery produces a reviewed aggregate budget, each website
-namespace uses a capacity-not-ready quota that admits zero Pods. Enabling a
-release requires replacing that gate with quantities calculated from evidence,
-not simply deleting isolation.
+Before discovery produced the reviewed aggregate budget, the small chart
+defaults were local scaffold values rather than a 1 CPU/1 GiB product ceiling,
+and each website namespace used a `capacity-not-ready` quota that admitted zero
+Pods. Enabling a release required replacing that gate with quantities
+calculated from evidence rather than simply deleting isolation.
+
+That replacement has now happened for both website namespaces, on the terms
+this section sets rather than by deleting the isolation. The measurement is
+recorded in `docs/audits/2026-08-22-site-capacity-evidence.md`, and each
+reviewed `namespace-budget` carries a
+`platform.snaraj.dev/capacity-evidence-sha256` annotation equal to the SHA-256
+of the current audit bytes. Independently, `scripts/validate_repository.py`
+and both Rego surfaces (`policies/conftest/kubernetes.rego` and
+`policies/release-conftest/deployment-readiness.rego`) require the exact
+five-value `hard` map. Audit-byte drift fails the hash check, while quota-value
+drift fails the exact-map check; their conjunction binds the checked-in desired
+state to both the reviewed evidence bytes and approved quantities. The
+derivation follows the four numbered steps above: allocatable, less the
+measured platform reservation, less the mandatory margin, with the sites
+taking under a fifth of the resulting pool on a requests basis.
+
+The reviewed Pod ceiling is deliberately larger than the current replica
+count. A budget equal to steady-state consumption leaves no room for the
+transient a rollout creates, and admits no growth at all; that same
+no-headroom shape is what deadlocked Helm release history in issue #198.
+Raising a Pod ceiling alone is also insufficient, and was measured to be so
+here — the previous budget capped `limits.memory` at exactly two Pods' worth,
+so a third Pod could not have scheduled whatever the Pod ceiling said. CPU and
+memory ceilings scale with the Pod ceiling or the budget does not expand.
+
+This is a reviewed ceiling, not a discovery of new hardware. It grants no
+high availability beyond what the next paragraph describes, answers none of
+the storage questions below it, and is not a production-graduation decision —
+`release-policy.env` is untouched, and graduating a site under ADR 0014
+remains a separate owner decision.
 
 Two replicas on one node protect only against one process and some rollout
 failures. They do not provide node, disk, ISP, Tunnel, or control-plane high

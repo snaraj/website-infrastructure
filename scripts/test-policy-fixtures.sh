@@ -126,7 +126,8 @@ assert_declared_denial_reasons() {
 
 expect_fixture_denials() {
   local fixture="$1"
-  local expected_file="${fixture%.yaml}.expected"
+  local selected_policy="${2:-$policy}"
+  local expected_file="${3:-${fixture%.yaml}.expected}"
   local output='' expected_count=0
 
   # The precondition, established before the engine is consulted: a fixture
@@ -140,7 +141,7 @@ expect_fixture_denials() {
     exit 1
   fi
 
-  if output="$(conftest test --no-color --policy "${policy}" "${fixture}" 2>&1)"; then
+  if output="$(conftest test --no-color --policy "${selected_policy}" "${fixture}" 2>&1)"; then
     printf 'deny fixture unexpectedly passed: %s\n' "${fixture}" >&2
     printf '%s\n' "${output}" >&2
     exit 1
@@ -162,3 +163,13 @@ done
 for fixture in "${repo_root}"/tests/kubernetes/fixtures/deny/*.yaml; do
   expect_fixture_denials "$fixture"
 done
+
+# Capacity is also a release-readiness predicate. Exercise the same reviewed
+# allow/deny bytes against that second policy surface, with its own exact
+# denial vocabulary, so widening either predicate breaks this canonical gate.
+capacity_allow="${repo_root}/tests/kubernetes/fixtures/allow/reviewed-capacity.yaml"
+capacity_deny="${repo_root}/tests/kubernetes/fixtures/deny/reviewed-capacity-bypasses.yaml"
+release_policy="${repo_root}/policies/release-conftest"
+conftest test --policy "${release_policy}" "${capacity_allow}"
+expect_fixture_denials "${capacity_deny}" "${release_policy}" \
+  "${capacity_deny%.yaml}.release.expected"

@@ -80,7 +80,6 @@ CORE_POLICIES = (
     "require-release-readiness",
     "require-replicaset-admission-identity",
     "require-restricted-workloads",
-    "require-zero-site-capacity",
 )
 SIGNATURE_POLICIES = ("require-signed-lidersea-com", "require-signed-naranjo-online")
 
@@ -209,9 +208,9 @@ NEEDS_KUSTOMIZE = "kustomize is not installed"
 # the enforcing value disappears from the difference list instead of failing it.
 # The counts are what make a disappearance loud.
 STAGE_DIFFERENCE_COUNTS = {
-    "failureAction": 33,
-    "failurePolicy": 11,
-    "validationFailureAction": 11,
+    "failureAction": 32,
+    "failurePolicy": 10,
+    "validationFailureAction": 10,
 }
 
 # The reviewed rule inventory: every rule name each committed policy declares,
@@ -287,7 +286,6 @@ REVIEWED_RULE_NAMES = {
         "verify-naranjo-online-signature",
         "verify-naranjo-online-provenance",
     ),
-    "require-zero-site-capacity": ("require-capacity-not-ready-quota",),
 }
 
 

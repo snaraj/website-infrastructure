@@ -72,22 +72,19 @@ runtime.controllers.names=kyverno-admission-controller,kyverno-reports-controlle
 # them in the same pull request as anything that changes a committed policy, and
 # keep the base recorded here so a reader can tell which tree they describe.
 #
-# Re-derived 2026-08-22 for issue #185, which re-points both site publishers'
-# cosign subjects from `@refs/tags/v*` to `@refs/heads/main` in
-# policies/kyverno/require-signed-{naranjo-online,lidersea-com}.yaml. Both roots
-# compose that directory, so both digests moved. The rendered delta was diffed
-# against this base and is EXACTLY four lines per stage — the two subjects in
-# each of the two policies — with no other byte, no object added or removed, and
-# both counts still 23. The inventory lists below are therefore unchanged.
-render.base=5b43bc4b10c88c6c5e70469f007a3c99e5c4bb79
+# Re-derived 2026-08-24 for issue #201 from protected main below with the
+# reviewed zero-capacity sentinel removed. The only inventory change is that
+# one dormant ClusterPolicy; OCI verification, every other policy, stage
+# authorization, and runtime-webhook recovery bytes remain unchanged.
+render.base=a184a88cd316aa008c2ea74a507cbdb8dc480069
 
 # STAGE 1 — kubernetes/platform/admission-install/report-only
-report-only.sha256=58276208de09ae8900d7be1472ed7be1242ef36ac136d5e26d9d22b864be2b83
-report-only.objects=23
+report-only.sha256=2dc5d02b9655f13ef07bec83af0572cc16f79ad252b352a1b6c8564d062ecf16
+report-only.objects=22
 
 # STAGE 2 — kubernetes/platform/admission-install/enforce
-enforce.sha256=396424d7331397155d6e369168049cff7e9b6894ce6814deee4be555748808c8
-enforce.objects=23
+enforce.sha256=ca956ab64c17c884135ab30dc0725b6a89cc9dab74c19560345524c0e881efb0
+enforce.objects=22
 
 # The inventory, by scope. Both stages carry the identical object set — stage 1
 # differs only in policy action fields — so one inventory governs both.
@@ -111,9 +108,9 @@ enforce.objects=23
 # Re-derive both lists in the same pull request as anything that changes the
 # rendered object set; a list that disagrees with its count stops the installer
 # rather than shrinking the proof.
-inventory.cluster-scoped=12
+inventory.cluster-scoped=11
 inventory.namespaced=11
-inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-services,ClusterPolicy/disallow-tenant-media-payloads,ClusterPolicy/disallow-undiscovered-storage,ClusterPolicy/require-approved-images,ClusterPolicy/require-exact-tenant-networking,ClusterPolicy/require-release-readiness,ClusterPolicy/require-replicaset-admission-identity,ClusterPolicy/require-restricted-workloads,ClusterPolicy/require-signed-lidersea-com,ClusterPolicy/require-signed-naranjo-online,ClusterPolicy/require-zero-site-capacity
+inventory.cluster-scoped.names=Namespace/kyverno,ClusterPolicy/disallow-public-services,ClusterPolicy/disallow-tenant-media-payloads,ClusterPolicy/disallow-undiscovered-storage,ClusterPolicy/require-approved-images,ClusterPolicy/require-exact-tenant-networking,ClusterPolicy/require-release-readiness,ClusterPolicy/require-replicaset-admission-identity,ClusterPolicy/require-restricted-workloads,ClusterPolicy/require-signed-lidersea-com,ClusterPolicy/require-signed-naranjo-online
 inventory.namespaced.names=ResourceQuota/kyverno/namespace-budget,ServiceAccount/kyverno/kyverno-admission-controller,ConfigMap/kyverno/kyverno,Service/kyverno/kyverno-svc,LimitRange/kyverno/container-defaults,Deployment/kyverno/kyverno-admission-controller,NetworkPolicy/kyverno/default-deny,NetworkPolicy/kyverno/kyverno-admission-webhook,NetworkPolicy/kyverno/kyverno-dns,NetworkPolicy/kyverno/kyverno-kube-apiserver,NetworkPolicy/kyverno/kyverno-public-https
 
 # The webhook configurations Kyverno registers for ITSELF at runtime. They are

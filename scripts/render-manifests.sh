@@ -124,8 +124,13 @@ declare -a CORE_POLICY_FILES=(
 )
 declare -a SIGNATURE_POLICY_INVENTORY_ARGS=()
 if [[ "$MODE" == '--scaffold' ]]; then
-  CORE_POLICY_FILES+=(require-zero-site-capacity)
-  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory staging)
+  # Scaffold state is still allowed before or after the reviewed capacity
+  # graduation. If the dormant sentinel remains active it is a core policy;
+  # once removed, the exact promoted inventory is equally closed and reviewed.
+  if policy_resource_is_active require-zero-site-capacity.yaml; then
+    CORE_POLICY_FILES+=(require-zero-site-capacity)
+  fi
+  SIGNATURE_POLICY_INVENTORY_ARGS+=(--inventory staging --inventory promoted)
 elif [[ "$any_website_active" == 'true' ]]; then
   if policy_resource_is_active require-zero-site-capacity.yaml; then
     die 'a live or outer-reconcilable website refuses the still-active zero-site-capacity admission policy'
@@ -386,10 +391,6 @@ if [[ "$MODE" == '--scaffold' ]]; then
   expect_release_rejection "${ARTIFACT_ROOT}/helm-cloudflare-public.yaml" 'cloudflared tunnel token revision remains unresolved'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-admission.yaml" 'Deployment kyverno-admission-controller is not marked ready'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-admission.yaml" 'container kyverno still uses the all-zero digest'
-  expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-prerequisites.yaml" \
-    'site capacity gate remains closed or lacks a hash-bound reviewed budget in namespace naranjo-online'
-  expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-platform-prerequisites.yaml" \
-    'site capacity gate remains closed or lacks a hash-bound reviewed budget in namespace lidersea-com'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization admission remains suspended'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization platform-services remains suspended'
   expect_release_rejection "${ARTIFACT_ROOT}/kubernetes-reconciliation.yaml" 'Kustomization naranjo-online remains suspended'

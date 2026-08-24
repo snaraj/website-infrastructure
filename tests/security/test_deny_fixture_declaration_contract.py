@@ -51,6 +51,15 @@ def _read(path):
     return path.read_text(encoding="utf-8")
 
 
+def _fixture_for_sidecar(sidecar):
+    """Map the general or release-specific reviewed reasons to their YAML."""
+
+    suffix = ".release.expected"
+    if sidecar.name.endswith(suffix):
+        return sidecar.with_name(sidecar.name[: -len(suffix)] + ".yaml")
+    return sidecar.with_suffix(".yaml")
+
+
 class DenyFixtureDeclarationTests(unittest.TestCase):
     """Every committed deny fixture states what it must be rejected FOR."""
 
@@ -126,7 +135,7 @@ class DenyFixtureDeclarationTests(unittest.TestCase):
         orphans = [
             sidecar.name
             for sidecar in sorted(DENY_FIXTURES.glob("*.expected"))
-            if not sidecar.with_suffix(".yaml").is_file()
+            if not _fixture_for_sidecar(sidecar).is_file()
         ]
         self.assertEqual(orphans, [], "these reviewed denial lists have no fixture")
 

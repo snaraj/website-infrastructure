@@ -155,8 +155,11 @@ Any CNI, kube-proxy mode, API endpoint, Service CIDR, or control-plane membershi
 change invalidates this contract. Rebind and rerun the canaries before an
 install, promotion, or rollback; never widen a CIDR to make a test pass.
 
-`kustomize` and `kubectl` must resolve to absolute paths outside the checkout.
-Run the installer directly or as
+Every live mode requires both `kustomize` and `kubectl` to resolve to absolute
+paths outside the checkout. The offline `--render` lock-regeneration mode
+resolves only `kustomize`: it does not resolve or execute `kubectl`, and it does
+not read `KUBECONFIG`, context, server, runtime-network, journal, or cluster
+paths. Run the installer directly or as
 `/bin/bash -p scripts/install-kyverno-admission.sh`.
 The fixed `/bin/bash -p` entry point does not elevate privilege: it prevents
 `BASH_ENV`, `ENV`, and exported shell functions from running before the guards.
@@ -178,6 +181,17 @@ path cannot change the bytes that receive cluster authority, and a changed held
 image is refused before its next invocation. Self-reported versions remain a
 separate compatibility check, never executable identity. This binds external
 pathname races, not a compromised process running as the effective operator.
+
+The live/install contract remains Linux AMD64 and continues to require the
+existing `KUSTOMIZE_LINUX_AMD64_SHA256` and
+`KUBECTL_LINUX_AMD64_SHA256` executable pins. Render-only provenance is a
+closed host tuple: Linux/x86_64 uses that same kustomize executable pin;
+Darwin/arm64 requires both the official v5.8.1 release-archive SHA-256 and the
+independently pinned SHA-256 of its extracted `kustomize` binary from
+`versions.env`. Any other kernel/architecture pair stops. The archive pin
+identifies the official asset a reviewer downloads and verifies before
+extraction; every invocation is then rebound to the extracted-binary pin.
+Render-only support grants no kubectl pin, target identity, or live authority.
 Controller, helper, and canary images require full non-zero digests and must
 equal the reviewed pins.
 
