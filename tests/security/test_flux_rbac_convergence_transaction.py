@@ -880,6 +880,104 @@ class HelmChainContractTests(unittest.TestCase):
                         candidate, "naranjo-online", "naranjo-online"
                     )
 
+    def test_helm_proof_spec_builder_is_exact_and_fail_closed(self):
+        plan_sha256 = "a" * 64
+        pre_spec = copy.deepcopy(self.valid_release()["spec"])
+        pre_spec["commonMetadata"] = {
+            "annotations": {"example.test/existing": "kept"},
+            "labels": {"example.test/existing": "kept"},
+        }
+        original = copy.deepcopy(pre_spec)
+        changed = transaction.build_helm_proof_spec(pre_spec, plan_sha256)
+        self.assertEqual(pre_spec, original)
+        self.assertEqual(
+            changed["commonMetadata"],
+            {
+                "annotations": {
+                    "example.test/existing": "kept",
+                    transaction.PROOF_ANNOTATION: plan_sha256,
+                },
+                "labels": {"example.test/existing": "kept"},
+            },
+        )
+
+        cases = {
+            "spec": ([], plan_sha256, "HELM_PROOF_SPEC_INVALID"),
+            "common metadata": (
+                {**pre_spec, "commonMetadata": []},
+                plan_sha256,
+                "HELM_PROOF_COMMON_METADATA_INVALID",
+            ),
+            "annotations": (
+                {**pre_spec, "commonMetadata": {"annotations": []}},
+                plan_sha256,
+                "HELM_PROOF_ANNOTATIONS_INVALID",
+            ),
+            "collision": (
+                {
+                    **pre_spec,
+                    "commonMetadata": {
+                        "annotations": {transaction.PROOF_ANNOTATION: plan_sha256}
+                    },
+                },
+                plan_sha256,
+                "HELM_PROOF_ANNOTATION_COLLISION",
+            ),
+            "plan hash": (
+                pre_spec,
+                "A" * 64,
+                "HELM_PROOF_PLAN_SHA256_INVALID",
+            ),
+        }
+        for label, (candidate, candidate_hash, code) in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                transaction.TransactionError, code
+            ):
+                transaction.build_helm_proof_spec(candidate, candidate_hash)
+
+    def test_forward_helm_proof_calls_shared_spec_builder_before_write(self):
+        plan_sha256 = "a" * 64
+        plan = {
+            "temporaryProof": {
+                "identity": {
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2",
+                    "kind": "HelmRelease",
+                    "namespace": "naranjo-online",
+                    "name": "naranjo-online",
+                },
+                "annotationKey": transaction.PROOF_ANNOTATION,
+            },
+            "baselines": {
+                "flux": self.flux_snapshot_for_versions("0.1.30", "0.1.26")
+            },
+        }
+        live = self.valid_release()
+
+        class Client:
+            put_calls = 0
+
+            def get(self, _url):
+                return copy.deepcopy(live)
+
+            def put(self, _url, _body):
+                self.put_calls += 1
+                raise AssertionError("write must not precede builder")
+
+        journal = mock.Mock()
+        journal.document = {"planSha256": plan_sha256}
+        client = Client()
+        with mock.patch.object(
+            transaction,
+            "build_helm_proof_spec",
+            side_effect=transaction.TransactionError("BUILDER_SENTINEL"),
+        ) as builder, self.assertRaisesRegex(
+            transaction.TransactionError, "BUILDER_SENTINEL"
+        ):
+            transaction.helm_proof(client, plan, plan_sha256, journal)
+        builder.assert_called_once_with(live["spec"], plan_sha256)
+        self.assertEqual(client.put_calls, 0)
+        journal.write.assert_not_called()
+
     def test_chart_movement_after_plan_is_baseline_drift(self):
         planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
         moved = self.flux_snapshot_for_versions("0.1.33", "0.1.29")
@@ -3414,15 +3512,17 @@ class RollbackResponseLossTests(unittest.TestCase):
                 )
             }
         }
+        plan_sha256 = "a" * 64
         pre_spec = copy.deepcopy(pre["spec"])
-        mutated_spec = copy.deepcopy(pre_spec)
-        mutated_spec["commonMetadata"] = {
-            "annotations": {transaction.PROOF_ANNOTATION: "a" * 64}
-        }
+        mutated_spec = transaction.build_helm_proof_spec(pre_spec, plan_sha256)
+        mutated_spec_sha256 = transaction.sha256_bytes(
+            transaction.canonical_json(mutated_spec)
+        )
 
         class ProofJournal:
             def __init__(self):
                 self.document = {
+                    "planSha256": plan_sha256,
                     "helmProof": {
                         "state": "add-intent",
                         "uid": UID_THREE,
@@ -3433,8 +3533,9 @@ class RollbackResponseLossTests(unittest.TestCase):
                         "name": "naranjo-online",
                         "version": "0.1.30",
                         "upstreamDigest": HelmChainContractTests.UPSTREAM,
-                        "preSpec": pre_spec,
-                        "mutatedSpec": mutated_spec,
+                        "preSpec": copy.deepcopy(pre_spec),
+                        "mutatedSpec": copy.deepcopy(mutated_spec),
+                        "mutatedSpecSha256": mutated_spec_sha256,
                     }
                 }
                 self.writes = 0
@@ -3486,6 +3587,36 @@ class RollbackResponseLossTests(unittest.TestCase):
             transaction.restore_helm_proof(tampered_client, plan, tampered_journal)
         self.assertEqual(tampered_client.put_fence_calls, 0)
         self.assertEqual(tampered_journal.writes, 0)
+
+        substituted_journal = ProofJournal()
+        substituted_proof = substituted_journal.document["helmProof"]
+        substituted_proof["mutatedSpec"]["interval"] = "1m0s"
+        substituted_proof["mutatedSpecSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(substituted_proof["mutatedSpec"])
+        )
+        substituted_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PROOF_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(
+                substituted_client, plan, substituted_journal
+            )
+        self.assertEqual(substituted_client.put_fence_calls, 0)
+        self.assertEqual(substituted_journal.writes, 0)
+
+        hash_tampered_journal = ProofJournal()
+        hash_tampered_journal.document["helmProof"][
+            "mutatedSpecSha256"
+        ] = "0" * 64
+        hash_tampered_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PROOF_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(
+                hash_tampered_client, plan, hash_tampered_journal
+            )
+        self.assertEqual(hash_tampered_client.put_fence_calls, 0)
+        self.assertEqual(hash_tampered_journal.writes, 0)
 
         journal = ProofJournal()
         client = LostHelmFenceClient(pre)

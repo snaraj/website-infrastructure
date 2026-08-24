@@ -4781,6 +4781,41 @@ def planned_site_chart_identity(
     return version, upstream_digest, planned_release
 
 
+def build_helm_proof_spec(
+    pre_spec: object, plan_sha256: object
+) -> dict[str, object]:
+    """Construct the sole temporary Helm proof spec from immutable inputs."""
+
+    if not isinstance(pre_spec, Mapping):
+        raise TransactionError("HELM_PROOF_SPEC_INVALID")
+    if (
+        not isinstance(plan_sha256, str)
+        or SHA256_RE.fullmatch(plan_sha256) is None
+    ):
+        raise TransactionError("HELM_PROOF_PLAN_SHA256_INVALID")
+    changed_spec = copy.deepcopy(dict(pre_spec))
+    if "commonMetadata" in changed_spec:
+        common = changed_spec["commonMetadata"]
+        if not isinstance(common, Mapping):
+            raise TransactionError("HELM_PROOF_COMMON_METADATA_INVALID")
+        changed_common = copy.deepcopy(dict(common))
+    else:
+        changed_common = {}
+    if "annotations" in changed_common:
+        annotations = changed_common["annotations"]
+        if not isinstance(annotations, Mapping):
+            raise TransactionError("HELM_PROOF_ANNOTATIONS_INVALID")
+        changed_annotations = copy.deepcopy(dict(annotations))
+    else:
+        changed_annotations = {}
+    if PROOF_ANNOTATION in changed_annotations:
+        raise TransactionError("HELM_PROOF_ANNOTATION_COLLISION")
+    changed_annotations[PROOF_ANNOTATION] = plan_sha256
+    changed_common["annotations"] = changed_annotations
+    changed_spec["commonMetadata"] = changed_common
+    return changed_spec
+
+
 def helm_proof(
     client: KubeClient,
     plan: Mapping[str, object],
@@ -4822,11 +4857,8 @@ def helm_proof(
     spec = current.get("spec")
     if not isinstance(spec, Mapping):
         raise TransactionError("HELM_PROOF_SPEC_INVALID")
-    common = spec.get("commonMetadata")
-    annotations = common.get("annotations") if isinstance(common, Mapping) else None
-    if isinstance(annotations, Mapping) and PROOF_ANNOTATION in annotations:
-        raise TransactionError("HELM_PROOF_ANNOTATION_COLLISION")
     pre_spec = copy.deepcopy(dict(spec))
+    mutated_spec = build_helm_proof_spec(pre_spec, plan_sha256)
     pre_generation = pre_snapshot["generation"]
     pre_history_revision = pre_snapshot["historyRevision"]
     if not isinstance(pre_generation, int) or not isinstance(
@@ -4834,16 +4866,7 @@ def helm_proof(
     ):
         raise TransactionError("HELM_PROOF_PRESTATE_INVALID")
     changed = writable_from_live(current)
-    changed_spec = changed.get("spec")
-    assert isinstance(changed_spec, MutableMapping)
-    changed_common = changed_spec.setdefault("commonMetadata", {})
-    if not isinstance(changed_common, MutableMapping):
-        raise TransactionError("HELM_PROOF_COMMON_METADATA_INVALID")
-    changed_annotations = changed_common.setdefault("annotations", {})
-    if not isinstance(changed_annotations, MutableMapping):
-        raise TransactionError("HELM_PROOF_ANNOTATIONS_INVALID")
-    changed_annotations[PROOF_ANNOTATION] = plan_sha256
-    mutated_spec = copy.deepcopy(dict(changed_spec))
+    changed["spec"] = copy.deepcopy(mutated_spec)
     journal.document["helmProof"] = {
         "state": "add-intent",
         "uid": uid,
@@ -5792,6 +5815,8 @@ def restore_helm_proof(
         raise RecoveryRequired("ROLLBACK_HELM_UID_DRIFT")
     pre_spec = proof.get("preSpec")
     mutated_spec = proof.get("mutatedSpec")
+    mutated_spec_sha256 = proof.get("mutatedSpecSha256")
+    plan_sha256 = journal.document.get("planSha256")
     pre_snapshot = proof.get("preSnapshot")
     namespace = proof.get("namespace")
     name = proof.get("name")
@@ -5837,6 +5862,21 @@ def restore_helm_proof(
         )
     except TransactionError as exc:
         raise RecoveryRequired("ROLLBACK_HELM_SPEC_INVALID") from exc
+    try:
+        expected_mutated_spec = build_helm_proof_spec(pre_spec, plan_sha256)
+    except TransactionError as exc:
+        raise RecoveryRequired("ROLLBACK_HELM_PROOF_BINDING_INVALID") from exc
+    expected_mutated_spec_sha256 = sha256_bytes(
+        canonical_json(expected_mutated_spec)
+    )
+    if (
+        dict(mutated_spec) != expected_mutated_spec
+        or not isinstance(mutated_spec_sha256, str)
+        or SHA256_RE.fullmatch(mutated_spec_sha256) is None
+        or mutated_spec_sha256 != expected_mutated_spec_sha256
+    ):
+        raise RecoveryRequired("ROLLBACK_HELM_PROOF_BINDING_INVALID")
+    mutated_spec = expected_mutated_spec
     live_spec = live.get("spec")
     if live_spec == pre_spec and proof.get("state") == "add-intent":
         try:
