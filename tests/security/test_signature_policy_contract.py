@@ -407,36 +407,47 @@ class SignaturePolicyContractTests(unittest.TestCase):
         canonical = REPO_ROOT.joinpath(
             "policies", "kyverno", "kustomization.yaml"
         ).read_text(encoding="utf-8")
+        self.assertEqual(canonical, MODULE.EXPECTED_POLICY_KUSTOMIZATION)
         self.assertEqual(
-            MODULE.signature_policy_kustomization_errors(canonical, ("staging",)),
-            [],
+            set(MODULE.POLICY_KUSTOMIZATION_INVENTORIES),
+            {"staging", "promoted"},
         )
-        self.assertTrue(
-            MODULE.signature_policy_kustomization_errors(canonical, ("promoted",))
-        )
-
-        promoted = MODULE.EXPECTED_PROMOTED_POLICY_KUSTOMIZATION
-        self.assertEqual(
-            MODULE.signature_policy_kustomization_errors(promoted, ("promoted",)),
-            [],
-        )
-        self.assertTrue(
-            MODULE.signature_policy_kustomization_errors(promoted, ("staging",))
-        )
+        for inventory in ("staging", "promoted"):
+            with self.subTest(inventory=inventory, canonical=True):
+                self.assertEqual(
+                    MODULE.signature_policy_kustomization_errors(
+                        canonical, (inventory,)
+                    ),
+                    [],
+                )
         self.assertEqual(
             MODULE.signature_policy_kustomization_errors(
-                promoted, ("staging", "promoted")
+                canonical, ("staging", "promoted")
             ),
             [],
         )
-        self.assertTrue(MODULE.signature_policy_kustomization_errors(promoted, ()))
+        self.assertTrue(MODULE.signature_policy_kustomization_errors(canonical, ()))
+        self.assertTrue(
+            MODULE.signature_policy_kustomization_errors(canonical, ("third",))
+        )
         for label, candidate in {
             "name prefix": canonical + "namePrefix: bypass-\n",
             "name suffix": canonical + "nameSuffix: -bypass\n",
             "patch": canonical + "patches:\n  - path: bypass.yaml\n",
+            "obsolete zero policy": canonical.replace(
+                "  - require-exact-tenant-networking.yaml\n",
+                "  - require-zero-site-capacity.yaml\n"
+                "  - require-exact-tenant-networking.yaml\n",
+            ),
             "duplicate": canonical + "  - require-signed-naranjo-online.yaml\n",
             "missing": canonical.replace(
                 "  - require-signed-lidersea-com.yaml\n", ""
+            ),
+            "reordered": canonical.replace(
+                "  - require-signed-naranjo-online.yaml\n"
+                "  - require-signed-lidersea-com.yaml\n",
+                "  - require-signed-lidersea-com.yaml\n"
+                "  - require-signed-naranjo-online.yaml\n",
             ),
             "replacement": canonical.replace(
                 "  - require-signed-lidersea-com.yaml\n",
@@ -447,25 +458,14 @@ class SignaturePolicyContractTests(unittest.TestCase):
             "generator": canonical + "secretGenerator:\n  - name: bypass\n",
             "image rewrite": canonical + "images:\n  - name: bypass\n",
         }.items():
-            with self.subTest(label=label):
-                self.assertTrue(
-                    MODULE.signature_policy_kustomization_errors(
-                        candidate, ("staging", "promoted")
+            self.assertNotEqual(candidate, canonical, "mutation changed nothing")
+            for inventory in ("staging", "promoted"):
+                with self.subTest(label=label, inventory=inventory):
+                    self.assertTrue(
+                        MODULE.signature_policy_kustomization_errors(
+                            candidate, (inventory,)
+                        )
                     )
-                )
-
-        for label, candidate in {
-            "promoted extra": promoted + "  - bypass.yaml\n",
-            "promoted missing": promoted.replace(
-                "  - require-signed-lidersea-com.yaml\n", ""
-            ),
-        }.items():
-            with self.subTest(label=label):
-                self.assertTrue(
-                    MODULE.signature_policy_kustomization_errors(
-                        candidate, ("promoted",)
-                    )
-                )
 
     def test_admission_parent_rejects_every_kustomize_transform(self):
         canonical = MODULE.EXPECTED_ADMISSION_KUSTOMIZATION

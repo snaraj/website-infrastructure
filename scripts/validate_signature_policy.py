@@ -64,7 +64,7 @@ SIGNATURE_DESCRIPTIONS = {
     "naranjo-online": "Verify the exact GitHub workflow signature and SLSA provenance bundle.",
     "lidersea-com": "Verify the exact lidersea.com workflow signature and SLSA provenance bundle.",
 }
-EXPECTED_STAGING_POLICY_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
+EXPECTED_POLICY_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - require-restricted-workloads.yaml
@@ -72,18 +72,18 @@ resources:
   - require-approved-images.yaml
   - disallow-undiscovered-storage.yaml
   - disallow-tenant-media-payloads.yaml
-  - require-zero-site-capacity.yaml
   - require-exact-tenant-networking.yaml
   - require-release-readiness.yaml
   - require-replicaset-admission-identity.yaml
   - require-signed-naranjo-online.yaml
   - require-signed-lidersea-com.yaml
 """
-EXPECTED_PROMOTED_POLICY_KUSTOMIZATION = (
-    EXPECTED_STAGING_POLICY_KUSTOMIZATION.replace(
-        "  - require-zero-site-capacity.yaml\n", ""
-    )
-)
+# `staging` and `promoted` remain the two closed API classifications, but #201
+# graduates both onto these same exact no-zero-policy bytes. Keeping two labels
+# bound to one value preserves fail-closed callers without admitting a third or
+# loosely matched inventory.
+EXPECTED_STAGING_POLICY_KUSTOMIZATION = EXPECTED_POLICY_KUSTOMIZATION
+EXPECTED_PROMOTED_POLICY_KUSTOMIZATION = EXPECTED_POLICY_KUSTOMIZATION
 POLICY_KUSTOMIZATION_INVENTORIES = {
     "staging": EXPECTED_STAGING_POLICY_KUSTOMIZATION,
     "promoted": EXPECTED_PROMOTED_POLICY_KUSTOMIZATION,
