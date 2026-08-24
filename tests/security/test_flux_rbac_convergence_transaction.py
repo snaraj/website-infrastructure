@@ -27,6 +27,7 @@ if TEST_TEMP_ROOT == ROOT or ROOT in TEST_TEMP_ROOT.parents:
 TRANSACTION_PATH = ROOT / "bootstrap/flux/rbac-convergence/transaction.py"
 DESIRED_PATH = ROOT / "bootstrap/flux/rbac-convergence/desired-active.json"
 SOURCE_MANIFEST_PATH = ROOT / "bootstrap/flux/rbac-convergence/source-manifest.v1"
+RUNBOOK_PATH = ROOT / "docs/runbooks/flux-rbac-narrowing.md"
 
 
 def _load_transaction():
@@ -399,7 +400,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v023-release-binding.md": 0o600,
+            "changelog.d/141-flux-rbac-v024-dynamic-site-baseline.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -671,6 +672,330 @@ class HelmChainContractTests(unittest.TestCase):
             "0.1.30",
             self.UPSTREAM,
         )
+
+    def flux_snapshot_for_versions(
+        self, naranjo_version, lidersea_version, source_mutation=None
+    ):
+        paths = {path: [] for path in transaction.FLUX_CRD_COLLECTIONS.values()}
+        paths[transaction.FLUX_CRD_COLLECTIONS["OCIRepository"]] = [
+            self.source(
+                "naranjo-online",
+                "naranjo-online",
+                naranjo_version,
+                UID_ONE,
+                "11",
+            ),
+            self.source(
+                "lidersea-com", "lidersea-com", lidersea_version, UID_TWO, "12"
+            ),
+        ]
+        paths[transaction.FLUX_CRD_COLLECTIONS["HelmRelease"]] = [
+            self.release(
+                "naranjo-online",
+                "naranjo-online",
+                naranjo_version,
+                UID_THREE,
+                "13",
+            ),
+            self.release(
+                "lidersea-com", "lidersea-com", lidersea_version, UID_FOUR, "14"
+            ),
+        ]
+        if source_mutation is not None:
+            source_mutation(
+                paths[transaction.FLUX_CRD_COLLECTIONS["OCIRepository"]][0]
+            )
+
+        class Client:
+            def get(self, path):
+                return {"items": copy.deepcopy(paths[path])}
+
+        return transaction.flux_snapshot(Client())
+
+    def test_runbook_binds_dynamic_site_chart_identity_to_immutable_plan(self):
+        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+        procedure_marker = "## Procedure"
+        step_marker = "1. **Freeze the live prestate without Secret data.**"
+        next_step_marker = "2. **Close the mutation inventory.**"
+        self.assertEqual(runbook.count(procedure_marker), 1)
+        procedure = runbook.split(procedure_marker, 1)[1]
+        self.assertEqual(procedure.count(step_marker), 1)
+        self.assertEqual(procedure.count(next_step_marker), 1)
+        step_one = procedure.split(step_marker, 1)[1].split(next_step_marker, 1)[0]
+        contract = " ".join(step_one.split())
+
+        for required in (
+            "`naranjo-online/naranjo-online-chart` to "
+            "`naranjo-online/naranjo-online`",
+            "`lidersea-com/lidersea-com-chart` to `lidersea-com/lidersea-com`",
+            "derive `chartVersion` only during `--plan` from the exact current "
+            "Cosign-verified OCI artifact `revision`",
+            "canonical stable release SemVer inside the exact "
+            "`>=0.1.9 <1.0.0` source range",
+            "its nonzero upstream `sha256:` `upstreamDigest`",
+            "`attemptedRevision=<chartVersion>+<first-12-upstreamDigest-hex>`",
+            "`attemptedRevisionDigest=<upstreamDigest>`",
+            "`historyChartVersion=<attemptedRevision>`",
+            "`historyOciDigest` either absent or exactly `<upstreamDigest>`",
+            "must remain exactly equal to its recorded immutable plan baseline",
+            "A later chart version, even when canonical, stable, and in range, "
+            "is drift; do not recapture or replan it into this transaction.",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, contract)
+        for former_fixed_version in ("`0.1.30`", "`0.1.26`"):
+            with self.subTest(former_fixed_version=former_fixed_version):
+                self.assertNotIn(former_fixed_version, contract)
+
+    def test_dynamic_source_identity_requires_current_successful_verification(self):
+        for label, field, value in (
+            ("missing", None, None),
+            ("false", "status", "False"),
+            ("stale generation", "observedGeneration", 2),
+            ("wrong reason", "reason", "VerificationFailed"),
+        ):
+            def mutate(source):
+                conditions = source["status"]["conditions"]
+                verified = next(
+                    condition
+                    for condition in conditions
+                    if condition.get("type") == "SourceVerified"
+                )
+                if field is None:
+                    conditions.remove(verified)
+                else:
+                    verified[field] = value
+
+            with self.subTest(label=label), self.assertRaisesRegex(
+                transaction.TransactionError, "OCI_REVISION_INVALID"
+            ):
+                self.flux_snapshot_for_versions("0.1.32", "0.1.29", mutate)
+
+    def test_source_revision_derives_only_canonical_in_range_release_versions(self):
+        self.assertEqual(
+            transaction.expected_site_oci_spec(
+                "naranjo-online", "naranjo-online"
+            )["ref"],
+            {"semver": ">=0.1.9 <1.0.0"},
+        )
+        for revision, expected in (
+            ("0.1.9@" + self.UPSTREAM, "0.1.9"),
+            ("v0.1.32@" + self.UPSTREAM, "0.1.32"),
+            ("0.99.0@" + self.UPSTREAM, "0.99.0"),
+        ):
+            with self.subTest(revision=revision):
+                version, digest = transaction.parse_site_oci_revision(revision)
+                self.assertEqual(version, expected)
+                self.assertEqual(digest, self.UPSTREAM)
+
+        for version in (
+            "0.1.8",
+            "1.0.0",
+            "0.01.32",
+            "0.1.32-rc.1",
+            "0.1.32+build.1",
+        ):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                transaction.TransactionError, "OCI_REVISION_INVALID"
+            ):
+                transaction.parse_site_oci_revision(version + "@" + self.UPSTREAM)
+
+    def test_flux_snapshot_accepts_and_records_current_in_range_site_versions(self):
+        snapshot = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        self.assertEqual(
+            snapshot["oci"]["naranjo-online/naranjo-online-chart"]["chartVersion"],
+            "0.1.32",
+        )
+        self.assertEqual(
+            snapshot["oci"]["lidersea-com/lidersea-com-chart"]["chartVersion"],
+            "0.1.29",
+        )
+        self.assertEqual(
+            snapshot["helm"]["naranjo-online/naranjo-online"][
+                "attemptedRevision"
+            ],
+            "0.1.32+" + "a" * 12,
+        )
+
+    def test_source_and_helm_chart_versions_must_match(self):
+        paths = {path: [] for path in transaction.FLUX_CRD_COLLECTIONS.values()}
+        paths[transaction.FLUX_CRD_COLLECTIONS["OCIRepository"]] = [
+            self.source(
+                "naranjo-online", "naranjo-online", "0.1.32", UID_ONE, "11"
+            ),
+            self.source(
+                "lidersea-com", "lidersea-com", "0.1.29", UID_TWO, "12"
+            ),
+        ]
+        paths[transaction.FLUX_CRD_COLLECTIONS["HelmRelease"]] = [
+            self.release(
+                "naranjo-online", "naranjo-online", "0.1.30", UID_THREE, "13"
+            ),
+            self.release(
+                "lidersea-com", "lidersea-com", "0.1.29", UID_FOUR, "14"
+            ),
+        ]
+
+        class Client:
+            def get(self, path):
+                return {"items": copy.deepcopy(paths[path])}
+
+        with self.assertRaisesRegex(
+            transaction.TransactionError, "HELM_REVISION_INVALID"
+        ):
+            transaction.flux_snapshot(Client())
+
+    def test_helm_proof_recovers_exact_chart_identity_from_plan_baseline(self):
+        flux = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        plan = {"baselines": {"flux": flux}}
+        version, digest, release = transaction.planned_site_chart_identity(
+            plan, "naranjo-online", "naranjo-online"
+        )
+        self.assertEqual(version, "0.1.32")
+        self.assertEqual(digest, self.UPSTREAM)
+        self.assertEqual(release["attemptedRevision"], "0.1.32+" + "a" * 12)
+
+        for label, mutate in (
+            (
+                "source version",
+                lambda candidate: candidate["baselines"]["flux"]["oci"][
+                    "naranjo-online/naranjo-online-chart"
+                ].update(chartVersion="0.1.31"),
+            ),
+            (
+                "Helm history",
+                lambda candidate: candidate["baselines"]["flux"]["helm"][
+                    "naranjo-online/naranjo-online"
+                ].update(historyChartVersion="0.1.31+" + "a" * 12),
+            ),
+        ):
+            with self.subTest(label=label):
+                candidate = copy.deepcopy(plan)
+                mutate(candidate)
+                with self.assertRaisesRegex(
+                    transaction.TransactionError,
+                    "PLAN_SITE_CHART_BINDING_INVALID",
+                ):
+                    transaction.planned_site_chart_identity(
+                        candidate, "naranjo-online", "naranjo-online"
+                    )
+
+    def test_helm_proof_spec_builder_is_exact_and_fail_closed(self):
+        plan_sha256 = "a" * 64
+        pre_spec = copy.deepcopy(self.valid_release()["spec"])
+        pre_spec["commonMetadata"] = {
+            "annotations": {"example.test/existing": "kept"},
+            "labels": {"example.test/existing": "kept"},
+        }
+        original = copy.deepcopy(pre_spec)
+        changed = transaction.build_helm_proof_spec(pre_spec, plan_sha256)
+        self.assertEqual(pre_spec, original)
+        self.assertEqual(
+            changed["commonMetadata"],
+            {
+                "annotations": {
+                    "example.test/existing": "kept",
+                    transaction.PROOF_ANNOTATION: plan_sha256,
+                },
+                "labels": {"example.test/existing": "kept"},
+            },
+        )
+
+        cases = {
+            "spec": ([], plan_sha256, "HELM_PROOF_SPEC_INVALID"),
+            "common metadata": (
+                {**pre_spec, "commonMetadata": []},
+                plan_sha256,
+                "HELM_PROOF_COMMON_METADATA_INVALID",
+            ),
+            "annotations": (
+                {**pre_spec, "commonMetadata": {"annotations": []}},
+                plan_sha256,
+                "HELM_PROOF_ANNOTATIONS_INVALID",
+            ),
+            "collision": (
+                {
+                    **pre_spec,
+                    "commonMetadata": {
+                        "annotations": {transaction.PROOF_ANNOTATION: plan_sha256}
+                    },
+                },
+                plan_sha256,
+                "HELM_PROOF_ANNOTATION_COLLISION",
+            ),
+            "plan hash": (
+                pre_spec,
+                "A" * 64,
+                "HELM_PROOF_PLAN_SHA256_INVALID",
+            ),
+        }
+        for label, (candidate, candidate_hash, code) in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                transaction.TransactionError, code
+            ):
+                transaction.build_helm_proof_spec(candidate, candidate_hash)
+
+    def test_forward_helm_proof_calls_shared_spec_builder_before_write(self):
+        plan_sha256 = "a" * 64
+        plan = {
+            "temporaryProof": {
+                "identity": {
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2",
+                    "kind": "HelmRelease",
+                    "namespace": "naranjo-online",
+                    "name": "naranjo-online",
+                },
+                "annotationKey": transaction.PROOF_ANNOTATION,
+            },
+            "baselines": {
+                "flux": self.flux_snapshot_for_versions("0.1.30", "0.1.26")
+            },
+        }
+        live = self.valid_release()
+
+        class Client:
+            put_calls = 0
+
+            def get(self, _url):
+                return copy.deepcopy(live)
+
+            def put(self, _url, _body):
+                self.put_calls += 1
+                raise AssertionError("write must not precede builder")
+
+        journal = mock.Mock()
+        journal.document = {"planSha256": plan_sha256}
+        client = Client()
+        with mock.patch.object(
+            transaction,
+            "build_helm_proof_spec",
+            side_effect=transaction.TransactionError("BUILDER_SENTINEL"),
+        ) as builder, self.assertRaisesRegex(
+            transaction.TransactionError, "BUILDER_SENTINEL"
+        ):
+            transaction.helm_proof(client, plan, plan_sha256, journal)
+        builder.assert_called_once_with(live["spec"], plan_sha256)
+        self.assertEqual(client.put_calls, 0)
+        journal.write.assert_not_called()
+
+    def test_chart_movement_after_plan_is_baseline_drift(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        moved = self.flux_snapshot_for_versions("0.1.33", "0.1.29")
+        plan = {
+            "baselines": {"flux": planned, "workloads": {}, "publicSites": {}}
+        }
+        with mock.patch.object(
+            transaction, "flux_snapshot", return_value=moved
+        ), mock.patch.object(
+            transaction, "workload_snapshot", return_value={}
+        ), mock.patch.object(
+            transaction, "validate_helm_workload_inventory"
+        ), mock.patch.object(
+            transaction, "public_health", return_value={}
+        ), self.assertRaisesRegex(
+            transaction.TransactionError, "FLUX_BASELINE_DRIFT"
+        ):
+            transaction.stable_baselines(plan, object())
 
     def test_flux_snapshot_binds_helm_to_upstream_not_stored_artifact_digest(self):
         sources = [
@@ -1727,12 +2052,13 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.23")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.24")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
             "v0.1.22",
-            "v0.1.24",
+            "v0.1.23",
+            "v0.1.25",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(
@@ -3179,27 +3505,37 @@ class RollbackResponseLossTests(unittest.TestCase):
             "0.1.30",
             HelmChainContractTests.UPSTREAM,
         )
-        pre_spec = copy.deepcopy(pre["spec"])
-        mutated_spec = copy.deepcopy(pre_spec)
-        mutated_spec["commonMetadata"] = {
-            "annotations": {transaction.PROOF_ANNOTATION: "a" * 64}
+        plan = {
+            "baselines": {
+                "flux": HelmChainContractTests().flux_snapshot_for_versions(
+                    "0.1.30", "0.1.26"
+                )
+            }
         }
+        plan_sha256 = "a" * 64
+        pre_spec = copy.deepcopy(pre["spec"])
+        mutated_spec = transaction.build_helm_proof_spec(pre_spec, plan_sha256)
+        mutated_spec_sha256 = transaction.sha256_bytes(
+            transaction.canonical_json(mutated_spec)
+        )
 
         class ProofJournal:
             def __init__(self):
                 self.document = {
+                    "planSha256": plan_sha256,
                     "helmProof": {
                         "state": "add-intent",
                         "uid": UID_THREE,
                         "preGeneration": 5,
                         "preHistoryRevision": 7,
-                        "preSnapshot": pre_snapshot,
+                        "preSnapshot": copy.deepcopy(pre_snapshot),
                         "namespace": "naranjo-online",
                         "name": "naranjo-online",
                         "version": "0.1.30",
                         "upstreamDigest": HelmChainContractTests.UPSTREAM,
-                        "preSpec": pre_spec,
-                        "mutatedSpec": mutated_spec,
+                        "preSpec": copy.deepcopy(pre_spec),
+                        "mutatedSpec": copy.deepcopy(mutated_spec),
+                        "mutatedSpecSha256": mutated_spec_sha256,
                     }
                 }
                 self.writes = 0
@@ -3235,13 +3571,114 @@ class RollbackResponseLossTests(unittest.TestCase):
             def put(self, _url, body):
                 return self._replace(body)
 
+        tampered_journal = ProofJournal()
+        tampered_proof = tampered_journal.document["helmProof"]
+        tampered_proof["version"] = "0.1.31"
+        tampered_proof["upstreamDigest"] = "sha256:" + "b" * 64
+        tampered_snapshot = tampered_proof["preSnapshot"]
+        tampered_snapshot["attemptedRevision"] = "0.1.31+" + "b" * 12
+        tampered_snapshot["attemptedRevisionDigest"] = "sha256:" + "b" * 64
+        tampered_snapshot["historyChartVersion"] = "0.1.31+" + "b" * 12
+        tampered_snapshot["historyOciDigest"] = "sha256:" + "b" * 64
+        tampered_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PLAN_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(tampered_client, plan, tampered_journal)
+        self.assertEqual(tampered_client.put_fence_calls, 0)
+        self.assertEqual(tampered_journal.writes, 0)
+
+        substituted_journal = ProofJournal()
+        substituted_proof = substituted_journal.document["helmProof"]
+        substituted_proof["mutatedSpec"]["interval"] = "1m0s"
+        substituted_proof["mutatedSpecSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(substituted_proof["mutatedSpec"])
+        )
+        substituted_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PROOF_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(
+                substituted_client, plan, substituted_journal
+            )
+        self.assertEqual(substituted_client.put_fence_calls, 0)
+        self.assertEqual(substituted_journal.writes, 0)
+
+        hash_tampered_journal = ProofJournal()
+        hash_tampered_journal.document["helmProof"][
+            "mutatedSpecSha256"
+        ] = "0" * 64
+        hash_tampered_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PROOF_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(
+                hash_tampered_client, plan, hash_tampered_journal
+            )
+        self.assertEqual(hash_tampered_client.put_fence_calls, 0)
+        self.assertEqual(hash_tampered_journal.writes, 0)
+
         journal = ProofJournal()
         client = LostHelmFenceClient(pre)
         with mock.patch.object(transaction, "wait_helm_restored"):
-            transaction.restore_helm_proof(client, journal)
+            transaction.restore_helm_proof(client, plan, journal)
         self.assertEqual(client.put_fence_calls, 1)
         self.assertEqual(client.live["spec"], pre_spec)
         self.assertEqual(journal.document["helmProof"]["state"], "restored")
+
+    def test_helm_recovery_rejects_coherent_pre_spec_substitution_before_writes(self):
+        pre = HelmChainContractTests().valid_release()
+        pre_snapshot = transaction.validate_site_helm_release(
+            pre,
+            "naranjo-online",
+            "naranjo-online",
+            "0.1.30",
+            HelmChainContractTests.UPSTREAM,
+        )
+        plan = {
+            "baselines": {
+                "flux": HelmChainContractTests().flux_snapshot_for_versions(
+                    "0.1.30", "0.1.26"
+                )
+            }
+        }
+        plan_sha256 = "a" * 64
+        substituted_pre_spec = copy.deepcopy(pre["spec"])
+        substituted_pre_spec["interval"] = "1m0s"
+        substituted_mutated_spec = transaction.build_helm_proof_spec(
+            substituted_pre_spec, plan_sha256
+        )
+        journal = mock.Mock()
+        journal.document = {
+            "planSha256": plan_sha256,
+            "helmProof": {
+                "state": "add-intent",
+                "uid": UID_THREE,
+                "preGeneration": 5,
+                "preHistoryRevision": 7,
+                "preSnapshot": copy.deepcopy(pre_snapshot),
+                "namespace": "naranjo-online",
+                "name": "naranjo-online",
+                "version": "0.1.30",
+                "upstreamDigest": HelmChainContractTests.UPSTREAM,
+                "preSpec": substituted_pre_spec,
+                "mutatedSpec": substituted_mutated_spec,
+                "mutatedSpecSha256": transaction.sha256_bytes(
+                    transaction.canonical_json(substituted_mutated_spec)
+                ),
+            },
+        }
+        client = mock.Mock()
+        client.get.return_value = copy.deepcopy(pre)
+
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PLAN_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(client, plan, journal)
+
+        client.put.assert_not_called()
+        client.put_fence.assert_not_called()
+        journal.write.assert_not_called()
 
     def test_rollback_restores_broad_authority_before_every_other_object(self):
         broad_id = "delete:ClusterRoleBinding:cluster-reconciler-flux-system"

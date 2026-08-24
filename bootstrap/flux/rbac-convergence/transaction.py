@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.22 and can therefore
+# selector.  Its protected-base candidate follows v0.1.23 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.23"
+AUTHORIZED_RELEASE_TAG = "v0.1.24"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v023-release-binding.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v024-dynamic-site-baseline.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -150,10 +150,18 @@ KUBERNETES_DEFAULT_GROUP_BINDINGS = {
         {"system:serviceaccounts"}
     ),
 }
-SITE_RELEASES = {
-    ("naranjo-online", "naranjo-online"): "0.1.30",
-    ("lidersea-com", "lidersea-com"): "0.1.26",
-}
+SITE_RELEASES = frozenset(
+    {
+        ("naranjo-online", "naranjo-online"),
+        ("lidersea-com", "lidersea-com"),
+    }
+)
+SITE_CHART_SEMVER_RANGE = ">=0.1.9 <1.0.0"
+SITE_CHART_MIN_VERSION = (0, 1, 9)
+SITE_CHART_MAX_VERSION = (1, 0, 0)
+SITE_CHART_VERSION_RE = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z"
+)
 SITE_SIGNING_REPOSITORIES = {
     ("naranjo-online", "naranjo-online"): "naranjo.online",
     ("lidersea-com", "lidersea-com"): "lidersea.com",
@@ -1897,7 +1905,7 @@ def expected_site_oci_spec(namespace: str, name: str) -> dict[str, object]:
             "operation": "copy",
         },
         "provider": "generic",
-        "ref": {"semver": ">=0.1.9 <1.0.0"},
+        "ref": {"semver": SITE_CHART_SEMVER_RANGE},
         "timeout": "60s",
         "url": f"oci://ghcr.io/snaraj/charts/{name}",
         "verify": {
@@ -1925,16 +1933,62 @@ def require_sha256_digest(value: object, code: str) -> str:
     return value
 
 
-def parse_site_oci_revision(revision: object, version: str) -> tuple[str, str]:
+def require_site_chart_version(value: object, code: str) -> str:
+    """Require one canonical release SemVer inside the reviewed source range."""
+
+    if not isinstance(value, str):
+        raise TransactionError(code)
+    match = SITE_CHART_VERSION_RE.fullmatch(value)
+    if match is None:
+        raise TransactionError(code)
+    try:
+        components = tuple(int(component) for component in match.groups())
+    except ValueError as exc:
+        raise TransactionError(code) from exc
+    if not SITE_CHART_MIN_VERSION <= components < SITE_CHART_MAX_VERSION:
+        raise TransactionError(code)
+    return value
+
+
+def parse_site_oci_revision(revision: object) -> tuple[str, str]:
     if not isinstance(revision, str):
         raise TransactionError("OCI_REVISION_INVALID")
     match = re.fullmatch(
-        r"(?P<tag>v?" + re.escape(version) + r")@sha256:(?P<digest>[0-9a-f]{64})",
+        r"v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+)@sha256:"
+        r"(?P<digest>[0-9a-f]{64})",
         revision,
     )
     if match is None or set(match.group("digest")) == {"0"}:
         raise TransactionError("OCI_REVISION_INVALID")
-    return match.group("tag").removeprefix("v"), "sha256:" + match.group("digest")
+    version = require_site_chart_version(
+        match.group("version"), "OCI_REVISION_INVALID"
+    )
+    return version, "sha256:" + match.group("digest")
+
+
+def validate_site_chart_snapshot_binding(
+    snapshot: Mapping[str, object],
+    version: object,
+    upstream_digest: object,
+    code: str,
+) -> tuple[str, str]:
+    """Bind a normalized Helm snapshot to one exact source version and digest."""
+
+    normalized_version = require_site_chart_version(version, code)
+    normalized_digest = require_sha256_digest(upstream_digest, code)
+    expected_revision = (
+        normalized_version
+        + "+"
+        + normalized_digest.removeprefix("sha256:")[:12]
+    )
+    if (
+        snapshot.get("attemptedRevision") != expected_revision
+        or snapshot.get("attemptedRevisionDigest") != normalized_digest
+        or snapshot.get("historyChartVersion") != expected_revision
+        or snapshot.get("historyOciDigest") not in (None, normalized_digest)
+    ):
+        raise TransactionError(code)
+    return normalized_version, normalized_digest
 
 
 def validate_site_helm_release(
@@ -1996,6 +2050,7 @@ def validate_site_helm_release(
     ):
         raise TransactionError("HELM_STATUS_GENERATION_INVALID")
 
+    version = require_site_chart_version(version, "HELM_CHART_VERSION_INVALID")
     upstream_digest = require_sha256_digest(
         upstream_digest, "HELM_UPSTREAM_DIGEST_INVALID"
     )
@@ -2151,7 +2206,6 @@ def flux_snapshot(client: KubeClient) -> dict[str, object]:
     result_oci: dict[str, object] = {}
     result_helm: dict[str, object] = {}
     for namespace, name in sorted(expected):
-        version = SITE_RELEASES[(namespace, name)]
         source = oci_by_id[(namespace, name + "-chart")]
         if object_is_terminating(source):
             raise TransactionError("OCI_TERMINATING")
@@ -2168,14 +2222,11 @@ def flux_snapshot(client: KubeClient) -> dict[str, object]:
             if isinstance(condition, Mapping) and condition.get("type") == "SourceVerified"
         ]
         expected_spec = expected_site_oci_spec(namespace, name)
-        source_chart_version, upstream_digest = parse_site_oci_revision(
-            revision, version
-        )
+        source_chart_version, upstream_digest = parse_site_oci_revision(revision)
         if (
             not isinstance(source_status, Mapping)
             or not isinstance(source_spec, Mapping)
             or dict(source_spec) != expected_spec
-            or source_chart_version != version
             or require_sha256_digest(digest, "OCI_STORED_ARTIFACT_DIGEST_INVALID")
             != digest
             or source_status.get("observedGeneration")
@@ -2209,7 +2260,7 @@ def flux_snapshot(client: KubeClient) -> dict[str, object]:
         }
         release = helm_by_id[(namespace, name)]
         result_helm[f"{namespace}/{name}"] = validate_site_helm_release(
-            release, namespace, name, version, upstream_digest
+            release, namespace, name, source_chart_version, upstream_digest
         )
     return {
         "closedEmptyInventories": {
@@ -4685,6 +4736,86 @@ def verify_controller_phase(
     return current
 
 
+def planned_site_chart_identity(
+    plan: Mapping[str, object], namespace: str, name: str
+) -> tuple[str, str, Mapping[str, object]]:
+    """Recover one exact OCI-to-Helm identity from the immutable plan baseline."""
+
+    if (namespace, name) not in SITE_RELEASES:
+        raise TransactionError("PLAN_SITE_CHART_BINDING_INVALID")
+    baselines = plan.get("baselines")
+    planned_flux = baselines.get("flux") if isinstance(baselines, Mapping) else None
+    planned_helm = planned_flux.get("helm") if isinstance(planned_flux, Mapping) else None
+    planned_oci = planned_flux.get("oci") if isinstance(planned_flux, Mapping) else None
+    planned_release = (
+        planned_helm.get(f"{namespace}/{name}")
+        if isinstance(planned_helm, Mapping)
+        else None
+    )
+    planned_source = (
+        planned_oci.get(f"{namespace}/{name}-chart")
+        if isinstance(planned_oci, Mapping)
+        else None
+    )
+    if not isinstance(planned_release, Mapping) or not isinstance(
+        planned_source, Mapping
+    ):
+        raise TransactionError("PLAN_SITE_CHART_BINDING_INVALID")
+    try:
+        version, upstream_digest = parse_site_oci_revision(
+            planned_source.get("revision")
+        )
+        if (
+            planned_source.get("chartVersion") != version
+            or planned_source.get("upstreamDigest") != upstream_digest
+        ):
+            raise TransactionError("PLAN_SITE_CHART_BINDING_INVALID")
+        version, upstream_digest = validate_site_chart_snapshot_binding(
+            planned_release,
+            version,
+            upstream_digest,
+            "PLAN_SITE_CHART_BINDING_INVALID",
+        )
+    except TransactionError as exc:
+        raise TransactionError("PLAN_SITE_CHART_BINDING_INVALID") from exc
+    return version, upstream_digest, planned_release
+
+
+def build_helm_proof_spec(
+    pre_spec: object, plan_sha256: object
+) -> dict[str, object]:
+    """Construct the sole temporary Helm proof spec from immutable inputs."""
+
+    if not isinstance(pre_spec, Mapping):
+        raise TransactionError("HELM_PROOF_SPEC_INVALID")
+    if (
+        not isinstance(plan_sha256, str)
+        or SHA256_RE.fullmatch(plan_sha256) is None
+    ):
+        raise TransactionError("HELM_PROOF_PLAN_SHA256_INVALID")
+    changed_spec = copy.deepcopy(dict(pre_spec))
+    if "commonMetadata" in changed_spec:
+        common = changed_spec["commonMetadata"]
+        if not isinstance(common, Mapping):
+            raise TransactionError("HELM_PROOF_COMMON_METADATA_INVALID")
+        changed_common = copy.deepcopy(dict(common))
+    else:
+        changed_common = {}
+    if "annotations" in changed_common:
+        annotations = changed_common["annotations"]
+        if not isinstance(annotations, Mapping):
+            raise TransactionError("HELM_PROOF_ANNOTATIONS_INVALID")
+        changed_annotations = copy.deepcopy(dict(annotations))
+    else:
+        changed_annotations = {}
+    if PROOF_ANNOTATION in changed_annotations:
+        raise TransactionError("HELM_PROOF_ANNOTATION_COLLISION")
+    changed_annotations[PROOF_ANNOTATION] = plan_sha256
+    changed_common["annotations"] = changed_annotations
+    changed_spec["commonMetadata"] = changed_common
+    return changed_spec
+
+
 def helm_proof(
     client: KubeClient,
     plan: Mapping[str, object],
@@ -4704,34 +4835,19 @@ def helm_proof(
         "annotationKey": PROOF_ANNOTATION,
     }:
         raise TransactionError("HELM_PROOF_IDENTITY_INVALID")
-    baselines = plan.get("baselines")
-    planned_flux = baselines.get("flux") if isinstance(baselines, Mapping) else None
-    planned_helm = planned_flux.get("helm") if isinstance(planned_flux, Mapping) else None
-    planned_oci = planned_flux.get("oci") if isinstance(planned_flux, Mapping) else None
-    planned_release = (
-        planned_helm.get("naranjo-online/naranjo-online")
-        if isinstance(planned_helm, Mapping)
-        else None
-    )
-    planned_source = (
-        planned_oci.get("naranjo-online/naranjo-online-chart")
-        if isinstance(planned_oci, Mapping)
-        else None
-    )
-    if not isinstance(planned_release, Mapping) or not isinstance(
-        planned_source, Mapping
-    ):
-        raise TransactionError("HELM_PROOF_BASELINE_INVALID")
-    upstream_digest = planned_source.get("upstreamDigest")
-    if not isinstance(upstream_digest, str):
-        raise TransactionError("HELM_PROOF_SOURCE_DIGEST_INVALID")
+    try:
+        version, upstream_digest, planned_release = planned_site_chart_identity(
+            plan, "naranjo-online", "naranjo-online"
+        )
+    except TransactionError as exc:
+        raise TransactionError("HELM_PROOF_BASELINE_INVALID") from exc
     _collection, url = resource_urls("HelmRelease", "naranjo-online", "naranjo-online")
     current = client.get(url)
     pre_snapshot = validate_site_helm_release(
         current,
         "naranjo-online",
         "naranjo-online",
-        SITE_RELEASES[("naranjo-online", "naranjo-online")],
+        version,
         upstream_digest,
     )
     if pre_snapshot != dict(planned_release):
@@ -4741,11 +4857,8 @@ def helm_proof(
     spec = current.get("spec")
     if not isinstance(spec, Mapping):
         raise TransactionError("HELM_PROOF_SPEC_INVALID")
-    common = spec.get("commonMetadata")
-    annotations = common.get("annotations") if isinstance(common, Mapping) else None
-    if isinstance(annotations, Mapping) and PROOF_ANNOTATION in annotations:
-        raise TransactionError("HELM_PROOF_ANNOTATION_COLLISION")
     pre_spec = copy.deepcopy(dict(spec))
+    mutated_spec = build_helm_proof_spec(pre_spec, plan_sha256)
     pre_generation = pre_snapshot["generation"]
     pre_history_revision = pre_snapshot["historyRevision"]
     if not isinstance(pre_generation, int) or not isinstance(
@@ -4753,16 +4866,7 @@ def helm_proof(
     ):
         raise TransactionError("HELM_PROOF_PRESTATE_INVALID")
     changed = writable_from_live(current)
-    changed_spec = changed.get("spec")
-    assert isinstance(changed_spec, MutableMapping)
-    changed_common = changed_spec.setdefault("commonMetadata", {})
-    if not isinstance(changed_common, MutableMapping):
-        raise TransactionError("HELM_PROOF_COMMON_METADATA_INVALID")
-    changed_annotations = changed_common.setdefault("annotations", {})
-    if not isinstance(changed_annotations, MutableMapping):
-        raise TransactionError("HELM_PROOF_ANNOTATIONS_INVALID")
-    changed_annotations[PROOF_ANNOTATION] = plan_sha256
-    mutated_spec = copy.deepcopy(dict(changed_spec))
+    changed["spec"] = copy.deepcopy(mutated_spec)
     journal.document["helmProof"] = {
         "state": "add-intent",
         "uid": uid,
@@ -4772,7 +4876,7 @@ def helm_proof(
         "preSnapshot": copy.deepcopy(pre_snapshot),
         "namespace": "naranjo-online",
         "name": "naranjo-online",
-        "version": SITE_RELEASES[("naranjo-online", "naranjo-online")],
+        "version": version,
         "upstreamDigest": upstream_digest,
         "preSpec": pre_spec,
         "mutatedSpec": mutated_spec,
@@ -4807,7 +4911,7 @@ def helm_proof(
         uid,
         "naranjo-online",
         "naranjo-online",
-        SITE_RELEASES[("naranjo-online", "naranjo-online")],
+        version,
         upstream_digest,
         pre_generation,
         pre_history_revision,
@@ -4868,7 +4972,7 @@ def helm_proof(
         uid,
         "naranjo-online",
         "naranjo-online",
-        SITE_RELEASES[("naranjo-online", "naranjo-online")],
+        version,
         upstream_digest,
         int(upgraded["generation"]),
         int(upgraded["historyRevision"]),
@@ -5696,7 +5800,9 @@ def cleanup_rollback_annotations(
         journal.write()
 
 
-def restore_helm_proof(client: KubeClient, journal: Journal) -> None:
+def restore_helm_proof(
+    client: KubeClient, plan: Mapping[str, object], journal: Journal
+) -> None:
     proof = journal.document.get("helmProof")
     if not isinstance(proof, Mapping) or proof.get("state") == "not-started":
         return
@@ -5709,6 +5815,8 @@ def restore_helm_proof(client: KubeClient, journal: Journal) -> None:
         raise RecoveryRequired("ROLLBACK_HELM_UID_DRIFT")
     pre_spec = proof.get("preSpec")
     mutated_spec = proof.get("mutatedSpec")
+    mutated_spec_sha256 = proof.get("mutatedSpecSha256")
+    plan_sha256 = journal.document.get("planSha256")
     pre_snapshot = proof.get("preSnapshot")
     namespace = proof.get("namespace")
     name = proof.get("name")
@@ -5722,12 +5830,53 @@ def restore_helm_proof(client: KubeClient, journal: Journal) -> None:
         or not isinstance(pre_snapshot, Mapping)
         or namespace != "naranjo-online"
         or name != "naranjo-online"
-        or version != SITE_RELEASES[("naranjo-online", "naranjo-online")]
-        or not isinstance(upstream_digest, str)
         or not isinstance(pre_generation, int)
         or not isinstance(pre_history_revision, int)
     ):
         raise RecoveryRequired("ROLLBACK_HELM_SPEC_INVALID")
+    try:
+        planned_version, planned_digest, planned_snapshot = (
+            planned_site_chart_identity(
+                plan, "naranjo-online", "naranjo-online"
+            )
+        )
+    except TransactionError as exc:
+        raise RecoveryRequired("ROLLBACK_HELM_PLAN_BINDING_INVALID") from exc
+    if (
+        version != planned_version
+        or upstream_digest != planned_digest
+        or dict(pre_snapshot) != dict(planned_snapshot)
+        or uid != planned_snapshot.get("uid")
+        or pre_generation != planned_snapshot.get("generation")
+        or pre_history_revision != planned_snapshot.get("historyRevision")
+        or sha256_bytes(canonical_json(pre_spec))
+        != planned_snapshot.get("specSha256")
+    ):
+        raise RecoveryRequired("ROLLBACK_HELM_PLAN_BINDING_INVALID")
+    try:
+        version, upstream_digest = validate_site_chart_snapshot_binding(
+            pre_snapshot,
+            version,
+            upstream_digest,
+            "ROLLBACK_HELM_SPEC_INVALID",
+        )
+    except TransactionError as exc:
+        raise RecoveryRequired("ROLLBACK_HELM_SPEC_INVALID") from exc
+    try:
+        expected_mutated_spec = build_helm_proof_spec(pre_spec, plan_sha256)
+    except TransactionError as exc:
+        raise RecoveryRequired("ROLLBACK_HELM_PROOF_BINDING_INVALID") from exc
+    expected_mutated_spec_sha256 = sha256_bytes(
+        canonical_json(expected_mutated_spec)
+    )
+    if (
+        dict(mutated_spec) != expected_mutated_spec
+        or not isinstance(mutated_spec_sha256, str)
+        or SHA256_RE.fullmatch(mutated_spec_sha256) is None
+        or mutated_spec_sha256 != expected_mutated_spec_sha256
+    ):
+        raise RecoveryRequired("ROLLBACK_HELM_PROOF_BINDING_INVALID")
+    mutated_spec = expected_mutated_spec
     live_spec = live.get("spec")
     if live_spec == pre_spec and proof.get("state") == "add-intent":
         try:
@@ -5933,7 +6082,7 @@ def rollback_internal(client: KubeClient, plan: Mapping[str, object], journal: J
                     and target_by_id[operation_id].get("action") != "noop"
                 ):
                     wait_controller_rollout(client, str(target_by_id[operation_id]["name"]))
-    restore_helm_proof(client, journal)
+    restore_helm_proof(client, plan, journal)
     for operation_id in reversed(order):
         if operation_id in operations and operation_id not in handled:
             restore_object(client, target_by_id[operation_id], journal)
