@@ -3626,6 +3626,60 @@ class RollbackResponseLossTests(unittest.TestCase):
         self.assertEqual(client.live["spec"], pre_spec)
         self.assertEqual(journal.document["helmProof"]["state"], "restored")
 
+    def test_helm_recovery_rejects_coherent_pre_spec_substitution_before_writes(self):
+        pre = HelmChainContractTests().valid_release()
+        pre_snapshot = transaction.validate_site_helm_release(
+            pre,
+            "naranjo-online",
+            "naranjo-online",
+            "0.1.30",
+            HelmChainContractTests.UPSTREAM,
+        )
+        plan = {
+            "baselines": {
+                "flux": HelmChainContractTests().flux_snapshot_for_versions(
+                    "0.1.30", "0.1.26"
+                )
+            }
+        }
+        plan_sha256 = "a" * 64
+        substituted_pre_spec = copy.deepcopy(pre["spec"])
+        substituted_pre_spec["interval"] = "1m0s"
+        substituted_mutated_spec = transaction.build_helm_proof_spec(
+            substituted_pre_spec, plan_sha256
+        )
+        journal = mock.Mock()
+        journal.document = {
+            "planSha256": plan_sha256,
+            "helmProof": {
+                "state": "add-intent",
+                "uid": UID_THREE,
+                "preGeneration": 5,
+                "preHistoryRevision": 7,
+                "preSnapshot": copy.deepcopy(pre_snapshot),
+                "namespace": "naranjo-online",
+                "name": "naranjo-online",
+                "version": "0.1.30",
+                "upstreamDigest": HelmChainContractTests.UPSTREAM,
+                "preSpec": substituted_pre_spec,
+                "mutatedSpec": substituted_mutated_spec,
+                "mutatedSpecSha256": transaction.sha256_bytes(
+                    transaction.canonical_json(substituted_mutated_spec)
+                ),
+            },
+        }
+        client = mock.Mock()
+        client.get.return_value = copy.deepcopy(pre)
+
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PLAN_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(client, plan, journal)
+
+        client.put.assert_not_called()
+        client.put_fence.assert_not_called()
+        journal.write.assert_not_called()
+
     def test_rollback_restores_broad_authority_before_every_other_object(self):
         broad_id = "delete:ClusterRoleBinding:cluster-reconciler-flux-system"
         narrow_id = "create:Role:flux-system:example"
