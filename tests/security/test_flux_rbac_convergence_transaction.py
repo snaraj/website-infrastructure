@@ -1151,7 +1151,11 @@ class HelmChainContractTests(unittest.TestCase):
     def test_missing_or_malformed_flux_resource_version_fails_closed(self):
         planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
         identity = next(iter(planned["oci"]))
-        for label, replacement in ("missing", None), ("malformed", "moved"):
+        for label, replacement in (
+            ("missing", None),
+            ("malformed", "moved"),
+            ("zero", "0"),
+        ):
             with self.subTest(label=label):
                 current = copy.deepcopy(planned)
                 if replacement is None:
@@ -4191,6 +4195,20 @@ class RollbackResponseLossTests(unittest.TestCase):
             )
         self.assertEqual(hash_tampered_client.put_fence_calls, 0)
         self.assertEqual(hash_tampered_journal.writes, 0)
+
+        zero_version_journal = ProofJournal()
+        zero_version_journal.document["helmProof"]["preSnapshot"][
+            "resourceVersion"
+        ] = "0"
+        zero_version_client = LostHelmFenceClient(pre)
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "ROLLBACK_HELM_PLAN_BINDING_INVALID"
+        ):
+            transaction.restore_helm_proof(
+                zero_version_client, plan, zero_version_journal
+            )
+        self.assertEqual(zero_version_client.put_fence_calls, 0)
+        self.assertEqual(zero_version_journal.writes, 0)
 
         drifted_pre = copy.deepcopy(pre)
         drifted_pre["metadata"]["resourceVersion"] = str(

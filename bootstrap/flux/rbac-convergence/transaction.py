@@ -2589,6 +2589,7 @@ def flux_row_without_resource_version(row: object) -> dict[str, object]:
         or not isinstance(row.get("resourceVersion"), str)
         or not str(row["resourceVersion"]).isascii()
         or not str(row["resourceVersion"]).isdecimal()
+        or int(str(row["resourceVersion"])) <= 0
     ):
         raise TransactionError("FLUX_BASELINE_INVALID")
     return {key: value for key, value in row.items() if key != "resourceVersion"}
