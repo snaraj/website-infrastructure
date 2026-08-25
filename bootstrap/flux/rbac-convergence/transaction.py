@@ -3079,7 +3079,11 @@ def binding_graph_row(item: Mapping[str, object]) -> dict[str, object] | None:
     }
 
 
-def binding_graph(client: KubeClient) -> dict[str, object]:
+def typed_binding_collection_items(
+    client: KubeClient,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Bind both raw RBAC list responses to their fixed path TypeMeta."""
+
     api_version = "rbac.authorization.k8s.io/v1"
     cluster = [
         collection_item_with_type_meta(
@@ -3103,6 +3107,11 @@ def binding_graph(client: KubeClient) -> dict[str, object]:
             client, "/apis/rbac.authorization.k8s.io/v1/rolebindings"
         )
     ]
+    return cluster, namespaced
+
+
+def binding_graph(client: KubeClient) -> dict[str, object]:
+    cluster, namespaced = typed_binding_collection_items(client)
     rows: list[dict[str, object]] = []
     for item in cluster + namespaced:
         row = binding_graph_row(item)
@@ -5406,12 +5415,7 @@ def binding_graph_final(client: KubeClient) -> dict[str, object]:
 
 
 def binding_graph_without_broad_requirement(client: KubeClient) -> dict[str, object]:
-    cluster = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
-    )
-    namespaced = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/rolebindings"
-    )
+    cluster, namespaced = typed_binding_collection_items(client)
     rows: list[dict[str, object]] = []
     for item in cluster + namespaced:
         row = binding_graph_row(item)

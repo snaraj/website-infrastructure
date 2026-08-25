@@ -1385,19 +1385,26 @@ class BindingGraphTypeMetaTests(unittest.TestCase):
         }
 
     @staticmethod
-    def snapshot(paths):
+    def snapshot(paths, *, require_broad=True):
         class Client:
             def get(self, path):
                 return {"items": copy.deepcopy(paths[path])}
 
-        return transaction.binding_graph(Client())
+        snapshotter = (
+            transaction.binding_graph
+            if require_broad
+            else transaction.binding_graph_without_broad_requirement
+        )
+        return snapshotter(Client())
 
     def test_raw_binding_lists_restore_only_caller_bound_type_meta_on_copies(self):
         paths = self.fixtures()
         original = copy.deepcopy(paths)
         graph = self.snapshot(paths)
+        terminal_graph = self.snapshot(paths, require_broad=False)
 
         self.assertEqual(paths, original)
+        self.assertEqual(terminal_graph, graph)
         rows = {row["name"]: row for row in graph["rows"]}
         self.assertEqual(
             set(rows),
@@ -1451,12 +1458,13 @@ class BindingGraphTypeMetaTests(unittest.TestCase):
             ),
         }
         for label, (path, mutate, error) in cases.items():
-            with self.subTest(label=label):
-                paths = self.fixtures()
-                mutate(paths[path][0])
-                with self.assertRaises(transaction.TransactionError) as caught:
-                    self.snapshot(paths)
-                self.assertEqual(str(caught.exception), error)
+            for require_broad in (True, False):
+                with self.subTest(label=label, require_broad=require_broad):
+                    paths = self.fixtures()
+                    mutate(paths[path][0])
+                    with self.assertRaises(transaction.TransactionError) as caught:
+                        self.snapshot(paths, require_broad=require_broad)
+                    self.assertEqual(str(caught.exception), error)
 
         paths = self.fixtures()
         second_broad = copy.deepcopy(paths[self.CLUSTER_PATH][0])
@@ -1861,12 +1869,30 @@ class ControllerRuntimeContractTests(unittest.TestCase):
                 "uid", UID_FOUR
             ),
         }
+        expected_errors = {
+            "deployment spec image": "CONTROLLER_IMAGE_INVALID",
+            "pod service account": "CONTROLLER_POD_NOT_READY",
+            "pod args": "CONTROLLER_POD_NOT_READY",
+            "pod spec image": "CONTROLLER_POD_NOT_READY",
+            "empty status image": "CONTROLLER_POD_NOT_READY",
+            "missing status image": "CONTROLLER_POD_NOT_READY",
+            "non-string status image": "CONTROLLER_POD_NOT_READY",
+            "oversized status image": "CONTROLLER_POD_NOT_READY",
+            "image id repository": "CONTROLLER_POD_IMAGE_ID_INVALID",
+            "image id digest": "CONTROLLER_POD_IMAGE_ID_INVALID",
+            "phase": "CONTROLLER_POD_NOT_READY",
+            "negative restarts": "CONTROLLER_POD_NOT_READY",
+            "pod owner": "CONTROLLER_REPLICASET_INVALID",
+            "replicaset owner": "CONTROLLER_REPLICASET_OWNER_INVALID",
+        }
+        self.assertEqual(set(mutations), set(expected_errors))
         for label, mutate in mutations.items():
             with self.subTest(label=label):
                 images, deployments, pods, replica_sets = self.fixture()
                 mutate(deployments, pods, replica_sets)
-                with self.assertRaises(transaction.TransactionError):
+                with self.assertRaises(transaction.TransactionError) as caught:
                     self.snapshot(images, deployments, pods, replica_sets)
+                self.assertEqual(str(caught.exception), expected_errors[label])
 
 
 class PlanLifetimeTests(unittest.TestCase):
