@@ -106,6 +106,9 @@ metadata:
   namespace: naranjo-online
 rules:
   - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
   - apiGroups: [apps]

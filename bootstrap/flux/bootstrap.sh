@@ -1153,6 +1153,9 @@ def access_role_rules():
         rule(["apps"], ["replicasets"], ["get", "list", "watch"]),
         rule(["networking.k8s.io"], ["networkpolicies"], mutate),
     ]
+    naranjo_helm = helm + [
+        rule([""], ["persistentvolumeclaims"], mutate),
+    ]
     # Controller identity. These are the namespaced Roles that replace the
     # deleted cluster-admin binding: leader election and controller-owned
     # ConfigMaps, the SOPS key read, and the name-restricted impersonation
@@ -1210,7 +1213,7 @@ def access_role_rules():
         ("naranjo-online", "flux-release-reconciler"): oci_release,
         ("lidersea-com", "flux-release-reconciler"): oci_release,
         ("cloudflare-public", "helm-reconciler"): helm,
-        ("naranjo-online", "helm-reconciler"): helm,
+        ("naranjo-online", "helm-reconciler"): naranjo_helm,
         ("lidersea-com", "helm-reconciler"): helm,
     }
 

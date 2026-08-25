@@ -707,12 +707,13 @@ valid_reviewed_capacity_quota if {
   input.metadata.name == "namespace-budget"
   annotations := object.get(input.metadata, "annotations", {})
   object.get(annotations, "platform.snaraj.dev/readiness", "") == "reviewed-pi-capacity"
-  regex.match("^[0-9a-f]{64}$", object.get(annotations, "platform.snaraj.dev/capacity-evidence-sha256", ""))
-  hard := object.get(input.spec, "hard", {})
-  object.keys(hard) == {"pods", "requests.cpu", "requests.memory", "limits.cpu", "limits.memory"}
-  to_number(hard.pods) >= 2
-  every key in {"requests.cpu", "requests.memory", "limits.cpu", "limits.memory"} {
-    regex.match("^[1-9][0-9]*(?:m|Ki|Mi|Gi)?$", hard[key])
+  object.get(annotations, "platform.snaraj.dev/capacity-evidence-sha256", "") == "955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34"
+  object.get(input.spec, "hard", {}) == {
+    "pods": "6",
+    "requests.cpu": "150m",
+    "requests.memory": "192Mi",
+    "limits.cpu": "1200m",
+    "limits.memory": "768Mi",
   }
 }
 
@@ -916,6 +917,27 @@ valid_helm_readback_rule(rule) if {
   input.metadata.name == "helm-reconciler"
   input.metadata.namespace in tenant_namespaces
   rule == {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}
+}
+
+valid_naranjo_pvc_rule(rule) if {
+  input.metadata.name == "helm-reconciler"
+  input.metadata.namespace == "naranjo-online"
+  rule == {"apiGroups": [""], "resources": ["persistentvolumeclaims"], "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]}
+}
+
+deny contains msg if {
+  input.kind == "Role"
+  some rule in object.get(input, "rules", [])
+  "persistentvolumeclaims" in object.get(rule, "resources", [])
+  not valid_naranjo_pvc_rule(rule)
+  msg := sprintf("Role %s/%s must grant PVC lifecycle only as the exact naranjo-online helm-reconciler rule", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "ClusterRole"
+  some rule in object.get(input, "rules", [])
+  "persistentvolumeclaims" in object.get(rule, "resources", [])
+  msg := sprintf("ClusterRole %s must not grant cluster-wide PVC authority", [input.metadata.name])
 }
 
 valid_helm_readback_rule(rule) if {

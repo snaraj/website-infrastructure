@@ -18,6 +18,8 @@ spec:
     name: flux-system
   suspend: true
   timeout: 5m0s
-  # The contained HelmRelease and the namespace's zero-Pod quota are separate
-  # fail-closed gates. HelmRelease status is the health boundary after activation.
+  # The reviewed namespace quota is a bounded capacity guardrail, not an
+  # activation signal. This Kustomization's suspension and the contained
+  # HelmRelease's suspended state are separate activation gates; HelmRelease
+  # status becomes the health boundary only after both gates are cleared.
   wait: false

@@ -91,12 +91,6 @@ patches:
       group: kyverno.io
       version: v1
       kind: ClusterPolicy
-      name: require-zero-site-capacity
-    path: patches/audit-require-zero-site-capacity.yaml
-  - target:
-      group: kyverno.io
-      version: v1
-      kind: ClusterPolicy
       name: require-exact-tenant-networking
     path: patches/audit-require-exact-tenant-networking.yaml
   - target:

@@ -6,7 +6,6 @@ resources:
   - require-approved-images.yaml
   - disallow-undiscovered-storage.yaml
   - disallow-tenant-media-payloads.yaml
-  - require-zero-site-capacity.yaml
   - require-exact-tenant-networking.yaml
   - require-release-readiness.yaml
   - require-replicaset-admission-identity.yaml

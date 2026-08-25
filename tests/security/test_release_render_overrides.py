@@ -32,6 +32,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER = REPO_ROOT / "scripts" / "render-manifests.sh"
 DETERMINISM = REPO_ROOT / "scripts" / "ci" / "verify-render-determinism.sh"
 RELEASE_POLICY = REPO_ROOT / "policies" / "release-conftest"
+REPOSITORY_POLICY = REPO_ROOT / "policies" / "conftest"
+CAPACITY_DENY_FIXTURE = (
+    REPO_ROOT / "tests" / "kubernetes" / "fixtures" / "deny"
+    / "reviewed-capacity-bypasses.yaml"
+)
 
 BASH = shutil.which("bash")
 CONFTEST = shutil.which("conftest")
@@ -126,15 +131,15 @@ def site_release_document(
     )
 
 
-def release_policy_denials(path):
-    """Return the exact denial messages the release policy raises."""
+def conftest_policy_denials(policy, path):
+    """Return the exact denial messages one Conftest policy surface raises."""
 
     completed = subprocess.run(
         [
             required_tool(CONFTEST, "conftest is required"),
             "test",
             "--policy",
-            str(RELEASE_POLICY),
+            str(policy),
             "--output",
             "json",
             str(path),
@@ -164,6 +169,128 @@ def release_policy_denials(path):
             )
         )
     return denials
+
+
+def release_policy_denials(path):
+    """Return the exact denial messages the release policy raises."""
+
+    return conftest_policy_denials(RELEASE_POLICY, path)
+
+
+def capacity_deny_documents():
+    """Return the six named single-mutation capacity documents."""
+
+    documents = []
+    for document in re.split(
+        r"(?m)^---\s*$", CAPACITY_DENY_FIXTURE.read_text(encoding="utf-8")
+    ):
+        case = re.search(r"(?m)^# capacity-deny-case: (\S+)$", document)
+        namespace = re.search(r"(?m)^  namespace: (\S+)$", document)
+        if case is None or namespace is None:
+            raise AssertionError("capacity deny fixture has an unnamed document")
+        documents.append((case.group(1), namespace.group(1), document.lstrip()))
+    return documents
+
+
+FORMER_BROAD_CAPACITY_PREDICATE = """valid_reviewed_capacity_quota if {
+  input.metadata.name == "namespace-budget"
+  annotations := object.get(input.metadata, "annotations", {})
+  object.get(annotations, "platform.snaraj.dev/readiness", "") == "reviewed-pi-capacity"
+  regex.match("^[0-9a-f]{64}$", object.get(annotations, "platform.snaraj.dev/capacity-evidence-sha256", ""))
+  hard := object.get(input.spec, "hard", {})
+  object.keys(hard) == {"pods", "requests.cpu", "requests.memory", "limits.cpu", "limits.memory"}
+  to_number(hard.pods) >= 2
+  every key in {"requests.cpu", "requests.memory", "limits.cpu", "limits.memory"} {
+    regex.match("^[1-9][0-9]*(?:m|Ki|Mi|Gi)?$", hard[key])
+  }
+}"""
+
+
+def restore_broad_capacity_predicate(path):
+    """Mutate one copied policy back to the pre-#201 syntactic predicate."""
+
+    text = path.read_text(encoding="utf-8")
+    start = text.index("valid_reviewed_capacity_quota if {")
+    end = text.index("\n}\n", start) + len("\n}")
+    path.write_text(
+        text[:start] + FORMER_BROAD_CAPACITY_PREDICATE + text[end:],
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+@unittest.skipUnless(CONFTEST, "conftest is required")
+class CapacityPolicyContractTests(unittest.TestCase):
+    """Bind all six reviewed-capacity fields across both Rego surfaces."""
+
+    CASES = {
+        "audit-sha256",
+        "pods",
+        "requests.cpu",
+        "requests.memory",
+        "limits.cpu",
+        "limits.memory",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.documents = capacity_deny_documents()
+        if {case for case, _, _ in cls.documents} != cls.CASES:
+            raise AssertionError("capacity deny fixture does not cover the exact six fields")
+
+    def _write_document(self, root, case, document):
+        path = root / (case.replace(".", "-") + ".yaml")
+        path.write_text(document, encoding="utf-8", newline="\n")
+        return path
+
+    def test_every_wrong_field_has_one_exact_reason_on_both_surfaces(self):
+        surfaces = (
+            (
+                REPOSITORY_POLICY,
+                lambda namespace: (
+                    "ResourceQuota {}/namespace-budget must be either the exact "
+                    "zero-Pod gate or a hash-bound reviewed namespace budget"
+                ).format(namespace),
+            ),
+            (
+                RELEASE_POLICY,
+                lambda namespace: (
+                    "site capacity gate remains closed or lacks a hash-bound "
+                    "reviewed budget in namespace {}"
+                ).format(namespace),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for case, namespace, document in self.documents:
+                manifest = self._write_document(root, case, document)
+                for policy, reason in surfaces:
+                    with self.subTest(case=case, policy=policy.name):
+                        self.assertEqual(
+                            conftest_policy_denials(policy, manifest),
+                            {reason(namespace)},
+                        )
+
+    def test_former_broad_predicate_is_killed_on_both_surfaces(self):
+        policy_files = (
+            (REPOSITORY_POLICY, "kubernetes.rego"),
+            (RELEASE_POLICY, "deployment-readiness.rego"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for policy, filename in policy_files:
+                mutated_policy = root / policy.name
+                shutil.copytree(policy, mutated_policy)
+                restore_broad_capacity_predicate(mutated_policy / filename)
+                for case, _, document in self.documents:
+                    manifest = self._write_document(root, policy.name + "-" + case, document)
+                    with self.subTest(case=case, policy=policy.name):
+                        self.assertEqual(
+                            conftest_policy_denials(mutated_policy, manifest),
+                            set(),
+                            "the former broad predicate must accept this mutant so "
+                            "the committed deny case is proven to kill it",
+                        )
 
 
 class ReleaseRenderOverrideTests(unittest.TestCase):
@@ -412,9 +539,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         inventory = set(
             re.findall(r'^\s+"([a-z0-9-]+)",?$', match.group("body"), re.MULTILINE)
         )
-        expected = set(bash_array(self.script, "CORE_POLICY_FILES")) | {
-            "require-zero-site-capacity"
-        }
+        expected = set(bash_array(self.script, "CORE_POLICY_FILES"))
         self.assertEqual(
             inventory,
             expected,
@@ -531,7 +656,9 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             with self.subTest(artifact=artifact):
                 self.assertGreater(self.script.index(artifact, active_gate), active_gate)
         self.assertIn(
-            "a live or outer-reconcilable website refuses the still-active zero-site-capacity admission policy",
+            "obsolete require-zero-site-capacity.yaml is active; restoration "
+            "requires a coordinated inventory, overlay, render-lock, and "
+            "validator recut",
             self.script,
         )
         self.assertIn("active website parent", self.script)

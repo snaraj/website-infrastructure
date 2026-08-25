@@ -57,8 +57,9 @@
 #                         Audit, and at least one policy report produced.
 #
 # MODES
-#   --render        render, hash, and print the inventory; no cluster contact,
-#                   no pins required. This is how render.lock is regenerated.
+#   --render        render, hash, and print the inventory with only the pinned
+#                   host-native kustomize; no kubectl, kubeconfig, target, or
+#                   cluster contact. This is how render.lock is regenerated.
 #   --plan          every guard, plus the read-only pre-apply gate. No mutation.
 #   --apply         the same guards, then the ordered transactional apply.
 #   --rollback      remove exactly what a journal says an attempt created.
@@ -101,10 +102,11 @@ case "$-" in
 esac
 unset BASH_ENV ENV
 
-# Retain ambient PATH only as data for the builtin lookup of the two reviewed
-# tool candidates. Every helper and every child process runs with the closed
-# system path below, so a directory that supplies kubectl cannot also replace
-# head, sed, stat, an interpreter, or another guard primitive.
+# Retain ambient PATH only as data for the builtin lookup of reviewed tool
+# candidates. Render mode resolves only kustomize; every live mode still binds
+# both kustomize and kubectl. Every helper and every child process runs with the
+# closed system path below, so a directory that supplies a candidate cannot
+# also replace head, sed, stat, an interpreter, or another guard primitive.
 TOOL_SEARCH_PATH="${PATH:-}"
 PATH='/usr/bin:/bin'
 LC_ALL='C'
@@ -200,6 +202,7 @@ note() {
 # call. Other kernels fail closed and should run this Linux contract under WSL
 # or a Linux container rather than receiving a simulated security result.
 KERNEL_NAME=''
+MACHINE_ARCH=''
 STAT_BIN=''
 CUT_BIN=''
 ID_BIN=''
@@ -214,6 +217,7 @@ configure_host_primitives() {
   local primitive=''
   [[ -x /usr/bin/uname ]] || die 'fixed uname identity is unavailable'
   KERNEL_NAME="$(command /usr/bin/uname -s)"
+  MACHINE_ARCH="$(command /usr/bin/uname -m)"
   STAT_BIN='/usr/bin/stat'
   CUT_BIN='/usr/bin/cut'
   ID_BIN='/usr/bin/id'
@@ -678,9 +682,10 @@ run_bound_tool() {
   "$path" "$@"
 }
 
+KUSTOMIZE_PIN_KEY='KUSTOMIZE_LINUX_AMD64_SHA256'
 KUSTOMIZE() {
   run_bound_tool kustomize "$KUSTOMIZE_FD" "$KUSTOMIZE_PATH" \
-    KUSTOMIZE_LINUX_AMD64_SHA256 "$@"
+    "$KUSTOMIZE_PIN_KEY" "$@"
 }
 
 KUBECTL_RAW() {
@@ -688,13 +693,10 @@ KUBECTL_RAW() {
     KUBECTL_LINUX_AMD64_SHA256 "$@"
 }
 
-bind_tools() {
-  local expected='' actual=''
-  close_tool_descriptor 7
-  close_tool_descriptor 8
-  close_tool_descriptor 9
-  [[ -n "${TOOL_WORK:-}" ]] || die 'private tool staging directory is unavailable'
-  bind_tool_image kustomize KUSTOMIZE_LINUX_AMD64_SHA256 \
+bind_kustomize() {
+  local pin_key="$1" expected='' actual=''
+  KUSTOMIZE_PIN_KEY="$pin_key"
+  bind_tool_image kustomize "$KUSTOMIZE_PIN_KEY" \
     KUSTOMIZE_FD KUSTOMIZE_PATH
   expected="$(pinned_version KUSTOMIZE_VERSION)"
   actual="$(KUSTOMIZE version 2>/dev/null | head -n1 | tr -d '[:space:]')"
@@ -707,6 +709,44 @@ bind_tools() {
   lock_tool_version="$(lock_value render.tool.version)"
   [[ "$actual" == "$lock_tool_version" ]] || \
     die "kustomize is ${actual}; render.lock digests were produced by ${lock_tool_version}"
+}
+
+render_kustomize_pin_key() {
+  local archive_pin=''
+  case "${KERNEL_NAME}:${MACHINE_ARCH}" in
+    Linux:x86_64) printf '%s' 'KUSTOMIZE_LINUX_AMD64_SHA256' ;;
+    Darwin:arm64)
+      # The archive pin is provenance for the exact official asset from which
+      # the locally supplied binary must have been extracted. The executable
+      # image itself is independently rebound to the second pin below.
+      archive_pin="$(pinned_version KUSTOMIZE_DARWIN_ARM64_ARCHIVE_SHA256)"
+      [[ "$archive_pin" =~ ^[0-9a-f]{64}$ ]] || \
+        die 'versions.env has no valid KUSTOMIZE_DARWIN_ARM64_ARCHIVE_SHA256'
+      printf '%s' 'KUSTOMIZE_DARWIN_ARM64_SHA256'
+      ;;
+    *)
+      die "unsupported host for render-only kustomize provenance: ${KERNEL_NAME}/${MACHINE_ARCH}"
+      ;;
+  esac
+}
+
+bind_render_tool() {
+  local pin_key=''
+  close_tool_descriptor 7
+  close_tool_descriptor 8
+  close_tool_descriptor 9
+  [[ -n "${TOOL_WORK:-}" ]] || die 'private tool staging directory is unavailable'
+  pin_key="$(render_kustomize_pin_key)"
+  bind_kustomize "$pin_key"
+}
+
+bind_tools() {
+  local expected='' actual=''
+  close_tool_descriptor 7
+  close_tool_descriptor 8
+  close_tool_descriptor 9
+  [[ -n "${TOOL_WORK:-}" ]] || die 'private tool staging directory is unavailable'
+  bind_kustomize KUSTOMIZE_LINUX_AMD64_SHA256
   bind_tool_image kubectl KUBECTL_LINUX_AMD64_SHA256 KUBECTL_FD KUBECTL_PATH
   expected="$(pinned_version KUBERNETES_VERSION)"
   actual="$(KUBECTL_RAW version --client --output=json 2>/dev/null |
@@ -1700,15 +1740,19 @@ if [[ "$MODE" == '--demote' ]]; then
   exit 0
 fi
 
-bind_tools
+if [[ "$MODE" == '--render' ]]; then
+  bind_render_tool
+else
+  bind_tools
+fi
 WORK="$(command "$MKTEMP_BIN" -d "${TMPDIR:-/tmp}/kyverno-admission.XXXXXX")"
 RENDERED="${WORK}/${STAGE}.yaml"
 render_stage "$STAGE" "$RENDERED"
 
 if [[ "$MODE" == '--render' ]]; then
-  # The lock-regeneration path. It deliberately requires no pins and no cluster:
-  # its whole job is to report what the working tree renders to, so a reviewer
-  # can commit those values.
+  # The lock-regeneration path binds only the pinned renderer for this closed
+  # host tuple. It never resolves kubectl or reads kubeconfig, context, server,
+  # runtime-network, journal, or cluster state.
   printf 'render.tool.version=%s\n' "$(KUSTOMIZE version | head -n1 | tr -d '[:space:]')"
   printf '%s.sha256=%s\n' "$STAGE" "$(digest_of "$RENDERED")"
   printf '%s.objects=%s\n' "$STAGE" "$(object_count "$RENDERED")"

@@ -30,15 +30,35 @@ spec:
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: capacity-not-ready
+  name: namespace-budget
   namespace: naranjo-online
   annotations:
-    platform.snaraj.dev/readiness: blocked-until-pi-capacity-evidence
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    # This annotation equals the SHA-256 of the current bytes at
+    # docs/audits/2026-08-22-site-capacity-evidence.md. Independently,
+    # validate_repository.py, policies/conftest/kubernetes.rego, and
+    # policies/release-conftest/deployment-readiness.rego require the exact
+    # five-value hard map below. Audit-byte drift fails the hash check; drift
+    # in a quota value fails the exact-map check. Their conjunction binds
+    # desired state to both the reviewed evidence bytes and approved quantities.
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
 spec:
   hard:
-    # The Pi workload envelope is still unmeasured. Zero Pods is an explicit,
-    # reversible admission gate rather than an invented CPU or memory budget.
-    pods: "0"
+    # The Pi workload envelope is now measured, so the zero-Pod gate this
+    # replaced has done its job (issue #201). The ceiling is deliberately NOT
+    # the current replica count: a budget equal to steady-state consumption
+    # leaves no room for the transient a rollout creates, which is the same
+    # shape that deadlocked Helm release history in #198. Six admits two
+    # replicas, a surge Pod for a future zero-downtime rollout, and growth.
+    pods: "6"
+    # Every quantity scales with the Pod ceiling from the measured per-Pod
+    # figures. Raising `pods` alone would be cosmetic: the previous budget
+    # capped limits.memory at exactly two Pods' worth, so a third Pod could
+    # not have scheduled whatever the Pod ceiling said.
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
 ---
 apiVersion: v1
 kind: LimitRange
@@ -58,15 +78,36 @@ spec:
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: capacity-not-ready
+  name: namespace-budget
   namespace: lidersea-com
   annotations:
-    platform.snaraj.dev/readiness: blocked-until-pi-capacity-evidence
+    platform.snaraj.dev/readiness: reviewed-pi-capacity
+    # This annotation equals the SHA-256 of the current bytes at
+    # docs/audits/2026-08-22-site-capacity-evidence.md. Independently,
+    # validate_repository.py, policies/conftest/kubernetes.rego, and
+    # policies/release-conftest/deployment-readiness.rego require the exact
+    # five-value hard map below. Audit-byte drift fails the hash check; drift
+    # in a quota value fails the exact-map check. Their conjunction binds
+    # desired state to both the reviewed evidence bytes and approved quantities.
+    platform.snaraj.dev/capacity-evidence-sha256: 955a59cbf5ba0bd36f5e62349ed070a2b1eba6fb3ef072951435010edcceaf34
 spec:
   hard:
-    # Promotion must replace this gate with a measured, reviewed namespace
-    # envelope before either replica is admitted on the production Pi.
-    pods: "0"
+    # The measured envelope this site was waiting for now exists (issue #201),
+    # so the promotion gate is replaced rather than deleted. The ceiling is
+    # deliberately NOT the current replica count: a budget equal to
+    # steady-state consumption leaves no room for the transient a rollout
+    # creates, which is the same shape that deadlocked Helm release history
+    # in #198. Six admits two replicas, a surge Pod for a future zero-downtime
+    # rollout, and growth.
+    pods: "6"
+    # Every quantity scales with the Pod ceiling from this site's own measured
+    # per-Pod figures. Raising `pods` alone would be cosmetic: the previous
+    # budget capped limits.memory at exactly two Pods' worth, so a third Pod
+    # could not have scheduled whatever the Pod ceiling said.
+    requests.cpu: 150m
+    requests.memory: 192Mi
+    limits.cpu: 1200m
+    limits.memory: 768Mi
 ---
 apiVersion: v1
 kind: LimitRange

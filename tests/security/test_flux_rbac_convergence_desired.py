@@ -239,6 +239,30 @@ class FluxRbacConvergenceDesiredTests(unittest.TestCase):
     def test_bundle_has_bidirectional_manifest_parity(self):
         self.assert_valid_bundle(self.bundle)
 
+    def test_naranjo_pvc_rule_is_exact_and_transaction_carried(self):
+        objects = _documents_by_identity(self.bundle["namespacedObjects"])
+        role = objects[("Role", "naranjo-online", "helm-reconciler")]
+        pvc_rules = [
+            rule
+            for rule in role.get("rules", [])
+            if "persistentvolumeclaims" in rule.get("resources", [])
+        ]
+        self.assertEqual(
+            pvc_rules,
+            [{
+                "apiGroups": [""],
+                "resources": ["persistentvolumeclaims"],
+                "verbs": [
+                    "get", "list", "watch", "create", "update", "patch", "delete",
+                ],
+            }],
+        )
+        for identity, document in objects.items():
+            if identity == ("Role", "naranjo-online", "helm-reconciler"):
+                continue
+            for rule in document.get("rules", []):
+                self.assertNotIn("persistentvolumeclaims", rule.get("resources", []))
+
     def test_extra_and_missing_objects_fail_closed(self):
         access_map = _documents_by_identity(self.access)
         extra = access_map[("Role", "flux-system", "flux-controller-decryption")]

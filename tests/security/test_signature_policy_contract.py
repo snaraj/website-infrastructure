@@ -407,36 +407,47 @@ class SignaturePolicyContractTests(unittest.TestCase):
         canonical = REPO_ROOT.joinpath(
             "policies", "kyverno", "kustomization.yaml"
         ).read_text(encoding="utf-8")
+        self.assertEqual(canonical, MODULE.EXPECTED_POLICY_KUSTOMIZATION)
         self.assertEqual(
-            MODULE.signature_policy_kustomization_errors(canonical, ("staging",)),
-            [],
+            set(MODULE.POLICY_KUSTOMIZATION_INVENTORIES),
+            {"staging", "promoted"},
         )
-        self.assertTrue(
-            MODULE.signature_policy_kustomization_errors(canonical, ("promoted",))
-        )
-
-        promoted = MODULE.EXPECTED_PROMOTED_POLICY_KUSTOMIZATION
-        self.assertEqual(
-            MODULE.signature_policy_kustomization_errors(promoted, ("promoted",)),
-            [],
-        )
-        self.assertTrue(
-            MODULE.signature_policy_kustomization_errors(promoted, ("staging",))
-        )
+        for inventory in ("staging", "promoted"):
+            with self.subTest(inventory=inventory, canonical=True):
+                self.assertEqual(
+                    MODULE.signature_policy_kustomization_errors(
+                        canonical, (inventory,)
+                    ),
+                    [],
+                )
         self.assertEqual(
             MODULE.signature_policy_kustomization_errors(
-                promoted, ("staging", "promoted")
+                canonical, ("staging", "promoted")
             ),
             [],
         )
-        self.assertTrue(MODULE.signature_policy_kustomization_errors(promoted, ()))
+        self.assertTrue(MODULE.signature_policy_kustomization_errors(canonical, ()))
+        self.assertTrue(
+            MODULE.signature_policy_kustomization_errors(canonical, ("third",))
+        )
         for label, candidate in {
             "name prefix": canonical + "namePrefix: bypass-\n",
             "name suffix": canonical + "nameSuffix: -bypass\n",
             "patch": canonical + "patches:\n  - path: bypass.yaml\n",
+            "obsolete zero policy": canonical.replace(
+                "  - require-exact-tenant-networking.yaml\n",
+                "  - require-zero-site-capacity.yaml\n"
+                "  - require-exact-tenant-networking.yaml\n",
+            ),
             "duplicate": canonical + "  - require-signed-naranjo-online.yaml\n",
             "missing": canonical.replace(
                 "  - require-signed-lidersea-com.yaml\n", ""
+            ),
+            "reordered": canonical.replace(
+                "  - require-signed-naranjo-online.yaml\n"
+                "  - require-signed-lidersea-com.yaml\n",
+                "  - require-signed-lidersea-com.yaml\n"
+                "  - require-signed-naranjo-online.yaml\n",
             ),
             "replacement": canonical.replace(
                 "  - require-signed-lidersea-com.yaml\n",
@@ -447,25 +458,14 @@ class SignaturePolicyContractTests(unittest.TestCase):
             "generator": canonical + "secretGenerator:\n  - name: bypass\n",
             "image rewrite": canonical + "images:\n  - name: bypass\n",
         }.items():
-            with self.subTest(label=label):
-                self.assertTrue(
-                    MODULE.signature_policy_kustomization_errors(
-                        candidate, ("staging", "promoted")
+            self.assertNotEqual(candidate, canonical, "mutation changed nothing")
+            for inventory in ("staging", "promoted"):
+                with self.subTest(label=label, inventory=inventory):
+                    self.assertTrue(
+                        MODULE.signature_policy_kustomization_errors(
+                            candidate, (inventory,)
+                        )
                     )
-                )
-
-        for label, candidate in {
-            "promoted extra": promoted + "  - bypass.yaml\n",
-            "promoted missing": promoted.replace(
-                "  - require-signed-lidersea-com.yaml\n", ""
-            ),
-        }.items():
-            with self.subTest(label=label):
-                self.assertTrue(
-                    MODULE.signature_policy_kustomization_errors(
-                        candidate, ("promoted",)
-                    )
-                )
 
     def test_admission_parent_rejects_every_kustomize_transform(self):
         canonical = MODULE.EXPECTED_ADMISSION_KUSTOMIZATION
@@ -572,7 +572,6 @@ class SignaturePolicyContractTests(unittest.TestCase):
         self.assertIn("validate_signature_policy.py\" kustomization", renderer)
         self.assertIn("--inventory staging", renderer)
         self.assertIn("--inventory promoted", renderer)
-        self.assertIn('any_website_active" == \'true\'', renderer)
         self.assertIn(
             "validate_signature_policy.py\" admission-kustomization", renderer
         )
@@ -610,6 +609,31 @@ class SignaturePolicyContractTests(unittest.TestCase):
             'signature_policy_failure_policies := {"Fail", "Ignore"}', signature_rego
         )
         self.assertIn("failure_policy in signature_policy_failure_policies", signature_rego)
+
+    def test_renderer_refuses_obsolete_zero_policy_before_inventory_selection(self):
+        renderer = REPO_ROOT.joinpath("scripts", "render-manifests.sh").read_text(
+            encoding="utf-8"
+        )
+        obsolete_guard = renderer.index(
+            "if policy_resource_is_active require-zero-site-capacity.yaml; then"
+        )
+        inventory_selection = renderer.index(
+            "declare -a SIGNATURE_POLICY_INVENTORY_ARGS=("
+        )
+        self.assertLess(obsolete_guard, inventory_selection)
+        self.assertEqual(
+            renderer.count(
+                "policy_resource_is_active require-zero-site-capacity.yaml"
+            ),
+            1,
+        )
+        self.assertIn(
+            "obsolete require-zero-site-capacity.yaml is active; restoration "
+            "requires a coordinated inventory, overlay, render-lock, and "
+            "validator recut",
+            renderer,
+        )
+        self.assertNotIn("CORE_POLICY_FILES+=(require-zero-site-capacity)", renderer)
 
     def test_fast_kubernetes_gate_rejects_a_weakened_audit_policy(self):
         with tempfile.TemporaryDirectory() as directory:

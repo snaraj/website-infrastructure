@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import os
 import re
 import shutil
@@ -1448,7 +1449,9 @@ class RepositoryPolicyTests(unittest.TestCase):
     def test_active_capacity_requires_exact_aggregate_quota_inventory(self):
         """Per-object policy cannot silently accept an absent site budget."""
 
-        def quota(namespace, digit):
+        def quota(namespace, evidence, values=None):
+            hard = dict(MODULE.REVIEWED_SITE_CAPACITY_HARD)
+            hard.update(values or {})
             return (
                 "apiVersion: v1\n"
                 "kind: ResourceQuota\n"
@@ -1460,22 +1463,34 @@ class RepositoryPolicyTests(unittest.TestCase):
                 "    platform.snaraj.dev/capacity-evidence-sha256: {evidence}\n"
                 "spec:\n"
                 "  hard:\n"
-                "    pods: \"2\"\n"
-                "    requests.cpu: 50m\n"
-                "    requests.memory: 64Mi\n"
-                "    limits.cpu: 500m\n"
-                "    limits.memory: 256Mi\n"
-            ).format(namespace=namespace, evidence=digit * 64)
+                "    pods: \"{pods}\"\n"
+                "    requests.cpu: {requests_cpu}\n"
+                "    requests.memory: {requests_memory}\n"
+                "    limits.cpu: {limits_cpu}\n"
+                "    limits.memory: {limits_memory}\n"
+            ).format(
+                namespace=namespace,
+                evidence=evidence,
+                pods=hard["pods"],
+                requests_cpu=hard["requests.cpu"],
+                requests_memory=hard["requests.memory"],
+                limits_cpu=hard["limits.cpu"],
+                limits_memory=hard["limits.memory"],
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             prerequisites = root / "kubernetes/platform/prerequisites"
             prerequisites.mkdir(parents=True)
+            evidence_path = root / MODULE.REVIEWED_SITE_CAPACITY_EVIDENCE
+            evidence_path.parent.mkdir(parents=True)
+            evidence_path.write_bytes(b"sanitized owner capacity evidence\n")
+            evidence = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
             prerequisites.joinpath("kustomization.yaml").write_bytes(
                 b"resources:\n  - resource-controls.yaml\n"
             )
-            quotas = quota("naranjo-online", "1") + "---\n" + quota(
-                "lidersea-com", "2"
+            quotas = quota("naranjo-online", evidence) + "---\n" + quota(
+                "lidersea-com", evidence
             )
             prerequisites.joinpath("resource-controls.yaml").write_bytes(
                 quotas.encode("utf-8")
@@ -1487,8 +1502,44 @@ class RepositoryPolicyTests(unittest.TestCase):
             )
             self.assertEqual(MODULE.reviewed_capacity_errors(root), [])
 
+            evidence_path.write_bytes(b"mutated owner capacity evidence\n")
+            mutation_errors = MODULE.reviewed_capacity_errors(root)
+            for namespace in ("lidersea-com", "naranjo-online"):
+                self.assertIn(
+                    "reviewed website capacity evidence hash does not match document: "
+                    + namespace,
+                    mutation_errors,
+                )
+            evidence_path.write_bytes(b"sanitized owner capacity evidence\n")
+
+            hostile_values = {
+                "pods": "7",
+                "requests.cpu": "151m",
+                "requests.memory": "193Mi",
+                "limits.cpu": "1201m",
+                "limits.memory": "769Mi",
+            }
+            for namespace in ("lidersea-com", "naranjo-online"):
+                other = (
+                    "naranjo-online"
+                    if namespace == "lidersea-com"
+                    else "lidersea-com"
+                )
+                for key, hostile in hostile_values.items():
+                    with self.subTest(namespace=namespace, key=key):
+                        mutated = quota(namespace, evidence, {key: hostile})
+                        mutated += "---\n" + quota(other, evidence)
+                        prerequisites.joinpath("resource-controls.yaml").write_bytes(
+                            mutated.encode("utf-8")
+                        )
+                        self.assertIn(
+                            "reviewed website capacity limits do not match owner decision: "
+                            + namespace,
+                            MODULE.reviewed_capacity_errors(root),
+                        )
+
             prerequisites.joinpath("resource-controls.yaml").write_bytes(
-                quota("naranjo-online", "1").encode("utf-8")
+                quota("naranjo-online", evidence).encode("utf-8")
             )
             self.assertIn(
                 "reviewed website capacity quota missing or duplicated: lidersea-com",

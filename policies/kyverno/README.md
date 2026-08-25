@@ -4,12 +4,19 @@ Core workload, image, exposure, network, readiness, discovery-gated storage,
 and tenant etcd-payload rules run in `Enforce` with webhook failure policy
 `Fail`. Tenant Pods may use only the bounded in-memory site scratch volume or
 the tunnel's one exact Secret key; wildcard tolerations, legacy ServiceAccount
-token Secrets, and every other volume source remain denied. The scaffold's
-zero-Pod quota can be replaced only by a reviewed `namespace-budget` whose
-annotation is bound to the local discovery-evidence hash. Flux reconciles them
-only after the pinned admission controller reports Ready; site and tunnel
-reconciliation remain suspended while capacity, image, token, and runtime
-evidence are unresolved.
+token Secrets, and every other volume source remain denied. Each site's former
+zero-Pod quota is now replaced by the exact reviewed `namespace-budget` whose
+annotation equals the SHA-256 of the local discovery-evidence document and
+whose five limits equal the owner-selected capacity map. The former
+`require-zero-site-capacity.yaml` source remains byte-for-byte available as a
+reversible gate, but is not in the active policy Kustomization. Kyverno remains
+uninstalled, and `render.lock` leaves both its report-only and enforce install
+stages unauthorized. The checked-in Flux graph orders `platform-prerequisites`,
+including the reviewed budgets, first; `admission` depends on that root. Each
+site root separately depends on both `platform-prerequisites` and `admission`
+(as well as `platform-services`), and both site roots remain suspended. Their
+contained HelmReleases remain independently suspended while activation
+evidence is unresolved.
 
 Signature and provenance rules are the same: `require-signed-naranjo-online`
 and `require-signed-lidersea-com` declare `validationFailureAction: Enforce`
