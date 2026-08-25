@@ -10,6 +10,7 @@ MODULE = load_script("validate_pr_flow.py")
 class BranchRuleTests(unittest.TestCase):
     def test_allows_reviewed_namespaces(self):
         for name in (
+            "5.6-sol/141-v030-cleanup-repair",
             "fable5/stage0",
             "fable5/stage0-audit-repo-split",
             "deploy/pi-live-readiness",
@@ -22,6 +23,16 @@ class BranchRuleTests(unittest.TestCase):
             "media/ingest-design",
         ):
             self.assertIsNone(MODULE.branch_denial(name), name)
+
+    def test_sol_namespace_does_not_generalize_branch_grammar(self):
+        for name in (
+            "5.6-sol",
+            "5.6-sol/",
+            "5.6-sol//double",
+            "5.6-sol/UPPER",
+            "5.6-terra/141-v030-cleanup-repair",
+        ):
+            self.assertIsNotNone(MODULE.branch_denial(name), repr(name))
 
     def test_denies_protected_and_malformed_names(self):
         for name in (
@@ -54,6 +65,22 @@ class RefspecRuleTests(unittest.TestCase):
             "refs/heads/{0}:refs/heads/{0}".format(self.CURRENT),
         ):
             self.assertIsNone(MODULE.refspec_denial(refspec, self.CURRENT), refspec)
+
+    def test_allows_same_name_sol_branch_push_only(self):
+        current = "5.6-sol/141-v030-cleanup-repair"
+        for refspec in (
+            current,
+            "{0}:{0}".format(current),
+            "refs/heads/{0}:refs/heads/{0}".format(current),
+        ):
+            self.assertIsNone(MODULE.refspec_denial(refspec, current), refspec)
+
+        self.assertIsNotNone(
+            MODULE.refspec_denial(
+                "5.6-terra/141-v030-cleanup-repair:5.6-terra/141-v030-cleanup-repair",
+                "5.6-terra/141-v030-cleanup-repair",
+            )
+        )
 
     def test_denies_force_delete_wildcard_tag_and_main(self):
         cases = (

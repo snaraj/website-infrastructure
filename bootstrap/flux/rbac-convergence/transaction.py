@@ -57,19 +57,22 @@ GITHUB_API = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
 SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.28 and can therefore
+# selector.  Its protected-base candidate follows v0.1.29 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.29"
+AUTHORIZED_RELEASE_TAG = "v0.1.30"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
-STATE_ROOT = Path("/var/lib/website-infrastructure/flux-rbac-convergence")
+STATE_ROOT = Path(
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
+)
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
 CUSTODY_RECEIPT = STATE_ROOT / "custody.receipt.json"
@@ -90,7 +93,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v029-helm-proof-rv.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v030-cleanup-state.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -124,6 +127,9 @@ CONTROLLER_RUNTIME_FIELDS = (
     "podReplicaSetName",
     "podReplicaSetUid",
     "semanticSha256",
+)
+FORWARD_FAILURE_PHASES = frozenset(
+    {"forward", "annotation-cleanup", "final-verify"}
 )
 CONTROLLER_SUBJECTS = frozenset(
     ("flux-system", controller) for controller in CONTROLLERS
@@ -3581,6 +3587,21 @@ def parse_journal_payload(payload: bytes) -> dict[str, object]:
         or not isinstance(value.get("operations"), dict)
         or not isinstance(value.get("helmProof"), dict)
         or not isinstance(value.get("recoveryRequired"), bool)
+        or "forwardFailurePhase" not in value
+        or "forwardFailureToken" not in value
+        or value.get("forwardFailurePhase")
+        not in {None, *FORWARD_FAILURE_PHASES}
+        or (
+            value.get("forwardFailurePhase") is None
+            and value.get("forwardFailureToken") is not None
+        )
+        or (
+            value.get("forwardFailurePhase") is not None
+            and FORWARD_FAILURE_TOKEN_RE.fullmatch(
+                str(value.get("forwardFailureToken"))
+            )
+            is None
+        )
     ):
         raise TransactionError("JOURNAL_INVALID")
     validate_journal_embedded_evidence(value)
@@ -3601,6 +3622,14 @@ def validate_journal_successor(
             raise TransactionError("JOURNAL_TEMP_IDENTITY_MISMATCH")
     if successor.get("sequence") != int(previous["sequence"]) + 1:
         raise TransactionError("JOURNAL_TEMP_SEQUENCE_INVALID")
+    if previous.get("forwardFailurePhase") is not None and (
+        successor.get("forwardFailurePhase"),
+        successor.get("forwardFailureToken"),
+    ) != (
+        previous.get("forwardFailurePhase"),
+        previous.get("forwardFailureToken"),
+    ):
+        raise TransactionError("JOURNAL_TEMP_FORWARD_FAILURE_REGRESSION")
     transitions = {
         "prepared": {"prepared", "recovery-required", "committed", "rolled-back"},
         "recovery-required": {"recovery-required", "rolled-back"},
@@ -3617,6 +3646,84 @@ def validate_journal_successor(
         raise TransactionError("JOURNAL_TEMP_OPERATIONS_INVALID")
     if not set(old_operations).issubset(new_operations):
         raise TransactionError("JOURNAL_TEMP_OPERATIONS_REMOVED")
+    for operation_id, old_record in old_operations.items():
+        new_record = new_operations.get(operation_id)
+        if not isinstance(old_record, Mapping) or not isinstance(
+            new_record, Mapping
+        ):
+            raise TransactionError("JOURNAL_TEMP_OPERATIONS_INVALID")
+        old_cleanup = old_record.get("cleanupState")
+        new_cleanup = new_record.get("cleanupState")
+        if old_cleanup not in {None, "remove-intent", "already-clean", "removed"}:
+            raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        allowed_cleanup = {
+            None: {None, "remove-intent", "already-clean"},
+            "remove-intent": {"remove-intent", "removed"},
+            "already-clean": {"already-clean"},
+            "removed": {"removed"},
+        }
+        if new_cleanup not in allowed_cleanup[old_cleanup]:
+            raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        source_uid = new_record.get("cleanupSourceUid")
+        source_rv = new_record.get("cleanupSourceResourceVersion")
+        cleanup_snapshot = new_record.get("cleanupSnapshot")
+        if new_cleanup is None:
+            if any(
+                field in new_record
+                for field in (
+                    "cleanupSourceUid",
+                    "cleanupSourceResourceVersion",
+                    "cleanupSnapshot",
+                )
+            ):
+                raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+            continue
+        if new_cleanup == "remove-intent":
+            if (
+                new_record.get("state") != "committed"
+                or source_uid != new_record.get("uid")
+                or not isinstance(source_rv, str)
+                or not source_rv.isdecimal()
+                or int(source_rv) <= 0
+                or cleanup_snapshot is not None
+            ):
+                raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        elif new_cleanup == "already-clean":
+            if (
+                new_record.get("state") != "verified"
+                or "cleanupSourceUid" in new_record
+                or "cleanupSourceResourceVersion" in new_record
+            ):
+                raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        else:
+            result_rv = new_record.get("resourceVersion")
+            if (
+                new_record.get("state") != "verified"
+                or source_uid != new_record.get("uid")
+                or not isinstance(source_rv, str)
+                or not source_rv.isdecimal()
+                or not isinstance(result_rv, str)
+                or not result_rv.isdecimal()
+                or int(result_rv) <= int(source_rv)
+            ):
+                raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        if cleanup_snapshot is not None and (
+            not isinstance(cleanup_snapshot, Mapping)
+            or set(cleanup_snapshot) != set(CONTROLLER_RUNTIME_FIELDS)
+            or not isinstance(cleanup_snapshot.get("generation"), int)
+            or cleanup_snapshot.get("podRestarts") != 0
+        ):
+            raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
+        if old_cleanup is not None:
+            for field in (
+                "cleanupSourceUid",
+                "cleanupSourceResourceVersion",
+                "cleanupSnapshot",
+            ):
+                if field in old_record and new_record.get(field) != old_record.get(
+                    field
+                ):
+                    raise TransactionError("JOURNAL_TEMP_CLEANUP_STATE_INVALID")
     old_receipts = previous.get("receiptRecords", {})
     new_receipts = successor.get("receiptRecords", {})
     if (
@@ -3769,6 +3876,8 @@ class Journal:
             "verificationChainSha256": "0" * 64,
             "pendingVerification": None,
             "recoveryRequired": False,
+            "forwardFailurePhase": None,
+            "forwardFailureToken": None,
         }
 
     @classmethod
@@ -3902,6 +4011,110 @@ class Journal:
         if "rolloutSnapshot" in record and record["rolloutSnapshot"] != evidence:
             raise TransactionError("CONTROLLER_ROLLOUT_EVIDENCE_COLLISION")
         record["rolloutSnapshot"] = evidence
+        self.write()
+
+    @staticmethod
+    def _controller_evidence(snapshot: Mapping[str, object]) -> dict[str, object]:
+        evidence = {
+            field: copy.deepcopy(snapshot.get(field))
+            for field in CONTROLLER_RUNTIME_FIELDS
+        }
+        if (
+            not isinstance(evidence["generation"], int)
+            or evidence["podRestarts"] != 0
+            or not isinstance(evidence["podUid"], str)
+            or not isinstance(evidence["args"], list)
+            or evidence["podArgs"] != evidence["args"]
+            or evidence["podImage"] != evidence["image"]
+            or not isinstance(evidence["podImageID"], str)
+            or not isinstance(evidence["podServiceAccountName"], str)
+            or evidence["podContainerName"] != "manager"
+            or not isinstance(evidence["podReplicaSetName"], str)
+            or UID_RE.fullmatch(str(evidence["podReplicaSetUid"])) is None
+        ):
+            raise TransactionError("CONTROLLER_CLEANUP_EVIDENCE_INVALID")
+        return evidence
+
+    def cleanup_intent(
+        self, operation_id: str, source_uid: str, source_resource_version: str
+    ) -> None:
+        operations = self.document.get("operations")
+        record = (
+            operations.get(operation_id)
+            if isinstance(operations, MutableMapping)
+            else None
+        )
+        if (
+            not isinstance(record, MutableMapping)
+            or record.get("state") != "committed"
+            or record.get("uid") != source_uid
+            or record.get("cleanupState") is not None
+        ):
+            raise TransactionError("ANNOTATION_CLEANUP_JOURNAL_INVALID")
+        record.update(
+            {
+                "cleanupState": "remove-intent",
+                "cleanupSourceUid": source_uid,
+                "cleanupSourceResourceVersion": source_resource_version,
+            }
+        )
+        self.document["phase"] = "annotation-cleanup"
+        self.document["pendingOperation"] = operation_id
+        self.write()
+
+    def cleanup_verified(
+        self,
+        operation_id: str,
+        live: Mapping[str, object],
+        *,
+        already_clean: bool,
+        controller_snapshot_value: Mapping[str, object] | None = None,
+    ) -> None:
+        operations = self.document.get("operations")
+        record = (
+            operations.get(operation_id)
+            if isinstance(operations, MutableMapping)
+            else None
+        )
+        expected_cleanup_state = None if already_clean else "remove-intent"
+        uid, resource_version = live_identity(live)
+        if (
+            not isinstance(record, MutableMapping)
+            or record.get("state") != "committed"
+            or record.get("uid") != uid
+            or record.get("cleanupState") != expected_cleanup_state
+            or (
+                not already_clean
+                and (
+                    record.get("cleanupSourceUid") != uid
+                    or record.get("cleanupSourceResourceVersion") is None
+                )
+            )
+        ):
+            raise TransactionError("ANNOTATION_CLEANUP_JOURNAL_INVALID")
+        record["state"] = "verified"
+        record["cleanupState"] = (
+            "already-clean" if already_clean else "removed"
+        )
+        record["resourceVersion"] = resource_version
+        if controller_snapshot_value is not None:
+            record["cleanupSnapshot"] = self._controller_evidence(
+                controller_snapshot_value
+            )
+        self.document["phase"] = "annotation-cleanup"
+        self.document["pendingOperation"] = None
+        self.write()
+
+    def record_forward_failure(self, phase: str, error: BaseException) -> None:
+        if phase not in FORWARD_FAILURE_PHASES:
+            raise TransactionError("FORWARD_FAILURE_PHASE_INVALID")
+        if self.document.get("forwardFailurePhase") is not None:
+            raise TransactionError("FORWARD_FAILURE_ALREADY_RECORDED")
+        token = str(error) if isinstance(error, TransactionError) else ""
+        if FORWARD_FAILURE_TOKEN_RE.fullmatch(token) is None:
+            token = "UNEXPECTED_FORWARD_FAILURE"
+        self.document["forwardFailurePhase"] = phase
+        self.document["forwardFailureToken"] = token
         self.write()
 
     def mark_recovery_required(self) -> None:
@@ -4853,7 +5066,11 @@ def verify_controller_phase(
             if isinstance(target, Mapping) and isinstance(operations, Mapping)
             else None
         )
-        rollout = record.get("rolloutSnapshot") if isinstance(record, Mapping) else None
+        rollout = (
+            record.get("cleanupSnapshot", record.get("rolloutSnapshot"))
+            if isinstance(record, Mapping)
+            else None
+        )
         observed_rollout = {
             key: copy.deepcopy(observed.get(key))
             for key in CONTROLLER_RUNTIME_FIELDS
@@ -5244,10 +5461,47 @@ def wait_helm_restored(
     raise TransactionError("HELM_RESTORE_TIMEOUT") from last_error
 
 
+def wait_controller_cleanup(
+    client: KubeClient,
+    name: str,
+    rollout: Mapping[str, object],
+    expected_generation: int,
+) -> dict[str, object]:
+    """Wait only for Deployment status to observe the metadata-only update."""
+
+    deadline = time.monotonic() + ROLLOUT_TIMEOUT_SECONDS
+    last_error: TransactionError | None = None
+    while time.monotonic() < deadline:
+        try:
+            observed = controller_snapshot(client).get(name)
+            if not isinstance(observed, Mapping):
+                raise RecoveryRequired("CONTROLLER_CLEANUP_SNAPSHOT_INVALID")
+            expected = {
+                field: copy.deepcopy(rollout.get(field))
+                for field in CONTROLLER_RUNTIME_FIELDS
+            }
+            expected["generation"] = expected_generation
+            actual = {
+                field: copy.deepcopy(observed.get(field))
+                for field in CONTROLLER_RUNTIME_FIELDS
+            }
+            if actual != expected:
+                raise RecoveryRequired("CONTROLLER_CLEANUP_RUNTIME_DRIFT")
+            return dict(observed)
+        except RecoveryRequired:
+            raise
+        except TransactionError as exc:
+            last_error = exc
+            time.sleep(2)
+    raise RecoveryRequired(
+        "CONTROLLER_CLEANUP_OBSERVED_GENERATION_TIMEOUT"
+    ) from last_error
+
+
 def cleanup_transaction_annotations(client: KubeClient, plan: Mapping[str, object], journal: Journal) -> None:
     operations = journal.document.get("operations")
     targets = plan.get("targets")
-    if not isinstance(operations, Mapping) or not isinstance(targets, list):
+    if not isinstance(operations, MutableMapping) or not isinstance(targets, list):
         raise TransactionError("CLEANUP_STATE_INVALID")
     target_by_id = {item["id"]: item for item in targets if isinstance(item, Mapping)}
     for operation_id, record in operations.items():
@@ -5260,22 +5514,116 @@ def cleanup_transaction_annotations(client: KubeClient, plan: Mapping[str, objec
         live = client.get(url)
         if object_is_terminating(live):
             raise RecoveryRequired("ANNOTATION_CLEANUP_OBJECT_TERMINATING")
-        uid, _ = live_identity(live)
-        if uid != record.get("uid") or semantic_hash(live) != target.get("desiredSha256"):
+        expected_identity = (
+            target["kind"],
+            target.get("namespace"),
+            target["name"],
+        )
+        uid, source_resource_version = live_identity(live)
+        if (
+            metadata_identity(live) != expected_identity
+            or uid != record.get("uid")
+            or semantic_hash(live) != target.get("desiredSha256")
+        ):
             raise RecoveryRequired("ANNOTATION_CLEANUP_DRIFT")
         annotations = live.get("metadata", {}).get("annotations")
-        if not isinstance(annotations, Mapping) or annotations.get(TRANSACTION_ANNOTATION) != journal.document["attemptId"]:
-            raise RecoveryRequired("TRANSACTION_ANNOTATION_MISSING")
+        marker_present = (
+            isinstance(annotations, Mapping)
+            and TRANSACTION_ANNOTATION in annotations
+        )
+        marker = (
+            annotations.get(TRANSACTION_ANNOTATION)
+            if isinstance(annotations, Mapping)
+            else None
+        )
+        rollout: Mapping[str, object] | None = None
+        is_watcher = target.get("phase") == "watchers"
+        if is_watcher:
+            rollout_value = record.get("rolloutSnapshot")
+            if not isinstance(rollout_value, Mapping):
+                raise RecoveryRequired("CONTROLLER_CLEANUP_ROLLOUT_MISSING")
+            current = controller_snapshot(client).get(str(target["name"]))
+            if not isinstance(current, Mapping) or {
+                field: copy.deepcopy(current.get(field))
+                for field in CONTROLLER_RUNTIME_FIELDS
+            } != dict(rollout_value):
+                raise RecoveryRequired("CONTROLLER_CLEANUP_RUNTIME_DRIFT")
+            rollout = rollout_value
+        if not marker_present:
+            journal.cleanup_verified(
+                str(operation_id),
+                live,
+                already_clean=True,
+                controller_snapshot_value=rollout,
+            )
+            continue
+        if marker != journal.document["attemptId"]:
+            raise RecoveryRequired("TRANSACTION_ANNOTATION_COLLISION")
+        journal.cleanup_intent(str(operation_id), uid, source_resource_version)
         body = writable_from_live(live)
         body = remove_transaction_annotation(body)
-        result = client.put(url, body)
-        if object_is_terminating(result) or semantic_hash(result) != target.get("desiredSha256"):
-            raise RecoveryRequired("ANNOTATION_CLEANUP_FAILED")
-        mutable = dict(record)
-        mutable["state"] = "verified"
-        mutable["resourceVersion"] = live_identity(result)[1]
-        operations[operation_id] = mutable  # type: ignore[index]
-        journal.write()
+        mutation_signals = block_transaction_signals()
+        try:
+            result = client.put_fence(url, body)
+            if result is None:
+                raise RecoveryRequired(
+                    "ANNOTATION_CLEANUP_RESOURCE_VERSION_CONFLICT"
+                )
+            result_uid, result_resource_version = live_identity(result)
+            result_metadata = result.get("metadata")
+            result_annotations = (
+                result_metadata.get("annotations")
+                if isinstance(result_metadata, Mapping)
+                else None
+            )
+            live_metadata = live.get("metadata")
+            result_generation = (
+                result_metadata.get("generation")
+                if isinstance(result_metadata, Mapping)
+                else None
+            )
+            source_generation = (
+                live_metadata.get("generation")
+                if isinstance(live_metadata, Mapping)
+                else None
+            )
+            if (
+                metadata_identity(result) != expected_identity
+                or result_uid != uid
+                or int(result_resource_version) <= int(source_resource_version)
+                or object_is_terminating(result)
+                or semantic_hash(result) != target.get("desiredSha256")
+                or (
+                    isinstance(result_annotations, Mapping)
+                    and TRANSACTION_ANNOTATION in result_annotations
+                )
+                or (
+                    is_watcher
+                    and (
+                        not isinstance(source_generation, int)
+                        or result_generation != source_generation + 1
+                    )
+                )
+            ):
+                raise RecoveryRequired("ANNOTATION_CLEANUP_RESPONSE_INVALID")
+            cleanup_snapshot = None
+            if is_watcher:
+                assert rollout is not None
+                assert isinstance(result_generation, int)
+                cleanup_snapshot = wait_controller_cleanup(
+                    client,
+                    str(target["name"]),
+                    rollout,
+                    result_generation,
+                )
+            journal.cleanup_verified(
+                str(operation_id),
+                result,
+                already_clean=False,
+                controller_snapshot_value=cleanup_snapshot,
+            )
+        finally:
+            restore_transaction_signals(mutation_signals)
 
 
 def verify_converged(
@@ -7227,6 +7575,7 @@ def apply(plan: dict[str, object], plan_sha256: str, client: KubeClient, target:
     target_digest = sha256_bytes(canonical_json(plan["target"]))
     journal = Journal(plan_sha256, str(custody["sourceRevision"]), target_digest)
     journal.write()
+    forward_failure_phase = "forward"
     old_handlers: dict[int, object] = {}
 
     def handle_signal(signum: int, _frame: object) -> None:
@@ -7308,7 +7657,9 @@ def apply(plan: dict[str, object], plan_sha256: str, client: KubeClient, target:
             plan, client, frozenset(changed_controllers), journal
         )
         helm_proof(client, plan, plan_sha256, journal)
+        forward_failure_phase = "annotation-cleanup"
         cleanup_transaction_annotations(client, plan, journal)
+        forward_failure_phase = "final-verify"
         evidence = verify_converged(
             client, plan, journal, oracle, after_proof=True
         )
@@ -7350,6 +7701,10 @@ def apply(plan: dict[str, object], plan_sha256: str, client: KubeClient, target:
     except BaseException as exc:
         if journal.document.get("state") == "committed":
             raise RecoveryRequired("COMMITTED_RECEIPT_INCOMPLETE") from exc
+        try:
+            journal.record_forward_failure(forward_failure_phase, exc)
+        except BaseException:
+            pass
         try:
             journal.mark_recovery_required()
             rollback_internal(client, plan, journal)
