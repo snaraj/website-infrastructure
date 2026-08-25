@@ -186,6 +186,10 @@ class _FakeClient:
         self.calls.append(("get_optional", url))
         return copy.deepcopy(self.live)
 
+    def get(self, url):
+        self.calls.append(("get", url))
+        return copy.deepcopy(self.live)
+
     def delete(self, url, uid, resource_version):
         self.calls.append(("delete", url, uid, resource_version))
         self.live = None
@@ -400,7 +404,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v029-helm-proof-rv.md": 0o600,
+            "changelog.d/141-flux-rbac-v030-cleanup-state.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -423,6 +427,20 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             "bootstrap/flux/rbac-convergence/transaction.py"
         ][0]
         transaction.validate_source_manifest_bundle(entries, launcher_digest)
+
+    def test_v030_uses_fresh_versioned_state_root(self):
+        expected = Path(
+            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
+        )
+        self.assertEqual(transaction.STATE_ROOT, expected)
+        self.assertEqual(transaction.STATE_PARENT, expected.parent)
+        self.assertEqual(transaction.CUSTODY_ROOT.parent, expected)
+        self.assertEqual(transaction.INPUT_ROOT.parent, expected)
+        self.assertEqual(transaction.PLAN_PATH.parent, expected)
+        self.assertEqual(transaction.JOURNAL_PATH.parent, expected)
+        self.assertEqual(transaction.RECEIPT_ROOT.parent, expected)
+        self.assertEqual(transaction.EVIDENCE_ROOT.parent, expected)
+        self.assertEqual(transaction.LOCK_PATH.parent, expected)
 
 
 class HeldSourceDescriptorTests(unittest.TestCase):
@@ -2621,7 +2639,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.29")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.30")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
@@ -2632,7 +2650,7 @@ class ReleaseOrderingTests(unittest.TestCase):
             "v0.1.26",
             "v0.1.27",
             "v0.1.28",
-            "v0.1.30",
+            "v0.1.29",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(
@@ -3608,6 +3626,70 @@ class TerminalModeTests(unittest.TestCase):
                     write_receipt.assert_called_once()
                     self.assertIs(raised.exception.__cause__, receipt_error)
 
+    def test_apply_persists_sanitized_forward_failure_before_rollback(self):
+        plan_sha256 = "a" * 64
+        source_revision = "b" * 40
+        plan = {"target": {}, "targets": [{"phase": "split"}]}
+        journal = mock.Mock()
+        journal.document = {"state": "prepared"}
+        events = []
+
+        def record_failure(phase, error):
+            events.append(("failure", phase, str(error)))
+
+        def mark_recovery_required():
+            events.append(("recovery",))
+            journal.document["state"] = "recovery-required"
+
+        def finish_rollback(*_args):
+            events.append(("rollback",))
+            journal.document["state"] = "rolled-back"
+
+        journal.record_forward_failure.side_effect = record_failure
+        journal.mark_recovery_required.side_effect = mark_recovery_required
+        with tempfile.TemporaryDirectory(
+            dir=str(TEST_TEMP_ROOT)
+        ) as temporary, mock.patch.object(
+            transaction, "JOURNAL_PATH", Path(temporary) / "journal.json"
+        ), mock.patch.object(
+            transaction, "validate_plan_bindings", return_value=object()
+        ), mock.patch.object(
+            transaction, "compare_prestate"
+        ), mock.patch.object(
+            transaction, "stable_baselines"
+        ), mock.patch.object(
+            transaction, "Journal", return_value=journal
+        ), mock.patch.object(
+            transaction.signal, "signal", return_value=signal.SIG_DFL
+        ), mock.patch.object(
+            transaction,
+            "apply_operation",
+            side_effect=transaction.TransactionError("FORWARD_FAILED"),
+        ), mock.patch.object(
+            transaction, "rollback_internal", side_effect=finish_rollback
+        ), mock.patch.object(
+            transaction, "write_receipt"
+        ):
+            with self.assertRaisesRegex(
+                transaction.TransactionError, "APPLY_ROLLED_BACK"
+            ):
+                transaction.apply(
+                    plan,
+                    plan_sha256,
+                    object(),
+                    object(),
+                    {"sourceRevision": source_revision},
+                )
+
+        self.assertEqual(
+            events,
+            [
+                ("failure", "forward", "FORWARD_FAILED"),
+                ("recovery",),
+                ("rollback",),
+            ],
+        )
+
     def test_committed_transaction_refuses_rollback_and_requires_verify(self):
         plan_sha256 = "a" * 64
         source_revision = "b" * 40
@@ -4336,6 +4418,403 @@ class RollbackResponseLossTests(unittest.TestCase):
             transaction.rollback_internal(object(), plan, journal)
         self.assertEqual(order[0], broad_id)
         self.assertEqual(set(order), {broad_id, narrow_id})
+
+
+class AnnotationCleanupTests(unittest.TestCase):
+    ATTEMPT = "c" * 64
+    OPERATION_ID = "create:Role:flux-system:example"
+
+    def role_case(self, marker):
+        live = _role(
+            rules=[{"verbs": ["get"], "resources": ["pods"]}],
+            uid=UID_ONE,
+            resource_version="7",
+            marker=marker,
+        )
+        target = {
+            "id": self.OPERATION_ID,
+            "phase": "split",
+            "action": "create",
+            "kind": "Role",
+            "namespace": "flux-system",
+            "name": "example",
+            "url": "/role/example",
+            "desiredSha256": transaction.semantic_hash(live),
+        }
+        journal = transaction.Journal("a" * 64, "b" * 40, "d" * 64)
+        journal.document["attemptId"] = self.ATTEMPT
+        journal.document["operations"] = {
+            self.OPERATION_ID: {
+                "state": "committed",
+                "uid": UID_ONE,
+                "resourceVersion": "7",
+                "semanticSha256": transaction.semantic_hash(live),
+            }
+        }
+        journal.write = mock.Mock()
+        return live, {"targets": [target]}, journal
+
+    def test_absent_marker_is_response_bound_already_clean_without_put(self):
+        live, plan, journal = self.role_case(None)
+        client = _FakeClient(live)
+
+        transaction.cleanup_transaction_annotations(client, plan, journal)
+
+        self.assertFalse(any(call[0] == "put" for call in client.calls))
+        record = journal.document["operations"][self.OPERATION_ID]
+        self.assertEqual(record["state"], "verified")
+        self.assertEqual(record["cleanupState"], "already-clean")
+        self.assertEqual(record["resourceVersion"], "7")
+        journal.write.assert_called_once()
+
+    def test_foreign_marker_fails_before_intent_or_put(self):
+        live, plan, journal = self.role_case("f" * 64)
+        client = _FakeClient(live)
+
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "TRANSACTION_ANNOTATION_COLLISION"
+        ):
+            transaction.cleanup_transaction_annotations(client, plan, journal)
+
+        self.assertEqual(
+            journal.document["operations"][self.OPERATION_ID]["state"],
+            "committed",
+        )
+        journal.write.assert_not_called()
+        self.assertFalse(any(call[0] == "put" for call in client.calls))
+
+    def test_present_null_marker_collides_without_journal_or_put(self):
+        live, plan, journal = self.role_case(None)
+        live["metadata"]["annotations"] = {
+            transaction.TRANSACTION_ANNOTATION: None
+        }
+        client = _FakeClient(live)
+
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "TRANSACTION_ANNOTATION_COLLISION"
+        ):
+            transaction.cleanup_transaction_annotations(client, plan, journal)
+
+        self.assertEqual(
+            journal.document["operations"][self.OPERATION_ID]["state"],
+            "committed",
+        )
+        journal.write.assert_not_called()
+        self.assertFalse(any(call[0] == "put" for call in client.calls))
+
+    def test_exact_marker_persists_bound_intent_before_fenced_put(self):
+        live, plan, journal = self.role_case(self.ATTEMPT)
+
+        class Client(_FakeClient):
+            def put_fence(inner_self, url, body):
+                record = journal.document["operations"][self.OPERATION_ID]
+                self.assertEqual(record["cleanupState"], "remove-intent")
+                self.assertEqual(record["cleanupSourceUid"], UID_ONE)
+                self.assertEqual(record["cleanupSourceResourceVersion"], "7")
+                self.assertEqual(
+                    journal.document["pendingOperation"], self.OPERATION_ID
+                )
+                self.assertEqual(journal.write.call_count, 1)
+                return super().put_fence(url, body)
+
+        client = Client(live)
+        transaction.cleanup_transaction_annotations(client, plan, journal)
+
+        record = journal.document["operations"][self.OPERATION_ID]
+        self.assertEqual(record["state"], "verified")
+        self.assertEqual(record["cleanupState"], "removed")
+        self.assertEqual(record["resourceVersion"], "8")
+        self.assertEqual(journal.write.call_count, 2)
+        self.assertIsNone(journal.document["pendingOperation"])
+
+    def test_fenced_put_and_response_substitutions_fail_closed(self):
+        mutations = {
+            "conflict": lambda result: None,
+            "identity": lambda result: result["metadata"].__setitem__(
+                "name", "substituted"
+            ),
+            "uid": lambda result: result["metadata"].__setitem__("uid", UID_TWO),
+            "resource version": lambda result: result["metadata"].__setitem__(
+                "resourceVersion", "7"
+            ),
+            "terminating": lambda result: result["metadata"].__setitem__(
+                "deletionTimestamp", "2026-08-25T00:00:00Z"
+            ),
+            "semantics": lambda result: result["rules"][0].__setitem__(
+                "verbs", ["list"]
+            ),
+            "foreign marker": lambda result: result["metadata"].setdefault(
+                "annotations", {}
+            ).__setitem__(transaction.TRANSACTION_ANNOTATION, "f" * 64),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                live, plan, journal = self.role_case(self.ATTEMPT)
+
+                class Client(_FakeClient):
+                    def put_fence(inner_self, url, body):
+                        if label == "conflict":
+                            return None
+                        result = super().put_fence(url, body)
+                        mutate(result)
+                        return result
+
+                with self.assertRaises(transaction.RecoveryRequired):
+                    transaction.cleanup_transaction_annotations(
+                        Client(live), plan, journal
+                    )
+                record = journal.document["operations"][self.OPERATION_ID]
+                self.assertEqual(record["state"], "committed")
+                self.assertEqual(record["cleanupState"], "remove-intent")
+                self.assertEqual(journal.write.call_count, 1)
+
+    @staticmethod
+    def controller_value(name, generation, pod_uid, semantic):
+        image = "ghcr.io/fluxcd/controller:v1@sha256:" + "f" * 64
+        args = ["--feature-gates=DisableConfigWatchers=true"]
+        return {
+            "uid": UID_ONE,
+            "resourceVersion": str(generation),
+            "generation": generation,
+            "image": image,
+            "args": args,
+            "podUid": pod_uid,
+            "podRestarts": 0,
+            "podServiceAccountName": name,
+            "podContainerName": "manager",
+            "podImage": image,
+            "podImageID": "ghcr.io/fluxcd/controller@sha256:" + "f" * 64,
+            "podArgs": copy.deepcopy(args),
+            "podCommand": None,
+            "podReplicaSetName": name + "-abc123",
+            "podReplicaSetUid": UID_TWO,
+            "semanticSha256": semantic,
+        }
+
+    def watcher_case(self):
+        name = "kustomize-controller"
+        live = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": name,
+                "namespace": "flux-system",
+                "uid": UID_ONE,
+                "resourceVersion": "20",
+                "generation": 2,
+                "annotations": {
+                    transaction.TRANSACTION_ANNOTATION: self.ATTEMPT
+                },
+            },
+            "spec": {"replicas": 1},
+        }
+        desired_sha = transaction.semantic_hash(live)
+        rollout = self.controller_value(name, 2, "new-pod", desired_sha)
+        baseline = {
+            "source-controller": self.controller_value(
+                "source-controller", 1, "source-pod", "a" * 64
+            ),
+            name: self.controller_value(name, 1, "old-pod", "b" * 64),
+            "helm-controller": self.controller_value(
+                "helm-controller", 1, "helm-pod", "c" * 64
+            ),
+        }
+        operation_id = "rollout:Deployment:flux-system:" + name
+        plan = {
+            "baselines": {"controllers": baseline},
+            "targets": [
+                {
+                    "id": operation_id,
+                    "phase": "watchers",
+                    "action": "args",
+                    "kind": "Deployment",
+                    "namespace": "flux-system",
+                    "name": name,
+                    "url": "/deployment/" + name,
+                    "desiredSha256": desired_sha,
+                }
+            ],
+        }
+        journal = transaction.Journal("a" * 64, "b" * 40, "d" * 64)
+        journal.document["attemptId"] = self.ATTEMPT
+        journal.document["operations"] = {
+            operation_id: {
+                "state": "committed",
+                "uid": UID_ONE,
+                "resourceVersion": "20",
+                "semanticSha256": desired_sha,
+                "rolloutSnapshot": {
+                    field: copy.deepcopy(rollout[field])
+                    for field in transaction.CONTROLLER_RUNTIME_FIELDS
+                },
+            }
+        }
+        journal.write = mock.Mock()
+        return name, live, rollout, baseline, operation_id, plan, journal
+
+    def test_watcher_cleanup_binds_generation_and_final_verify_to_cleanup_snapshot(self):
+        name, live, rollout, baseline, operation_id, plan, journal = (
+            self.watcher_case()
+        )
+        cleaned = copy.deepcopy(rollout)
+        cleaned["generation"] = 3
+        current_before = {
+            "source-controller": copy.deepcopy(baseline["source-controller"]),
+            name: copy.deepcopy(rollout),
+            "helm-controller": copy.deepcopy(baseline["helm-controller"]),
+        }
+        current_after = copy.deepcopy(current_before)
+        current_after[name] = cleaned
+
+        class Client(_FakeClient):
+            def put_fence(inner_self, url, body):
+                result = super().put_fence(url, body)
+                result["metadata"]["generation"] = 3
+                return result
+
+        with mock.patch.object(
+            transaction,
+            "controller_snapshot",
+            side_effect=[current_before, current_after],
+        ):
+            transaction.cleanup_transaction_annotations(
+                Client(live), plan, journal
+            )
+        record = journal.document["operations"][operation_id]
+        self.assertEqual(record["cleanupSnapshot"]["generation"], 3)
+        self.assertEqual(record["cleanupSnapshot"]["podUid"], "new-pod")
+
+        with mock.patch.object(
+            transaction, "controller_snapshot", return_value=current_after
+        ):
+            transaction.verify_controller_phase(
+                plan, object(), frozenset({name}), journal
+            )
+
+    def test_watcher_cleanup_rejects_nonunit_generation_and_runtime_drift(self):
+        for generation in (2, 4):
+            with self.subTest(generation=generation):
+                name, live, rollout, baseline, _operation_id, plan, journal = (
+                    self.watcher_case()
+                )
+
+                class Client(_FakeClient):
+                    def put_fence(inner_self, url, body):
+                        result = super().put_fence(url, body)
+                        result["metadata"]["generation"] = generation
+                        return result
+
+                current = {
+                    "source-controller": baseline["source-controller"],
+                    name: rollout,
+                    "helm-controller": baseline["helm-controller"],
+                }
+                with mock.patch.object(
+                    transaction, "controller_snapshot", return_value=current
+                ), self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "ANNOTATION_CLEANUP_RESPONSE_INVALID",
+                ):
+                    transaction.cleanup_transaction_annotations(
+                        Client(live), plan, journal
+                    )
+
+        for field in (
+            "podUid",
+            "podReplicaSetUid",
+            "image",
+            "args",
+            "podCommand",
+            "podServiceAccountName",
+            "podRestarts",
+        ):
+            with self.subTest(field=field):
+                name, _live, rollout, _baseline, _operation_id, _plan, _journal = (
+                    self.watcher_case()
+                )
+                drifted = copy.deepcopy(rollout)
+                drifted["generation"] = 3
+                drifted[field] = 1 if field == "podRestarts" else "unexpected"
+                with mock.patch.object(
+                    transaction,
+                    "controller_snapshot",
+                    return_value={name: drifted},
+                ), self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "CONTROLLER_CLEANUP_RUNTIME_DRIFT",
+                ):
+                    transaction.wait_controller_cleanup(
+                        object(), name, rollout, 3
+                    )
+
+    def test_forward_failure_fields_are_allowlisted_and_immutable(self):
+        journal = transaction.Journal("a" * 64, "b" * 40, "d" * 64)
+        journal.write = mock.Mock()
+        journal.record_forward_failure(
+            "annotation-cleanup",
+            transaction.RecoveryRequired("ANNOTATION_CLEANUP_DRIFT"),
+        )
+        self.assertEqual(
+            journal.document["forwardFailureToken"],
+            "ANNOTATION_CLEANUP_DRIFT",
+        )
+
+        unexpected = transaction.Journal("a" * 64, "b" * 40, "d" * 64)
+        unexpected.write = mock.Mock()
+        unexpected.record_forward_failure(
+            "annotation-cleanup", OSError("private path must not persist")
+        )
+        self.assertEqual(
+            unexpected.document["forwardFailureToken"],
+            "UNEXPECTED_FORWARD_FAILURE",
+        )
+        self.assertNotIn("private", json.dumps(unexpected.document))
+
+        previous = copy.deepcopy(journal.document)
+        previous["sequence"] = 1
+        successor = copy.deepcopy(previous)
+        successor["sequence"] = 2
+        successor["forwardFailureToken"] = "SUBSTITUTED_TOKEN"
+        with self.assertRaisesRegex(
+            transaction.TransactionError,
+            "JOURNAL_TEMP_FORWARD_FAILURE_REGRESSION",
+        ):
+            transaction.validate_journal_successor(previous, successor)
+
+        cleanup_previous = transaction.Journal(
+            "a" * 64, "b" * 40, "d" * 64
+        ).document
+        cleanup_previous["sequence"] = 1
+        cleanup_previous["operations"] = {
+            self.OPERATION_ID: {
+                "state": "committed",
+                "uid": UID_ONE,
+                "resourceVersion": "7",
+            }
+        }
+        cleanup_intent = copy.deepcopy(cleanup_previous)
+        cleanup_intent["sequence"] = 2
+        cleanup_intent["operations"][self.OPERATION_ID].update(
+            {
+                "cleanupState": "remove-intent",
+                "cleanupSourceUid": UID_ONE,
+                "cleanupSourceResourceVersion": "7",
+            }
+        )
+        transaction.validate_journal_successor(
+            cleanup_previous, cleanup_intent
+        )
+        substituted = copy.deepcopy(cleanup_intent)
+        substituted["operations"][self.OPERATION_ID][
+            "cleanupSourceUid"
+        ] = UID_TWO
+        with self.assertRaisesRegex(
+            transaction.TransactionError,
+            "JOURNAL_TEMP_CLEANUP_STATE_INVALID",
+        ):
+            transaction.validate_journal_successor(
+                cleanup_previous, substituted
+            )
 
 
 class SemanticGuardTests(unittest.TestCase):

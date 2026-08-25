@@ -122,8 +122,8 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.29`, the next
-release after its reviewed `v0.1.28` protected base. `target.json` cannot select
+This one-time executable authorizes exactly platform tag `v0.1.30`, the next
+release after its reviewed `v0.1.29` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
@@ -143,7 +143,7 @@ unchanged. Prepare a new local `target.json` through the owner-controlled
 read-only ceremony, then install it as:
 
 ```text
-/var/lib/website-infrastructure/flux-rbac-convergence/input/target.json
+/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30/input/target.json
 owner: root:root
 mode: 0600
 ```
@@ -151,7 +151,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.29`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.30`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
@@ -174,7 +174,7 @@ ceremony; do not query or expose Secret data to populate this file.
 ## Root custody and stage zero
 
 Protected state lives under
-`/var/lib/website-infrastructure/flux-rbac-convergence`, with root ownership and
+`/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30`, with root ownership and
 mode 0700 directories. Plans, journals, receipts, the private target, and
 custodied source files are mode 0600 except for both the mode-0700 custodied
 transaction blob and its mode-0700 installed launcher copy.
