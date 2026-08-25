@@ -400,7 +400,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v028-rv-baseline.md": 0o600,
+            "changelog.d/141-flux-rbac-v029-helm-proof-rv.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -1023,6 +1023,83 @@ class HelmChainContractTests(unittest.TestCase):
             transaction.helm_proof(client, plan, plan_sha256, journal)
         builder.assert_called_once_with(live["spec"], plan_sha256)
         self.assertEqual(client.put_calls, 0)
+        journal.write.assert_not_called()
+
+    def test_forward_helm_proof_uses_current_resource_version_as_write_fence(self):
+        plan_sha256 = "a" * 64
+        plan = {
+            "temporaryProof": {
+                "identity": {
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2",
+                    "kind": "HelmRelease",
+                    "namespace": "naranjo-online",
+                    "name": "naranjo-online",
+                },
+                "annotationKey": transaction.PROOF_ANNOTATION,
+            },
+            "baselines": {
+                "flux": self.flux_snapshot_for_versions("0.1.30", "0.1.26")
+            },
+        }
+        live = self.valid_release()
+        planned = plan["baselines"]["flux"]["helm"][
+            "naranjo-online/naranjo-online"
+        ]
+        live["metadata"]["resourceVersion"] = str(
+            int(live["metadata"]["resourceVersion"]) + 1
+        )
+
+        class Client:
+            put_body = None
+
+            def get(self, _url):
+                return copy.deepcopy(live)
+
+            def put(self, _url, body):
+                self.put_body = copy.deepcopy(body)
+                raise transaction.TransactionError("PUT_SENTINEL")
+
+        journal = mock.Mock()
+        journal.document = {"planSha256": plan_sha256}
+        client = Client()
+        with self.assertRaisesRegex(transaction.TransactionError, "PUT_SENTINEL"):
+            transaction.helm_proof(client, plan, plan_sha256, journal)
+        self.assertNotEqual(
+            live["metadata"]["resourceVersion"], planned["resourceVersion"]
+        )
+        self.assertEqual(
+            client.put_body["metadata"]["resourceVersion"],
+            live["metadata"]["resourceVersion"],
+        )
+        journal.write.assert_called_once_with()
+
+    def test_forward_helm_proof_still_rejects_non_version_drift(self):
+        plan_sha256 = "a" * 64
+        plan = {
+            "temporaryProof": {
+                "identity": {
+                    "apiVersion": "helm.toolkit.fluxcd.io/v2",
+                    "kind": "HelmRelease",
+                    "namespace": "naranjo-online",
+                    "name": "naranjo-online",
+                },
+                "annotationKey": transaction.PROOF_ANNOTATION,
+            },
+            "baselines": {
+                "flux": self.flux_snapshot_for_versions("0.1.30", "0.1.26")
+            },
+        }
+        live = self.valid_release()
+        live["status"]["lastAttemptedReleaseAction"] = "install"
+        client = mock.Mock()
+        client.get.return_value = copy.deepcopy(live)
+        journal = mock.Mock()
+        journal.document = {"planSha256": plan_sha256}
+        with self.assertRaisesRegex(
+            transaction.TransactionError, "HELM_PROOF_PLAN_PRESTATE_DRIFT"
+        ):
+            transaction.helm_proof(client, plan, plan_sha256, journal)
+        client.put.assert_not_called()
         journal.write.assert_not_called()
 
     def test_chart_movement_after_plan_is_baseline_drift(self):
@@ -2540,7 +2617,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.28")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.29")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
@@ -2550,7 +2627,8 @@ class ReleaseOrderingTests(unittest.TestCase):
             "v0.1.25",
             "v0.1.26",
             "v0.1.27",
-            "v0.1.29",
+            "v0.1.28",
+            "v0.1.30",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(
@@ -4039,6 +4117,7 @@ class RollbackResponseLossTests(unittest.TestCase):
             def __init__(self, live):
                 self.live = copy.deepcopy(live)
                 self.put_fence_calls = 0
+                self.last_fence_resource_version = None
 
             def get(self, _url):
                 return copy.deepcopy(self.live)
@@ -4057,6 +4136,9 @@ class RollbackResponseLossTests(unittest.TestCase):
 
             def put_fence(self, _url, body):
                 self.put_fence_calls += 1
+                self.last_fence_resource_version = body["metadata"][
+                    "resourceVersion"
+                ]
                 self._replace(body)
                 return None
 
@@ -4110,11 +4192,28 @@ class RollbackResponseLossTests(unittest.TestCase):
         self.assertEqual(hash_tampered_client.put_fence_calls, 0)
         self.assertEqual(hash_tampered_journal.writes, 0)
 
+        drifted_pre = copy.deepcopy(pre)
+        drifted_pre["metadata"]["resourceVersion"] = str(
+            int(drifted_pre["metadata"]["resourceVersion"]) + 1
+        )
+        drifted_snapshot = transaction.validate_site_helm_release(
+            drifted_pre,
+            "naranjo-online",
+            "naranjo-online",
+            "0.1.30",
+            HelmChainContractTests.UPSTREAM,
+        )
         journal = ProofJournal()
-        client = LostHelmFenceClient(pre)
+        journal.document["helmProof"]["preSnapshot"] = drifted_snapshot
+        client = LostHelmFenceClient(drifted_pre)
+        client.live["metadata"]["resourceVersion"] = str(
+            int(client.live["metadata"]["resourceVersion"]) + 1
+        )
+        current_resource_version = client.live["metadata"]["resourceVersion"]
         with mock.patch.object(transaction, "wait_helm_restored"):
             transaction.restore_helm_proof(client, plan, journal)
         self.assertEqual(client.put_fence_calls, 1)
+        self.assertEqual(client.last_fence_resource_version, current_resource_version)
         self.assertEqual(client.live["spec"], pre_spec)
         self.assertEqual(journal.document["helmProof"]["state"], "restored")
 
