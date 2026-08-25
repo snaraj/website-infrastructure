@@ -400,7 +400,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v027-runtime-status-image.md": 0o600,
+            "changelog.d/141-flux-rbac-v028-rv-baseline.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -553,6 +553,53 @@ class HeldSourceDescriptorTests(unittest.TestCase):
             open_source.assert_not_called()
             self.assertFalse(pending_receipt.exists())
             self.assertEqual(receipt_path.stat().st_nlink, 1)
+
+
+class KubeClientCustodyCleanupTests(unittest.TestCase):
+    def target(self):
+        return transaction.Target(
+            release_tag=transaction.AUTHORIZED_RELEASE_TAG,
+            kubectl=Path("/reviewed/kubectl"),
+            kubeconfig=Path("/reviewed/kubeconfig"),
+            context="reviewed-context",
+            server="https://api.example.invalid",
+            ca_sha256="a" * 64,
+            kube_system_uid_sha256="b" * 64,
+            node_identity_sha256="c" * 64,
+        )
+
+    def test_second_bound_file_failure_closes_first(self):
+        first = mock.Mock()
+        oracle = mock.Mock()
+        oracle.BoundFile.side_effect = [first, RuntimeError("injected")]
+        versions = {
+            "KUBECTL_LINUX_AMD64_SHA256": "d" * 64,
+            "KUBECTL_ARM64_SHA256": "e" * 64,
+        }
+        with mock.patch.object(
+            transaction.os, "uname", return_value=mock.Mock(machine="x86_64")
+        ), self.assertRaisesRegex(
+            transaction.TransactionError, "KUBECTL_CUSTODY_FAILED"
+        ):
+            transaction.KubeClient(self.target(), versions, oracle)
+        first.close.assert_called_once_with()
+
+    def test_partial_cleanup_failure_is_fail_closed(self):
+        first = mock.Mock()
+        first.close.side_effect = OSError("injected cleanup failure")
+        oracle = mock.Mock()
+        oracle.BoundFile.side_effect = [first, RuntimeError("injected bind failure")]
+        versions = {
+            "KUBECTL_LINUX_AMD64_SHA256": "d" * 64,
+            "KUBECTL_ARM64_SHA256": "e" * 64,
+        }
+        with mock.patch.object(
+            transaction.os, "uname", return_value=mock.Mock(machine="x86_64")
+        ), self.assertRaisesRegex(
+            transaction.TransactionError, "KUBECTL_CUSTODY_CLEANUP_FAILED"
+        ):
+            transaction.KubeClient(self.target(), versions, oracle)
+        first.close.assert_called_once_with()
 
 
 class HelmChainContractTests(unittest.TestCase):
@@ -996,6 +1043,94 @@ class HelmChainContractTests(unittest.TestCase):
             transaction.TransactionError, "FLUX_BASELINE_DRIFT"
         ):
             transaction.stable_baselines(plan, object())
+
+    def assert_stable_flux(self, planned, current, *, allow_proof=False):
+        plan = {
+            "baselines": {"flux": planned, "workloads": {}, "publicSites": {}}
+        }
+        with mock.patch.object(
+            transaction, "flux_snapshot", return_value=current
+        ), mock.patch.object(
+            transaction, "workload_snapshot", return_value={}
+        ), mock.patch.object(
+            transaction, "validate_helm_workload_inventory"
+        ), mock.patch.object(
+            transaction, "public_health", return_value={}
+        ):
+            transaction.stable_baselines(
+                plan, object(), allow_proof=allow_proof
+            )
+
+    def test_resource_version_only_flux_drift_is_tolerated(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        current = copy.deepcopy(planned)
+        next_resource_version = 100
+        for section in ("oci", "helm"):
+            for row in current[section].values():
+                row["resourceVersion"] = str(next_resource_version)
+                next_resource_version += 1
+        self.assert_stable_flux(planned, current)
+
+    def test_missing_or_malformed_flux_resource_version_fails_closed(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        identity = next(iter(planned["oci"]))
+        for label, replacement in ("missing", None), ("malformed", "moved"):
+            with self.subTest(label=label):
+                current = copy.deepcopy(planned)
+                if replacement is None:
+                    current["oci"][identity].pop("resourceVersion")
+                else:
+                    current["oci"][identity]["resourceVersion"] = replacement
+                with self.assertRaisesRegex(
+                    transaction.TransactionError, "FLUX_BASELINE_INVALID"
+                ):
+                    self.assert_stable_flux(planned, current)
+
+    def test_every_other_flux_row_field_remains_bound(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        for section in ("oci", "helm"):
+            identity, planned_row = next(iter(planned[section].items()))
+            for field in sorted(set(planned_row) - {"resourceVersion"}):
+                with self.subTest(section=section, field=field):
+                    current = copy.deepcopy(planned)
+                    current[section][identity][field] = {"hostile": True}
+                    with self.assertRaisesRegex(
+                        transaction.TransactionError, "FLUX_BASELINE_DRIFT"
+                    ):
+                        self.assert_stable_flux(planned, current)
+
+    def test_json_numeric_type_drift_remains_bound(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        identity = next(iter(planned["oci"]))
+        current = copy.deepcopy(planned)
+        self.assertEqual(current["oci"][identity]["generation"], 3)
+        current["oci"][identity]["generation"] = 3.0
+        with self.assertRaisesRegex(
+            transaction.TransactionError, "FLUX_BASELINE_DRIFT"
+        ):
+            self.assert_stable_flux(planned, current)
+
+    def test_closed_flux_inventory_fields_remain_bound(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        for field, hostile in (
+            ("closedEmptyInventories", {"Bucket": 1}),
+            ("gitRepositories", 1),
+            ("kustomizations", 1),
+        ):
+            with self.subTest(field=field):
+                current = copy.deepcopy(planned)
+                current[field] = hostile
+                with self.assertRaisesRegex(
+                    transaction.TransactionError, "FLUX_BASELINE_DRIFT"
+                ):
+                    self.assert_stable_flux(planned, current)
+
+    def test_post_proof_oci_resource_version_only_drift_is_tolerated(self):
+        planned = self.flux_snapshot_for_versions("0.1.32", "0.1.29")
+        current = copy.deepcopy(planned)
+        for index, row in enumerate(current["oci"].values(), start=100):
+            row["resourceVersion"] = str(index)
+        self.assert_stable_flux(planned, current, allow_proof=True)
 
     def test_flux_snapshot_binds_helm_to_upstream_not_stored_artifact_digest(self):
         sources = [
@@ -2405,7 +2540,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.27")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.28")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
@@ -2414,7 +2549,8 @@ class ReleaseOrderingTests(unittest.TestCase):
             "v0.1.24",
             "v0.1.25",
             "v0.1.26",
-            "v0.1.28",
+            "v0.1.27",
+            "v0.1.29",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(
