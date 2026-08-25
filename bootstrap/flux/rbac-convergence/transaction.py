@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.25 and can therefore
+# selector.  Its protected-base candidate follows v0.1.26 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.26"
+AUTHORIZED_RELEASE_TAG = "v0.1.27"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v026-live-convergence.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v027-runtime-status-image.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -101,6 +101,7 @@ ROLLOUT_TIMEOUT_SECONDS = 300
 HELM_TIMEOUT_SECONDS = 300
 DELETE_TIMEOUT_SECONDS = 60
 TRANSACTION_TARGET_COUNT = 23
+MAX_CONTROLLER_STATUS_IMAGE_CHARS = 4096
 
 CONTROLLERS = (
     "source-controller",
@@ -1894,6 +1895,44 @@ def collection_items(client: KubeClient, path: str) -> list[Mapping[str, object]
     return list(items)  # type: ignore[return-value]
 
 
+def collection_item_with_type_meta(
+    value: Mapping[str, object],
+    *,
+    expected_kind: str,
+    expected_api_version: str,
+    error_token: str,
+) -> dict[str, object]:
+    """Restore TypeMeta omitted by one caller-bound collection path."""
+
+    if (
+        ("apiVersion" in value and value.get("apiVersion") != expected_api_version)
+        or ("kind" in value and value.get("kind") != expected_kind)
+    ):
+        raise TransactionError(error_token)
+    result = copy.deepcopy(dict(value))
+    result["apiVersion"] = expected_api_version
+    result["kind"] = expected_kind
+    return result
+
+
+def typed_site_inventory_item(
+    value: Mapping[str, object], kind: str
+) -> dict[str, object]:
+    """Bind a site inventory item to its closed kind/path identity."""
+
+    identity = SITE_INVENTORY_KINDS.get(kind)
+    if identity is None:
+        raise TransactionError("SITE_OWNED_OBJECT_IDENTITY_INVALID")
+    group, version = identity
+    api_version = version if not group else f"{group}/{version}"
+    return collection_item_with_type_meta(
+        value,
+        expected_kind=kind,
+        expected_api_version=api_version,
+        error_token="SITE_OWNED_OBJECT_IDENTITY_INVALID",
+    )
+
+
 def expected_site_oci_spec(namespace: str, name: str) -> dict[str, object]:
     repository = SITE_SIGNING_REPOSITORIES.get((namespace, name))
     if repository is None:
@@ -2287,7 +2326,7 @@ def workload_snapshot(client: KubeClient) -> dict[str, object]:
         ]
         if len(matches) != 1:
             raise TransactionError("SITE_DEPLOYMENT_INVENTORY_INVALID")
-        deployment = matches[0]
+        deployment = typed_site_inventory_item(matches[0], "Deployment")
         uid, _rv = live_identity(deployment)
         metadata = deployment.get("metadata")
         spec = deployment.get("spec")
@@ -2317,6 +2356,7 @@ def workload_snapshot(client: KubeClient) -> dict[str, object]:
         owned_rows: list[dict[str, object]] = []
         for kind, candidates in owned_collections:
             for candidate in candidates:
+                candidate = typed_site_inventory_item(candidate, kind)
                 candidate_metadata = candidate.get("metadata")
                 annotations = (
                     candidate_metadata.get("annotations")
@@ -2882,6 +2922,8 @@ def controller_snapshot(client: KubeClient) -> dict[str, object]:
         pod_containers = (
             pod_spec.get("containers") if isinstance(pod_spec, Mapping) else None
         )
+        # Runtimes choose this display representation; imageID below, together
+        # with both spec images, remains the immutable identity.
         if (
             not isinstance(pod_spec, Mapping)
             or pod_spec.get("serviceAccountName") != name
@@ -2901,7 +2943,9 @@ def controller_snapshot(client: KubeClient) -> dict[str, object]:
             or not isinstance(statuses[0]["state"].get("running"), Mapping)
             or type(statuses[0].get("restartCount")) is not int
             or statuses[0].get("restartCount") < 0
-            or statuses[0].get("image") != pod_containers[0].get("image")
+            or not isinstance(statuses[0].get("image"), str)
+            or not statuses[0]["image"]
+            or len(statuses[0]["image"]) > MAX_CONTROLLER_STATUS_IMAGE_CHARS
             or len(ready) != 1
             or ready[0].get("status") != "True"
             or pod_status.get("phase") != "Running"
@@ -3035,13 +3079,39 @@ def binding_graph_row(item: Mapping[str, object]) -> dict[str, object] | None:
     }
 
 
+def typed_binding_collection_items(
+    client: KubeClient,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Bind both raw RBAC list responses to their fixed path TypeMeta."""
+
+    api_version = "rbac.authorization.k8s.io/v1"
+    cluster = [
+        collection_item_with_type_meta(
+            item,
+            expected_kind="ClusterRoleBinding",
+            expected_api_version=api_version,
+            error_token="OBJECT_IDENTITY_INVALID",
+        )
+        for item in collection_items(
+            client, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+        )
+    ]
+    namespaced = [
+        collection_item_with_type_meta(
+            item,
+            expected_kind="RoleBinding",
+            expected_api_version=api_version,
+            error_token="OBJECT_IDENTITY_INVALID",
+        )
+        for item in collection_items(
+            client, "/apis/rbac.authorization.k8s.io/v1/rolebindings"
+        )
+    ]
+    return cluster, namespaced
+
+
 def binding_graph(client: KubeClient) -> dict[str, object]:
-    cluster = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
-    )
-    namespaced = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/rolebindings"
-    )
+    cluster, namespaced = typed_binding_collection_items(client)
     rows: list[dict[str, object]] = []
     for item in cluster + namespaced:
         row = binding_graph_row(item)
@@ -5345,12 +5415,7 @@ def binding_graph_final(client: KubeClient) -> dict[str, object]:
 
 
 def binding_graph_without_broad_requirement(client: KubeClient) -> dict[str, object]:
-    cluster = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
-    )
-    namespaced = collection_items(
-        client, "/apis/rbac.authorization.k8s.io/v1/rolebindings"
-    )
+    cluster, namespaced = typed_binding_collection_items(client)
     rows: list[dict[str, object]] = []
     for item in cluster + namespaced:
         row = binding_graph_row(item)
