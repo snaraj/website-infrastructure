@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.27 and can therefore
+# selector.  Its protected-base candidate follows v0.1.28 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.28"
+AUTHORIZED_RELEASE_TAG = "v0.1.29"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v028-rv-baseline.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v029-helm-proof-rv.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -2581,6 +2581,20 @@ def compare_flux_without_resource_versions(
                 raise TransactionError("HELM_PROOF_FLUX_DRIFT")
 
 
+def flux_row_without_resource_version(row: object) -> dict[str, object]:
+    """Validate one Flux snapshot row and remove only its volatile version."""
+
+    if (
+        not isinstance(row, Mapping)
+        or not isinstance(row.get("resourceVersion"), str)
+        or not str(row["resourceVersion"]).isascii()
+        or not str(row["resourceVersion"]).isdecimal()
+        or int(str(row["resourceVersion"])) <= 0
+    ):
+        raise TransactionError("FLUX_BASELINE_INVALID")
+    return {key: value for key, value in row.items() if key != "resourceVersion"}
+
+
 def flux_rows_without_resource_versions(rows: object) -> dict[str, object]:
     """Remove only controller-written resource versions from Flux baseline rows."""
 
@@ -2588,17 +2602,9 @@ def flux_rows_without_resource_versions(rows: object) -> dict[str, object]:
         raise TransactionError("FLUX_BASELINE_INVALID")
     result: dict[str, object] = {}
     for identity, row in rows.items():
-        if (
-            not isinstance(identity, str)
-            or not isinstance(row, Mapping)
-            or not isinstance(row.get("resourceVersion"), str)
-            or not str(row["resourceVersion"]).isascii()
-            or not str(row["resourceVersion"]).isdecimal()
-        ):
+        if not isinstance(identity, str):
             raise TransactionError("FLUX_BASELINE_INVALID")
-        result[identity] = {
-            key: value for key, value in row.items() if key != "resourceVersion"
-        }
+        result[identity] = flux_row_without_resource_version(row)
     return result
 
 
@@ -4983,7 +4989,9 @@ def helm_proof(
         version,
         upstream_digest,
     )
-    if pre_snapshot != dict(planned_release):
+    if flux_row_without_resource_version(
+        pre_snapshot
+    ) != flux_row_without_resource_version(planned_release):
         raise TransactionError("HELM_PROOF_PLAN_PRESTATE_DRIFT")
     uid = str(pre_snapshot["uid"])
     pre_resource_version = str(pre_snapshot["resourceVersion"])
@@ -5968,12 +5976,16 @@ def restore_helm_proof(
                 plan, "naranjo-online", "naranjo-online"
             )
         )
+        pre_snapshot_binding = flux_row_without_resource_version(pre_snapshot)
+        planned_snapshot_binding = flux_row_without_resource_version(
+            planned_snapshot
+        )
     except TransactionError as exc:
         raise RecoveryRequired("ROLLBACK_HELM_PLAN_BINDING_INVALID") from exc
     if (
         version != planned_version
         or upstream_digest != planned_digest
-        or dict(pre_snapshot) != dict(planned_snapshot)
+        or pre_snapshot_binding != planned_snapshot_binding
         or uid != planned_snapshot.get("uid")
         or pre_generation != planned_snapshot.get("generation")
         or pre_history_revision != planned_snapshot.get("historyRevision")
@@ -6015,7 +6027,13 @@ def restore_helm_proof(
             raise RecoveryRequired(
                 "ROLLBACK_HELM_UNCHANGED_PRESTATE_DRIFT"
             ) from exc
-        if unchanged != dict(pre_snapshot):
+        try:
+            unchanged_binding = flux_row_without_resource_version(unchanged)
+        except TransactionError as exc:
+            raise RecoveryRequired(
+                "ROLLBACK_HELM_UNCHANGED_PRESTATE_DRIFT"
+            ) from exc
+        if unchanged_binding != pre_snapshot_binding:
             raise RecoveryRequired("ROLLBACK_HELM_UNCHANGED_PRESTATE_DRIFT")
         request = writable_from_live(live)
         request["spec"] = copy.deepcopy(dict(mutated_spec))
