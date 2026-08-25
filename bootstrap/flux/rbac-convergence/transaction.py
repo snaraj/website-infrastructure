@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.23 and can therefore
+# selector.  Its protected-base candidate follows v0.1.25 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.24"
+AUTHORIZED_RELEASE_TAG = "v0.1.26"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v024-dynamic-site-baseline.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v026-live-convergence.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
