@@ -400,7 +400,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v026-live-convergence.md": 0o600,
+            "changelog.d/141-flux-rbac-v027-runtime-status-image.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -1179,6 +1179,297 @@ class HelmChainContractTests(unittest.TestCase):
                     self.validate(release)
 
 
+class WorkloadSnapshotTypeMetaTests(unittest.TestCase):
+    @staticmethod
+    def fixtures():
+        paths = {}
+        for namespace, name in sorted(transaction.SITE_RELEASES):
+            annotations = {
+                "meta.helm.sh/release-name": name,
+                "meta.helm.sh/release-namespace": namespace,
+            }
+
+            def metadata(object_name, uid, resource_version):
+                return {
+                    "name": object_name,
+                    "namespace": namespace,
+                    "uid": uid,
+                    "resourceVersion": resource_version,
+                    "annotations": copy.deepcopy(annotations),
+                }
+
+            labels = {"app": name}
+            deployment = {
+                "metadata": {
+                    **metadata(name, UID_ONE, "11"),
+                    "generation": 2,
+                },
+                "spec": {
+                    "replicas": 1,
+                    "selector": {"matchLabels": labels},
+                    "template": {
+                        "metadata": {"labels": labels},
+                        "spec": {"containers": [{"name": name}]},
+                    },
+                },
+                "status": {
+                    "observedGeneration": 2,
+                    "availableReplicas": 1,
+                    "updatedReplicas": 1,
+                },
+            }
+            service = {"metadata": metadata(name, UID_TWO, "12")}
+            service_account = {"metadata": metadata(name, UID_THREE, "13")}
+            network_policy = {"metadata": metadata(name, UID_FOUR, "14")}
+            pod = {
+                "metadata": {
+                    "name": name + "-pod",
+                    "namespace": namespace,
+                    "uid": UID_FOUR,
+                    "resourceVersion": "15",
+                    "labels": labels,
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [
+                        {
+                            "restartCount": 0,
+                            "image": "example.invalid/site@sha256:" + "a" * 64,
+                        }
+                    ],
+                },
+            }
+            paths[
+                f"/apis/apps/v1/namespaces/{namespace}/deployments"
+            ] = [deployment]
+            paths[f"/api/v1/namespaces/{namespace}/services"] = [service]
+            paths[f"/api/v1/namespaces/{namespace}/serviceaccounts"] = [
+                service_account
+            ]
+            paths[
+                f"/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies"
+            ] = [network_policy]
+            paths[f"/api/v1/namespaces/{namespace}/pods"] = [pod]
+        return paths
+
+    @staticmethod
+    def snapshot(paths):
+        class Client:
+            def get(self, path):
+                return {"items": copy.deepcopy(paths[path])}
+
+        return transaction.workload_snapshot(Client())
+
+    def test_raw_list_items_without_type_meta_use_closed_path_identity(self):
+        paths = self.fixtures()
+        for path, items in paths.items():
+            if path.endswith("/pods"):
+                continue
+            self.assertNotIn("apiVersion", items[0])
+            self.assertNotIn("kind", items[0])
+
+        snapshot = self.snapshot(paths)
+        self.assertEqual(
+            set(snapshot),
+            {
+                "lidersea-com/lidersea-com",
+                "naranjo-online/naranjo-online",
+            },
+        )
+        expected_versions = {
+            kind: version if not group else f"{group}/{version}"
+            for kind, (group, version) in transaction.SITE_INVENTORY_KINDS.items()
+        }
+        for workload in snapshot.values():
+            rows = {row["kind"]: row for row in workload["ownedObjects"]}
+            self.assertEqual(set(rows), set(expected_versions))
+            self.assertEqual(
+                {kind: row["apiVersion"] for kind, row in rows.items()},
+                expected_versions,
+            )
+            self.assertEqual(
+                workload["semanticSha256"],
+                rows["Deployment"]["semanticSha256"],
+            )
+
+    def test_conflicting_type_meta_and_wrong_inventory_fail_closed(self):
+        namespace = "lidersea-com"
+        service_path = f"/api/v1/namespaces/{namespace}/services"
+        policy_path = (
+            f"/apis/networking.k8s.io/v1/namespaces/{namespace}/networkpolicies"
+        )
+
+        def add_extra(paths):
+            extra = copy.deepcopy(paths[service_path][0])
+            extra["metadata"].update(
+                name="lidersea-com-extra",
+                uid=UID_FOUR,
+                resourceVersion="99",
+            )
+            paths[service_path].append(extra)
+
+        cases = {
+            "conflicting apiVersion": (
+                lambda paths: paths[service_path][0].update(apiVersion="v2"),
+                "SITE_OWNED_OBJECT_IDENTITY_INVALID",
+            ),
+            "conflicting kind": (
+                lambda paths: paths[service_path][0].update(kind="Secret"),
+                "SITE_OWNED_OBJECT_IDENTITY_INVALID",
+            ),
+            "null apiVersion": (
+                lambda paths: paths[service_path][0].update(apiVersion=None),
+                "SITE_OWNED_OBJECT_IDENTITY_INVALID",
+            ),
+            "non-string kind": (
+                lambda paths: paths[service_path][0].update(kind=7),
+                "SITE_OWNED_OBJECT_IDENTITY_INVALID",
+            ),
+            "extra owned object": (
+                add_extra,
+                "SITE_OWNED_OBJECT_INVENTORY_INVALID",
+            ),
+            "missing owned kind": (
+                lambda paths: paths[policy_path].clear(),
+                "SITE_OWNED_OBJECT_INVENTORY_INVALID",
+            ),
+        }
+        for label, (mutate, error) in cases.items():
+            with self.subTest(label=label):
+                paths = self.fixtures()
+                mutate(paths)
+                with self.assertRaises(transaction.TransactionError) as caught:
+                    self.snapshot(paths)
+                self.assertEqual(str(caught.exception), error)
+
+
+class BindingGraphTypeMetaTests(unittest.TestCase):
+    CLUSTER_PATH = "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+    NAMESPACED_PATH = "/apis/rbac.authorization.k8s.io/v1/rolebindings"
+
+    @classmethod
+    def fixtures(cls):
+        broad = _cluster_role_binding(
+            transaction.BROAD_NAME,
+            role_name="cluster-admin",
+        )
+        role_binding = {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {
+                "name": "source-controller-runtime",
+                "namespace": "flux-system",
+                "uid": UID_TWO,
+                "resourceVersion": "8",
+            },
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "Role",
+                "name": "source-controller-runtime",
+            },
+            "subjects": [
+                {
+                    "kind": "ServiceAccount",
+                    "namespace": "flux-system",
+                    "name": "source-controller",
+                }
+            ],
+        }
+        for item in (broad, role_binding):
+            item.pop("apiVersion")
+            item.pop("kind")
+        return {
+            cls.CLUSTER_PATH: [broad],
+            cls.NAMESPACED_PATH: [role_binding],
+        }
+
+    @staticmethod
+    def snapshot(paths):
+        class Client:
+            def get(self, path):
+                return {"items": copy.deepcopy(paths[path])}
+
+        return transaction.binding_graph(Client())
+
+    def test_raw_binding_lists_restore_only_caller_bound_type_meta_on_copies(self):
+        paths = self.fixtures()
+        original = copy.deepcopy(paths)
+        graph = self.snapshot(paths)
+
+        self.assertEqual(paths, original)
+        rows = {row["name"]: row for row in graph["rows"]}
+        self.assertEqual(
+            set(rows),
+            {transaction.BROAD_NAME, "source-controller-runtime"},
+        )
+        self.assertEqual(
+            rows[transaction.BROAD_NAME]["kind"],
+            "ClusterRoleBinding",
+        )
+        self.assertEqual(rows["source-controller-runtime"]["kind"], "RoleBinding")
+        self.assertEqual(
+            rows["source-controller-runtime"]["trackedSubjects"],
+            ["ServiceAccount:flux-system/source-controller"],
+        )
+        for path, kind in (
+            (self.CLUSTER_PATH, "ClusterRoleBinding"),
+            (self.NAMESPACED_PATH, "RoleBinding"),
+        ):
+            normalized = transaction.collection_item_with_type_meta(
+                paths[path][0],
+                expected_kind=kind,
+                expected_api_version="rbac.authorization.k8s.io/v1",
+                error_token="OBJECT_IDENTITY_INVALID",
+            )
+            self.assertEqual(
+                rows[normalized["metadata"]["name"]]["semanticSha256"],
+                transaction.semantic_hash(normalized),
+            )
+
+    def test_present_invalid_binding_type_meta_and_broad_graph_fail_closed(self):
+        cases = {
+            "wrong cluster apiVersion": (
+                self.CLUSTER_PATH,
+                lambda item: item.update(apiVersion="v1"),
+                "OBJECT_IDENTITY_INVALID",
+            ),
+            "null cluster kind": (
+                self.CLUSTER_PATH,
+                lambda item: item.update(kind=None),
+                "OBJECT_IDENTITY_INVALID",
+            ),
+            "wrong namespaced kind": (
+                self.NAMESPACED_PATH,
+                lambda item: item.update(kind="ClusterRoleBinding"),
+                "OBJECT_IDENTITY_INVALID",
+            ),
+            "non-string namespaced apiVersion": (
+                self.NAMESPACED_PATH,
+                lambda item: item.update(apiVersion=7),
+                "OBJECT_IDENTITY_INVALID",
+            ),
+        }
+        for label, (path, mutate, error) in cases.items():
+            with self.subTest(label=label):
+                paths = self.fixtures()
+                mutate(paths[path][0])
+                with self.assertRaises(transaction.TransactionError) as caught:
+                    self.snapshot(paths)
+                self.assertEqual(str(caught.exception), error)
+
+        paths = self.fixtures()
+        second_broad = copy.deepcopy(paths[self.CLUSTER_PATH][0])
+        second_broad["metadata"].update(name="unexpected-broad", uid=UID_THREE)
+        paths[self.CLUSTER_PATH].append(second_broad)
+        with self.assertRaises(transaction.TransactionError) as caught:
+            self.snapshot(paths)
+        self.assertEqual(
+            str(caught.exception),
+            "CONTROLLER_CLUSTER_ADMIN_GRAPH_INVALID",
+        )
+
+
 class HelmProofInventoryTests(unittest.TestCase):
     PLAN_SHA = "9" * 64
 
@@ -1467,7 +1758,7 @@ class ControllerRuntimeContractTests(unittest.TestCase):
                                 "ready": True,
                                 "state": {"running": {"startedAt": "2026-08-22T00:00:00Z"}},
                                 "restartCount": 2 if name == "source-controller" else 0,
-                                "image": images[name],
+                                "image": "sha256:" + "d" * 64,
                                 "imageID": "containerd://" + repository + "@" + digest,
                             }
                         ],
@@ -1496,31 +1787,67 @@ class ControllerRuntimeContractTests(unittest.TestCase):
         ):
             return transaction.controller_snapshot(Client())
 
-    def test_snapshot_binds_ready_pod_runtime_and_owner_chain(self):
+    def test_runtime_status_image_representations_and_bound_image_id_pass(self):
         images, deployments, pods, replica_sets = self.fixture()
         snapshot = self.snapshot(images, deployments, pods, replica_sets)
         source = snapshot["source-controller"]
+        self.assertEqual(
+            pods[0]["status"]["containerStatuses"][0]["image"],
+            "sha256:" + "d" * 64,
+        )
         self.assertEqual(source["podRestarts"], 2)
         self.assertEqual(source["podImage"], source["image"])
         self.assertEqual(source["podArgs"], source["args"])
         self.assertEqual(source["podServiceAccountName"], "source-controller")
         self.assertTrue(source["podImageID"].endswith("@sha256:" + "a" * 64))
 
+        pods[0]["status"]["containerStatuses"][0][
+            "image"
+        ] = "runtime.example/display:v9"
+        alternate = self.snapshot(images, deployments, pods, replica_sets)
+        self.assertEqual(
+            alternate["source-controller"]["podImageID"],
+            source["podImageID"],
+        )
+
     def test_runtime_and_owner_mutations_fail_closed(self):
         mutations = {
+            "deployment spec image": lambda d, _p, _r: d[
+                "source-controller"
+            ]["spec"]["template"]["spec"]["containers"][0].__setitem__(
+                "image", "ghcr.io/example/wrong@sha256:" + "a" * 64
+            ),
             "pod service account": lambda _d, p, _r: p[0]["spec"].__setitem__(
                 "serviceAccountName", "default"
             ),
             "pod args": lambda _d, p, _r: p[0]["spec"]["containers"][0].__setitem__(
                 "args", ["--unexpected"]
             ),
-            "pod image": lambda _d, p, _r: p[0]["spec"]["containers"][0].__setitem__(
+            "pod spec image": lambda _d, p, _r: p[0]["spec"]["containers"][0].__setitem__(
                 "image", "ghcr.io/example/wrong@sha256:" + "a" * 64
             ),
-            "status image": lambda _d, p, _r: p[0]["status"]["containerStatuses"][0].__setitem__(
-                "image", "ghcr.io/example/wrong@sha256:" + "a" * 64
+            "empty status image": lambda _d, p, _r: p[0]["status"][
+                "containerStatuses"
+            ][0].__setitem__("image", ""),
+            "missing status image": lambda _d, p, _r: p[0]["status"][
+                "containerStatuses"
+            ][0].pop("image"),
+            "non-string status image": lambda _d, p, _r: p[0]["status"][
+                "containerStatuses"
+            ][0].__setitem__("image", None),
+            "oversized status image": lambda _d, p, _r: p[0]["status"][
+                "containerStatuses"
+            ][0].__setitem__(
+                "image", "x" * (transaction.MAX_CONTROLLER_STATUS_IMAGE_CHARS + 1)
             ),
-            "image id": lambda _d, p, _r: p[0]["status"]["containerStatuses"][0].__setitem__(
+            "image id repository": lambda _d, p, _r: p[0]["status"][
+                "containerStatuses"
+            ][0].__setitem__(
+                "imageID",
+                "containerd://ghcr.io/example/source-controller@sha256:"
+                + "a" * 64,
+            ),
+            "image id digest": lambda _d, p, _r: p[0]["status"]["containerStatuses"][0].__setitem__(
                 "imageID", "ghcr.io/fluxcd/source-controller@sha256:" + "f" * 64
             ),
             "phase": lambda _d, p, _r: p[0]["status"].__setitem__("phase", "Pending"),
@@ -2052,7 +2379,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.26")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.27")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
@@ -2060,7 +2387,8 @@ class ReleaseOrderingTests(unittest.TestCase):
             "v0.1.23",
             "v0.1.24",
             "v0.1.25",
-            "v0.1.27",
+            "v0.1.26",
+            "v0.1.28",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(

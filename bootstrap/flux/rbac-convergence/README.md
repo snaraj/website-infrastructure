@@ -43,6 +43,20 @@ The deleted broad binding is one of those 23 targets, so a committed terminal
 inventory has 22 present rows and that one absent row. A rolled-back terminal
 inventory has the original present/absent shape.
 
+Controller runtime readiness binds image identity through the reviewed
+tag-at-digest Deployment image, the byte-equal Pod spec image, and the
+repository/digest-checked `imageID`. The runtime-reported
+`containerStatuses[].image` remains required as a nonempty string of at most
+4096 characters, but its runtime-selected representation is not parsed as or
+equated to image identity.
+
+Raw Kubernetes collection items may omit per-item `apiVersion` and `kind`.
+For the four Helm-owned workload kinds, the transaction restores that TypeMeta
+on copies from each already closed kind/path mapping before semantic hashing.
+It does the same for the fixed ClusterRoleBinding and RoleBinding collection
+paths using only `rbac.authorization.k8s.io/v1`. Present conflicting TypeMeta,
+an unknown site kind, or a missing/extra owned object still fails closed.
+
 It also makes and restores one collision-free `commonMetadata` annotation on
 the existing naranjo HelmRelease as a journaled runtime proof. The final state
 must match the captured HelmRelease semantics and the accepted workload
@@ -106,8 +120,8 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.26`, the next
-release after its reviewed `v0.1.25` protected base. `target.json` cannot select
+This one-time executable authorizes exactly platform tag `v0.1.27`, the next
+release after its reviewed `v0.1.26` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
@@ -135,7 +149,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.26`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.27`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
