@@ -19,6 +19,7 @@ PROTECTED_BRANCHES = frozenset({"main", "master", "HEAD"})
 # Branch namespaces reviewed for agent work. A single flat name such as
 # "fix-typo" is rejected: namespacing keeps ownership and cleanup auditable.
 ALLOWED_NAMESPACES = (
+    "5.6-sol/",
     "fable5/",
     "deploy/",
     "import/",
