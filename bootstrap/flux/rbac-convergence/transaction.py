@@ -59,11 +59,11 @@ SOURCE_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.26 and can therefore
+# selector.  Its protected-base candidate follows v0.1.27 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.27"
+AUTHORIZED_RELEASE_TAG = "v0.1.28"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
@@ -90,7 +90,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v027-runtime-status-image.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v028-rv-baseline.md"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -1127,14 +1127,27 @@ class KubeClient:
         )
         if not pin_key or SHA256_RE.fullmatch(versions.get(pin_key, "")) is None:
             raise TransactionError("KUBECTL_ARCHITECTURE_UNSUPPORTED")
+        bound: list[object] = []
         try:
             self.kubectl = oracle.BoundFile(
                 target.kubectl,
                 executable=True,
                 expected_digest=versions[pin_key],
             )
+            bound.append(self.kubectl)
             self.kubeconfig = oracle.BoundFile(target.kubeconfig, executable=False)
-        except Exception as exc:
+            bound.append(self.kubeconfig)
+        except BaseException as exc:
+            cleanup_errors: list[BaseException] = []
+            for item in reversed(bound):
+                try:
+                    item.close()
+                except BaseException as cleanup_exc:
+                    cleanup_errors.append(cleanup_exc)
+            if cleanup_errors:
+                raise TransactionError("KUBECTL_CUSTODY_CLEANUP_FAILED") from cleanup_errors[0]
+            if not isinstance(exc, Exception):
+                raise
             raise TransactionError("KUBECTL_CUSTODY_FAILED") from exc
         if (
             self.kubeconfig.kubeconfig_context != target.context
@@ -2566,6 +2579,49 @@ def compare_flux_without_resource_versions(
                 if key != "resourceVersion"
             }:
                 raise TransactionError("HELM_PROOF_FLUX_DRIFT")
+
+
+def flux_rows_without_resource_versions(rows: object) -> dict[str, object]:
+    """Remove only controller-written resource versions from Flux baseline rows."""
+
+    if not isinstance(rows, Mapping):
+        raise TransactionError("FLUX_BASELINE_INVALID")
+    result: dict[str, object] = {}
+    for identity, row in rows.items():
+        if (
+            not isinstance(identity, str)
+            or not isinstance(row, Mapping)
+            or not isinstance(row.get("resourceVersion"), str)
+            or not str(row["resourceVersion"]).isascii()
+            or not str(row["resourceVersion"]).isdecimal()
+        ):
+            raise TransactionError("FLUX_BASELINE_INVALID")
+        result[identity] = {
+            key: value for key, value in row.items() if key != "resourceVersion"
+        }
+    return result
+
+
+def flux_baseline_without_resource_versions(
+    snapshot: object,
+) -> dict[str, object]:
+    """Project a closed Flux snapshot while retaining every non-RV field."""
+
+    if not isinstance(snapshot, Mapping) or set(snapshot) != {
+        "closedEmptyInventories",
+        "gitRepositories",
+        "kustomizations",
+        "oci",
+        "helm",
+    }:
+        raise TransactionError("FLUX_BASELINE_INVALID")
+    return {
+        "closedEmptyInventories": snapshot["closedEmptyInventories"],
+        "gitRepositories": snapshot["gitRepositories"],
+        "kustomizations": snapshot["kustomizations"],
+        "oci": flux_rows_without_resource_versions(snapshot["oci"]),
+        "helm": flux_rows_without_resource_versions(snapshot["helm"]),
+    }
 
 
 def validate_active_helm_proof_inventory(
@@ -4695,12 +4751,19 @@ def stable_baselines(plan: Mapping[str, object], client: KubeClient, *, allow_pr
     current_flux = flux_snapshot(client)
     planned_flux = baselines.get("flux")
     if not allow_proof:
-        if current_flux != planned_flux:
+        if (
+            canonical_json(flux_baseline_without_resource_versions(current_flux))
+            != canonical_json(flux_baseline_without_resource_versions(planned_flux))
+        ):
             raise TransactionError("FLUX_BASELINE_DRIFT")
     else:
         if not isinstance(planned_flux, Mapping):
             raise TransactionError("FLUX_BASELINE_INVALID")
-        if current_flux.get("oci") != planned_flux.get("oci"):
+        if canonical_json(
+            flux_rows_without_resource_versions(current_flux.get("oci"))
+        ) != canonical_json(
+            flux_rows_without_resource_versions(planned_flux.get("oci"))
+        ):
             raise TransactionError("OCI_BASELINE_DRIFT")
         planned_helm = planned_flux.get("helm")
         current_helm = current_flux.get("helm")

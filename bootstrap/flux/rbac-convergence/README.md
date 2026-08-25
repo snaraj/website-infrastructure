@@ -1,8 +1,10 @@
 # Protected Flux RBAC convergence transaction
 
-This directory contains the closed, one-time transaction for converging an
-existing Flux installation to the reviewed RBAC model. It is operator tooling,
-not a generic installer, a Kubernetes workload, or a Flux-reconciled path.
+This directory contains the closed, one-time rescue transaction for converging
+an existing Flux installation to the reviewed RBAC model. It is operator
+tooling, not a generic installer, a Kubernetes workload, or a Flux-reconciled
+path. After its terminal state is proved, this directory is historical evidence
+only: never reuse, generalize, or treat it as a template for later migrations.
 
 Never execute `transaction.py` from a checkout. The program rejects that use.
 The only live program is the exact released blob installed as the root-owned
@@ -120,8 +122,8 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.27`, the next
-release after its reviewed `v0.1.26` protected base. `target.json` cannot select
+This one-time executable authorizes exactly platform tag `v0.1.28`, the next
+release after its reviewed `v0.1.27` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
@@ -149,7 +151,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.27`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.28`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
