@@ -1,6 +1,6 @@
 {
   "schema": "flux-rbac-convergence-target-v1",
-  "releaseTag": "vX.Y.Z",
+  "releaseTag": "v0.1.31",
   "kubectl": "/absolute/path/to/reviewed/kubectl",
   "kubeconfig": "/absolute/path/to/root-owned/flattened-kubeconfig.json",
   "context": "reviewed-private-context",
