@@ -881,6 +881,11 @@ class ExactReleaseMovementTests(unittest.TestCase):
         ):
             objects["deployment"]["spec"]["replicas"] = 2
 
+        def substituted_direct_generation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["deployment"]["metadata"]["generation"] += 1
+
         def pod_finalizer(
             _plan, _flux, _workloads, _controllers, _sites, objects
         ):
@@ -940,6 +945,7 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 substituted_direct_deployment_identity
             ),
             "substituted direct replicas": substituted_direct_replicas,
+            "substituted direct generation": substituted_direct_generation,
             "Pod finalizer": pod_finalizer,
             "ReplicaSet finalizer": replica_set_finalizer,
             "Pod behavior annotation": pod_behavior_annotation,
