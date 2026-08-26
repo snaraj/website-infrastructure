@@ -50,6 +50,8 @@ VERIFICATION_SCHEMA = "flux-rbac-convergence-verification-v1"
 TARGET_SCHEMA = "flux-rbac-convergence-target-v1"
 CUSTODY_SCHEMA = "flux-rbac-convergence-custody-receipt-v1"
 DESIRED_SCHEMA = "flux-rbac-convergence-desired-v1"
+RECOVERY_SCHEMA = "flux-rbac-v030-recovery-dispatch-v1"
+RECOVERY_RECEIPT_SCHEMA = "flux-rbac-v030-recovery-receipt-v1"
 
 REPOSITORY = "snaraj/website-infrastructure"
 OWNER_LOGIN = "snaraj"
@@ -60,18 +62,18 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.29 and can therefore
+# selector.  Its protected-base candidate follows v0.1.30 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.30"
+AUTHORIZED_RELEASE_TAG = "v0.1.31"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.31"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -83,17 +85,53 @@ JOURNAL_PATH = STATE_ROOT / "journal.json"
 RECEIPT_ROOT = STATE_ROOT / "receipts"
 EVIDENCE_ROOT = STATE_ROOT / "evidence"
 LOCK_PATH = STATE_ROOT / "transaction.lock"
+RECOVERY_RECEIPT_PATH = STATE_ROOT / "recovery-v030.receipt.json"
 INSTALLED_LAUNCHER = Path(
     "/usr/local/sbin/website-infrastructure-flux-rbac-convergence"
 )
 PYTHON_PATH = Path("/usr/bin/python3")
 SOURCE_MANIFEST_REL = "bootstrap/flux/rbac-convergence/source-manifest.v1"
+RECOVERY_REL = "bootstrap/flux/rbac-convergence/recovery.py"
 DESIRED_REL = "bootstrap/flux/rbac-convergence/desired-active.json"
 ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v030-cleanup-state.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v031-recovery-forward.md"
+
+RECOVERED_STATE_ROOT = Path(
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
+)
+RECOVERED_SOURCE_REVISION = "c789e94e3392a77ecbecf728f87fa6a708966a43"
+RECOVERED_RELEASE_TAG = "v0.1.30"
+RECOVERED_PLAN_SHA256 = (
+    "5df4f86a4c6b0b3a54def6797e051cfe86e994b011d33db08e4aa255ef15a88a"
+)
+RECOVERED_MANIFEST_SHA256 = (
+    "b14e52ae6d145eb1e64dd90cb5b151a9f7e0e909eae817672bb6b56d03a7e8dd"
+)
+RECOVERED_LAUNCHER_SHA256 = (
+    "494d573d593d8ffc435d68e92a3755044021b5421e481d1b6cfa8465730dc785"
+)
+RECOVERED_PYTHON_SHA256 = (
+    "a7d56a8a764faf7bbf5c164055a48fd072be52287bdeb523a9e07b2042f4e7e1"
+)
+RECOVERED_CUSTODY_SHA256 = (
+    "dd1859928c95a51d36d31b3f83e1de616f0294293c7d7e5d9f25af5d6484da58"
+)
+RECOVERED_INITIAL_SEQUENCE = 47
+RECOVERED_INITIAL_OPERATION_COUNT = 18
+RECOVERED_FROM_VERSION = "0.1.42"
+RECOVERED_TO_VERSION = "0.1.43"
+RECOVERED_TO_CHART_DIGEST = (
+    "sha256:0dc36329a9cc040a687984c5f3111b538c9f140ca5f4183078063e1516c22661"
+)
+RECOVERED_TO_IMAGE = (
+    "ghcr.io/snaraj/naranjo-online:v0.1.43@"
+    "sha256:f9a1536eb04f12b248328d6fe906327c4a381d775da3fdff487d0b895789b420"
+)
+RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
+RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -279,6 +317,9 @@ MODE_ENVIRONMENT = {
         }
     ),
     "--verify": frozenset({"LC_ALL", "FLUX_RBAC_EXPECTED_PLAN_SHA256"}),
+    "--recover-v030": frozenset(
+        {"LC_ALL", "CONFIRM_FLUX_RBAC_RECOVERY"}
+    ),
 }
 
 
@@ -913,8 +954,8 @@ def writable_from_live(value: Mapping[str, object]) -> dict[str, object]:
     return result
 
 
-def load_module(path: Path, name: str) -> ModuleType:
-    payload = read_regular(path, owner=0, mode=0o600, maximum=2 * 1024 * 1024)
+def load_module(path: Path, name: str, *, mode: int = 0o600) -> ModuleType:
+    payload = read_regular(path, owner=0, mode=mode, maximum=2 * 1024 * 1024)
     module = ModuleType(name)
     module.__file__ = str(path)
     module.__package__ = ""
@@ -1098,6 +1139,7 @@ def validate_custody(receipt: Mapping[str, object]) -> dict[str, str]:
         PLATFORM_CONTRACT_REL,
         VERSIONS_REL,
         RELEASE_FRAGMENT_REL,
+        RECOVERY_REL,
         "bootstrap/flux/rbac-convergence/transaction.py",
     }
     if set(entries) != required:
@@ -7873,6 +7915,827 @@ def verify(
     raise AssertionError("unreachable terminal state")
 
 
+def validate_recovered_incident(
+    old: ModuleType,
+    plan: Mapping[str, object],
+    journal_document: Mapping[str, object],
+) -> None:
+    """Recognize only the exact seq47 v0.1.30 incident and its rollback resume."""
+
+    source = plan.get("source")
+    target = plan.get("target")
+    order = plan.get("operationOrder")
+    operations = journal_document.get("operations")
+    if (
+        not isinstance(source, Mapping)
+        or source.get("sourceRevision") != RECOVERED_SOURCE_REVISION
+        or source.get("tag") != RECOVERED_RELEASE_TAG
+        or not isinstance(target, Mapping)
+        or journal_document.get("schema") != old.JOURNAL_SCHEMA
+        or journal_document.get("planSha256") != RECOVERED_PLAN_SHA256
+        or journal_document.get("sourceRevision") != RECOVERED_SOURCE_REVISION
+        or journal_document.get("targetSha256")
+        != old.sha256_bytes(old.canonical_json(target))
+        or journal_document.get("forwardFailurePhase") != "forward"
+        or journal_document.get("forwardFailureToken") != "FLUX_BASELINE_DRIFT"
+        or journal_document.get("helmProof") != {"state": "not-started"}
+        or not isinstance(order, list)
+        or len(order) != old.TRANSACTION_TARGET_COUNT
+        or not isinstance(operations, Mapping)
+    ):
+        raise RecoveryRequired("RECOVERY_INCIDENT_IDENTITY_INVALID")
+    state = journal_document.get("state")
+    sequence = journal_document.get("sequence")
+    if type(sequence) is not int or int(sequence) < RECOVERED_INITIAL_SEQUENCE:
+        raise RecoveryRequired("RECOVERY_INCIDENT_SEQUENCE_INVALID")
+    expected_initial = set(str(item) for item in order[:18])
+    if sequence == RECOVERED_INITIAL_SEQUENCE:
+        if (
+            state != "recovery-required"
+            or journal_document.get("phase") != "namespaced"
+            or journal_document.get("pendingOperation") is not None
+            or journal_document.get("recoveryRequired") is not True
+            or len(operations) != RECOVERED_INITIAL_OPERATION_COUNT
+            or set(operations) != expected_initial
+            or any(
+                not isinstance(record, Mapping)
+                or record.get("state") != "committed"
+                or record.get("rollbackState") not in {None, "restored"}
+                for record in operations.values()
+            )
+            or {
+                operation_id
+                for operation_id, record in operations.items()
+                if isinstance(record, Mapping)
+                and record.get("rollbackState") == "restored"
+            }
+            != {
+                "converge:Role:lidersea-com:helm-reconciler",
+                "converge:Role:naranjo-online:helm-reconciler",
+            }
+        ):
+            raise RecoveryRequired("RECOVERY_INCIDENT_FINGERPRINT_INVALID")
+        return
+    if state == "recovery-required":
+        if (
+            journal_document.get("recoveryRequired") is not True
+            or journal_document.get("phase") != "namespaced"
+            or journal_document.get("pendingOperation") is not None
+            or len(operations) != RECOVERED_INITIAL_OPERATION_COUNT
+            or set(operations) != expected_initial
+            or any(
+                not isinstance(record, Mapping)
+                or record.get("state") != "committed"
+                or record.get("rollbackState")
+                not in {
+                    None,
+                    "marker-cleanup-intent",
+                    "marker-cleaned",
+                    "restore-intent",
+                    "restored",
+                    "verified",
+                }
+                for record in operations.values()
+            )
+        ):
+            raise RecoveryRequired("RECOVERY_INCIDENT_RESUME_INVALID")
+    elif state == "rolled-back":
+        if (
+            journal_document.get("recoveryRequired") is not False
+            or journal_document.get("pendingOperation") is not None
+            or len(operations) != old.TRANSACTION_TARGET_COUNT
+            or set(operations) != set(str(item) for item in order)
+        ):
+            raise RecoveryRequired("RECOVERY_INCIDENT_TERMINAL_INVALID")
+        old.validate_terminal_evidence_document(journal_document)
+    else:
+        raise RecoveryRequired("RECOVERY_INCIDENT_STATE_INVALID")
+
+
+def load_recovered_transaction() -> tuple[ModuleType, Mapping[str, object]]:
+    transaction_path = (
+        RECOVERED_STATE_ROOT
+        / "custody/bootstrap/flux/rbac-convergence/transaction.py"
+    )
+    payload = read_regular(
+        transaction_path, owner=0, mode=0o700, maximum=2 * 1024 * 1024
+    )
+    if sha256_bytes(payload) != RECOVERED_LAUNCHER_SHA256:
+        raise TransactionError("RECOVERY_OLD_LAUNCHER_DIGEST_INVALID")
+    old = load_module(
+        transaction_path, "flux_rbac_v030_transaction_recovery", mode=0o700
+    )
+    if (
+        old.STATE_ROOT != RECOVERED_STATE_ROOT
+        or old.AUTHORIZED_RELEASE_TAG != RECOVERED_RELEASE_TAG
+        or old.INSTALLED_LAUNCHER != INSTALLED_LAUNCHER
+    ):
+        raise TransactionError("RECOVERY_OLD_MODULE_IDENTITY_INVALID")
+    custody = old.load_custody_receipt()
+    expected = {
+        "schema": old.CUSTODY_SCHEMA,
+        "sourceRevision": RECOVERED_SOURCE_REVISION,
+        "manifestSha256": RECOVERED_MANIFEST_SHA256,
+        "launcherSha256": RECOVERED_LAUNCHER_SHA256,
+        "pythonPath": str(old.PYTHON_PATH),
+        "pythonSha256": RECOVERED_PYTHON_SHA256,
+        "custodySha256": RECOVERED_CUSTODY_SHA256,
+    }
+    if custody != expected:
+        raise TransactionError("RECOVERY_OLD_CUSTODY_RECEIPT_INVALID")
+    entries = old.validate_custody(custody)
+    if entries.get(old.SOURCE_MANIFEST_REL) is not None:
+        raise TransactionError("RECOVERY_OLD_CUSTODY_ENTRY_INVALID")
+    if entries.get("bootstrap/flux/rbac-convergence/transaction.py") != (
+        RECOVERED_LAUNCHER_SHA256
+    ):
+        raise TransactionError("RECOVERY_OLD_CUSTODY_ENTRY_INVALID")
+    return old, custody
+
+
+def validate_recovery_release_identity(
+    custody: Mapping[str, object], *, require_main_tip: bool
+) -> dict[str, object]:
+    contract = load_module(
+        custody_path(PLATFORM_CONTRACT_REL),
+        "platform_release_contract_recovery_v031",
+    )
+    source = verify_release_identity(
+        str(custody["sourceRevision"]),
+        AUTHORIZED_RELEASE_TAG,
+        contract,
+        read_regular(custody_path(RELEASE_FRAGMENT_REL), owner=0, mode=0o600),
+        require_main_tip=require_main_tip,
+    )
+    entries = validate_custody(custody)
+    source["sourceBundleSha256"] = verify_custody_source_tree(
+        str(custody["sourceRevision"]), str(source["sourceTreeSha"]), entries
+    )
+    source["sourceManifestSha256"] = custody["manifestSha256"]
+    source["custodySha256"] = custody["custodySha256"]
+    return source
+
+
+def validate_recovered_naranjo_deployment(old: ModuleType, client: object) -> None:
+    """Bind the accepted chart movement to its reviewed live workload shape."""
+
+    items = old.collection_items(
+        client, "/apis/apps/v1/namespaces/naranjo-online/deployments"
+    )
+    matches = [
+        item
+        for item in items
+        if isinstance(item.get("metadata"), Mapping)
+        and item["metadata"].get("name") == "naranjo-online"
+    ]
+    if len(matches) != 1:
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_INVALID")
+    deployment = old.typed_site_inventory_item(matches[0], "Deployment")
+    metadata = deployment.get("metadata")
+    spec = deployment.get("spec")
+    template = spec.get("template") if isinstance(spec, Mapping) else None
+    template_metadata = (
+        template.get("metadata") if isinstance(template, Mapping) else None
+    )
+    pod_spec = template.get("spec") if isinstance(template, Mapping) else None
+    containers = pod_spec.get("containers") if isinstance(pod_spec, Mapping) else None
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(spec, Mapping)
+        or not isinstance(template_metadata, Mapping)
+        or not isinstance(pod_spec, Mapping)
+        or not isinstance(containers, list)
+        or len(containers) != 1
+        or not isinstance(containers[0], Mapping)
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_INVALID")
+    container = containers[0]
+
+    def closed(
+        value: Mapping[str, object],
+        required: set[str],
+        optional: Mapping[str, object],
+    ) -> None:
+        if (
+            not required.issubset(value)
+            or not set(value).issubset(required | set(optional))
+            or any(value[key] != expected for key, expected in optional.items() if key in value)
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_KEYS_INVALID")
+
+    closed(
+        spec,
+        {
+            "replicas",
+            "revisionHistoryLimit",
+            "strategy",
+            "selector",
+            "template",
+        },
+        {"progressDeadlineSeconds": 600, "minReadySeconds": 0, "paused": False},
+    )
+    closed(template_metadata, {"labels"}, {"creationTimestamp": None})
+    closed(
+        pod_spec,
+        {
+            "automountServiceAccountToken",
+            "serviceAccountName",
+            "securityContext",
+            "containers",
+            "volumes",
+        },
+        {
+            "serviceAccount": "naranjo-online",
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 30,
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "enableServiceLinks": True,
+            "preemptionPolicy": "PreemptLowerPriority",
+            "priority": 0,
+            "hostNetwork": False,
+            "hostPID": False,
+            "hostIPC": False,
+            "shareProcessNamespace": False,
+            "hostUsers": True,
+        },
+    )
+    closed(
+        container,
+        {
+            "name",
+            "image",
+            "imagePullPolicy",
+            "env",
+            "ports",
+            "startupProbe",
+            "readinessProbe",
+            "livenessProbe",
+            "resources",
+            "securityContext",
+            "volumeMounts",
+        },
+        {
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "stdin": False,
+            "stdinOnce": False,
+            "tty": False,
+        },
+    )
+
+    def probe(name: str) -> dict[str, object]:
+        value = container.get(name)
+        http = value.get("httpGet") if isinstance(value, Mapping) else None
+        if not isinstance(value, Mapping) or not isinstance(http, Mapping):
+            raise RecoveryRequired("RECOVERY_NARANJO_PROBE_INVALID")
+        if not set(value).issubset(
+            {
+                "httpGet",
+                "failureThreshold",
+                "periodSeconds",
+                "timeoutSeconds",
+                "successThreshold",
+                "initialDelaySeconds",
+                "terminationGracePeriodSeconds",
+            }
+        ) or not set(http).issubset(
+            {"path", "port", "scheme", "host", "httpHeaders"}
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_PROBE_INVALID")
+        if (
+            http.get("host") not in (None, "")
+            or http.get("httpHeaders") not in (None, [])
+            or value.get("successThreshold") not in (None, 1)
+            or value.get("initialDelaySeconds") not in (None, 0)
+            or value.get("terminationGracePeriodSeconds") is not None
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_PROBE_INVALID")
+        return {
+            "path": http.get("path"),
+            "port": http.get("port"),
+            "scheme": http.get("scheme", "HTTP"),
+            "failureThreshold": value.get("failureThreshold"),
+            "periodSeconds": value.get("periodSeconds"),
+            "timeoutSeconds": value.get("timeoutSeconds"),
+        }
+
+    labels = {
+        "app.kubernetes.io/name": "naranjo-online",
+        "app.kubernetes.io/instance": "naranjo-online",
+        "app.kubernetes.io/managed-by": "Helm",
+        "app.kubernetes.io/version": RECOVERED_TO_VERSION,
+    }
+    annotations = metadata.get("annotations")
+    contract = {
+        "metadataLabels": metadata.get("labels"),
+        "deploymentReady": annotations.get(
+            "platform.snaraj.dev/deployment-ready"
+        ) if isinstance(annotations, Mapping) else None,
+        "mediaReady": annotations.get(
+            "platform.snaraj.dev/media-storage-ready"
+        ) if isinstance(annotations, Mapping) else None,
+        "revisionHistoryLimit": spec.get("revisionHistoryLimit"),
+        "strategy": spec.get("strategy"),
+        "selector": spec.get("selector"),
+        "templateLabels": template_metadata.get("labels"),
+        "serviceAccountName": pod_spec.get("serviceAccountName"),
+        "automount": pod_spec.get("automountServiceAccountToken"),
+        "podSecurityContext": pod_spec.get("securityContext"),
+        "hostNetwork": pod_spec.get("hostNetwork", False),
+        "hostPID": pod_spec.get("hostPID", False),
+        "hostIPC": pod_spec.get("hostIPC", False),
+        "initContainers": pod_spec.get("initContainers"),
+        "imagePullSecrets": pod_spec.get("imagePullSecrets"),
+        "volumes": pod_spec.get("volumes"),
+        "name": container.get("name"),
+        "image": container.get("image"),
+        "imagePullPolicy": container.get("imagePullPolicy"),
+        "command": container.get("command"),
+        "args": container.get("args"),
+        "envFrom": container.get("envFrom"),
+        "lifecycle": container.get("lifecycle"),
+        "volumeDevices": container.get("volumeDevices"),
+        "env": container.get("env"),
+        "ports": container.get("ports"),
+        "resources": container.get("resources"),
+        "securityContext": container.get("securityContext"),
+        "volumeMounts": container.get("volumeMounts"),
+        "startupProbe": probe("startupProbe"),
+        "readinessProbe": probe("readinessProbe"),
+        "livenessProbe": probe("livenessProbe"),
+    }
+    expected = {
+        "metadataLabels": labels,
+        "deploymentReady": "true",
+        "mediaReady": "false",
+        "revisionHistoryLimit": 3,
+        "strategy": {
+            "type": "RollingUpdate",
+            "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1},
+        },
+        "selector": {"matchLabels": {
+            "app.kubernetes.io/name": "naranjo-online",
+            "app.kubernetes.io/instance": "naranjo-online",
+        }},
+        "templateLabels": labels,
+        "serviceAccountName": "naranjo-online",
+        "automount": False,
+        "podSecurityContext": {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "hostNetwork": False,
+        "hostPID": False,
+        "hostIPC": False,
+        "initContainers": None,
+        "imagePullSecrets": None,
+        "volumes": [{"name": "tmp", "emptyDir": {
+            "medium": "Memory", "sizeLimit": "16Mi"
+        }}],
+        "name": "naranjo-online",
+        "image": RECOVERED_TO_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": None,
+        "args": None,
+        "envFrom": None,
+        "lifecycle": None,
+        "volumeDevices": None,
+        "env": [
+            {"name": "PORT", "value": "8080"},
+            {"name": "MEDIA_ENABLED", "value": "false"},
+            {"name": "PANELS_REFRESH", "value": "false"},
+        ],
+        "ports": [{"name": "http", "containerPort": 8080, "protocol": "TCP"}],
+        "resources": {
+            "limits": {"cpu": "200m", "memory": "128Mi"},
+            "requests": {"cpu": "25m", "memory": "32Mi"},
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": True,
+        },
+        "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
+        "startupProbe": {
+            "path": "/livez", "port": "http", "scheme": "HTTP",
+            "failureThreshold": 30, "periodSeconds": 2, "timeoutSeconds": 1,
+        },
+        "readinessProbe": {
+            "path": "/readyz", "port": "http", "scheme": "HTTP",
+            "failureThreshold": 3, "periodSeconds": 10, "timeoutSeconds": 2,
+        },
+        "livenessProbe": {
+            "path": "/livez", "port": "http", "scheme": "HTTP",
+            "failureThreshold": 3, "periodSeconds": 30, "timeoutSeconds": 2,
+        },
+    }
+    if contract != expected:
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_CONTRACT_INVALID")
+
+
+def accepted_naranjo_movement(
+    old: ModuleType, client: object, plan: Mapping[str, object]
+) -> dict[str, object]:
+    baselines = plan.get("baselines")
+    if not isinstance(baselines, Mapping):
+        raise RecoveryRequired("RECOVERY_BASELINES_INVALID")
+    planned_flux = baselines.get("flux")
+    planned_workloads = baselines.get("workloads")
+    if not isinstance(planned_flux, Mapping) or not isinstance(
+        planned_workloads, Mapping
+    ):
+        raise RecoveryRequired("RECOVERY_BASELINES_INVALID")
+    current_flux = old.flux_snapshot(client)
+    current_workloads = old.workload_snapshot(client)
+    old.validate_helm_workload_inventory(current_flux, current_workloads)
+    old.validate_clean_workload_baseline(current_workloads)
+    planned_oci = planned_flux.get("oci")
+    planned_helm = planned_flux.get("helm")
+    current_oci = current_flux.get("oci")
+    current_helm = current_flux.get("helm")
+    if any(
+        not isinstance(value, Mapping)
+        for value in (planned_oci, planned_helm, current_oci, current_helm)
+    ):
+        raise RecoveryRequired("RECOVERY_FLUX_BASELINE_INVALID")
+    old_oci = planned_oci.get(RECOVERED_NARANJO_OCI)
+    new_oci = current_oci.get(RECOVERED_NARANJO_OCI)
+    old_helm = planned_helm.get(RECOVERED_NARANJO_RELEASE)
+    new_helm = current_helm.get(RECOVERED_NARANJO_RELEASE)
+    old_workload = planned_workloads.get(RECOVERED_NARANJO_RELEASE)
+    new_workload = current_workloads.get(RECOVERED_NARANJO_RELEASE)
+    if any(
+        not isinstance(value, Mapping)
+        for value in (
+            old_oci,
+            new_oci,
+            old_helm,
+            new_helm,
+            old_workload,
+            new_workload,
+        )
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_BASELINE_INVALID")
+    old_history_version = old_helm.get("historyChartVersion")
+    new_history_version = new_helm.get("historyChartVersion")
+    if (
+        old_oci.get("chartVersion") != RECOVERED_FROM_VERSION
+        or not isinstance(old_history_version, str)
+        or old_history_version.split("+", 1)[0]
+        != RECOVERED_FROM_VERSION
+        or new_oci.get("chartVersion") != RECOVERED_TO_VERSION
+        or new_oci.get("upstreamDigest") != RECOVERED_TO_CHART_DIGEST
+        or new_helm.get("attemptedRevisionDigest")
+        != RECOVERED_TO_CHART_DIGEST
+        or new_helm.get("historyOciDigest") != RECOVERED_TO_CHART_DIGEST
+        or not isinstance(new_history_version, str)
+        or new_history_version.split("+", 1)[0]
+        != RECOVERED_TO_VERSION
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_VERSION_INVALID")
+
+    def same_except(
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+        mutable: set[str],
+    ) -> bool:
+        return set(before) == set(after) and all(
+            before[key] == after[key] for key in set(before) - mutable
+        )
+
+    if not same_except(
+        old_oci,
+        new_oci,
+        {
+            "resourceVersion",
+            "revision",
+            "chartVersion",
+            "upstreamDigest",
+            "storedArtifactDigest",
+            "semanticSha256",
+        },
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_OCI_SCOPE_INVALID")
+    if not same_except(
+        old_helm,
+        new_helm,
+        {
+            "resourceVersion",
+            "attemptedRevision",
+            "attemptedRevisionDigest",
+            "historyRevision",
+            "historyChartVersion",
+            "historyOciDigest",
+            "historyDigest",
+            "historyConfigDigest",
+            "semanticSha256",
+        },
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_HELM_SCOPE_INVALID")
+    old_history_revision = old_helm.get("historyRevision")
+    new_history_revision = new_helm.get("historyRevision")
+    if (
+        type(old_history_revision) is not int
+        or type(new_history_revision) is not int
+        or new_history_revision != old_history_revision + 1
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_HELM_REVISION_INVALID")
+
+    if not same_except(
+        old_workload,
+        new_workload,
+        {
+            "generation",
+            "templateSha256",
+            "semanticSha256",
+            "semanticWithoutProofSha256",
+            "pods",
+            "ownedObjects",
+        },
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_WORKLOAD_SCOPE_INVALID")
+    old_generation = old_workload.get("generation")
+    new_generation = new_workload.get("generation")
+    if (
+        type(old_generation) is not int
+        or type(new_generation) is not int
+        or new_generation != old_generation + 1
+        or new_workload.get("semanticSha256")
+        != new_workload.get("semanticWithoutProofSha256")
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_WORKLOAD_SCOPE_INVALID")
+    old_owned = old_workload.get("ownedObjects")
+    new_owned = new_workload.get("ownedObjects")
+    if not isinstance(old_owned, list) or not isinstance(new_owned, list):
+        raise RecoveryRequired("RECOVERY_NARANJO_OWNERSHIP_INVALID")
+    old_owned_by_kind = {
+        str(row.get("kind")): row for row in old_owned if isinstance(row, Mapping)
+    }
+    new_owned_by_kind = {
+        str(row.get("kind")): row for row in new_owned if isinstance(row, Mapping)
+    }
+    if (
+        len(old_owned_by_kind) != len(old_owned)
+        or len(new_owned_by_kind) != len(new_owned)
+        or set(old_owned_by_kind) != set(old.SITE_INVENTORY_KINDS)
+        or set(new_owned_by_kind) != set(old.SITE_INVENTORY_KINDS)
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_OWNERSHIP_INVALID")
+    for kind in ("Service", "ServiceAccount", "NetworkPolicy"):
+        if old_owned_by_kind[kind] != new_owned_by_kind[kind]:
+            raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_DRIFT")
+    old_deployment = old_owned_by_kind["Deployment"]
+    new_deployment = new_owned_by_kind["Deployment"]
+    if not same_except(
+        old_deployment,
+        new_deployment,
+        {"semanticSha256", "semanticWithoutProofSha256"},
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_IDENTITY_INVALID")
+    new_pods = new_workload.get("pods")
+    if (
+        not isinstance(new_pods, list)
+        or len(new_pods) != new_workload.get("replicas")
+        or any(
+            not isinstance(pod, Mapping)
+            or not isinstance(pod.get("restartCounts"), list)
+            or any(count != 0 for count in pod["restartCounts"])
+            or pod.get("images") != [RECOVERED_TO_IMAGE]
+            for pod in new_pods
+        )
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_POD_STATE_INVALID")
+    expected_flux = copy.deepcopy(dict(planned_flux))
+    expected_flux["oci"][RECOVERED_NARANJO_OCI] = copy.deepcopy(new_oci)  # type: ignore[index]
+    expected_flux["helm"][RECOVERED_NARANJO_RELEASE] = copy.deepcopy(new_helm)  # type: ignore[index]
+    if old.flux_baseline_without_resource_versions(
+        expected_flux
+    ) != old.flux_baseline_without_resource_versions(current_flux):
+        raise RecoveryRequired("RECOVERY_UNEXPECTED_FLUX_DRIFT")
+    expected_workloads = copy.deepcopy(dict(planned_workloads))
+    expected_workloads[RECOVERED_NARANJO_RELEASE] = copy.deepcopy(new_workload)
+    if expected_workloads != current_workloads:
+        raise RecoveryRequired("RECOVERY_UNEXPECTED_WORKLOAD_DRIFT")
+    if old.controller_snapshot(client) != baselines.get("controllers"):
+        raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+    if old.public_health() != baselines.get("publicSites"):
+        raise RecoveryRequired("RECOVERY_PUBLIC_SITE_DRIFT")
+    validate_recovered_naranjo_deployment(old, client)
+    return {
+        "verificationRows": {
+            "oci": copy.deepcopy(dict(new_oci)),
+            "helm": copy.deepcopy(dict(new_helm)),
+            "workload": copy.deepcopy(dict(new_workload)),
+        },
+    }
+
+
+def run_recovered_rollback_once(
+    old: ModuleType,
+    client: object,
+    plan: Mapping[str, object],
+    journal: object,
+    movement: Mapping[str, object],
+) -> None:
+    rows = movement.get("verificationRows")
+    if not isinstance(rows, Mapping):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    original = old.verify_rolled_back_state
+    original_plan_sha256 = old.sha256_bytes(old.canonical_json(plan))
+    calls = 0
+
+    def verify_with_accepted_release(
+        candidate_client: object,
+        candidate_plan: Mapping[str, object],
+        oracle: ModuleType,
+        *,
+        proof_started: bool,
+    ) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if (
+            calls != 1
+            or proof_started
+            or candidate_client is not client
+            or old.sha256_bytes(old.canonical_json(candidate_plan))
+            != RECOVERED_PLAN_SHA256
+            or old.sha256_bytes(old.canonical_json(plan))
+            != original_plan_sha256
+        ):
+            raise old.RecoveryRequired("RECOVERY_VERIFY_CALL_INVALID")
+        verification_plan = copy.deepcopy(dict(plan))
+        baselines = verification_plan.get("baselines")
+        flux = baselines.get("flux") if isinstance(baselines, MutableMapping) else None
+        oci = flux.get("oci") if isinstance(flux, MutableMapping) else None
+        helm = flux.get("helm") if isinstance(flux, MutableMapping) else None
+        workloads = (
+            baselines.get("workloads")
+            if isinstance(baselines, MutableMapping)
+            else None
+        )
+        if not all(
+            isinstance(value, MutableMapping)
+            for value in (oci, helm, workloads)
+        ):
+            raise old.RecoveryRequired("RECOVERY_VERIFY_PLAN_INVALID")
+        oci[RECOVERED_NARANJO_OCI] = copy.deepcopy(rows.get("oci"))
+        helm[RECOVERED_NARANJO_RELEASE] = copy.deepcopy(rows.get("helm"))
+        workloads[RECOVERED_NARANJO_RELEASE] = copy.deepcopy(
+            rows.get("workload")
+        )
+        return original(
+            candidate_client,
+            verification_plan,
+            oracle,
+            proof_started=False,
+        )
+
+    old.verify_rolled_back_state = verify_with_accepted_release
+    try:
+        old.rollback_internal(client, plan, journal)
+    finally:
+        old.verify_rolled_back_state = original
+    if calls != 1 or old.sha256_bytes(old.canonical_json(plan)) != original_plan_sha256:
+        raise RecoveryRequired("RECOVERY_VERIFY_CALL_INVALID")
+
+
+def publish_recovery_receipt(
+    custody: Mapping[str, object],
+    source: Mapping[str, object],
+    old: ModuleType,
+    journal: object,
+    movement: Mapping[str, object],
+) -> None:
+    """Bind the old terminal evidence to the immutable recovery release."""
+
+    records = journal.document.get("receiptRecords")
+    terminal_record = (
+        records.get("rolled-back") if isinstance(records, Mapping) else None
+    )
+    terminal_digest = journal.document.get("terminalEvidenceSha256")
+    if (
+        not isinstance(terminal_record, Mapping)
+        or not isinstance(terminal_record.get("recordedAt"), str)
+        or SHA256_RE.fullmatch(str(terminal_digest)) is None
+        or not isinstance(movement.get("verificationRows"), Mapping)
+    ):
+        raise RecoveryRequired("RECOVERY_RECEIPT_INPUT_INVALID")
+    document = {
+        "schema": RECOVERY_RECEIPT_SCHEMA,
+        "result": "rolled-back",
+        "recoveryRelease": AUTHORIZED_RELEASE_TAG,
+        "recoverySourceRevision": custody["sourceRevision"],
+        "recoveryManifestSha256": custody["manifestSha256"],
+        "recoveryCustodySha256": custody["custodySha256"],
+        "recoveryReleaseIdentitySha256": sha256_bytes(canonical_json(source)),
+        "recoveredRelease": RECOVERED_RELEASE_TAG,
+        "recoveredSourceRevision": RECOVERED_SOURCE_REVISION,
+        "recoveredPlanSha256": RECOVERED_PLAN_SHA256,
+        "terminalJournalSha256": sha256_bytes(
+            canonical_json(journal.document)
+        ),
+        "terminalEvidenceSha256": terminal_digest,
+        "acceptedMovementSha256": sha256_bytes(
+            canonical_json(movement["verificationRows"])
+        ),
+        "acceptedChartDigest": RECOVERED_TO_CHART_DIGEST,
+        "acceptedImage": RECOVERED_TO_IMAGE,
+        "recordedAt": terminal_record["recordedAt"],
+    }
+    payload = canonical_json(document)
+    publish_once(RECOVERY_RECEIPT_PATH, payload)
+    if read_regular(RECOVERY_RECEIPT_PATH, owner=0, mode=0o600) != payload:
+        raise RecoveryRequired("RECOVERY_RECEIPT_PUBLICATION_INVALID")
+
+
+def recover_v030(custody: Mapping[str, object]) -> None:
+    """Terminalize only the authenticated seq47 incident, then stop."""
+
+    expected_ack = (
+        f"recover-v030-{RECOVERED_PLAN_SHA256}-with-{custody['sourceRevision']}"
+    )
+    if os.environ.get("CONFIRM_FLUX_RBAC_RECOVERY") != expected_ack:
+        raise TransactionError("RECOVERY_ACK_INVALID")
+    ensure_state_root()
+    new_lock = acquire_lock()
+    old_lock = -1
+    previous_validator = sys.modules.get("validate_kubeconfig_snapshot")
+    try:
+        source = validate_recovery_release_identity(custody, require_main_tip=True)
+        old, old_custody = load_recovered_transaction()
+        old_lock = old.acquire_lock()
+        old, old_custody = load_recovered_transaction()
+        plan, plan_sha256 = old.read_plan(
+            RECOVERED_PLAN_SHA256, require_fresh=False
+        )
+        journal = old.Journal.load()
+        validate_recovered_incident(
+            old,
+            plan,
+            journal.document,
+        )
+        if journal.document.get("state") == "recovery-required":
+            old.write_receipt(
+                "recovery-required",
+                RECOVERED_PLAN_SHA256,
+                RECOVERED_SOURCE_REVISION,
+                journal,
+            )
+        if plan_sha256 != RECOVERED_PLAN_SHA256:
+            raise RecoveryRequired("RECOVERY_PLAN_DIGEST_INVALID")
+        target = old.load_target()
+        versions = old.parse_versions(
+            old.read_regular(
+                old.custody_path(old.VERSIONS_REL), owner=0, mode=0o600
+            )
+        )
+        validator = old.load_module(
+            old.custody_path(old.KUBECONFIG_VALIDATOR_REL),
+            "validate_kubeconfig_snapshot",
+        )
+        sys.modules["validate_kubeconfig_snapshot"] = validator
+        oracle = old.load_module(
+            old.custody_path(old.ORACLE_REL),
+            "flux_rbac_denial_oracle_recovery_v030",
+        )
+        with old.KubeClient(target, versions, oracle) as client:
+            old.validate_plan_bindings(
+                plan,
+                plan_sha256,
+                client,
+                target,
+                old_custody,
+                require_apply_ack=False,
+                require_main_tip=False,
+            )
+            movement = accepted_naranjo_movement(old, client, plan)
+            if journal.document.get("state") != "rolled-back":
+                run_recovered_rollback_once(old, client, plan, journal, movement)
+            validate_recovered_incident(old, plan, journal.document)
+            old.write_receipt(
+                "rolled-back",
+                RECOVERED_PLAN_SHA256,
+                RECOVERED_SOURCE_REVISION,
+                journal,
+            )
+            publish_recovery_receipt(custody, source, old, journal, movement)
+    except (RecoveryRequired, TransactionError):
+        raise
+    except BaseException as exc:
+        raise RecoveryRequired("RECOVERY_V030_FAILED") from exc
+    finally:
+        if previous_validator is None:
+            sys.modules.pop("validate_kubeconfig_snapshot", None)
+        else:
+            sys.modules["validate_kubeconfig_snapshot"] = previous_validator
+        if old_lock >= 0:
+            os.close(old_lock)
+        os.close(new_lock)
+
+
 def acquire_lock() -> int:
     descriptor = os.open(
         LOCK_PATH,
@@ -7923,6 +8786,7 @@ def validate_source_manifest_bundle(
         PLATFORM_CONTRACT_REL,
         VERSIONS_REL,
         RELEASE_FRAGMENT_REL,
+        RECOVERY_REL,
         "bootstrap/flux/rbac-convergence/transaction.py",
     }
     if set(entries) != required:
@@ -7932,6 +8796,8 @@ def validate_source_manifest_bundle(
     ]
     if transaction_digest != expected_launcher or transaction_mode != 0o700:
         raise TransactionError("CUSTODY_LAUNCHER_ENTRY_MISMATCH")
+    if entries[RECOVERY_REL][1] != 0o600:
+        raise TransactionError("CUSTODY_RECOVERY_ENTRY_MISMATCH")
 
 
 def expected_custody_receipt(
@@ -8244,11 +9110,37 @@ def run_mode(mode: str) -> None:
         os.close(lock_fd)
 
 
+def run_recovery_mode() -> None:
+    """Dispatch the custodied one-incident recovery outside normal run_mode."""
+
+    custody, _entries = validate_runtime_custody()
+    recovery = load_module(
+        custody_path(RECOVERY_REL),
+        "flux_rbac_v030_recovery_dispatch",
+        mode=0o600,
+    )
+    if (
+        getattr(recovery, "SCHEMA", None)
+        != "flux-rbac-v030-recovery-dispatch-v1"
+        or not callable(getattr(recovery, "run", None))
+    ):
+        raise TransactionError("RECOVERY_DISPATCH_IDENTITY_INVALID")
+    recovery.run(sys.modules[__name__], custody)
+    print("RECOVERED_V030")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
         "mode",
-        choices=("--stage", "--plan", "--apply", "--rollback", "--verify"),
+        choices=(
+            "--stage",
+            "--plan",
+            "--apply",
+            "--rollback",
+            "--verify",
+            "--recover-v030",
+        ),
     )
     return result
 
@@ -8264,6 +9156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--apply",
         "--rollback",
         "--verify",
+        "--recover-v030",
     }:
         parser().print_usage(sys.stderr)
         return 2
@@ -8271,6 +9164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_process_boundary(arguments[0])
         if arguments[0] == "--stage":
             stage_custody()
+        elif arguments[0] == "--recover-v030":
+            run_recovery_mode()
         else:
             run_mode(arguments[0])
     except RecoveryRequired:

@@ -652,7 +652,8 @@ only entry point is the exact released, root-owned transaction documented in
 [`bootstrap/flux/rbac-convergence/README.md`](../../bootstrap/flux/rbac-convergence/README.md).
 `access.yaml` is not in its custody manifest: the transaction never reads or
 applies it.
-Its `--stage`, `--plan`, `--apply`, `--rollback`, and `--verify` modes bind the
+Its `--stage`, `--plan`, `--apply`, `--rollback`, `--verify`, and single-incident
+`--recover-v030` modes bind the
 protected merge and platform Release, explicit target tuple, reviewed tool
 bytes, captured UID/resourceVersion prestate, and owner-reviewed plan hash.
 Use only the literal mode commands in that README. Every invocation must be
@@ -673,6 +674,12 @@ owner-controlled maintenance freeze, not a claim that the launcher can observe
 every registry or host-side violation. On a violation or doubt, stop, preserve
 all state, and use owner-reviewed recovery. Never compensate with `access.yaml`,
 manual kubectl, a forward retry, or a replan.
+
+The v0.1.31 release carries one owner-attended recovery for the authenticated
+v0.1.30 sequence-47 stop caused solely by Naranjo 0.1.42 to 0.1.43 movement.
+That mode must terminalize the old journal and publish its rolled-back receipt
+before a fresh v0.1.31 plan is captured. It does not broaden the normal
+rollback classifier, accept another release movement, or perform forward work.
 
 The reviewed release tree must stay unchanged until the held-descriptor stage
 prints `STAGED` and validates the root custody receipt. Only then may the source
