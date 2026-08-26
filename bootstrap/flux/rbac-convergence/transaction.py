@@ -66,14 +66,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.31"
+AUTHORIZED_RELEASE_TAG = "v0.1.32"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.31"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.32"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -97,7 +97,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v031-recovery-forward.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v032-recovery-forward.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -122,15 +122,15 @@ RECOVERED_CUSTODY_SHA256 = (
 RECOVERED_INITIAL_SEQUENCE = 47
 RECOVERED_INITIAL_OPERATION_COUNT = 18
 RECOVERED_FROM_VERSION = "0.1.42"
-RECOVERED_TO_VERSION = "0.1.45"
-RECOVERED_RELEASE_STEP_COUNT = 3
-RECOVERED_TO_DEPLOYMENT_REVISION = "20"
+RECOVERED_TO_VERSION = "0.1.46"
+RECOVERED_RELEASE_STEP_COUNT = 4
+RECOVERED_TO_DEPLOYMENT_REVISION = "21"
 RECOVERED_TO_CHART_DIGEST = (
-    "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb882a756c"
+    "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e7a67cf68"
 )
 RECOVERED_TO_IMAGE = (
-    "ghcr.io/snaraj/naranjo-online:v0.1.45@"
-    "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16"
+    "ghcr.io/snaraj/naranjo-online:v0.1.46@"
+    "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470"
 )
 RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
 RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
@@ -8078,7 +8078,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v031",
+        "platform_release_contract_recovery_v032",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -9300,6 +9300,107 @@ def publish_recovery_receipt(
         raise RecoveryRequired("RECOVERY_RECEIPT_PUBLICATION_INVALID")
 
 
+def validate_recovery_receipt_for_plan(custody: Mapping[str, object]) -> None:
+    """Require the exact terminal v0.1.30 recovery before fresh planning."""
+
+    old_lock = -1
+    try:
+        source = validate_recovery_release_identity(
+            custody, require_main_tip=True
+        )
+        payload = read_regular(
+            RECOVERY_RECEIPT_PATH, owner=0, mode=0o600
+        )
+        document = parse_json_bytes(payload)
+        if (
+            not isinstance(document, Mapping)
+            or canonical_json(document) != payload
+        ):
+            raise RecoveryRequired("RECOVERY_PLAN_RECEIPT_INVALID")
+
+        old, _old_custody = load_recovered_transaction()
+        old_lock = old.acquire_lock()
+        old, _old_custody = load_recovered_transaction()
+        plan, plan_sha256 = old.read_plan(
+            RECOVERED_PLAN_SHA256, require_fresh=False
+        )
+        temporary = old.JOURNAL_PATH.with_name(old.JOURNAL_PATH.name + ".new")
+        if temporary.exists() or temporary.is_symlink():
+            raise RecoveryRequired("RECOVERY_PLAN_JOURNAL_PENDING")
+        journal = object.__new__(old.Journal)
+        journal.document = old.parse_journal_payload(
+            old.read_regular(
+                old.JOURNAL_PATH,
+                owner=0,
+                mode=0o600,
+                durable=True,
+            )
+        )
+        validate_recovered_incident(old, plan, journal.document)
+        if (
+            plan_sha256 != RECOVERED_PLAN_SHA256
+            or journal.document.get("state") != "rolled-back"
+        ):
+            raise RecoveryRequired("RECOVERY_PLAN_TERMINAL_STATE_INVALID")
+
+        terminal_document, terminal_payload = old.terminal_receipt_payload(
+            journal, "rolled-back"
+        )
+        terminal_path = (
+            old.RECEIPT_ROOT
+            / f"rolled-back.{RECOVERED_PLAN_SHA256}.json"
+        )
+        if (
+            old.read_regular(terminal_path, owner=0, mode=0o600)
+            != terminal_payload
+        ):
+            raise RecoveryRequired("RECOVERY_PLAN_TERMINAL_RECEIPT_INVALID")
+
+        expected = {
+            "schema": RECOVERY_RECEIPT_SCHEMA,
+            "result": "rolled-back",
+            "recoveryRelease": AUTHORIZED_RELEASE_TAG,
+            "recoverySourceRevision": custody["sourceRevision"],
+            "recoveryManifestSha256": custody["manifestSha256"],
+            "recoveryCustodySha256": custody["custodySha256"],
+            "recoveryReleaseIdentitySha256": sha256_bytes(
+                canonical_json(source)
+            ),
+            "recoveredRelease": RECOVERED_RELEASE_TAG,
+            "recoveredSourceRevision": RECOVERED_SOURCE_REVISION,
+            "recoveredPlanSha256": RECOVERED_PLAN_SHA256,
+            "terminalJournalSha256": sha256_bytes(
+                canonical_json(journal.document)
+            ),
+            "terminalEvidenceSha256": journal.document.get(
+                "terminalEvidenceSha256"
+            ),
+            "acceptedChartDigest": RECOVERED_TO_CHART_DIGEST,
+            "acceptedImage": RECOVERED_TO_IMAGE,
+            "recordedAt": terminal_document["recordedAt"],
+        }
+        dynamic_fields = {
+            "acceptedMovementSha256",
+            "acceptedPodProofSha256",
+        }
+        if (
+            set(document) != set(expected) | dynamic_fields
+            or any(document.get(key) != value for key, value in expected.items())
+            or any(
+                SHA256_RE.fullmatch(str(document.get(key))) is None
+                for key in dynamic_fields
+            )
+        ):
+            raise RecoveryRequired("RECOVERY_PLAN_RECEIPT_INVALID")
+    except RecoveryRequired:
+        raise
+    except Exception as exc:
+        raise RecoveryRequired("RECOVERY_PLAN_RECEIPT_INVALID") from exc
+    finally:
+        if old_lock >= 0:
+            os.close(old_lock)
+
+
 def recover_v030(custody: Mapping[str, object]) -> None:
     """Terminalize only the authenticated seq47 incident, then stop."""
 
@@ -9732,6 +9833,8 @@ def run_mode(mode: str) -> None:
     ensure_root_directory(INPUT_ROOT, 0o700)
     lock_fd = acquire_lock()
     try:
+        if mode == "--plan":
+            validate_recovery_receipt_for_plan(custody)
         target = load_target()
         versions = parse_versions(read_regular(custody_path(VERSIONS_REL), owner=0, mode=0o600))
         # Loading the validator before the oracle satisfies the oracle's direct

@@ -272,14 +272,14 @@ def _raw_deployment():
             "namespace": "naranjo-online",
             "uid": DEPLOYMENT_UID,
             "resourceVersion": "20",
-            "generation": 24,
+            "generation": 25,
             "labels": copy.deepcopy(labels),
             "annotations": {
                 "meta.helm.sh/release-name": "naranjo-online",
                 "meta.helm.sh/release-namespace": "naranjo-online",
                 "platform.snaraj.dev/deployment-ready": "true",
                 "platform.snaraj.dev/media-storage-ready": "false",
-                "deployment.kubernetes.io/revision": "20",
+                "deployment.kubernetes.io/revision": "21",
             },
         },
         "spec": {
@@ -512,10 +512,10 @@ def _movement_fixture():
     }
     current_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_TO_VERSION, "2")},
-        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 22)},
+        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 23)},
     }
     planned_workloads = {key_release: _workload("1", 21)}
-    current_workloads = {key_release: _workload("2", 24)}
+    current_workloads = {key_release: _workload("2", 25)}
     controllers = {"source-controller": {"podRestarts": 0}}
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
@@ -658,21 +658,21 @@ class ExactIncidentFingerprintTests(unittest.TestCase):
 
 class ExactReleaseMovementTests(unittest.TestCase):
     def test_recovered_release_tuple_is_literal_and_exact(self):
-        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.45")
-        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 3)
-        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "20")
+        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.46")
+        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 4)
+        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "21")
         self.assertEqual(
             transaction.RECOVERED_TO_CHART_DIGEST,
-            "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb"
-            "882a756c",
+            "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e"
+            "7a67cf68",
         )
         self.assertEqual(
             transaction.RECOVERED_TO_IMAGE,
-            "ghcr.io/snaraj/naranjo-online:v0.1.45@"
-            "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16",
+            "ghcr.io/snaraj/naranjo-online:v0.1.46@"
+            "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470",
         )
 
-    def test_exact_three_release_two_replica_movement_is_accepted(self):
+    def test_exact_four_release_two_replica_movement_is_accepted(self):
         old, plan, current_flux, current_workloads, _controllers, _sites, _raw = (
             _movement_fixture()
         )
@@ -689,10 +689,10 @@ class ExactReleaseMovementTests(unittest.TestCase):
             set(movement["podProof"]), {"deploymentSha256", "pods"}
         )
         self.assertEqual(
-            movement["verificationRows"]["helm"]["historyRevision"], 22
+            movement["verificationRows"]["helm"]["historyRevision"], 23
         )
         self.assertEqual(
-            movement["verificationRows"]["workload"]["generation"], 24
+            movement["verificationRows"]["workload"]["generation"], 25
         )
         self.assertEqual(
             movement["verificationRows"]["workload"]["replicas"], 2
@@ -758,12 +758,11 @@ class ExactReleaseMovementTests(unittest.TestCase):
         movement = transaction.accepted_naranjo_movement(old, object(), plan)
         self.assertEqual(len(movement["podProof"]["pods"]), 2)
 
-    def test_one_skipped_and_extra_release_steps_fail_closed(self):
+    def test_three_and_five_release_steps_fail_closed(self):
         for field in ("Helm history", "workload generation"):
             for label, delta in {
-                "one-step": 1,
-                "skipped-step": 2,
-                "extra-step": 4,
+                "one-short": 3,
+                "one-extra": 5,
             }.items():
                 with self.subTest(field=field, label=label):
                     old, plan, flux, workloads, _controllers, _sites, objects = (
@@ -818,23 +817,73 @@ class ExactReleaseMovementTests(unittest.TestCase):
                     )
 
     def test_coherent_deployment_revision_substitution_fails_closed(self):
-        old, plan, _flux, workloads, _controllers, _sites, objects = (
+        for substituted_revision in ("20", "22"):
+            with self.subTest(revision=substituted_revision):
+                old, plan, _flux, workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                objects["deployment"]["metadata"]["annotations"][
+                    "deployment.kubernetes.io/revision"
+                ] = substituted_revision
+                objects["replicaSet"]["metadata"]["annotations"][
+                    "deployment.kubernetes.io/revision"
+                ] = substituted_revision
+                _sync_workload_with_deployment(
+                    workloads[transaction.RECOVERED_NARANJO_RELEASE],
+                    objects["deployment"],
+                )
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_previous_endpoint_and_coherent_tuple_substitution_fail_closed(self):
+        old, plan, flux, _workloads, _controllers, _sites, objects = (
             _movement_fixture()
         )
-        objects["deployment"]["metadata"]["annotations"][
-            "deployment.kubernetes.io/revision"
-        ] = "21"
-        objects["replicaSet"]["metadata"]["annotations"][
-            "deployment.kubernetes.io/revision"
-        ] = "21"
+        flux["oci"][transaction.RECOVERED_NARANJO_OCI]["chartVersion"] = (
+            "0.1.45"
+        )
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired,
+            "RECOVERY_NARANJO_VERSION_INVALID",
+        ):
+            transaction.accepted_naranjo_movement(old, object(), plan)
+
+        old, plan, flux, workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        substituted_digest = "sha256:" + "f" * 64
+        substituted_image = (
+            "ghcr.io/snaraj/naranjo-online:v0.1.46@" + substituted_digest
+        )
+        flux["oci"][transaction.RECOVERED_NARANJO_OCI][
+            "upstreamDigest"
+        ] = substituted_digest
+        flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+            "attemptedRevisionDigest"
+        ] = substituted_digest
+        flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+            "historyOciDigest"
+        ] = substituted_digest
+        objects["deployment"]["spec"]["template"]["spec"]["containers"][0][
+            "image"
+        ] = substituted_image
+        for pod in objects["pods"]:
+            pod["spec"]["containers"][0]["image"] = substituted_image
+            pod["status"]["containerStatuses"][0]["image"] = substituted_image
+            pod["status"]["containerStatuses"][0]["imageID"] = (
+                "containerd://ghcr.io/snaraj/naranjo-online@"
+                + substituted_digest
+            )
         _sync_workload_with_deployment(
             workloads[transaction.RECOVERED_NARANJO_RELEASE],
             objects["deployment"],
         )
-        with self.assertRaisesRegex(
-            transaction.RecoveryRequired,
-            "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
-        ):
+        for pod in workloads[transaction.RECOVERED_NARANJO_RELEASE]["pods"]:
+            pod["images"] = [substituted_image]
+        with self.assertRaises(transaction.RecoveryRequired):
             transaction.accepted_naranjo_movement(old, object(), plan)
 
     def test_matching_live_and_snapshot_pod_count_drift_fails_closed(self):
@@ -1496,6 +1545,272 @@ class RecoveryReceiptBindingTests(unittest.TestCase):
                 "RECOVERY_VERIFICATION_ROWS_INVALID",
             ):
                 self.render(movement)
+
+
+class RecoveryPlanGateTests(unittest.TestCase):
+    @staticmethod
+    def terminal_fixture():
+        old, plan, journal_document = _incident_fixture()
+        order = plan["operationOrder"]
+        for operation_id in order[18:]:
+            journal_document["operations"][operation_id] = {
+                "state": "not-started",
+                "rollbackState": "prestate-verified",
+            }
+        journal_document.update(
+            {
+                "state": "rolled-back",
+                "phase": "rolled-back",
+                "sequence": transaction.RECOVERED_INITIAL_SEQUENCE + 10,
+                "recoveryRequired": False,
+            }
+        )
+        public_oracle = {
+            "label": "rollback-terminal",
+            "matrixPhase": "rollback",
+            "receiptCount": transaction.ORACLE_PHASE_COUNTS["rollback"],
+            "receiptsSha256": "6" * 64,
+            "file": "oracle.rollback-terminal.reviewed.json",
+            "fileSha256": "7" * 64,
+        }
+        journal_document["oracleEvidenceRecords"] = {
+            "rollback-terminal": copy.deepcopy(public_oracle)
+        }
+        evidence = {
+            "bindingGraph": {
+                "rows": [],
+                "sha256": transaction.sha256_bytes(
+                    transaction.canonical_json([])
+                ),
+            },
+            "authorizationEvidence": copy.deepcopy(public_oracle),
+            "terminalTargetInventory": [
+                {"id": operation_id, "present": False}
+                for operation_id in order
+            ],
+        }
+        journal_document["terminalEvidence"] = evidence
+        journal_document["terminalEvidenceSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(evidence)
+        )
+        journal_document["receiptRecords"] = {
+            "rolled-back": {
+                "result": "rolled-back",
+                "evidenceSha256": journal_document[
+                    "terminalEvidenceSha256"
+                ],
+                "recordedAt": "2026-08-26T00:00:00Z",
+                "journalSequence": journal_document["sequence"],
+                "journalState": "rolled-back",
+            }
+        }
+        journal = SimpleNamespace(document=journal_document)
+        old.validate_terminal_evidence_document = (
+            transaction.validate_terminal_evidence_document
+        )
+        old.read_plan = mock.Mock(
+            return_value=(plan, transaction.RECOVERED_PLAN_SHA256)
+        )
+        old.acquire_lock = mock.Mock(return_value=37)
+        old.Journal = type("OldJournal", (), {})
+        old.JOURNAL_PATH = Path("/reviewed-v030/journal.json")
+        old.parse_journal_payload = mock.Mock(
+            return_value=journal.document
+        )
+        old.RECEIPT_ROOT = Path("/reviewed-v030/receipts")
+        old.terminal_receipt_payload = transaction.terminal_receipt_payload
+        old.read_regular = mock.Mock()
+        return old, plan, journal
+
+    @staticmethod
+    def receipt_fixture():
+        old, plan, journal = RecoveryPlanGateTests.terminal_fixture()
+        custody = {
+            "sourceRevision": "1" * 40,
+            "manifestSha256": "2" * 64,
+            "custodySha256": "3" * 64,
+        }
+        source = {"tag": transaction.AUTHORIZED_RELEASE_TAG, "tree": "4" * 40}
+        terminal_document, terminal_payload = old.terminal_receipt_payload(
+            journal, "rolled-back"
+        )
+        old.read_regular.side_effect = lambda path, **_kwargs: (
+            b"reviewed terminal journal"
+            if path == old.JOURNAL_PATH
+            else terminal_payload
+        )
+        receipt = {
+            "schema": transaction.RECOVERY_RECEIPT_SCHEMA,
+            "result": "rolled-back",
+            "recoveryRelease": transaction.AUTHORIZED_RELEASE_TAG,
+            "recoverySourceRevision": custody["sourceRevision"],
+            "recoveryManifestSha256": custody["manifestSha256"],
+            "recoveryCustodySha256": custody["custodySha256"],
+            "recoveryReleaseIdentitySha256": transaction.sha256_bytes(
+                transaction.canonical_json(source)
+            ),
+            "recoveredRelease": transaction.RECOVERED_RELEASE_TAG,
+            "recoveredSourceRevision": transaction.RECOVERED_SOURCE_REVISION,
+            "recoveredPlanSha256": transaction.RECOVERED_PLAN_SHA256,
+            "terminalJournalSha256": transaction.sha256_bytes(
+                transaction.canonical_json(journal.document)
+            ),
+            "terminalEvidenceSha256": journal.document[
+                "terminalEvidenceSha256"
+            ],
+            "acceptedMovementSha256": "8" * 64,
+            "acceptedPodProofSha256": "9" * 64,
+            "acceptedChartDigest": transaction.RECOVERED_TO_CHART_DIGEST,
+            "acceptedImage": transaction.RECOVERED_TO_IMAGE,
+            "recordedAt": terminal_document["recordedAt"],
+        }
+        return old, plan, journal, custody, source, receipt
+
+    def validate(self, old, custody, source, receipt):
+        with mock.patch.object(
+            transaction,
+            "validate_recovery_release_identity",
+            return_value=source,
+        ) as release, mock.patch.object(
+            transaction,
+            "load_recovered_transaction",
+            return_value=(old, {"old": "custody"}),
+        ) as recovered, mock.patch.object(
+            transaction,
+            "read_regular",
+            return_value=transaction.canonical_json(receipt),
+        ) as read, mock.patch.object(transaction.os, "close") as close:
+            transaction.validate_recovery_receipt_for_plan(custody)
+        return release, recovered, read, close
+
+    def test_exact_receipt_and_terminal_old_state_authorize_planning(self):
+        old, _plan, _journal, custody, source, receipt = self.receipt_fixture()
+        release, recovered, read, close = self.validate(
+            old, custody, source, receipt
+        )
+        release.assert_called_once_with(custody, require_main_tip=True)
+        self.assertEqual(recovered.call_count, 2)
+        read.assert_called_once_with(
+            transaction.RECOVERY_RECEIPT_PATH, owner=0, mode=0o600
+        )
+        old.acquire_lock.assert_called_once_with()
+        old.parse_journal_payload.assert_called_once_with(
+            b"reviewed terminal journal"
+        )
+        old.read_regular.assert_has_calls(
+            [
+                mock.call(
+                    old.JOURNAL_PATH,
+                    owner=0,
+                    mode=0o600,
+                    durable=True,
+                ),
+                mock.call(
+                    old.RECEIPT_ROOT
+                    / f"rolled-back.{transaction.RECOVERED_PLAN_SHA256}.json",
+                    owner=0,
+                    mode=0o600,
+                ),
+            ]
+        )
+        close.assert_called_once_with(37)
+
+    def test_absent_partial_and_substituted_recovery_receipts_fail_closed(self):
+        old, _plan, _journal, custody, source, receipt = self.receipt_fixture()
+        cases = {}
+        partial = copy.deepcopy(receipt)
+        partial.pop("terminalEvidenceSha256")
+        cases["partial receipt"] = partial
+        substituted_custody = copy.deepcopy(receipt)
+        substituted_custody["recoveryCustodySha256"] = "a" * 64
+        cases["substituted recovery custody"] = substituted_custody
+        substituted_incident = copy.deepcopy(receipt)
+        substituted_incident["recoveredPlanSha256"] = "b" * 64
+        cases["substituted recovered plan"] = substituted_incident
+        substituted_journal = copy.deepcopy(receipt)
+        substituted_journal["terminalJournalSha256"] = "c" * 64
+        cases["substituted journal binding"] = substituted_journal
+        for label, candidate in cases.items():
+            with self.subTest(label=label), self.assertRaises(
+                transaction.RecoveryRequired
+            ):
+                self.validate(old, custody, source, candidate)
+
+        with mock.patch.object(
+            transaction,
+            "validate_recovery_release_identity",
+            return_value=source,
+        ), mock.patch.object(
+            transaction,
+            "read_regular",
+            side_effect=transaction.TransactionError("FILE_OPEN_FAILED"),
+        ), self.assertRaises(transaction.RecoveryRequired):
+            transaction.validate_recovery_receipt_for_plan(custody)
+
+    def test_nonterminal_and_substituted_old_journals_fail_closed(self):
+        old, plan, journal, custody, source, receipt = self.receipt_fixture()
+        order = plan["operationOrder"]
+        journal.document.update(
+            {
+                "state": "recovery-required",
+                "phase": "namespaced",
+                "recoveryRequired": True,
+                "operations": {
+                    operation_id: journal.document["operations"][operation_id]
+                    for operation_id in order[:18]
+                },
+            }
+        )
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+        old, _plan, journal, custody, source, receipt = self.receipt_fixture()
+        journal.document["sequence"] += 1
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+    def test_copied_receipt_cannot_substitute_old_terminal_evidence(self):
+        old, _plan, journal, custody, source, receipt = self.receipt_fixture()
+        journal.document["terminalEvidence"]["authorizationEvidence"][
+            "matrixPhase"
+        ] = "final"
+        journal.document["terminalEvidenceSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(journal.document["terminalEvidence"])
+        )
+        receipt["terminalEvidenceSha256"] = journal.document[
+            "terminalEvidenceSha256"
+        ]
+        receipt["terminalJournalSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(journal.document)
+        )
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+    def test_plan_gate_runs_before_target_or_client_loading(self):
+        custody = {"sourceRevision": "1" * 40}
+        with mock.patch.object(
+            transaction,
+            "validate_runtime_custody",
+            return_value=(custody, {}),
+        ), mock.patch.object(
+            transaction, "ensure_state_root"
+        ), mock.patch.object(
+            transaction, "ensure_root_directory"
+        ), mock.patch.object(
+            transaction, "acquire_lock", return_value=19
+        ), mock.patch.object(
+            transaction,
+            "validate_recovery_receipt_for_plan",
+            side_effect=transaction.RecoveryRequired("injected"),
+        ) as gate, mock.patch.object(
+            transaction, "load_target"
+        ) as load_target, mock.patch.object(
+            transaction.os, "close"
+        ) as close, self.assertRaises(transaction.RecoveryRequired):
+            transaction.run_mode("--plan")
+        gate.assert_called_once_with(custody)
+        load_target.assert_not_called()
+        close.assert_called_once_with(19)
 
 
 class RecoveryWrapperTests(unittest.TestCase):
