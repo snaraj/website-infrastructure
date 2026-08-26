@@ -954,8 +954,9 @@ def writable_from_live(value: Mapping[str, object]) -> dict[str, object]:
     return result
 
 
-def load_module(path: Path, name: str, *, mode: int = 0o600) -> ModuleType:
-    payload = read_regular(path, owner=0, mode=mode, maximum=2 * 1024 * 1024)
+def load_module_payload(payload: bytes, path: Path, name: str) -> ModuleType:
+    """Compile one already-custodied byte string without reopening its path."""
+
     module = ModuleType(name)
     module.__file__ = str(path)
     module.__package__ = ""
@@ -970,6 +971,11 @@ def load_module(path: Path, name: str, *, mode: int = 0o600) -> ModuleType:
             sys.modules[name] = previous
         raise TransactionError("CUSTODY_MODULE_LOAD_FAILED") from exc
     return module
+
+
+def load_module(path: Path, name: str, *, mode: int = 0o600) -> ModuleType:
+    payload = read_regular(path, owner=0, mode=mode, maximum=2 * 1024 * 1024)
+    return load_module_payload(payload, path, name)
 
 
 def parse_versions(payload: bytes) -> dict[str, str]:
@@ -8022,8 +8028,8 @@ def load_recovered_transaction() -> tuple[ModuleType, Mapping[str, object]]:
     )
     if sha256_bytes(payload) != RECOVERED_LAUNCHER_SHA256:
         raise TransactionError("RECOVERY_OLD_LAUNCHER_DIGEST_INVALID")
-    old = load_module(
-        transaction_path, "flux_rbac_v030_transaction_recovery", mode=0o700
+    old = load_module_payload(
+        payload, transaction_path, "flux_rbac_v030_transaction_recovery"
     )
     if (
         old.STATE_ROOT != RECOVERED_STATE_ROOT
@@ -8044,7 +8050,16 @@ def load_recovered_transaction() -> tuple[ModuleType, Mapping[str, object]]:
     if custody != expected:
         raise TransactionError("RECOVERY_OLD_CUSTODY_RECEIPT_INVALID")
     entries = old.validate_custody(custody)
-    if entries.get(old.SOURCE_MANIFEST_REL) is not None:
+    expected_entries = {
+        old.DESIRED_REL,
+        old.ORACLE_REL,
+        old.KUBECONFIG_VALIDATOR_REL,
+        old.PLATFORM_CONTRACT_REL,
+        old.VERSIONS_REL,
+        old.RELEASE_FRAGMENT_REL,
+        "bootstrap/flux/rbac-convergence/transaction.py",
+    }
+    if set(entries) != expected_entries:
         raise TransactionError("RECOVERY_OLD_CUSTODY_ENTRY_INVALID")
     if entries.get("bootstrap/flux/rbac-convergence/transaction.py") != (
         RECOVERED_LAUNCHER_SHA256
@@ -8056,6 +8071,9 @@ def load_recovered_transaction() -> tuple[ModuleType, Mapping[str, object]]:
 def validate_recovery_release_identity(
     custody: Mapping[str, object], *, require_main_tip: bool
 ) -> dict[str, object]:
+    runtime_custody, runtime_entries = validate_runtime_custody()
+    if custody != runtime_custody:
+        raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
         "platform_release_contract_recovery_v031",
@@ -8068,6 +8086,8 @@ def validate_recovery_release_identity(
         require_main_tip=require_main_tip,
     )
     entries = validate_custody(custody)
+    if entries != runtime_entries:
+        raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     source["sourceBundleSha256"] = verify_custody_source_tree(
         str(custody["sourceRevision"]), str(source["sourceTreeSha"]), entries
     )
@@ -8076,7 +8096,11 @@ def validate_recovery_release_identity(
     return source
 
 
-def validate_recovered_naranjo_deployment(old: ModuleType, client: object) -> None:
+def validate_recovered_naranjo_deployment(
+    old: ModuleType,
+    client: object,
+    workload: Mapping[str, object],
+) -> dict[str, object]:
     """Bind the accepted chart movement to its reviewed live workload shape."""
 
     items = old.collection_items(
@@ -8109,6 +8133,7 @@ def validate_recovered_naranjo_deployment(old: ModuleType, client: object) -> No
         or not isinstance(containers[0], Mapping)
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_INVALID")
+    deployment_uid, _deployment_resource_version = old.live_identity(deployment)
     container = containers[0]
 
     def closed(
@@ -8227,6 +8252,76 @@ def validate_recovered_naranjo_deployment(old: ModuleType, client: object) -> No
         "app.kubernetes.io/version": RECOVERED_TO_VERSION,
     }
     annotations = metadata.get("annotations")
+    expected_annotations = {
+        "meta.helm.sh/release-name": "naranjo-online",
+        "meta.helm.sh/release-namespace": "naranjo-online",
+        "platform.snaraj.dev/deployment-ready": "true",
+        "platform.snaraj.dev/media-storage-ready": "false",
+    }
+    revision_annotation = (
+        annotations.get("deployment.kubernetes.io/revision")
+        if isinstance(annotations, Mapping)
+        else None
+    )
+    allowed_metadata = set(old.SERVER_METADATA) | {
+        "name",
+        "namespace",
+        "labels",
+        "annotations",
+    }
+    if (
+        not isinstance(annotations, Mapping)
+        or metadata.get("name") != "naranjo-online"
+        or metadata.get("namespace") != "naranjo-online"
+        or metadata.get("labels") != labels
+        or metadata.get("deletionTimestamp") is not None
+        or not set(metadata).issubset(allowed_metadata)
+        or not set(expected_annotations).issubset(annotations)
+        or not set(annotations).issubset(
+            set(expected_annotations) | {"deployment.kubernetes.io/revision"}
+        )
+        or any(
+            annotations.get(name) != value
+            for name, value in expected_annotations.items()
+        )
+        or not isinstance(revision_annotation, str)
+        or not revision_annotation.isascii()
+        or not revision_annotation.isdecimal()
+        or int(revision_annotation) <= 0
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID")
+    direct_projection = {
+        "uid": deployment_uid,
+        "generation": metadata.get("generation"),
+        "replicas": spec.get("replicas"),
+        "templateSha256": old.sha256_bytes(
+            old.canonical_json(spec.get("template"))
+        ),
+        "semanticSha256": old.semantic_hash(deployment),
+        "semanticWithoutProofSha256": old.semantic_without_proof_annotation(
+            deployment
+        )[1],
+    }
+    if any(
+        workload.get(key) != value for key, value in direct_projection.items()
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_SNAPSHOT_INVALID")
+    workload_owned = workload.get("ownedObjects")
+    owned_deployments = [
+        row
+        for row in workload_owned or []
+        if isinstance(row, Mapping) and row.get("kind") == "Deployment"
+    ]
+    if (
+        not isinstance(workload_owned, list)
+        or len(owned_deployments) != 1
+        or owned_deployments[0].get("uid") != deployment_uid
+        or owned_deployments[0].get("semanticSha256")
+        != direct_projection["semanticSha256"]
+        or owned_deployments[0].get("semanticWithoutProofSha256")
+        != direct_projection["semanticWithoutProofSha256"]
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_SNAPSHOT_INVALID")
     contract = {
         "metadataLabels": metadata.get("labels"),
         "deploymentReady": annotations.get(
@@ -8334,6 +8429,472 @@ def validate_recovered_naranjo_deployment(old: ModuleType, client: object) -> No
     }
     if contract != expected:
         raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_CONTRACT_INVALID")
+    selector = spec.get("selector")
+    match_labels = selector.get("matchLabels") if isinstance(selector, Mapping) else None
+    if not isinstance(match_labels, Mapping):
+        raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_CONTRACT_INVALID")
+    return {
+        "uid": deployment_uid,
+        "revision": revision_annotation,
+        "selector": copy.deepcopy(dict(match_labels)),
+        "templateLabels": copy.deepcopy(dict(template_metadata["labels"])),
+        "templateSpec": copy.deepcopy(dict(pod_spec)),
+        "projection": direct_projection,
+    }
+
+
+def validate_recovered_naranjo_pods(
+    old: ModuleType,
+    client: object,
+    workload: Mapping[str, object],
+    deployment: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind live Pods to the reviewed template, digest, and owner chain."""
+
+    selector = deployment.get("selector")
+    template_labels = deployment.get("templateLabels")
+    template_spec = deployment.get("templateSpec")
+    deployment_uid = deployment.get("uid")
+    deployment_revision = deployment.get("revision")
+    deployment_projection = deployment.get("projection")
+    workload_pods = workload.get("pods")
+    if (
+        not isinstance(selector, Mapping)
+        or not isinstance(template_labels, Mapping)
+        or not isinstance(template_spec, Mapping)
+        or not isinstance(deployment_uid, str)
+        or old.UID_RE.fullmatch(deployment_uid) is None
+        or not isinstance(deployment_revision, str)
+        or not deployment_revision.isdecimal()
+        or not isinstance(deployment_projection, Mapping)
+        or not isinstance(workload_pods, list)
+        or not workload_pods
+        or any(not isinstance(row, Mapping) for row in workload_pods)
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_POD_INPUT_INVALID")
+    expected_rows = {
+        str(row.get("uid")): row
+        for row in workload_pods
+        if isinstance(row, Mapping)
+        and isinstance(row.get("uid"), str)
+        and old.UID_RE.fullmatch(str(row.get("uid"))) is not None
+    }
+    if len(expected_rows) != len(workload_pods):
+        raise RecoveryRequired("RECOVERY_NARANJO_POD_INPUT_INVALID")
+
+    def owner_reference(
+        value: Mapping[str, object], expected_kind: str
+    ) -> Mapping[str, object]:
+        metadata = value.get("metadata")
+        references = (
+            metadata.get("ownerReferences")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if (
+            not isinstance(references, list)
+            or len(references) != 1
+            or not isinstance(references[0], Mapping)
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_OWNER_INVALID")
+        reference = references[0]
+        required_reference_keys = {
+            "apiVersion",
+            "controller",
+            "kind",
+            "name",
+            "uid",
+        }
+        if (
+            not required_reference_keys.issubset(reference)
+            or not set(reference).issubset(
+                required_reference_keys | {"blockOwnerDeletion"}
+            )
+            or reference.get("apiVersion") != "apps/v1"
+            or reference.get("kind") != expected_kind
+            or reference.get("controller") is not True
+            or reference.get("blockOwnerDeletion") not in (None, True)
+            or not isinstance(reference.get("name"), str)
+            or old.UID_RE.fullmatch(str(reference.get("uid"))) is None
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_OWNER_INVALID")
+        return {
+            "apiVersion": "apps/v1",
+            "blockOwnerDeletion": True,
+            "controller": True,
+            "kind": expected_kind,
+            "name": reference["name"],
+            "uid": reference["uid"],
+        }
+
+    replica_sets = old.collection_items(
+        client, "/apis/apps/v1/namespaces/naranjo-online/replicasets"
+    )
+    matching_pods: list[Mapping[str, object]] = []
+    for pod in old.collection_items(
+        client, "/api/v1/namespaces/naranjo-online/pods"
+    ):
+        metadata = pod.get("metadata")
+        labels = metadata.get("labels") if isinstance(metadata, Mapping) else None
+        if isinstance(labels, Mapping) and all(
+            labels.get(key) == value for key, value in selector.items()
+        ):
+            matching_pods.append(pod)
+    if len(matching_pods) != len(expected_rows):
+        raise RecoveryRequired("RECOVERY_NARANJO_POD_INVENTORY_INVALID")
+
+    default_tolerations = [
+        {
+            "effect": "NoExecute",
+            "key": "node.kubernetes.io/not-ready",
+            "operator": "Exists",
+            "tolerationSeconds": 300,
+        },
+        {
+            "effect": "NoExecute",
+            "key": "node.kubernetes.io/unreachable",
+            "operator": "Exists",
+            "tolerationSeconds": 300,
+        },
+    ]
+
+    def normalize_pod_spec(
+        value: Mapping[str, object], *, live_pod: bool
+    ) -> dict[str, object]:
+        """Normalize only documented API defaults; preserve all unknown fields."""
+
+        normalized = copy.deepcopy(dict(value))
+        pod_defaults = {
+            "serviceAccount": "naranjo-online",
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 30,
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "enableServiceLinks": True,
+            "preemptionPolicy": "PreemptLowerPriority",
+            "priority": 0,
+            "hostNetwork": False,
+            "hostPID": False,
+            "hostIPC": False,
+            "shareProcessNamespace": False,
+            "hostUsers": True,
+        }
+        for key, default in pod_defaults.items():
+            normalized.setdefault(key, copy.deepcopy(default))
+        containers = normalized.get("containers")
+        if (
+            not isinstance(containers, list)
+            or len(containers) != 1
+            or not isinstance(containers[0], Mapping)
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_SPEC_INVALID")
+        container = copy.deepcopy(dict(containers[0]))
+        for key, default in {
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "stdin": False,
+            "stdinOnce": False,
+            "tty": False,
+        }.items():
+            container.setdefault(key, default)
+        for probe_name in ("startupProbe", "readinessProbe", "livenessProbe"):
+            probe_value = container.get(probe_name)
+            http_get = (
+                probe_value.get("httpGet")
+                if isinstance(probe_value, Mapping)
+                else None
+            )
+            if not isinstance(probe_value, Mapping) or not isinstance(
+                http_get, Mapping
+            ):
+                raise RecoveryRequired("RECOVERY_NARANJO_POD_SPEC_INVALID")
+            probe = copy.deepcopy(dict(probe_value))
+            http = copy.deepcopy(dict(http_get))
+            probe.setdefault("successThreshold", 1)
+            probe.setdefault("initialDelaySeconds", 0)
+            http.setdefault("scheme", "HTTP")
+            http.setdefault("host", "")
+            http.setdefault("httpHeaders", [])
+            probe["httpGet"] = http
+            container[probe_name] = probe
+        normalized["containers"] = [container]
+        if live_pod:
+            node_name = normalized.pop("nodeName", None)
+            tolerations = normalized.pop("tolerations", None)
+            if (
+                not isinstance(node_name, str)
+                or old.DNS_RE.fullmatch(node_name) is None
+                or not isinstance(tolerations, list)
+                or len(tolerations) != len(default_tolerations)
+                or sorted(
+                    old.canonical_json(row) for row in tolerations
+                )
+                != sorted(
+                    old.canonical_json(row) for row in default_tolerations
+                )
+            ):
+                raise RecoveryRequired("RECOVERY_NARANJO_POD_SPEC_INVALID")
+        elif "nodeName" in normalized or "tolerations" in normalized:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_SPEC_INVALID")
+        return normalized
+
+    normalized_deployment_spec = normalize_pod_spec(
+        template_spec, live_pod=False
+    )
+    proof_rows: list[dict[str, object]] = []
+    observed_uids: set[str] = set()
+    observed_replica_set_uids: set[str] = set()
+    for pod in matching_pods:
+        if (
+            ("apiVersion" in pod and pod.get("apiVersion") != "v1")
+            or ("kind" in pod and pod.get("kind") != "Pod")
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_TYPE_INVALID")
+        metadata = pod.get("metadata")
+        pod_spec = pod.get("spec")
+        pod_status = pod.get("status")
+        labels = metadata.get("labels") if isinstance(metadata, Mapping) else None
+        pod_annotations = (
+            metadata.get("annotations") if isinstance(metadata, Mapping) else None
+        )
+        allowed_pod_metadata = set(old.SERVER_METADATA) | {
+            "name",
+            "namespace",
+            "labels",
+            "annotations",
+            "ownerReferences",
+        }
+        if (
+            not isinstance(metadata, Mapping)
+            or not isinstance(pod_spec, Mapping)
+            or not isinstance(pod_status, Mapping)
+            or not isinstance(labels, Mapping)
+            or metadata.get("namespace") != "naranjo-online"
+            or not isinstance(metadata.get("name"), str)
+            or old.DNS_RE.fullmatch(str(metadata.get("name"))) is None
+            or not set(metadata).issubset(allowed_pod_metadata)
+            or pod_annotations not in (None, {})
+            or metadata.get("deletionTimestamp") is not None
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_INVALID")
+        pod_uid, _pod_resource_version = old.live_identity(pod)
+        expected_row = expected_rows.get(pod_uid)
+        if expected_row is None or pod_uid in observed_uids:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_INVENTORY_INVALID")
+        observed_uids.add(pod_uid)
+        pod_template_hash = labels.get("pod-template-hash")
+        if (
+            not isinstance(pod_template_hash, str)
+            or not pod_template_hash
+            or set(labels) != set(template_labels) | {"pod-template-hash"}
+            or any(labels.get(key) != value for key, value in template_labels.items())
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_LABELS_INVALID")
+
+        pod_owner = owner_reference(pod, "ReplicaSet")
+        replica_set_matches = []
+        for replica_set in replica_sets:
+            replica_metadata = replica_set.get("metadata")
+            if not isinstance(replica_metadata, Mapping):
+                continue
+            if (
+                replica_metadata.get("name") == pod_owner.get("name")
+                and replica_metadata.get("uid") == pod_owner.get("uid")
+            ):
+                replica_set_matches.append(replica_set)
+        if len(replica_set_matches) != 1:
+            raise RecoveryRequired("RECOVERY_NARANJO_OWNER_INVALID")
+        replica_set = replica_set_matches[0]
+        if (
+            ("apiVersion" in replica_set and replica_set.get("apiVersion") != "apps/v1")
+            or ("kind" in replica_set and replica_set.get("kind") != "ReplicaSet")
+            or old.object_is_terminating(replica_set)
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_OWNER_INVALID")
+        replica_uid, _replica_resource_version = old.live_identity(replica_set)
+        observed_replica_set_uids.add(replica_uid)
+        replica_metadata = replica_set.get("metadata")
+        replica_labels = (
+            replica_metadata.get("labels")
+            if isinstance(replica_metadata, Mapping)
+            else None
+        )
+        replica_annotations = (
+            replica_metadata.get("annotations")
+            if isinstance(replica_metadata, Mapping)
+            else None
+        )
+        replica_owner = owner_reference(replica_set, "Deployment")
+        replica_spec = replica_set.get("spec")
+        replica_selector = (
+            replica_spec.get("selector")
+            if isinstance(replica_spec, Mapping)
+            else None
+        )
+        replica_template = (
+            replica_spec.get("template")
+            if isinstance(replica_spec, Mapping)
+            else None
+        )
+        replica_template_metadata = (
+            replica_template.get("metadata")
+            if isinstance(replica_template, Mapping)
+            else None
+        )
+        replica_template_spec = (
+            replica_template.get("spec")
+            if isinstance(replica_template, Mapping)
+            else None
+        )
+        expected_replica_labels = dict(template_labels)
+        expected_replica_labels["pod-template-hash"] = pod_template_hash
+        expected_replica_annotations = {
+            "deployment.kubernetes.io/desired-replicas": "1",
+            "deployment.kubernetes.io/max-replicas": "1",
+            "deployment.kubernetes.io/revision": deployment_revision,
+        }
+        allowed_replica_metadata = set(old.SERVER_METADATA) | {
+            "name",
+            "namespace",
+            "labels",
+            "annotations",
+            "ownerReferences",
+        }
+        if (
+            replica_uid != pod_owner.get("uid")
+            or replica_owner.get("name") != "naranjo-online"
+            or replica_owner.get("uid") != deployment_uid
+            or not isinstance(replica_labels, Mapping)
+            or dict(replica_labels) != expected_replica_labels
+            or not isinstance(replica_metadata, Mapping)
+            or replica_metadata.get("namespace") != "naranjo-online"
+            or replica_metadata.get("name") != pod_owner.get("name")
+            or not set(replica_metadata).issubset(allowed_replica_metadata)
+            or replica_annotations != expected_replica_annotations
+            or not isinstance(replica_spec, Mapping)
+            or not set(replica_spec).issubset(
+                {"replicas", "minReadySeconds", "selector", "template"}
+            )
+            or replica_spec.get("replicas") != 1
+            or replica_spec.get("minReadySeconds") not in (None, 0)
+            or not isinstance(replica_selector, Mapping)
+            or set(replica_selector) != {"matchLabels"}
+            or replica_selector.get("matchLabels") != expected_replica_labels
+            or not isinstance(replica_template_metadata, Mapping)
+            or not set(replica_template_metadata).issubset(
+                {"labels", "creationTimestamp"}
+            )
+            or replica_template_metadata.get("labels")
+            != expected_replica_labels
+            or replica_template_metadata.get("creationTimestamp")
+            not in (None,)
+            or not isinstance(replica_template_spec, Mapping)
+            or normalize_pod_spec(replica_template_spec, live_pod=False)
+            != normalized_deployment_spec
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_OWNER_INVALID")
+
+        if normalize_pod_spec(
+            pod_spec, live_pod=True
+        ) != normalized_deployment_spec:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_SPEC_INVALID")
+
+        statuses = pod_status.get("containerStatuses")
+        conditions = pod_status.get("conditions")
+        ready = [
+            condition
+            for condition in conditions or []
+            if isinstance(condition, Mapping) and condition.get("type") == "Ready"
+        ]
+        display_image = (
+            statuses[0].get("image")
+            if isinstance(statuses, list)
+            and len(statuses) == 1
+            and isinstance(statuses[0], Mapping)
+            else None
+        )
+        snapshot_images = expected_row.get("images")
+        if (
+            not isinstance(statuses, list)
+            or len(statuses) != 1
+            or not isinstance(statuses[0], Mapping)
+            or statuses[0].get("name") != "naranjo-online"
+            or not isinstance(display_image, str)
+            or not display_image
+            or len(display_image) > MAX_CONTROLLER_STATUS_IMAGE_CHARS
+            or statuses[0].get("restartCount") != 0
+            or statuses[0].get("ready") is not True
+            or statuses[0].get("started") not in (None, True)
+            or not isinstance(statuses[0].get("state"), Mapping)
+            or not isinstance(statuses[0]["state"].get("running"), Mapping)
+            or len(ready) != 1
+            or ready[0].get("status") != "True"
+            or pod_status.get("phase") != "Running"
+            or expected_row.get("restartCounts") != [0]
+            or snapshot_images != [display_image]
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_STATUS_INVALID")
+        try:
+            image_id = old.validate_controller_image_id(
+                statuses[0].get("imageID"), RECOVERED_TO_IMAGE
+            )
+        except Exception as exc:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_IMAGE_ID_INVALID") from exc
+        owner_chain = {
+            "podUid": pod_uid,
+            "replicaSetUid": replica_uid,
+            "deploymentUid": deployment_uid,
+        }
+        pod_metadata_projection = {
+            "name": metadata["name"],
+            "namespace": metadata["namespace"],
+            "labels": copy.deepcopy(dict(labels)),
+            "ownerReference": pod_owner,
+        }
+        replica_metadata_projection = {
+            "name": replica_metadata["name"],
+            "namespace": replica_metadata["namespace"],
+            "labels": copy.deepcopy(dict(replica_labels)),
+            "annotations": copy.deepcopy(dict(replica_annotations)),
+            "ownerReference": replica_owner,
+        }
+        replica_template_projection = {
+            "labels": copy.deepcopy(expected_replica_labels),
+            "spec": normalize_pod_spec(
+                replica_template_spec, live_pod=False
+            ),
+        }
+        proof_rows.append(
+            {
+                "podUidSha256": old.sha256_bytes(pod_uid.encode()),
+                "imageIDSha256": old.sha256_bytes(image_id.encode()),
+                "podSpecSha256": old.sha256_bytes(old.canonical_json(pod_spec)),
+                "podMetadataSha256": old.sha256_bytes(
+                    old.canonical_json(pod_metadata_projection)
+                ),
+                "replicaSetMetadataSha256": old.sha256_bytes(
+                    old.canonical_json(replica_metadata_projection)
+                ),
+                "replicaSetTemplateSha256": old.sha256_bytes(
+                    old.canonical_json(replica_template_projection)
+                ),
+                "ownerChainSha256": old.sha256_bytes(
+                    old.canonical_json(owner_chain)
+                ),
+            }
+        )
+    if (
+        observed_uids != set(expected_rows)
+        or len(observed_replica_set_uids) != 1
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_POD_INVENTORY_INVALID")
+    proof_rows.sort(key=lambda row: str(row["podUidSha256"]))
+    return {
+        "deploymentSha256": old.sha256_bytes(
+            old.canonical_json(deployment_projection)
+        ),
+        "pods": proof_rows,
+    }
 
 
 def accepted_naranjo_movement(
@@ -8415,7 +8976,6 @@ def accepted_naranjo_movement(
             "chartVersion",
             "upstreamDigest",
             "storedArtifactDigest",
-            "semanticSha256",
         },
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_OCI_SCOPE_INVALID")
@@ -8431,7 +8991,6 @@ def accepted_naranjo_movement(
             "historyOciDigest",
             "historyDigest",
             "historyConfigDigest",
-            "semanticSha256",
         },
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_HELM_SCOPE_INVALID")
@@ -8503,7 +9062,11 @@ def accepted_naranjo_movement(
             not isinstance(pod, Mapping)
             or not isinstance(pod.get("restartCounts"), list)
             or any(count != 0 for count in pod["restartCounts"])
-            or pod.get("images") != [RECOVERED_TO_IMAGE]
+            or not isinstance(pod.get("images"), list)
+            or len(pod["images"]) != 1
+            or not isinstance(pod["images"][0], str)
+            or not pod["images"][0]
+            or len(pod["images"][0]) > MAX_CONTROLLER_STATUS_IMAGE_CHARS
             for pod in new_pods
         )
     ):
@@ -8523,14 +9086,87 @@ def accepted_naranjo_movement(
         raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
     if old.public_health() != baselines.get("publicSites"):
         raise RecoveryRequired("RECOVERY_PUBLIC_SITE_DRIFT")
-    validate_recovered_naranjo_deployment(old, client)
+    deployment_proof = validate_recovered_naranjo_deployment(
+        old, client, new_workload
+    )
+    pod_proof = validate_recovered_naranjo_pods(
+        old, client, new_workload, deployment_proof
+    )
     return {
         "verificationRows": {
             "oci": copy.deepcopy(dict(new_oci)),
             "helm": copy.deepcopy(dict(new_helm)),
             "workload": copy.deepcopy(dict(new_workload)),
         },
+        "podProof": pod_proof,
     }
+
+
+def validated_recovery_movement(
+    movement: Mapping[str, object],
+) -> tuple[Mapping[str, object], Mapping[str, object]]:
+    """Validate the exact nonempty movement schema before use or publication."""
+
+    if set(movement) != {"verificationRows", "podProof"}:
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    rows = movement.get("verificationRows")
+    pod_proof = movement.get("podProof")
+    if (
+        not isinstance(rows, Mapping)
+        or set(rows) != {"oci", "helm", "workload"}
+        or any(
+            not isinstance(rows.get(name), Mapping) or not rows.get(name)
+            for name in ("oci", "helm", "workload")
+        )
+        or not isinstance(pod_proof, Mapping)
+        or set(pod_proof) != {"deploymentSha256", "pods"}
+        or SHA256_RE.fullmatch(str(pod_proof.get("deploymentSha256"))) is None
+    ):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    workload = rows["workload"]
+    workload_pods = workload.get("pods")
+    proof_pods = pod_proof.get("pods")
+    proof_fields = {
+        "podUidSha256",
+        "imageIDSha256",
+        "podSpecSha256",
+        "podMetadataSha256",
+        "replicaSetMetadataSha256",
+        "replicaSetTemplateSha256",
+        "ownerChainSha256",
+    }
+    if (
+        not isinstance(workload_pods, list)
+        or not workload_pods
+        or any(not isinstance(row, Mapping) for row in workload_pods)
+        or not isinstance(proof_pods, list)
+        or len(proof_pods) != len(workload_pods)
+        or any(
+            not isinstance(row, Mapping)
+            or set(row) != proof_fields
+            or any(SHA256_RE.fullmatch(str(row.get(key))) is None for key in row)
+            for row in proof_pods
+        )
+    ):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    expected_uid_hashes = {
+        sha256_bytes(str(row.get("uid")).encode())
+        for row in workload_pods
+        if isinstance(row.get("uid"), str)
+        and UID_RE.fullmatch(str(row.get("uid"))) is not None
+    }
+    observed_uid_hashes = {
+        str(row["podUidSha256"])
+        for row in proof_pods
+        if isinstance(row, Mapping)
+    }
+    if (
+        len(expected_uid_hashes) != len(workload_pods)
+        or len(observed_uid_hashes) != len(proof_pods)
+        or observed_uid_hashes != expected_uid_hashes
+    ):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    return rows, pod_proof
 
 
 def run_recovered_rollback_once(
@@ -8540,9 +9176,7 @@ def run_recovered_rollback_once(
     journal: object,
     movement: Mapping[str, object],
 ) -> None:
-    rows = movement.get("verificationRows")
-    if not isinstance(rows, Mapping):
-        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    rows, _pod_proof = validated_recovery_movement(movement)
     original = old.verify_rolled_back_state
     original_plan_sha256 = old.sha256_bytes(old.canonical_json(plan))
     calls = 0
@@ -8611,6 +9245,7 @@ def publish_recovery_receipt(
 ) -> None:
     """Bind the old terminal evidence to the immutable recovery release."""
 
+    _rows, pod_proof = validated_recovery_movement(movement)
     records = journal.document.get("receiptRecords")
     terminal_record = (
         records.get("rolled-back") if isinstance(records, Mapping) else None
@@ -8620,7 +9255,6 @@ def publish_recovery_receipt(
         not isinstance(terminal_record, Mapping)
         or not isinstance(terminal_record.get("recordedAt"), str)
         or SHA256_RE.fullmatch(str(terminal_digest)) is None
-        or not isinstance(movement.get("verificationRows"), Mapping)
     ):
         raise RecoveryRequired("RECOVERY_RECEIPT_INPUT_INVALID")
     document = {
@@ -8639,7 +9273,10 @@ def publish_recovery_receipt(
         ),
         "terminalEvidenceSha256": terminal_digest,
         "acceptedMovementSha256": sha256_bytes(
-            canonical_json(movement["verificationRows"])
+            canonical_json(movement)
+        ),
+        "acceptedPodProofSha256": sha256_bytes(
+            canonical_json(pod_proof)
         ),
         "acceptedChartDigest": RECOVERED_TO_CHART_DIGEST,
         "acceptedImage": RECOVERED_TO_IMAGE,
@@ -8711,17 +9348,26 @@ def recover_v030(custody: Mapping[str, object]) -> None:
                 require_apply_ack=False,
                 require_main_tip=False,
             )
-            movement = accepted_naranjo_movement(old, client, plan)
+            initial_movement = accepted_naranjo_movement(old, client, plan)
             if journal.document.get("state") != "rolled-back":
-                run_recovered_rollback_once(old, client, plan, journal, movement)
+                run_recovered_rollback_once(
+                    old, client, plan, journal, initial_movement
+                )
             validate_recovered_incident(old, plan, journal.document)
+            terminal_movement = accepted_naranjo_movement(old, client, plan)
+            if canonical_json(initial_movement) != canonical_json(
+                terminal_movement
+            ):
+                raise RecoveryRequired("RECOVERY_TERMINAL_MOVEMENT_CHANGED")
             old.write_receipt(
                 "rolled-back",
                 RECOVERED_PLAN_SHA256,
                 RECOVERED_SOURCE_REVISION,
                 journal,
             )
-            publish_recovery_receipt(custody, source, old, journal, movement)
+            publish_recovery_receipt(
+                custody, source, old, journal, terminal_movement
+            )
     except (RecoveryRequired, TransactionError):
         raise
     except BaseException as exc:

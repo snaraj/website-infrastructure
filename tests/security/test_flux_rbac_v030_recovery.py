@@ -40,12 +40,52 @@ def _load_transaction():
 transaction = _load_transaction()
 
 
+def _synthetic_uid(digit):
+    return f"{digit * 8}-{digit * 4}-4{digit * 3}-8{digit * 3}-{digit * 12}"
+
+
+DEPLOYMENT_UID = _synthetic_uid("1")
+POD_UID = _synthetic_uid("2")
+REPLICA_SET_UID = _synthetic_uid("3")
+FOREIGN_UID = _synthetic_uid("4")
+SUBSTITUTED_UID = _synthetic_uid("5")
+
+
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _sha256(payload):
     return hashlib.sha256(payload).hexdigest()
+
+
+def _valid_movement(rows=None):
+    verification_rows = copy.deepcopy(
+        rows
+        or {
+            "oci": {"revision": "reviewed"},
+            "helm": {"revision": "reviewed"},
+            "workload": {"generation": 12, "pods": [{"uid": POD_UID}]},
+        }
+    )
+    verification_rows["workload"].setdefault("pods", [{"uid": POD_UID}])
+    return {
+        "verificationRows": verification_rows,
+        "podProof": {
+            "deploymentSha256": "5" * 64,
+            "pods": [
+                {
+                    "podUidSha256": transaction.sha256_bytes(POD_UID.encode()),
+                    "podSpecSha256": "6" * 64,
+                    "imageIDSha256": "7" * 64,
+                    "podMetadataSha256": "8" * 64,
+                    "replicaSetMetadataSha256": "9" * 64,
+                    "replicaSetTemplateSha256": "a" * 64,
+                    "ownerChainSha256": "b" * 64,
+                }
+            ],
+        },
+    }
 
 
 def _incident_fixture():
@@ -121,7 +161,7 @@ def _oci(version, marker):
         "readyReason": "Succeeded",
         "sourceVerifiedReason": "Succeeded",
         "specSha256": "a" * 64,
-        "semanticSha256": marker * 64,
+        "semanticSha256": "d" * 64,
     }
 
 
@@ -150,7 +190,7 @@ def _helm(version, marker, revision):
         "inventory": [{"id": "deployment"}],
         "readyReason": "Succeeded",
         "specSha256": "b" * 64,
-        "semanticSha256": marker * 64,
+        "semanticSha256": "e" * 64,
     }
 
 
@@ -164,7 +204,7 @@ def _owned_objects(marker):
             "kind": "Deployment",
             "name": "naranjo-online",
             "apiVersion": "apps/v1",
-            "uid": "deployment-uid",
+            "uid": DEPLOYMENT_UID,
             "semanticSha256": marker * 64,
             "proofAnnotation": None,
             "semanticWithoutProofSha256": marker * 64,
@@ -174,7 +214,7 @@ def _owned_objects(marker):
 
 def _workload(marker, generation):
     return {
-        "uid": "deployment-uid",
+        "uid": DEPLOYMENT_UID,
         "generation": generation,
         "replicas": 1,
         "templateSha256": marker * 64,
@@ -183,7 +223,7 @@ def _workload(marker, generation):
         "semanticWithoutProofSha256": marker * 64,
         "pods": [
             {
-                "uid": f"pod-{marker}",
+                "uid": POD_UID,
                 "restartCounts": [0],
                 "images": [
                     transaction.RECOVERED_TO_IMAGE
@@ -219,10 +259,17 @@ def _raw_deployment():
         "kind": "Deployment",
         "metadata": {
             "name": "naranjo-online",
+            "namespace": "naranjo-online",
+            "uid": DEPLOYMENT_UID,
+            "resourceVersion": "20",
+            "generation": 12,
             "labels": copy.deepcopy(labels),
             "annotations": {
+                "meta.helm.sh/release-name": "naranjo-online",
+                "meta.helm.sh/release-namespace": "naranjo-online",
                 "platform.snaraj.dev/deployment-ready": "true",
                 "platform.snaraj.dev/media-storage-ready": "false",
+                "deployment.kubernetes.io/revision": "9",
             },
         },
         "spec": {
@@ -320,6 +367,129 @@ def _raw_deployment():
     }
 
 
+def _sync_workload_with_deployment(workload, deployment):
+    semantic_sha256 = transaction.semantic_hash(deployment)
+    workload.update(
+        {
+            "uid": deployment["metadata"]["uid"],
+            "generation": deployment["metadata"]["generation"],
+            "replicas": deployment["spec"]["replicas"],
+            "templateSha256": transaction.sha256_bytes(
+                transaction.canonical_json(deployment["spec"]["template"])
+            ),
+            "semanticSha256": semantic_sha256,
+            "semanticWithoutProofSha256": semantic_sha256,
+        }
+    )
+    owned_deployment = workload["ownedObjects"][-1]
+    owned_deployment["uid"] = deployment["metadata"]["uid"]
+    owned_deployment["semanticSha256"] = semantic_sha256
+    owned_deployment["semanticWithoutProofSha256"] = semantic_sha256
+
+
+def _owner_reference(kind, name, uid):
+    return {
+        "apiVersion": "apps/v1",
+        "blockOwnerDeletion": True,
+        "controller": True,
+        "kind": kind,
+        "name": name,
+        "uid": uid,
+    }
+
+
+def _raw_replica_set(deployment):
+    labels = copy.deepcopy(deployment["spec"]["template"]["metadata"]["labels"])
+    labels["pod-template-hash"] = "reviewedhash"
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "ReplicaSet",
+        "metadata": {
+            "name": "naranjo-online-reviewedhash",
+            "namespace": "naranjo-online",
+            "uid": REPLICA_SET_UID,
+            "resourceVersion": "21",
+            "labels": labels,
+            "annotations": {
+                "deployment.kubernetes.io/desired-replicas": "1",
+                "deployment.kubernetes.io/max-replicas": "1",
+                "deployment.kubernetes.io/revision": "9",
+            },
+            "ownerReferences": [
+                _owner_reference("Deployment", "naranjo-online", DEPLOYMENT_UID)
+            ],
+        },
+        "spec": {
+            "replicas": 1,
+            "minReadySeconds": 0,
+            "selector": {"matchLabels": copy.deepcopy(labels)},
+            "template": {
+                "metadata": {
+                    "labels": copy.deepcopy(labels),
+                    "creationTimestamp": None,
+                },
+                "spec": copy.deepcopy(deployment["spec"]["template"]["spec"]),
+            },
+        },
+    }
+
+
+def _raw_pod(deployment):
+    labels = copy.deepcopy(deployment["spec"]["template"]["metadata"]["labels"])
+    labels["pod-template-hash"] = "reviewedhash"
+    spec = copy.deepcopy(deployment["spec"]["template"]["spec"])
+    spec["nodeName"] = "reviewed-node"
+    spec["tolerations"] = [
+        {
+            "effect": "NoExecute",
+            "key": "node.kubernetes.io/not-ready",
+            "operator": "Exists",
+            "tolerationSeconds": 300,
+        },
+        {
+            "effect": "NoExecute",
+            "key": "node.kubernetes.io/unreachable",
+            "operator": "Exists",
+            "tolerationSeconds": 300,
+        },
+    ]
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "naranjo-online-reviewedhash-abcde",
+            "namespace": "naranjo-online",
+            "uid": POD_UID,
+            "resourceVersion": "22",
+            "labels": labels,
+            "ownerReferences": [
+                _owner_reference(
+                    "ReplicaSet", "naranjo-online-reviewedhash", REPLICA_SET_UID
+                )
+            ],
+        },
+        "spec": spec,
+        "status": {
+            "phase": "Running",
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "containerStatuses": [
+                {
+                    "name": "naranjo-online",
+                    "image": transaction.RECOVERED_TO_IMAGE,
+                    "imageID": (
+                        "containerd://ghcr.io/snaraj/naranjo-online@"
+                        + transaction.RECOVERED_TO_IMAGE.rsplit("@", 1)[1]
+                    ),
+                    "ready": True,
+                    "restartCount": 0,
+                    "started": True,
+                    "state": {"running": {"startedAt": "2026-08-25T00:00:00Z"}},
+                }
+            ],
+        },
+    }
+
+
 def _movement_fixture():
     key_oci = transaction.RECOVERED_NARANJO_OCI
     key_release = transaction.RECOVERED_NARANJO_RELEASE
@@ -336,6 +506,10 @@ def _movement_fixture():
     controllers = {"source-controller": {"podRestarts": 0}}
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
+    replica_set = _raw_replica_set(deployment)
+    pod = _raw_pod(deployment)
+    current_workload = current_workloads[key_release]
+    _sync_workload_with_deployment(current_workload, deployment)
     plan = {
         "baselines": {
             "flux": planned_flux,
@@ -352,6 +526,15 @@ def _movement_fixture():
                 row.pop("resourceVersion", None)
         return normalized
 
+    def collection(_client, url):
+        if url.endswith("/deployments"):
+            return [copy.deepcopy(deployment)]
+        if url.endswith("/replicasets"):
+            return [copy.deepcopy(replica_set)]
+        if url.endswith("/pods"):
+            return [copy.deepcopy(pod)]
+        raise AssertionError(f"unexpected collection: {url}")
+
     old = SimpleNamespace(
         SITE_INVENTORY_KINDS={
             "Deployment": None,
@@ -366,8 +549,20 @@ def _movement_fixture():
         flux_baseline_without_resource_versions=without_resource_versions,
         controller_snapshot=lambda _client: copy.deepcopy(controllers),
         public_health=lambda: copy.deepcopy(public_sites),
-        collection_items=lambda _client, _url: [copy.deepcopy(deployment)],
+        collection_items=collection,
         typed_site_inventory_item=lambda value, _kind: value,
+        UID_RE=transaction.UID_RE,
+        DNS_RE=transaction.DNS_RE,
+        SERVER_METADATA=transaction.SERVER_METADATA,
+        live_identity=transaction.live_identity,
+        object_is_terminating=transaction.object_is_terminating,
+        semantic_hash=transaction.semantic_hash,
+        semantic_without_proof_annotation=(
+            transaction.semantic_without_proof_annotation
+        ),
+        validate_controller_image_id=transaction.validate_controller_image_id,
+        canonical_json=transaction.canonical_json,
+        sha256_bytes=transaction.sha256_bytes,
     )
     return (
         old,
@@ -376,7 +571,11 @@ def _movement_fixture():
         current_workloads,
         controllers,
         public_sites,
-        deployment,
+        {
+            "deployment": deployment,
+            "replicaSet": replica_set,
+            "pod": pod,
+        },
     )
 
 
@@ -454,6 +653,69 @@ class ExactReleaseMovementTests(unittest.TestCase):
             movement["verificationRows"]["workload"],
             current_workloads[transaction.RECOVERED_NARANJO_RELEASE],
         )
+        self.assertEqual(
+            set(movement["podProof"]), {"deploymentSha256", "pods"}
+        )
+        self.assertEqual(len(movement["podProof"]["pods"]), 1)
+        self.assertEqual(
+            set(movement["podProof"]["pods"][0]),
+            {
+                "podUidSha256",
+                "imageIDSha256",
+                "podSpecSha256",
+                "podMetadataSha256",
+                "replicaSetMetadataSha256",
+                "replicaSetTemplateSha256",
+                "ownerChainSha256",
+            },
+        )
+
+    def test_known_api_defaults_and_runtime_display_variants_are_accepted(self):
+        old, plan, _flux, workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        defaulted_keys = (
+            "serviceAccount",
+            "priority",
+            "hostUsers",
+            "shareProcessNamespace",
+        )
+        for name in ("deployment", "replicaSet", "pod"):
+            if name == "deployment":
+                spec = objects[name]["spec"]["template"]["spec"]
+            elif name == "replicaSet":
+                spec = objects[name]["spec"]["template"]["spec"]
+            else:
+                spec = objects[name]["spec"]
+            for key in defaulted_keys:
+                spec.pop(key, None)
+            container = spec["containers"][0]
+            container.pop("terminationMessagePolicy", None)
+            for probe_name in (
+                "startupProbe",
+                "readinessProbe",
+                "livenessProbe",
+            ):
+                container[probe_name].pop("successThreshold", None)
+                container[probe_name]["httpGet"].pop("host", None)
+                container[probe_name]["httpGet"].pop("httpHeaders", None)
+        display_image = (
+            "ghcr.io/snaraj/naranjo-online@"
+            + transaction.RECOVERED_TO_IMAGE.rsplit("@", 1)[1]
+        )
+        objects["pod"]["status"]["containerStatuses"][0][
+            "image"
+        ] = display_image
+        workloads[transaction.RECOVERED_NARANJO_RELEASE]["pods"][0][
+            "images"
+        ] = [display_image]
+        _sync_workload_with_deployment(
+            workloads[transaction.RECOVERED_NARANJO_RELEASE],
+            objects["deployment"],
+        )
+
+        movement = transaction.accepted_naranjo_movement(old, object(), plan)
+        self.assertEqual(len(movement["podProof"]["pods"]), 1)
 
     def test_every_out_of_scope_drift_class_fails_closed(self):
         def oci_identity(_plan, flux, _workloads, _controllers, _sites):
@@ -507,43 +769,143 @@ class ExactReleaseMovementTests(unittest.TestCase):
         def public_drift(_plan, _flux, _workloads, _controllers, sites):
             sites["naranjo.online"]["status"] = 503
 
+        def oci_semantic_drift(_plan, flux, _workloads, _controllers, _sites):
+            flux["oci"][transaction.RECOVERED_NARANJO_OCI][
+                "semanticSha256"
+            ] = "f" * 64
+
+        def helm_semantic_drift(_plan, flux, _workloads, _controllers, _sites):
+            flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+                "semanticSha256"
+            ] = "f" * 64
+
         def foreign_image(
-            _plan, _flux, _workloads, _controllers, _sites, deployment
+            _plan, _flux, _workloads, _controllers, _sites, objects
         ):
+            deployment = objects["deployment"]
             deployment["spec"]["template"]["spec"]["containers"][0][
                 "image"
             ] = "ghcr.io/example/foreign@sha256:" + "f" * 64
 
         def template_drift(
-            _plan, _flux, _workloads, _controllers, _sites, deployment
+            _plan, _flux, _workloads, _controllers, _sites, objects
         ):
+            deployment = objects["deployment"]
             deployment["spec"]["template"]["metadata"]["labels"][
                 "app.kubernetes.io/version"
             ] = "0.1.44"
 
         def environment_drift(
-            _plan, _flux, _workloads, _controllers, _sites, deployment
+            _plan, _flux, _workloads, _controllers, _sites, objects
         ):
+            deployment = objects["deployment"]
             deployment["spec"]["template"]["spec"]["containers"][0]["env"][2][
                 "value"
             ] = "true"
 
         def security_drift(
-            _plan, _flux, _workloads, _controllers, _sites, deployment
+            _plan, _flux, _workloads, _controllers, _sites, objects
         ):
+            deployment = objects["deployment"]
             deployment["spec"]["template"]["spec"]["containers"][0][
                 "securityContext"
             ]["allowPrivilegeEscalation"] = True
 
         def shared_process_namespace(
-            _plan, _flux, _workloads, _controllers, _sites, deployment
+            _plan, _flux, _workloads, _controllers, _sites, objects
         ):
+            deployment = objects["deployment"]
             deployment["spec"]["template"]["spec"][
                 "shareProcessNamespace"
             ] = True
 
+        def extra_deployment_annotation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["deployment"]["metadata"]["annotations"][
+                "example.invalid/foreign"
+            ] = "accepted-before-fix"
+
+        def foreign_pod_image_id(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["status"]["containerStatuses"][0][
+                "imageID"
+            ] = "containerd://ghcr.io/example/foreign@sha256:" + "e" * 64
+
+        def unsafe_live_pod_spec(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["spec"]["hostNetwork"] = True
+            objects["pod"]["spec"]["hostPID"] = True
+            objects["pod"]["spec"]["containers"][0]["securityContext"][
+                "privileged"
+            ] = True
+
+        def foreign_owner_chain(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["ownerReferences"][0]["uid"] = (
+                FOREIGN_UID
+            )
+
+        def foreign_replica_template(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["spec"]["template"]["spec"][
+                "hostNetwork"
+            ] = True
+
+        def extra_owner_reference(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["ownerReferences"].append(
+                _owner_reference(
+                    "ReplicaSet",
+                    "foreign-owner",
+                    FOREIGN_UID,
+                )
+            )
+
+        def substituted_direct_deployment_identity(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            substituted_uid = SUBSTITUTED_UID
+            objects["deployment"]["metadata"]["uid"] = substituted_uid
+            objects["replicaSet"]["metadata"]["ownerReferences"][0][
+                "uid"
+            ] = substituted_uid
+
+        def substituted_direct_replicas(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["deployment"]["spec"]["replicas"] = 2
+
+        def pod_finalizer(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["finalizers"] = [
+                "example.invalid/hold"
+            ]
+
+        def replica_set_finalizer(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["metadata"]["finalizers"] = [
+                "example.invalid/hold"
+            ]
+
+        def pod_behavior_annotation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["annotations"] = {
+                "container.apparmor.security.beta.kubernetes.io/naranjo-online": (
+                    "unconfined"
+                )
+            }
+
         def adapt(mutate):
-            return lambda plan, flux, workloads, controllers, sites, _deployment: mutate(
+            return lambda plan, flux, workloads, controllers, sites, _objects: mutate(
                 plan, flux, workloads, controllers, sites
             )
 
@@ -561,20 +923,299 @@ class ExactReleaseMovementTests(unittest.TestCase):
             "unrelated workload": adapt(unrelated_workload),
             "controller drift": adapt(controller_drift),
             "public-site drift": adapt(public_drift),
+            "OCI semantic drift": adapt(oci_semantic_drift),
+            "Helm semantic drift": adapt(helm_semantic_drift),
             "foreign workload image": foreign_image,
             "raw template drift": template_drift,
             "environment activation": environment_drift,
             "security-context weakening": security_drift,
             "shared process namespace": shared_process_namespace,
+            "extra Deployment annotation": extra_deployment_annotation,
+            "foreign live Pod imageID": foreign_pod_image_id,
+            "unsafe live Pod spec": unsafe_live_pod_spec,
+            "foreign Pod owner chain": foreign_owner_chain,
+            "foreign ReplicaSet template": foreign_replica_template,
+            "extra Pod owner reference": extra_owner_reference,
+            "substituted direct Deployment identity": (
+                substituted_direct_deployment_identity
+            ),
+            "substituted direct replicas": substituted_direct_replicas,
+            "Pod finalizer": pod_finalizer,
+            "ReplicaSet finalizer": replica_set_finalizer,
+            "Pod behavior annotation": pod_behavior_annotation,
         }
         for label, mutate in cases.items():
             with self.subTest(label=label):
-                old, plan, flux, workloads, controllers, sites, deployment = (
+                old, plan, flux, workloads, controllers, sites, objects = (
                     _movement_fixture()
                 )
-                mutate(plan, flux, workloads, controllers, sites, deployment)
+                mutate(plan, flux, workloads, controllers, sites, objects)
                 with self.assertRaises(transaction.RecoveryRequired):
                     transaction.accepted_naranjo_movement(old, object(), plan)
+
+
+class RecoveryCustodyBindingTests(unittest.TestCase):
+    @staticmethod
+    def old_fixture():
+        receipt = {
+            "schema": transaction.CUSTODY_SCHEMA,
+            "sourceRevision": transaction.RECOVERED_SOURCE_REVISION,
+            "manifestSha256": transaction.RECOVERED_MANIFEST_SHA256,
+            "launcherSha256": transaction.RECOVERED_LAUNCHER_SHA256,
+            "pythonPath": str(transaction.PYTHON_PATH),
+            "pythonSha256": transaction.RECOVERED_PYTHON_SHA256,
+            "custodySha256": transaction.RECOVERED_CUSTODY_SHA256,
+        }
+        old = SimpleNamespace(
+            STATE_ROOT=transaction.RECOVERED_STATE_ROOT,
+            AUTHORIZED_RELEASE_TAG=transaction.RECOVERED_RELEASE_TAG,
+            INSTALLED_LAUNCHER=transaction.INSTALLED_LAUNCHER,
+            CUSTODY_SCHEMA=transaction.CUSTODY_SCHEMA,
+            PYTHON_PATH=transaction.PYTHON_PATH,
+            SOURCE_MANIFEST_REL=transaction.SOURCE_MANIFEST_REL,
+            DESIRED_REL=transaction.DESIRED_REL,
+            ORACLE_REL=transaction.ORACLE_REL,
+            KUBECONFIG_VALIDATOR_REL=transaction.KUBECONFIG_VALIDATOR_REL,
+            PLATFORM_CONTRACT_REL=transaction.PLATFORM_CONTRACT_REL,
+            VERSIONS_REL=transaction.VERSIONS_REL,
+            RELEASE_FRAGMENT_REL="changelog.d/141-flux-rbac-v030-cleanup-state.md",
+            load_custody_receipt=mock.Mock(return_value=receipt),
+        )
+        entries = {
+            old.DESIRED_REL: "1" * 64,
+            old.ORACLE_REL: "2" * 64,
+            old.KUBECONFIG_VALIDATOR_REL: "3" * 64,
+            old.PLATFORM_CONTRACT_REL: "4" * 64,
+            old.VERSIONS_REL: "5" * 64,
+            old.RELEASE_FRAGMENT_REL: "6" * 64,
+            "bootstrap/flux/rbac-convergence/transaction.py": (
+                transaction.RECOVERED_LAUNCHER_SHA256
+            ),
+        }
+        old.validate_custody = mock.Mock(return_value=entries)
+        return old, receipt, entries
+
+    @contextlib.contextmanager
+    def patched_old_load(self, old):
+        with mock.patch.object(
+            transaction, "read_regular", return_value=b"reviewed-v030-transaction"
+        ), mock.patch.object(
+            transaction,
+            "sha256_bytes",
+            return_value=transaction.RECOVERED_LAUNCHER_SHA256,
+        ), mock.patch.object(
+            transaction, "load_module_payload", return_value=old
+        ) as load_payload, mock.patch.object(
+            transaction,
+            "load_module",
+            side_effect=AssertionError("hashed path must not be reopened"),
+        ):
+            yield load_payload
+
+    def test_exact_old_custody_and_closed_entries_are_required(self):
+        old, receipt, _entries = self.old_fixture()
+        with self.patched_old_load(old) as load_payload:
+            loaded, loaded_receipt = transaction.load_recovered_transaction()
+        self.assertIs(loaded, old)
+        self.assertEqual(loaded_receipt, receipt)
+        old.validate_custody.assert_called_once_with(receipt)
+        self.assertEqual(
+            load_payload.call_args.args[0], b"reviewed-v030-transaction"
+        )
+
+    def test_every_old_custody_field_substitution_fails_closed(self):
+        mutations = {
+            "schema": "foreign-schema",
+            "sourceRevision": "a" * 40,
+            "manifestSha256": "b" * 64,
+            "launcherSha256": "c" * 64,
+            "pythonPath": "/foreign/python",
+            "pythonSha256": "d" * 64,
+            "custodySha256": "e" * 64,
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                old, receipt, _entries = self.old_fixture()
+                old.load_custody_receipt.return_value = {
+                    **receipt,
+                    field: value,
+                }
+                with self.patched_old_load(old), self.assertRaisesRegex(
+                    transaction.TransactionError,
+                    "RECOVERY_OLD_CUSTODY_RECEIPT_INVALID",
+                ):
+                    transaction.load_recovered_transaction()
+
+    def test_every_old_custody_entry_substitution_fails_closed(self):
+        old, _receipt, entries = self.old_fixture()
+        cases = {}
+        for relative in entries:
+            candidate = dict(entries)
+            candidate.pop(relative)
+            cases[f"missing {relative}"] = candidate
+        extra = dict(entries)
+        extra[transaction.SOURCE_MANIFEST_REL] = "7" * 64
+        cases["foreign source manifest entry"] = extra
+        wrong_launcher = dict(entries)
+        wrong_launcher["bootstrap/flux/rbac-convergence/transaction.py"] = "8" * 64
+        cases["wrong transaction entry"] = wrong_launcher
+        for label, candidate in cases.items():
+            with self.subTest(label=label):
+                old.validate_custody.return_value = candidate
+                with self.patched_old_load(old), self.assertRaisesRegex(
+                    transaction.TransactionError,
+                    "RECOVERY_OLD_CUSTODY_ENTRY_INVALID",
+                ):
+                    transaction.load_recovered_transaction()
+
+    def test_new_custody_and_release_arguments_are_revalidated(self):
+        custody = {
+            "schema": transaction.CUSTODY_SCHEMA,
+            "sourceRevision": "6" * 40,
+            "manifestSha256": "7" * 64,
+            "launcherSha256": "8" * 64,
+            "pythonPath": str(transaction.PYTHON_PATH),
+            "pythonSha256": "9" * 64,
+            "custodySha256": "a" * 64,
+        }
+        entries = {"reviewed": "entry"}
+        source = {"sourceTreeSha": "b" * 40}
+        with mock.patch.object(
+            transaction,
+            "validate_runtime_custody",
+            return_value=(copy.deepcopy(custody), copy.deepcopy(entries)),
+        ) as validate_runtime, mock.patch.object(
+            transaction, "load_module", return_value=object()
+        ), mock.patch.object(
+            transaction, "read_regular", return_value=b"reviewed fragment"
+        ), mock.patch.object(
+            transaction, "verify_release_identity", return_value=source
+        ) as verify_release, mock.patch.object(
+            transaction, "validate_custody", return_value=copy.deepcopy(entries)
+        ) as validate_custody, mock.patch.object(
+            transaction, "verify_custody_source_tree", return_value="c" * 64
+        ):
+            result = transaction.validate_recovery_release_identity(
+                custody, require_main_tip=True
+            )
+            self.assertEqual(result["sourceManifestSha256"], "7" * 64)
+            self.assertEqual(result["custodySha256"], "a" * 64)
+            verify_release.assert_called_once()
+            self.assertEqual(
+                verify_release.call_args.args[:2],
+                ("6" * 40, transaction.AUTHORIZED_RELEASE_TAG),
+            )
+            self.assertIs(verify_release.call_args.kwargs["require_main_tip"], True)
+            validate_runtime.assert_called_once_with()
+            validate_custody.assert_called_once_with(custody)
+
+            for field, replacement in (
+                ("schema", "foreign"),
+                ("sourceRevision", "d" * 40),
+                ("manifestSha256", "e" * 64),
+                ("launcherSha256", "f" * 64),
+                ("pythonPath", "/foreign/python"),
+                ("pythonSha256", "1" * 64),
+                ("custodySha256", "2" * 64),
+            ):
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    transaction.TransactionError,
+                    "RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED",
+                ):
+                    transaction.validate_recovery_release_identity(
+                        {**custody, field: replacement}, require_main_tip=True
+                    )
+
+
+class RecoveryReceiptBindingTests(unittest.TestCase):
+    @staticmethod
+    def render(movement):
+        captured = {}
+        custody = {
+            "sourceRevision": "1" * 40,
+            "manifestSha256": "2" * 64,
+            "custodySha256": "3" * 64,
+        }
+        source = {"tag": transaction.AUTHORIZED_RELEASE_TAG, "tree": "4" * 40}
+        journal = SimpleNamespace(
+            document={
+                "state": "rolled-back",
+                "receiptRecords": {
+                    "rolled-back": {"recordedAt": "2026-08-25T00:00:00Z"}
+                },
+                "terminalEvidenceSha256": "5" * 64,
+            }
+        )
+
+        def publish(path, payload):
+            captured[path] = payload
+
+        def read(path, **_kwargs):
+            return captured[path]
+
+        with mock.patch.object(
+            transaction, "publish_once", side_effect=publish
+        ), mock.patch.object(transaction, "read_regular", side_effect=read):
+            transaction.publish_recovery_receipt(
+                custody, source, object(), journal, movement
+            )
+        return json.loads(captured[transaction.RECOVERY_RECEIPT_PATH])
+
+    def test_receipt_hashes_the_complete_movement_and_runtime_proof(self):
+        movement = _valid_movement()
+        receipt = self.render(movement)
+        self.assertEqual(
+            receipt["acceptedMovementSha256"],
+            transaction.sha256_bytes(transaction.canonical_json(movement)),
+        )
+        self.assertEqual(
+            receipt["acceptedPodProofSha256"],
+            transaction.sha256_bytes(
+                transaction.canonical_json(movement["podProof"])
+            ),
+        )
+
+        substituted = copy.deepcopy(movement)
+        substituted["podProof"]["pods"][0]["podSpecSha256"] = "8" * 64
+        substituted_receipt = self.render(substituted)
+        self.assertNotEqual(
+            receipt["acceptedMovementSha256"],
+            substituted_receipt["acceptedMovementSha256"],
+        )
+        self.assertNotEqual(
+            receipt["acceptedPodProofSha256"],
+            substituted_receipt["acceptedPodProofSha256"],
+        )
+
+    def test_receipt_rejects_missing_runtime_proof(self):
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired, "RECOVERY_VERIFICATION_ROWS_INVALID"
+        ):
+            self.render({"verificationRows": {}})
+
+    def test_receipt_rejects_partial_or_unbound_runtime_proof(self):
+        cases = {}
+        extra = _valid_movement()
+        extra["unexpected"] = {}
+        cases["extra movement field"] = extra
+        empty_row = _valid_movement()
+        empty_row["verificationRows"]["oci"] = {}
+        cases["empty verification row"] = empty_row
+        partial = _valid_movement()
+        partial["podProof"]["pods"][0].pop("podMetadataSha256")
+        cases["partial Pod proof"] = partial
+        wrong_uid = _valid_movement()
+        wrong_uid["podProof"]["pods"][0]["podUidSha256"] = "f" * 64
+        cases["unbound Pod UID"] = wrong_uid
+        empty_pods = _valid_movement()
+        empty_pods["podProof"]["pods"] = []
+        cases["empty Pod proof"] = empty_pods
+        for label, movement in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_VERIFICATION_ROWS_INVALID",
+            ):
+                self.render(movement)
 
 
 class RecoveryWrapperTests(unittest.TestCase):
@@ -596,7 +1237,10 @@ class RecoveryWrapperTests(unittest.TestCase):
         rows = {
             "oci": {"new": "oci"},
             "helm": {"new": "helm"},
-            "workload": {"new": "workload"},
+            "workload": {
+                "new": "workload",
+                "pods": [{"uid": POD_UID}],
+            },
         }
         original = mock.Mock(return_value={"bindingGraph": {}})
         old = SimpleNamespace(
@@ -606,7 +1250,7 @@ class RecoveryWrapperTests(unittest.TestCase):
             verify_rolled_back_state=original,
             write_receipt=mock.Mock(),
         )
-        return old, plan, {"verificationRows": rows}, original
+        return old, plan, _valid_movement(rows), original
 
     def test_wrapper_substitutes_only_verification_rows_and_restores_function(self):
         old, plan, movement, original = self.fixture()
@@ -723,17 +1367,11 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(transaction, "validate_recovered_incident")
             )
-            stack.enter_context(
+            accepted = stack.enter_context(
                 mock.patch.object(
                     transaction,
                     "accepted_naranjo_movement",
-                    return_value={
-                        "verificationRows": {
-                            "oci": {},
-                            "helm": {},
-                            "workload": {},
-                        }
-                    },
+                    return_value=_valid_movement(),
                 )
             )
             stack.enter_context(
@@ -745,7 +1383,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 mock.patch.object(transaction, "publish_recovery_receipt")
             )
             close = stack.enter_context(mock.patch.object(transaction.os, "close"))
-            yield custody, close, publish
+            yield custody, close, publish, accepted
 
     def test_first_recovery_and_terminal_rerun_are_idempotent(self):
         old, journal, rollback = self.fixture("recovery-required")
@@ -753,7 +1391,12 @@ class RecoveryOrchestrationTests(unittest.TestCase):
         sentinel = SimpleNamespace(name="previous-validator")
         sys.modules["validate_kubeconfig_snapshot"] = sentinel
         try:
-            with self.patched_recovery(old, rollback) as (custody, close, publish):
+            with self.patched_recovery(old, rollback) as (
+                custody,
+                close,
+                publish,
+                accepted,
+            ):
                 transaction.recover_v030(custody)
                 self.assertIs(
                     sys.modules["validate_kubeconfig_snapshot"], sentinel
@@ -765,6 +1408,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 )
                 rollback.assert_called_once()
                 publish.assert_called_once()
+                self.assertEqual(accepted.call_count, 2)
 
                 old.write_receipt.reset_mock()
                 rollback.reset_mock()
@@ -779,6 +1423,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 )
                 rollback.assert_not_called()
                 publish.assert_called_once()
+                self.assertEqual(accepted.call_count, 4)
                 self.assertEqual(
                     sorted(call.args[0] for call in close.call_args_list),
                     [101, 101, 202, 202],
@@ -795,7 +1440,12 @@ class RecoveryOrchestrationTests(unittest.TestCase):
         sentinel = SimpleNamespace(name="previous-validator")
         sys.modules["validate_kubeconfig_snapshot"] = sentinel
         try:
-            with self.patched_recovery(old, rollback) as (custody, close, publish):
+            with self.patched_recovery(old, rollback) as (
+                custody,
+                close,
+                publish,
+                _accepted,
+            ):
                 publish.side_effect = transaction.TransactionError(
                     "injected receipt collision"
                 )
@@ -819,6 +1469,29 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 sys.modules.pop("validate_kubeconfig_snapshot", None)
             else:
                 sys.modules["validate_kubeconfig_snapshot"] = previous
+
+    def test_runtime_proof_change_during_rollback_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("recovery-required")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["podProof"]["pods"][0]["podSpecSha256"] = "c" * 64
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+        ):
+            accepted.side_effect = [initial, changed]
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
+            ):
+                transaction.recover_v030(custody)
+        publish.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in old.write_receipt.call_args_list],
+            ["recovery-required"],
+        )
 
 
 class RecoveryDispatchTests(unittest.TestCase):
