@@ -909,6 +909,66 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 )
             }
 
+        def owned_deployment_projection(
+            _plan, _flux, workloads, _controllers, _sites, _objects
+        ):
+            owned = workloads[transaction.RECOVERED_NARANJO_RELEASE][
+                "ownedObjects"
+            ][-1]
+            owned["semanticSha256"] = "f" * 64
+            owned["semanticWithoutProofSha256"] = "f" * 64
+
+        def pod_owner_field(field, value):
+            def mutate(
+                _plan, _flux, _workloads, _controllers, _sites, objects
+            ):
+                objects["pod"]["metadata"]["ownerReferences"][0][field] = value
+
+            return mutate
+
+        def replica_owner_field(field, value):
+            def mutate(
+                _plan, _flux, _workloads, _controllers, _sites, objects
+            ):
+                objects["replicaSet"]["metadata"]["ownerReferences"][0][
+                    field
+                ] = value
+
+            return mutate
+
+        def extra_replica_annotation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["metadata"]["annotations"][
+                "example.invalid/foreign"
+            ] = "true"
+
+        def extra_pod_label(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["labels"][
+                "example.invalid/foreign"
+            ] = "true"
+
+        def extra_replica_label(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["metadata"]["labels"][
+                "example.invalid/foreign"
+            ] = "true"
+
+        def changed_live_toleration(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["spec"]["tolerations"][0][
+                "tolerationSeconds"
+            ] = 301
+
+        def invalid_live_node_name(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["spec"]["nodeName"] = "INVALID_NODE"
+
         def adapt(mutate):
             return lambda plan, flux, workloads, controllers, sites, _objects: mutate(
                 plan, flux, workloads, controllers, sites
@@ -949,6 +1009,23 @@ class ExactReleaseMovementTests(unittest.TestCase):
             "Pod finalizer": pod_finalizer,
             "ReplicaSet finalizer": replica_set_finalizer,
             "Pod behavior annotation": pod_behavior_annotation,
+            "owned Deployment semantic projection": owned_deployment_projection,
+            "Pod owner controller": pod_owner_field("controller", False),
+            "Pod owner API version": pod_owner_field("apiVersion", "v1"),
+            "Pod owner kind": pod_owner_field("kind", "Deployment"),
+            "Pod owner block deletion": pod_owner_field(
+                "blockOwnerDeletion", False
+            ),
+            "Pod owner extra field": pod_owner_field("foreign", "value"),
+            "ReplicaSet owner name": replica_owner_field(
+                "name", "foreign-deployment"
+            ),
+            "ReplicaSet owner UID": replica_owner_field("uid", FOREIGN_UID),
+            "ReplicaSet extra annotation": extra_replica_annotation,
+            "Pod extra metadata label": extra_pod_label,
+            "ReplicaSet extra metadata label": extra_replica_label,
+            "changed live toleration": changed_live_toleration,
+            "invalid live node name": invalid_live_node_name,
         }
         for label, mutate in cases.items():
             with self.subTest(label=label):
@@ -1132,6 +1209,45 @@ class RecoveryCustodyBindingTests(unittest.TestCase):
                         {**custody, field: replacement}, require_main_tip=True
                     )
 
+    def test_revalidated_runtime_entry_map_must_match(self):
+        custody = {
+            "schema": transaction.CUSTODY_SCHEMA,
+            "sourceRevision": "6" * 40,
+            "manifestSha256": "7" * 64,
+            "launcherSha256": "8" * 64,
+            "pythonPath": str(transaction.PYTHON_PATH),
+            "pythonSha256": "9" * 64,
+            "custodySha256": "a" * 64,
+        }
+        runtime_entries = {"reviewed": "entry"}
+        with mock.patch.object(
+            transaction,
+            "validate_runtime_custody",
+            return_value=(custody, runtime_entries),
+        ), mock.patch.object(
+            transaction, "load_module", return_value=object()
+        ), mock.patch.object(
+            transaction, "read_regular", return_value=b"reviewed fragment"
+        ), mock.patch.object(
+            transaction,
+            "verify_release_identity",
+            return_value={"sourceTreeSha": "b" * 40},
+        ), mock.patch.object(
+            transaction,
+            "validate_custody",
+            return_value={"substituted": "entry"},
+        ), mock.patch.object(
+            transaction, "verify_custody_source_tree"
+        ) as verify_tree:
+            with self.assertRaisesRegex(
+                transaction.TransactionError,
+                "RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED",
+            ):
+                transaction.validate_recovery_release_identity(
+                    custody, require_main_tip=True
+                )
+        verify_tree.assert_not_called()
+
 
 class RecoveryReceiptBindingTests(unittest.TestCase):
     @staticmethod
@@ -1216,6 +1332,22 @@ class RecoveryReceiptBindingTests(unittest.TestCase):
         empty_pods = _valid_movement()
         empty_pods["podProof"]["pods"] = []
         cases["empty Pod proof"] = empty_pods
+        extra_row = _valid_movement()
+        extra_row["verificationRows"]["foreign"] = {"value": "unexpected"}
+        cases["extra verification row"] = extra_row
+        extra_proof = _valid_movement()
+        extra_proof["podProof"]["foreign"] = "unexpected"
+        cases["extra Pod proof field"] = extra_proof
+        malformed_deployment = _valid_movement()
+        malformed_deployment["podProof"]["deploymentSha256"] = "invalid"
+        cases["malformed Deployment proof hash"] = malformed_deployment
+        malformed_image = _valid_movement()
+        malformed_image["podProof"]["pods"][0]["imageIDSha256"] = "invalid"
+        cases["malformed imageID proof hash"] = malformed_image
+        both_empty = _valid_movement()
+        both_empty["verificationRows"]["workload"]["pods"] = []
+        both_empty["podProof"]["pods"] = []
+        cases["empty workload and proof Pod inventories"] = both_empty
         for label, movement in cases.items():
             with self.subTest(label=label), self.assertRaisesRegex(
                 transaction.RecoveryRequired,
