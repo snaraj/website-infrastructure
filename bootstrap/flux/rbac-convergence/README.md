@@ -206,12 +206,13 @@ mode below; ambiguity remains a stop.
 
 The sole exception is `--recover-v030`, which exists only for the authenticated
 v0.1.30 plan stopped at journal sequence 47 after Naranjo moved from chart
-0.1.42 to 0.1.43. It accepts no other plan, incident, release movement, site,
-controller change, or unrelated drift. It reuses the v0.1.30 journal's existing
-crash-safe rollback and terminal receipt machinery, restores the original
-verifier even on failure, and stops after publishing both the old rolled-back
-receipt and a root-only v0.1.31 receipt binding the recovery release, terminal
-journal, exact chart/image movement, and custody hashes.
+0.1.42 through exactly three sequential protected releases ending at 0.1.45.
+It accepts no other plan, incident, release movement, site, controller change,
+or unrelated drift. It reuses the v0.1.30 journal's existing crash-safe
+rollback and terminal receipt machinery, restores the original verifier even
+on failure, and stops after publishing both the old rolled-back receipt and a
+root-only v0.1.31 receipt binding the recovery release, terminal journal, exact
+chart/image movement, and custody hashes.
 Run it once through the same isolated root process boundary with only `LC_ALL=C`
 and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.31-peeled-commit>`.
 Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.31

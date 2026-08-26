@@ -122,13 +122,15 @@ RECOVERED_CUSTODY_SHA256 = (
 RECOVERED_INITIAL_SEQUENCE = 47
 RECOVERED_INITIAL_OPERATION_COUNT = 18
 RECOVERED_FROM_VERSION = "0.1.42"
-RECOVERED_TO_VERSION = "0.1.43"
+RECOVERED_TO_VERSION = "0.1.45"
+RECOVERED_RELEASE_STEP_COUNT = 3
+RECOVERED_TO_DEPLOYMENT_REVISION = "20"
 RECOVERED_TO_CHART_DIGEST = (
-    "sha256:0dc36329a9cc040a687984c5f3111b538c9f140ca5f4183078063e1516c22661"
+    "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb882a756c"
 )
 RECOVERED_TO_IMAGE = (
-    "ghcr.io/snaraj/naranjo-online:v0.1.43@"
-    "sha256:f9a1536eb04f12b248328d6fe906327c4a381d775da3fdff487d0b895789b420"
+    "ghcr.io/snaraj/naranjo-online:v0.1.45@"
+    "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16"
 )
 RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
 RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
@@ -8288,6 +8290,7 @@ def validate_recovered_naranjo_deployment(
         or not revision_annotation.isascii()
         or not revision_annotation.isdecimal()
         or int(revision_annotation) <= 0
+        or revision_annotation != RECOVERED_TO_DEPLOYMENT_REVISION
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID")
     direct_projection = {
@@ -8306,6 +8309,9 @@ def validate_recovered_naranjo_deployment(
         workload.get(key) != value for key, value in direct_projection.items()
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_DEPLOYMENT_SNAPSHOT_INVALID")
+    expected_replicas = direct_projection["replicas"]
+    if type(expected_replicas) is not int or expected_replicas not in {1, 2}:
+        raise RecoveryRequired("RECOVERY_NARANJO_REPLICA_COUNT_INVALID")
     workload_owned = workload.get("ownedObjects")
     owned_deployments = [
         row
@@ -8440,6 +8446,7 @@ def validate_recovered_naranjo_deployment(
         "templateLabels": copy.deepcopy(dict(template_metadata["labels"])),
         "templateSpec": copy.deepcopy(dict(pod_spec)),
         "projection": direct_projection,
+        "replicas": expected_replicas,
     }
 
 
@@ -8457,6 +8464,7 @@ def validate_recovered_naranjo_pods(
     deployment_uid = deployment.get("uid")
     deployment_revision = deployment.get("revision")
     deployment_projection = deployment.get("projection")
+    expected_replicas = deployment.get("replicas")
     workload_pods = workload.get("pods")
     if (
         not isinstance(selector, Mapping)
@@ -8467,8 +8475,11 @@ def validate_recovered_naranjo_pods(
         or not isinstance(deployment_revision, str)
         or not deployment_revision.isdecimal()
         or not isinstance(deployment_projection, Mapping)
+        or type(expected_replicas) is not int
+        or expected_replicas not in {1, 2}
         or not isinstance(workload_pods, list)
         or not workload_pods
+        or len(workload_pods) != expected_replicas
         or any(not isinstance(row, Mapping) for row in workload_pods)
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_POD_INPUT_INVALID")
@@ -8749,8 +8760,8 @@ def validate_recovered_naranjo_pods(
         expected_replica_labels = dict(template_labels)
         expected_replica_labels["pod-template-hash"] = pod_template_hash
         expected_replica_annotations = {
-            "deployment.kubernetes.io/desired-replicas": "1",
-            "deployment.kubernetes.io/max-replicas": "1",
+            "deployment.kubernetes.io/desired-replicas": str(expected_replicas),
+            "deployment.kubernetes.io/max-replicas": str(expected_replicas),
             "deployment.kubernetes.io/revision": deployment_revision,
         }
         allowed_replica_metadata = set(old.SERVER_METADATA) | {
@@ -8775,7 +8786,7 @@ def validate_recovered_naranjo_pods(
             or not set(replica_spec).issubset(
                 {"replicas", "minReadySeconds", "selector", "template"}
             )
-            or replica_spec.get("replicas") != 1
+            or replica_spec.get("replicas") != expected_replicas
             or replica_spec.get("minReadySeconds") not in (None, 0)
             or not isinstance(replica_selector, Mapping)
             or set(replica_selector) != {"matchLabels"}
@@ -8999,7 +9010,8 @@ def accepted_naranjo_movement(
     if (
         type(old_history_revision) is not int
         or type(new_history_revision) is not int
-        or new_history_revision != old_history_revision + 1
+        or new_history_revision
+        != old_history_revision + RECOVERED_RELEASE_STEP_COUNT
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_HELM_REVISION_INVALID")
 
@@ -9021,7 +9033,7 @@ def accepted_naranjo_movement(
     if (
         type(old_generation) is not int
         or type(new_generation) is not int
-        or new_generation != old_generation + 1
+        or new_generation != old_generation + RECOVERED_RELEASE_STEP_COUNT
         or new_workload.get("semanticSha256")
         != new_workload.get("semanticWithoutProofSha256")
     ):

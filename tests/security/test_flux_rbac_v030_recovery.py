@@ -49,6 +49,7 @@ POD_UID = _synthetic_uid("2")
 REPLICA_SET_UID = _synthetic_uid("3")
 FOREIGN_UID = _synthetic_uid("4")
 SUBSTITUTED_UID = _synthetic_uid("5")
+POD_UID_2 = _synthetic_uid("6")
 
 
 def _canonical(value):
@@ -216,7 +217,7 @@ def _workload(marker, generation):
     return {
         "uid": DEPLOYMENT_UID,
         "generation": generation,
-        "replicas": 1,
+        "replicas": 2,
         "templateSha256": marker * 64,
         "semanticSha256": marker * 64,
         "proofAnnotation": None,
@@ -230,7 +231,16 @@ def _workload(marker, generation):
                     if marker == "2"
                     else "old-reviewed-image"
                 ],
-            }
+            },
+            {
+                "uid": POD_UID_2,
+                "restartCounts": [0],
+                "images": [
+                    transaction.RECOVERED_TO_IMAGE
+                    if marker == "2"
+                    else "old-reviewed-image"
+                ],
+            },
         ],
         "ownedObjects": _owned_objects(marker),
     }
@@ -262,18 +272,18 @@ def _raw_deployment():
             "namespace": "naranjo-online",
             "uid": DEPLOYMENT_UID,
             "resourceVersion": "20",
-            "generation": 12,
+            "generation": 24,
             "labels": copy.deepcopy(labels),
             "annotations": {
                 "meta.helm.sh/release-name": "naranjo-online",
                 "meta.helm.sh/release-namespace": "naranjo-online",
                 "platform.snaraj.dev/deployment-ready": "true",
                 "platform.snaraj.dev/media-storage-ready": "false",
-                "deployment.kubernetes.io/revision": "9",
+                "deployment.kubernetes.io/revision": "20",
             },
         },
         "spec": {
-            "replicas": 1,
+            "replicas": 2,
             "revisionHistoryLimit": 3,
             "progressDeadlineSeconds": 600,
             "minReadySeconds": 0,
@@ -401,6 +411,7 @@ def _owner_reference(kind, name, uid):
 def _raw_replica_set(deployment):
     labels = copy.deepcopy(deployment["spec"]["template"]["metadata"]["labels"])
     labels["pod-template-hash"] = "reviewedhash"
+    replicas = deployment["spec"]["replicas"]
     return {
         "apiVersion": "apps/v1",
         "kind": "ReplicaSet",
@@ -411,16 +422,18 @@ def _raw_replica_set(deployment):
             "resourceVersion": "21",
             "labels": labels,
             "annotations": {
-                "deployment.kubernetes.io/desired-replicas": "1",
-                "deployment.kubernetes.io/max-replicas": "1",
-                "deployment.kubernetes.io/revision": "9",
+                "deployment.kubernetes.io/desired-replicas": str(replicas),
+                "deployment.kubernetes.io/max-replicas": str(replicas),
+                "deployment.kubernetes.io/revision": deployment["metadata"][
+                    "annotations"
+                ]["deployment.kubernetes.io/revision"],
             },
             "ownerReferences": [
                 _owner_reference("Deployment", "naranjo-online", DEPLOYMENT_UID)
             ],
         },
         "spec": {
-            "replicas": 1,
+            "replicas": replicas,
             "minReadySeconds": 0,
             "selector": {"matchLabels": copy.deepcopy(labels)},
             "template": {
@@ -434,7 +447,7 @@ def _raw_replica_set(deployment):
     }
 
 
-def _raw_pod(deployment):
+def _raw_pod(deployment, uid=POD_UID, suffix="abcde"):
     labels = copy.deepcopy(deployment["spec"]["template"]["metadata"]["labels"])
     labels["pod-template-hash"] = "reviewedhash"
     spec = copy.deepcopy(deployment["spec"]["template"]["spec"])
@@ -457,9 +470,9 @@ def _raw_pod(deployment):
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
-            "name": "naranjo-online-reviewedhash-abcde",
+            "name": f"naranjo-online-reviewedhash-{suffix}",
             "namespace": "naranjo-online",
-            "uid": POD_UID,
+            "uid": uid,
             "resourceVersion": "22",
             "labels": labels,
             "ownerReferences": [
@@ -495,19 +508,22 @@ def _movement_fixture():
     key_release = transaction.RECOVERED_NARANJO_RELEASE
     planned_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_FROM_VERSION, "1")},
-        "helm": {key_release: _helm(transaction.RECOVERED_FROM_VERSION, "1", 8)},
+        "helm": {key_release: _helm(transaction.RECOVERED_FROM_VERSION, "1", 19)},
     }
     current_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_TO_VERSION, "2")},
-        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 9)},
+        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 22)},
     }
-    planned_workloads = {key_release: _workload("1", 11)}
-    current_workloads = {key_release: _workload("2", 12)}
+    planned_workloads = {key_release: _workload("1", 21)}
+    current_workloads = {key_release: _workload("2", 24)}
     controllers = {"source-controller": {"podRestarts": 0}}
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
     replica_set = _raw_replica_set(deployment)
-    pod = _raw_pod(deployment)
+    pods = [
+        _raw_pod(deployment),
+        _raw_pod(deployment, POD_UID_2, "fghij"),
+    ]
     current_workload = current_workloads[key_release]
     _sync_workload_with_deployment(current_workload, deployment)
     plan = {
@@ -532,7 +548,7 @@ def _movement_fixture():
         if url.endswith("/replicasets"):
             return [copy.deepcopy(replica_set)]
         if url.endswith("/pods"):
-            return [copy.deepcopy(pod)]
+            return copy.deepcopy(pods)
         raise AssertionError(f"unexpected collection: {url}")
 
     old = SimpleNamespace(
@@ -574,7 +590,8 @@ def _movement_fixture():
         {
             "deployment": deployment,
             "replicaSet": replica_set,
-            "pod": pod,
+            "pod": pods[0],
+            "pods": pods,
         },
     )
 
@@ -640,7 +657,22 @@ class ExactIncidentFingerprintTests(unittest.TestCase):
 
 
 class ExactReleaseMovementTests(unittest.TestCase):
-    def test_exact_naranjo_release_movement_is_accepted(self):
+    def test_recovered_release_tuple_is_literal_and_exact(self):
+        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.45")
+        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 3)
+        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "20")
+        self.assertEqual(
+            transaction.RECOVERED_TO_CHART_DIGEST,
+            "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb"
+            "882a756c",
+        )
+        self.assertEqual(
+            transaction.RECOVERED_TO_IMAGE,
+            "ghcr.io/snaraj/naranjo-online:v0.1.45@"
+            "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16",
+        )
+
+    def test_exact_three_release_two_replica_movement_is_accepted(self):
         old, plan, current_flux, current_workloads, _controllers, _sites, _raw = (
             _movement_fixture()
         )
@@ -656,7 +688,16 @@ class ExactReleaseMovementTests(unittest.TestCase):
         self.assertEqual(
             set(movement["podProof"]), {"deploymentSha256", "pods"}
         )
-        self.assertEqual(len(movement["podProof"]["pods"]), 1)
+        self.assertEqual(
+            movement["verificationRows"]["helm"]["historyRevision"], 22
+        )
+        self.assertEqual(
+            movement["verificationRows"]["workload"]["generation"], 24
+        )
+        self.assertEqual(
+            movement["verificationRows"]["workload"]["replicas"], 2
+        )
+        self.assertEqual(len(movement["podProof"]["pods"]), 2)
         self.assertEqual(
             set(movement["podProof"]["pods"][0]),
             {
@@ -715,7 +756,108 @@ class ExactReleaseMovementTests(unittest.TestCase):
         )
 
         movement = transaction.accepted_naranjo_movement(old, object(), plan)
-        self.assertEqual(len(movement["podProof"]["pods"]), 1)
+        self.assertEqual(len(movement["podProof"]["pods"]), 2)
+
+    def test_one_skipped_and_extra_release_steps_fail_closed(self):
+        for field in ("Helm history", "workload generation"):
+            for label, delta in {
+                "one-step": 1,
+                "skipped-step": 2,
+                "extra-step": 4,
+            }.items():
+                with self.subTest(field=field, label=label):
+                    old, plan, flux, workloads, _controllers, _sites, objects = (
+                        _movement_fixture()
+                    )
+                    if field == "Helm history":
+                        planned_helm = plan["baselines"]["flux"]["helm"][
+                            transaction.RECOVERED_NARANJO_RELEASE
+                        ]
+                        flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+                            "historyRevision"
+                        ] = planned_helm["historyRevision"] + delta
+                    else:
+                        planned_workload = plan["baselines"]["workloads"][
+                            transaction.RECOVERED_NARANJO_RELEASE
+                        ]
+                        objects["deployment"]["metadata"]["generation"] = (
+                            planned_workload["generation"] + delta
+                        )
+                        _sync_workload_with_deployment(
+                            workloads[transaction.RECOVERED_NARANJO_RELEASE],
+                            objects["deployment"],
+                        )
+                    with self.assertRaises(transaction.RecoveryRequired):
+                        transaction.accepted_naranjo_movement(
+                            old, object(), plan
+                        )
+
+    def test_replica_set_count_mismatches_fail_closed(self):
+        for label, mutate in {
+            "desired annotation": lambda replica_set: replica_set["metadata"][
+                "annotations"
+            ].__setitem__("deployment.kubernetes.io/desired-replicas", "1"),
+            "max annotation": lambda replica_set: replica_set["metadata"][
+                "annotations"
+            ].__setitem__("deployment.kubernetes.io/max-replicas", "1"),
+            "spec replicas": lambda replica_set: replica_set["spec"].__setitem__(
+                "replicas", 1
+            ),
+        }.items():
+            with self.subTest(label=label):
+                old, plan, _flux, _workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                mutate(objects["replicaSet"])
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_OWNER_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(
+                        old, object(), plan
+                    )
+
+    def test_coherent_deployment_revision_substitution_fails_closed(self):
+        old, plan, _flux, workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        objects["deployment"]["metadata"]["annotations"][
+            "deployment.kubernetes.io/revision"
+        ] = "21"
+        objects["replicaSet"]["metadata"]["annotations"][
+            "deployment.kubernetes.io/revision"
+        ] = "21"
+        _sync_workload_with_deployment(
+            workloads[transaction.RECOVERED_NARANJO_RELEASE],
+            objects["deployment"],
+        )
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired,
+            "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
+        ):
+            transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_matching_live_and_snapshot_pod_count_drift_fails_closed(self):
+        for label in ("missing-one", "extra-one"):
+            with self.subTest(label=label):
+                old, plan, _flux, workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                live_pods = objects["pods"]
+                if label == "missing-one":
+                    live_pods.pop()
+                else:
+                    extra_uid = _synthetic_uid("7")
+                    live_pods.append(
+                        _raw_pod(objects["deployment"], extra_uid, "klmno")
+                    )
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_POD_INVENTORY_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(
+                        old, object(), plan
+                    )
 
     def test_every_out_of_scope_drift_class_fails_closed(self):
         def oci_identity(_plan, flux, _workloads, _controllers, _sites):
@@ -879,7 +1021,7 @@ class ExactReleaseMovementTests(unittest.TestCase):
         def substituted_direct_replicas(
             _plan, _flux, _workloads, _controllers, _sites, objects
         ):
-            objects["deployment"]["spec"]["replicas"] = 2
+            objects["deployment"]["spec"]["replicas"] = 1
 
         def substituted_direct_generation(
             _plan, _flux, _workloads, _controllers, _sites, objects
