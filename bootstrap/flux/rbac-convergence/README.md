@@ -216,7 +216,9 @@ chart/image movement, and custody hashes.
 Run it once through the same isolated root process boundary with only `LC_ALL=C`
 and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.32-peeled-commit>`.
 Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.32
-plan; the recovery mode never plans or applies forward state.
+plan. The `--plan` mode revalidates the exact root-only recovery receipt and
+its matching terminal v0.1.30 journal evidence before opening the fresh plan;
+the recovery mode never plans or applies forward state.
 
 The transaction deliberately cannot establish trust in the first copy of
 itself. Before `--stage`, the owner must:

@@ -1547,6 +1547,272 @@ class RecoveryReceiptBindingTests(unittest.TestCase):
                 self.render(movement)
 
 
+class RecoveryPlanGateTests(unittest.TestCase):
+    @staticmethod
+    def terminal_fixture():
+        old, plan, journal_document = _incident_fixture()
+        order = plan["operationOrder"]
+        for operation_id in order[18:]:
+            journal_document["operations"][operation_id] = {
+                "state": "not-started",
+                "rollbackState": "prestate-verified",
+            }
+        journal_document.update(
+            {
+                "state": "rolled-back",
+                "phase": "rolled-back",
+                "sequence": transaction.RECOVERED_INITIAL_SEQUENCE + 10,
+                "recoveryRequired": False,
+            }
+        )
+        public_oracle = {
+            "label": "rollback-terminal",
+            "matrixPhase": "rollback",
+            "receiptCount": transaction.ORACLE_PHASE_COUNTS["rollback"],
+            "receiptsSha256": "6" * 64,
+            "file": "oracle.rollback-terminal.reviewed.json",
+            "fileSha256": "7" * 64,
+        }
+        journal_document["oracleEvidenceRecords"] = {
+            "rollback-terminal": copy.deepcopy(public_oracle)
+        }
+        evidence = {
+            "bindingGraph": {
+                "rows": [],
+                "sha256": transaction.sha256_bytes(
+                    transaction.canonical_json([])
+                ),
+            },
+            "authorizationEvidence": copy.deepcopy(public_oracle),
+            "terminalTargetInventory": [
+                {"id": operation_id, "present": False}
+                for operation_id in order
+            ],
+        }
+        journal_document["terminalEvidence"] = evidence
+        journal_document["terminalEvidenceSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(evidence)
+        )
+        journal_document["receiptRecords"] = {
+            "rolled-back": {
+                "result": "rolled-back",
+                "evidenceSha256": journal_document[
+                    "terminalEvidenceSha256"
+                ],
+                "recordedAt": "2026-08-26T00:00:00Z",
+                "journalSequence": journal_document["sequence"],
+                "journalState": "rolled-back",
+            }
+        }
+        journal = SimpleNamespace(document=journal_document)
+        old.validate_terminal_evidence_document = (
+            transaction.validate_terminal_evidence_document
+        )
+        old.read_plan = mock.Mock(
+            return_value=(plan, transaction.RECOVERED_PLAN_SHA256)
+        )
+        old.acquire_lock = mock.Mock(return_value=37)
+        old.Journal = type("OldJournal", (), {})
+        old.JOURNAL_PATH = Path("/reviewed-v030/journal.json")
+        old.parse_journal_payload = mock.Mock(
+            return_value=journal.document
+        )
+        old.RECEIPT_ROOT = Path("/reviewed-v030/receipts")
+        old.terminal_receipt_payload = transaction.terminal_receipt_payload
+        old.read_regular = mock.Mock()
+        return old, plan, journal
+
+    @staticmethod
+    def receipt_fixture():
+        old, plan, journal = RecoveryPlanGateTests.terminal_fixture()
+        custody = {
+            "sourceRevision": "1" * 40,
+            "manifestSha256": "2" * 64,
+            "custodySha256": "3" * 64,
+        }
+        source = {"tag": transaction.AUTHORIZED_RELEASE_TAG, "tree": "4" * 40}
+        terminal_document, terminal_payload = old.terminal_receipt_payload(
+            journal, "rolled-back"
+        )
+        old.read_regular.side_effect = lambda path, **_kwargs: (
+            b"reviewed terminal journal"
+            if path == old.JOURNAL_PATH
+            else terminal_payload
+        )
+        receipt = {
+            "schema": transaction.RECOVERY_RECEIPT_SCHEMA,
+            "result": "rolled-back",
+            "recoveryRelease": transaction.AUTHORIZED_RELEASE_TAG,
+            "recoverySourceRevision": custody["sourceRevision"],
+            "recoveryManifestSha256": custody["manifestSha256"],
+            "recoveryCustodySha256": custody["custodySha256"],
+            "recoveryReleaseIdentitySha256": transaction.sha256_bytes(
+                transaction.canonical_json(source)
+            ),
+            "recoveredRelease": transaction.RECOVERED_RELEASE_TAG,
+            "recoveredSourceRevision": transaction.RECOVERED_SOURCE_REVISION,
+            "recoveredPlanSha256": transaction.RECOVERED_PLAN_SHA256,
+            "terminalJournalSha256": transaction.sha256_bytes(
+                transaction.canonical_json(journal.document)
+            ),
+            "terminalEvidenceSha256": journal.document[
+                "terminalEvidenceSha256"
+            ],
+            "acceptedMovementSha256": "8" * 64,
+            "acceptedPodProofSha256": "9" * 64,
+            "acceptedChartDigest": transaction.RECOVERED_TO_CHART_DIGEST,
+            "acceptedImage": transaction.RECOVERED_TO_IMAGE,
+            "recordedAt": terminal_document["recordedAt"],
+        }
+        return old, plan, journal, custody, source, receipt
+
+    def validate(self, old, custody, source, receipt):
+        with mock.patch.object(
+            transaction,
+            "validate_recovery_release_identity",
+            return_value=source,
+        ) as release, mock.patch.object(
+            transaction,
+            "load_recovered_transaction",
+            return_value=(old, {"old": "custody"}),
+        ) as recovered, mock.patch.object(
+            transaction,
+            "read_regular",
+            return_value=transaction.canonical_json(receipt),
+        ) as read, mock.patch.object(transaction.os, "close") as close:
+            transaction.validate_recovery_receipt_for_plan(custody)
+        return release, recovered, read, close
+
+    def test_exact_receipt_and_terminal_old_state_authorize_planning(self):
+        old, _plan, _journal, custody, source, receipt = self.receipt_fixture()
+        release, recovered, read, close = self.validate(
+            old, custody, source, receipt
+        )
+        release.assert_called_once_with(custody, require_main_tip=True)
+        self.assertEqual(recovered.call_count, 2)
+        read.assert_called_once_with(
+            transaction.RECOVERY_RECEIPT_PATH, owner=0, mode=0o600
+        )
+        old.acquire_lock.assert_called_once_with()
+        old.parse_journal_payload.assert_called_once_with(
+            b"reviewed terminal journal"
+        )
+        old.read_regular.assert_has_calls(
+            [
+                mock.call(
+                    old.JOURNAL_PATH,
+                    owner=0,
+                    mode=0o600,
+                    durable=True,
+                ),
+                mock.call(
+                    old.RECEIPT_ROOT
+                    / f"rolled-back.{transaction.RECOVERED_PLAN_SHA256}.json",
+                    owner=0,
+                    mode=0o600,
+                ),
+            ]
+        )
+        close.assert_called_once_with(37)
+
+    def test_absent_partial_and_substituted_recovery_receipts_fail_closed(self):
+        old, _plan, _journal, custody, source, receipt = self.receipt_fixture()
+        cases = {}
+        partial = copy.deepcopy(receipt)
+        partial.pop("terminalEvidenceSha256")
+        cases["partial receipt"] = partial
+        substituted_custody = copy.deepcopy(receipt)
+        substituted_custody["recoveryCustodySha256"] = "a" * 64
+        cases["substituted recovery custody"] = substituted_custody
+        substituted_incident = copy.deepcopy(receipt)
+        substituted_incident["recoveredPlanSha256"] = "b" * 64
+        cases["substituted recovered plan"] = substituted_incident
+        substituted_journal = copy.deepcopy(receipt)
+        substituted_journal["terminalJournalSha256"] = "c" * 64
+        cases["substituted journal binding"] = substituted_journal
+        for label, candidate in cases.items():
+            with self.subTest(label=label), self.assertRaises(
+                transaction.RecoveryRequired
+            ):
+                self.validate(old, custody, source, candidate)
+
+        with mock.patch.object(
+            transaction,
+            "validate_recovery_release_identity",
+            return_value=source,
+        ), mock.patch.object(
+            transaction,
+            "read_regular",
+            side_effect=transaction.TransactionError("FILE_OPEN_FAILED"),
+        ), self.assertRaises(transaction.RecoveryRequired):
+            transaction.validate_recovery_receipt_for_plan(custody)
+
+    def test_nonterminal_and_substituted_old_journals_fail_closed(self):
+        old, plan, journal, custody, source, receipt = self.receipt_fixture()
+        order = plan["operationOrder"]
+        journal.document.update(
+            {
+                "state": "recovery-required",
+                "phase": "namespaced",
+                "recoveryRequired": True,
+                "operations": {
+                    operation_id: journal.document["operations"][operation_id]
+                    for operation_id in order[:18]
+                },
+            }
+        )
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+        old, _plan, journal, custody, source, receipt = self.receipt_fixture()
+        journal.document["sequence"] += 1
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+    def test_copied_receipt_cannot_substitute_old_terminal_evidence(self):
+        old, _plan, journal, custody, source, receipt = self.receipt_fixture()
+        journal.document["terminalEvidence"]["authorizationEvidence"][
+            "matrixPhase"
+        ] = "final"
+        journal.document["terminalEvidenceSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(journal.document["terminalEvidence"])
+        )
+        receipt["terminalEvidenceSha256"] = journal.document[
+            "terminalEvidenceSha256"
+        ]
+        receipt["terminalJournalSha256"] = transaction.sha256_bytes(
+            transaction.canonical_json(journal.document)
+        )
+        with self.assertRaises(transaction.RecoveryRequired):
+            self.validate(old, custody, source, receipt)
+
+    def test_plan_gate_runs_before_target_or_client_loading(self):
+        custody = {"sourceRevision": "1" * 40}
+        with mock.patch.object(
+            transaction,
+            "validate_runtime_custody",
+            return_value=(custody, {}),
+        ), mock.patch.object(
+            transaction, "ensure_state_root"
+        ), mock.patch.object(
+            transaction, "ensure_root_directory"
+        ), mock.patch.object(
+            transaction, "acquire_lock", return_value=19
+        ), mock.patch.object(
+            transaction,
+            "validate_recovery_receipt_for_plan",
+            side_effect=transaction.RecoveryRequired("injected"),
+        ) as gate, mock.patch.object(
+            transaction, "load_target"
+        ) as load_target, mock.patch.object(
+            transaction.os, "close"
+        ) as close, self.assertRaises(transaction.RecoveryRequired):
+            transaction.run_mode("--plan")
+        gate.assert_called_once_with(custody)
+        load_target.assert_not_called()
+        close.assert_called_once_with(19)
+
+
 class RecoveryWrapperTests(unittest.TestCase):
     @staticmethod
     def fixture():
