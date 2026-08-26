@@ -22,6 +22,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -66,14 +67,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.32"
+AUTHORIZED_RELEASE_TAG = "v0.1.33"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.32"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.33"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -97,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v032-recovery-forward.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v033-static-shape.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -3527,6 +3528,7 @@ def build_plan(client: KubeClient, target: Target, custody: Mapping[str, object]
         target.release_tag,
         contract,
         read_regular(custody_path(RELEASE_FRAGMENT_REL), owner=0, mode=0o600),
+        require_main_tip=False,
     )
     entries = validate_custody(custody)
     source["sourceBundleSha256"] = verify_custody_source_tree(
@@ -7613,7 +7615,14 @@ def validate_plan_bindings(
 def apply(plan: dict[str, object], plan_sha256: str, client: KubeClient, target: Target, custody: Mapping[str, object]) -> None:
     if JOURNAL_PATH.exists() or JOURNAL_PATH.is_symlink():
         raise TransactionError("JOURNAL_ALREADY_EXISTS")
-    oracle = validate_plan_bindings(plan, plan_sha256, client, target, custody)
+    oracle = validate_plan_bindings(
+        plan,
+        plan_sha256,
+        client,
+        target,
+        custody,
+        require_main_tip=False,
+    )
     targets = plan.get("targets")
     if not isinstance(targets, list):
         raise TransactionError("PLAN_TARGETS_INVALID")
@@ -8078,7 +8087,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v032",
+        "platform_release_contract_recovery_v033",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -8908,6 +8917,270 @@ def validate_recovered_naranjo_pods(
     }
 
 
+def validate_recovered_naranjo_static_objects(
+    old: ModuleType,
+    client: object,
+    planned: Mapping[str, Mapping[str, object]],
+    current: Mapping[str, Mapping[str, object]],
+) -> None:
+    """Accept only release-label churn on three closed Helm-owned objects."""
+
+    labels = {
+        "app.kubernetes.io/name": "naranjo-online",
+        "app.kubernetes.io/instance": "naranjo-online",
+        "app.kubernetes.io/managed-by": "Helm",
+        "app.kubernetes.io/version": RECOVERED_TO_VERSION,
+        "helm.toolkit.fluxcd.io/name": "naranjo-online",
+        "helm.toolkit.fluxcd.io/namespace": "naranjo-online",
+    }
+    annotations = {
+        "meta.helm.sh/release-name": "naranjo-online",
+        "meta.helm.sh/release-namespace": "naranjo-online",
+    }
+    identities = {
+        "Service": (
+            "naranjo-online",
+            "/api/v1/namespaces/naranjo-online/services",
+        ),
+        "ServiceAccount": (
+            "naranjo-online",
+            "/api/v1/namespaces/naranjo-online/serviceaccounts",
+        ),
+        "NetworkPolicy": (
+            "ingress-to-naranjo-online",
+            "/apis/networking.k8s.io/v1/namespaces/naranjo-online/networkpolicies",
+        ),
+    }
+    row_fields = {
+        "kind",
+        "name",
+        "apiVersion",
+        "uid",
+        "semanticSha256",
+        "proofAnnotation",
+        "semanticWithoutProofSha256",
+    }
+    live: dict[str, Mapping[str, object]] = {}
+    for kind, (name, path) in identities.items():
+        before = planned[kind]
+        after = current[kind]
+        if (
+            set(before) != row_fields
+            or set(after) != row_fields
+            or any(
+                before.get(field) != after.get(field)
+                for field in row_fields
+                - {"semanticSha256", "semanticWithoutProofSha256"}
+            )
+            or after.get("kind") != kind
+            or after.get("name") != name
+            or after.get("proofAnnotation") is not None
+            or SHA256_RE.fullmatch(str(after.get("semanticSha256"))) is None
+            or SHA256_RE.fullmatch(
+                str(after.get("semanticWithoutProofSha256"))
+            )
+            is None
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_DRIFT")
+        matches = []
+        for candidate in old.collection_items(client, path):
+            typed = old.typed_site_inventory_item(candidate, kind)
+            metadata = typed.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("name") == name:
+                matches.append(typed)
+        if len(matches) != 1:
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_STATIC_OBJECT_IDENTITY_INVALID"
+            )
+        value = matches[0]
+        uid, _resource_version = old.live_identity(value)
+        if uid != before.get("uid") or uid != after.get("uid"):
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_STATIC_OBJECT_IDENTITY_INVALID"
+            )
+        metadata = value.get("metadata")
+        allowed_metadata = set(old.SERVER_METADATA) | {
+            "name",
+            "namespace",
+            "labels",
+            "annotations",
+        }
+        if (
+            not isinstance(metadata, Mapping)
+            or metadata.get("name") != name
+            or metadata.get("namespace") != "naranjo-online"
+            or metadata.get("labels") != labels
+            or metadata.get("annotations") != annotations
+            or metadata.get("deletionTimestamp") is not None
+            or not set(metadata).issubset(allowed_metadata)
+        ):
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID"
+            )
+        live[kind] = value
+
+    service = live["Service"]
+    service_spec = service.get("spec")
+    service_status = service.get("status")
+    if (
+        not isinstance(service_spec, Mapping)
+        or not {"apiVersion", "kind", "metadata", "spec"}.issubset(service)
+        or not set(service).issubset(
+            {"apiVersion", "kind", "metadata", "spec", "status"}
+        )
+        or (service_status is not None and service_status != {"loadBalancer": {}})
+        or set(service_spec)
+        != {
+            "clusterIP",
+            "clusterIPs",
+            "internalTrafficPolicy",
+            "ipFamilies",
+            "ipFamilyPolicy",
+            "ports",
+            "selector",
+            "sessionAffinity",
+            "type",
+        }
+        or service_spec.get("type") != "ClusterIP"
+        or service_spec.get("selector")
+        != {
+            "app.kubernetes.io/name": "naranjo-online",
+            "app.kubernetes.io/instance": "naranjo-online",
+        }
+        or service_spec.get("ports")
+        != [
+            {
+                "name": "http",
+                "port": 8080,
+                "protocol": "TCP",
+                "targetPort": "http",
+            }
+        ]
+        or service_spec.get("internalTrafficPolicy") != "Cluster"
+        or service_spec.get("ipFamilyPolicy") != "SingleStack"
+        or service_spec.get("sessionAffinity") != "None"
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID")
+    cluster_ip = service_spec.get("clusterIP")
+    cluster_ips = service_spec.get("clusterIPs")
+    ip_families = service_spec.get("ipFamilies")
+    try:
+        address = ipaddress.ip_address(cluster_ip)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise RecoveryRequired(
+            "RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID"
+        ) from exc
+    expected_family = "IPv4" if address.version == 4 else "IPv6"
+    if (
+        str(address) != cluster_ip
+        or cluster_ips != [cluster_ip]
+        or ip_families != [expected_family]
+        or address.is_unspecified
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID")
+
+    service_account = live["ServiceAccount"]
+    if (
+        not {
+            "apiVersion",
+            "kind",
+            "metadata",
+            "automountServiceAccountToken",
+        }.issubset(service_account)
+        or not set(service_account).issubset(
+            {
+                "apiVersion",
+                "kind",
+                "metadata",
+                "automountServiceAccountToken",
+                "secrets",
+                "imagePullSecrets",
+            }
+        )
+        or service_account.get("automountServiceAccountToken") is not False
+        or service_account.get("secrets", []) != []
+        or service_account.get("imagePullSecrets", []) != []
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID")
+
+    network_policy = live["NetworkPolicy"]
+    network_spec = network_policy.get("spec")
+    if (
+        set(network_policy) != {"apiVersion", "kind", "metadata", "spec"}
+        or not isinstance(network_spec, Mapping)
+        or set(network_spec) != {"podSelector", "policyTypes", "ingress"}
+        or network_spec.get("podSelector")
+        != {
+            "matchLabels": {
+                "app.kubernetes.io/name": "naranjo-online",
+                "app.kubernetes.io/instance": "naranjo-online",
+            }
+        }
+        or network_spec.get("policyTypes") != ["Ingress", "Egress"]
+        or network_spec.get("ingress")
+        != [
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {
+                                "kubernetes.io/metadata.name": "cloudflare-public"
+                            }
+                        },
+                        "podSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "cloudflare-public",
+                                "app.kubernetes.io/instance": (
+                                    "naranjo-online-tunnel"
+                                ),
+                            }
+                        },
+                    }
+                ],
+                "ports": [{"port": 8080, "protocol": "TCP"}],
+            }
+        ]
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_SHAPE_INVALID")
+
+    for kind, value in live.items():
+        proof_annotation, without_proof = old.semantic_without_proof_annotation(
+            value
+        )
+        projected = copy.deepcopy(dict(value))
+        projected_metadata = projected.get("metadata")
+        projected_labels = (
+            projected_metadata.get("labels")
+            if isinstance(projected_metadata, MutableMapping)
+            else None
+        )
+        if not isinstance(projected_labels, MutableMapping):
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_STATIC_OBJECT_SNAPSHOT_INVALID"
+            )
+        projected_labels["app.kubernetes.io/version"] = RECOVERED_FROM_VERSION
+        projected_proof, projected_without_proof = (
+            old.semantic_without_proof_annotation(projected)
+        )
+        before = planned[kind]
+        after = current[kind]
+        if (
+            proof_annotation is not None
+            or old.semantic_hash(value) != after.get("semanticSha256")
+            or without_proof != after.get("semanticWithoutProofSha256")
+            or projected_proof is not None
+            or old.semantic_hash(projected) != before.get("semanticSha256")
+            or projected_without_proof
+            != before.get("semanticWithoutProofSha256")
+        ):
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_STATIC_OBJECT_SNAPSHOT_INVALID"
+            )
+
+
 def accepted_naranjo_movement(
     old: ModuleType, client: object, plan: Mapping[str, object]
 ) -> dict[str, object]:
@@ -9055,9 +9328,9 @@ def accepted_naranjo_movement(
         or set(new_owned_by_kind) != set(old.SITE_INVENTORY_KINDS)
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_OWNERSHIP_INVALID")
-    for kind in ("Service", "ServiceAccount", "NetworkPolicy"):
-        if old_owned_by_kind[kind] != new_owned_by_kind[kind]:
-            raise RecoveryRequired("RECOVERY_NARANJO_STATIC_OBJECT_DRIFT")
+    validate_recovered_naranjo_static_objects(
+        old, client, old_owned_by_kind, new_owned_by_kind
+    )
     old_deployment = old_owned_by_kind["Deployment"]
     new_deployment = new_owned_by_kind["Deployment"]
     if not same_except(
@@ -9306,7 +9579,7 @@ def validate_recovery_receipt_for_plan(custody: Mapping[str, object]) -> None:
     old_lock = -1
     try:
         source = validate_recovery_release_identity(
-            custody, require_main_tip=True
+            custody, require_main_tip=False
         )
         payload = read_regular(
             RECOVERY_RECEIPT_PATH, owner=0, mode=0o600
@@ -9414,7 +9687,9 @@ def recover_v030(custody: Mapping[str, object]) -> None:
     old_lock = -1
     previous_validator = sys.modules.get("validate_kubeconfig_snapshot")
     try:
-        source = validate_recovery_release_identity(custody, require_main_tip=True)
+        source = validate_recovery_release_identity(
+            custody, require_main_tip=False
+        )
         old, old_custody = load_recovered_transaction()
         old_lock = old.acquire_lock()
         old, old_custody = load_recovered_transaction()
