@@ -66,14 +66,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.31"
+AUTHORIZED_RELEASE_TAG = "v0.1.32"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.31"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.32"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -97,7 +97,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v031-recovery-forward.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v032-recovery-forward.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -122,15 +122,15 @@ RECOVERED_CUSTODY_SHA256 = (
 RECOVERED_INITIAL_SEQUENCE = 47
 RECOVERED_INITIAL_OPERATION_COUNT = 18
 RECOVERED_FROM_VERSION = "0.1.42"
-RECOVERED_TO_VERSION = "0.1.45"
-RECOVERED_RELEASE_STEP_COUNT = 3
-RECOVERED_TO_DEPLOYMENT_REVISION = "20"
+RECOVERED_TO_VERSION = "0.1.46"
+RECOVERED_RELEASE_STEP_COUNT = 4
+RECOVERED_TO_DEPLOYMENT_REVISION = "21"
 RECOVERED_TO_CHART_DIGEST = (
-    "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb882a756c"
+    "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e7a67cf68"
 )
 RECOVERED_TO_IMAGE = (
-    "ghcr.io/snaraj/naranjo-online:v0.1.45@"
-    "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16"
+    "ghcr.io/snaraj/naranjo-online:v0.1.46@"
+    "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470"
 )
 RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
 RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
@@ -8078,7 +8078,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v031",
+        "platform_release_contract_recovery_v032",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),

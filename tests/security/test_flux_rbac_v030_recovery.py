@@ -272,14 +272,14 @@ def _raw_deployment():
             "namespace": "naranjo-online",
             "uid": DEPLOYMENT_UID,
             "resourceVersion": "20",
-            "generation": 24,
+            "generation": 25,
             "labels": copy.deepcopy(labels),
             "annotations": {
                 "meta.helm.sh/release-name": "naranjo-online",
                 "meta.helm.sh/release-namespace": "naranjo-online",
                 "platform.snaraj.dev/deployment-ready": "true",
                 "platform.snaraj.dev/media-storage-ready": "false",
-                "deployment.kubernetes.io/revision": "20",
+                "deployment.kubernetes.io/revision": "21",
             },
         },
         "spec": {
@@ -512,10 +512,10 @@ def _movement_fixture():
     }
     current_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_TO_VERSION, "2")},
-        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 22)},
+        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 23)},
     }
     planned_workloads = {key_release: _workload("1", 21)}
-    current_workloads = {key_release: _workload("2", 24)}
+    current_workloads = {key_release: _workload("2", 25)}
     controllers = {"source-controller": {"podRestarts": 0}}
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
@@ -658,21 +658,21 @@ class ExactIncidentFingerprintTests(unittest.TestCase):
 
 class ExactReleaseMovementTests(unittest.TestCase):
     def test_recovered_release_tuple_is_literal_and_exact(self):
-        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.45")
-        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 3)
-        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "20")
+        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.46")
+        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 4)
+        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "21")
         self.assertEqual(
             transaction.RECOVERED_TO_CHART_DIGEST,
-            "sha256:17ae3be07d77554c52d59978865e95b75acc5419aa6f5c8083db9fcb"
-            "882a756c",
+            "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e"
+            "7a67cf68",
         )
         self.assertEqual(
             transaction.RECOVERED_TO_IMAGE,
-            "ghcr.io/snaraj/naranjo-online:v0.1.45@"
-            "sha256:b7e1fd31b3b07f70b5dc8297e7720e92f811f1c9be57fc2bd1cd5743a08fce16",
+            "ghcr.io/snaraj/naranjo-online:v0.1.46@"
+            "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470",
         )
 
-    def test_exact_three_release_two_replica_movement_is_accepted(self):
+    def test_exact_four_release_two_replica_movement_is_accepted(self):
         old, plan, current_flux, current_workloads, _controllers, _sites, _raw = (
             _movement_fixture()
         )
@@ -689,10 +689,10 @@ class ExactReleaseMovementTests(unittest.TestCase):
             set(movement["podProof"]), {"deploymentSha256", "pods"}
         )
         self.assertEqual(
-            movement["verificationRows"]["helm"]["historyRevision"], 22
+            movement["verificationRows"]["helm"]["historyRevision"], 23
         )
         self.assertEqual(
-            movement["verificationRows"]["workload"]["generation"], 24
+            movement["verificationRows"]["workload"]["generation"], 25
         )
         self.assertEqual(
             movement["verificationRows"]["workload"]["replicas"], 2
@@ -758,12 +758,11 @@ class ExactReleaseMovementTests(unittest.TestCase):
         movement = transaction.accepted_naranjo_movement(old, object(), plan)
         self.assertEqual(len(movement["podProof"]["pods"]), 2)
 
-    def test_one_skipped_and_extra_release_steps_fail_closed(self):
+    def test_three_and_five_release_steps_fail_closed(self):
         for field in ("Helm history", "workload generation"):
             for label, delta in {
-                "one-step": 1,
-                "skipped-step": 2,
-                "extra-step": 4,
+                "one-short": 3,
+                "one-extra": 5,
             }.items():
                 with self.subTest(field=field, label=label):
                     old, plan, flux, workloads, _controllers, _sites, objects = (
@@ -818,23 +817,73 @@ class ExactReleaseMovementTests(unittest.TestCase):
                     )
 
     def test_coherent_deployment_revision_substitution_fails_closed(self):
-        old, plan, _flux, workloads, _controllers, _sites, objects = (
+        for substituted_revision in ("20", "22"):
+            with self.subTest(revision=substituted_revision):
+                old, plan, _flux, workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                objects["deployment"]["metadata"]["annotations"][
+                    "deployment.kubernetes.io/revision"
+                ] = substituted_revision
+                objects["replicaSet"]["metadata"]["annotations"][
+                    "deployment.kubernetes.io/revision"
+                ] = substituted_revision
+                _sync_workload_with_deployment(
+                    workloads[transaction.RECOVERED_NARANJO_RELEASE],
+                    objects["deployment"],
+                )
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_previous_endpoint_and_coherent_tuple_substitution_fail_closed(self):
+        old, plan, flux, _workloads, _controllers, _sites, objects = (
             _movement_fixture()
         )
-        objects["deployment"]["metadata"]["annotations"][
-            "deployment.kubernetes.io/revision"
-        ] = "21"
-        objects["replicaSet"]["metadata"]["annotations"][
-            "deployment.kubernetes.io/revision"
-        ] = "21"
+        flux["oci"][transaction.RECOVERED_NARANJO_OCI]["chartVersion"] = (
+            "0.1.45"
+        )
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired,
+            "RECOVERY_NARANJO_VERSION_INVALID",
+        ):
+            transaction.accepted_naranjo_movement(old, object(), plan)
+
+        old, plan, flux, workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        substituted_digest = "sha256:" + "f" * 64
+        substituted_image = (
+            "ghcr.io/snaraj/naranjo-online:v0.1.46@" + substituted_digest
+        )
+        flux["oci"][transaction.RECOVERED_NARANJO_OCI][
+            "upstreamDigest"
+        ] = substituted_digest
+        flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+            "attemptedRevisionDigest"
+        ] = substituted_digest
+        flux["helm"][transaction.RECOVERED_NARANJO_RELEASE][
+            "historyOciDigest"
+        ] = substituted_digest
+        objects["deployment"]["spec"]["template"]["spec"]["containers"][0][
+            "image"
+        ] = substituted_image
+        for pod in objects["pods"]:
+            pod["spec"]["containers"][0]["image"] = substituted_image
+            pod["status"]["containerStatuses"][0]["image"] = substituted_image
+            pod["status"]["containerStatuses"][0]["imageID"] = (
+                "containerd://ghcr.io/snaraj/naranjo-online@"
+                + substituted_digest
+            )
         _sync_workload_with_deployment(
             workloads[transaction.RECOVERED_NARANJO_RELEASE],
             objects["deployment"],
         )
-        with self.assertRaisesRegex(
-            transaction.RecoveryRequired,
-            "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
-        ):
+        for pod in workloads[transaction.RECOVERED_NARANJO_RELEASE]["pods"]:
+            pod["images"] = [substituted_image]
+        with self.assertRaises(transaction.RecoveryRequired):
             transaction.accepted_naranjo_movement(old, object(), plan)
 
     def test_matching_live_and_snapshot_pod_count_drift_fails_closed(self):
