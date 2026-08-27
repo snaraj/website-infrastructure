@@ -63,18 +63,18 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.30 and can therefore
+# selector.  Its protected-base candidate follows v0.1.36 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.36"
+AUTHORIZED_RELEASE_TAG = "v0.1.37"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.36"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v036-replicaset-semantics.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v037-service-proof.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -227,6 +227,17 @@ FORBIDDEN_HELM_SPEC_FIELDS = frozenset(
         "targetNamespace",
         "valuesFrom",
     }
+)
+HELM_PROOF_TARGET = {
+    "group": "",
+    "version": "v1",
+    "kind": "Service",
+    "namespace": "naranjo-online",
+    "name": "naranjo-online",
+}
+HELM_PROOF_JSON_POINTER = (
+    "/metadata/annotations/"
+    "platform.snaraj.dev~1flux-rbac-convergence-proof"
 )
 SITE_INVENTORY_KINDS = {
     "Deployment": ("apps", "v1"),
@@ -2106,6 +2117,7 @@ def validate_site_helm_release(
     name: str,
     version: str,
     upstream_digest: str,
+    expected_proof_annotation: str | None = None,
 ) -> dict[str, object]:
     """Validate one closed, credentialless same-site OCI Helm chain."""
 
@@ -2128,8 +2140,22 @@ def validate_site_helm_release(
     generation = metadata.get("generation")
     if not isinstance(generation, int) or generation <= 0:
         raise TransactionError("HELM_GENERATION_INVALID")
-    if any(field in spec for field in FORBIDDEN_HELM_SPEC_FIELDS):
+    if expected_proof_annotation is not None:
+        if (
+            namespace != "naranjo-online"
+            or name != "naranjo-online"
+            or SHA256_RE.fullmatch(expected_proof_annotation) is None
+        ):
+            raise TransactionError("HELM_PROOF_IDENTITY_INVALID")
+        forbidden_fields = FORBIDDEN_HELM_SPEC_FIELDS - {"postRenderers"}
+    else:
+        forbidden_fields = FORBIDDEN_HELM_SPEC_FIELDS
+    if any(field in spec for field in forbidden_fields):
         raise TransactionError("HELM_FORBIDDEN_SPEC_PATH")
+    if expected_proof_annotation is not None and spec.get(
+        "postRenderers"
+    ) != helm_proof_post_renderers(expected_proof_annotation):
+        raise TransactionError("HELM_PROOF_POST_RENDERERS_INVALID")
     upgrade = spec.get("upgrade")
     install = spec.get("install")
     if (
@@ -2274,7 +2300,9 @@ def validate_site_helm_release(
     }
 
 
-def flux_snapshot(client: KubeClient) -> dict[str, object]:
+def flux_snapshot(
+    client: KubeClient, expected_proof_annotation: str | None = None
+) -> dict[str, object]:
     collections = {
         kind: collection_items(client, path)
         for kind, path in FLUX_CRD_COLLECTIONS.items()
@@ -2369,7 +2397,16 @@ def flux_snapshot(client: KubeClient) -> dict[str, object]:
         }
         release = helm_by_id[(namespace, name)]
         result_helm[f"{namespace}/{name}"] = validate_site_helm_release(
-            release, namespace, name, source_chart_version, upstream_digest
+            release,
+            namespace,
+            name,
+            source_chart_version,
+            upstream_digest,
+            expected_proof_annotation=(
+                expected_proof_annotation
+                if (namespace, name) == ("naranjo-online", "naranjo-online")
+                else None
+            ),
         )
     return {
         "closedEmptyInventories": {
@@ -2703,7 +2740,9 @@ def validate_active_helm_proof_inventory(
     ):
         raise TransactionError("HELM_PROOF_BASELINE_INVALID")
     validate_clean_workload_baseline(planned_workloads)
-    current_flux = flux_snapshot(client)
+    current_flux = flux_snapshot(
+        client, expected_proof_annotation=plan_sha256
+    )
     current_workloads = workload_snapshot(client)
     validate_helm_workload_inventory(current_flux, current_workloads)
 
@@ -2760,17 +2799,11 @@ def validate_active_helm_proof_inventory(
         active_naranjo, Mapping
     ):
         raise TransactionError("HELM_PROOF_WORKLOAD_BASELINE_INVALID")
-    for key in ("uid", "generation", "replicas", "templateSha256", "pods"):
-        if active_naranjo.get(key) != planned_naranjo.get(key):
+    if set(active_naranjo) != set(planned_naranjo):
+        raise TransactionError("HELM_PROOF_WORKLOAD_IDENTITY_DRIFT")
+    for key, value in planned_naranjo.items():
+        if key != "ownedObjects" and active_naranjo.get(key) != value:
             raise TransactionError("HELM_PROOF_WORKLOAD_IDENTITY_DRIFT")
-    if (
-        active_naranjo.get("proofAnnotation") != plan_sha256
-        or active_naranjo.get("semanticWithoutProofSha256")
-        != planned_naranjo.get("semanticSha256")
-        or active_naranjo.get("semanticSha256")
-        == planned_naranjo.get("semanticSha256")
-    ):
-        raise TransactionError("HELM_PROOF_DEPLOYMENT_MUTATION_INVALID")
     planned_rows = planned_naranjo.get("ownedObjects")
     active_rows = active_naranjo.get("ownedObjects")
     if not isinstance(planned_rows, list) or not isinstance(active_rows, list):
@@ -2790,9 +2823,14 @@ def validate_active_helm_proof_inventory(
         or set(active_by_identity) != set(planned_by_identity)
     ):
         raise TransactionError("HELM_PROOF_OWNED_INVENTORY_INVALID")
+    service_identity = ("Service", "naranjo-online", "v1")
     for identity, planned_row in planned_by_identity.items():
         active_row = active_by_identity[identity]
-        if (
+        if identity != service_identity:
+            if active_row != planned_row:
+                raise TransactionError("HELM_PROOF_UNEXPECTED_OWNED_MUTATION")
+            continue
+        if set(active_row) != set(planned_row) or (
             active_row.get("uid") != planned_row.get("uid")
             or active_row.get("proofAnnotation") != plan_sha256
             or active_row.get("semanticWithoutProofSha256")
@@ -5189,6 +5227,39 @@ def planned_site_chart_identity(
     return version, upstream_digest, planned_release
 
 
+def helm_proof_post_renderers(plan_sha256: object) -> list[dict[str, object]]:
+    """Return the sole exact Service-only post-render proof."""
+
+    if (
+        not isinstance(plan_sha256, str)
+        or SHA256_RE.fullmatch(plan_sha256) is None
+    ):
+        raise TransactionError("HELM_PROOF_PLAN_SHA256_INVALID")
+    patch = json.dumps(
+        [
+            {
+                "op": "add",
+                "path": HELM_PROOF_JSON_POINTER,
+                "value": plan_sha256,
+            }
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return [
+        {
+            "kustomize": {
+                "patches": [
+                    {
+                        "patch": patch,
+                        "target": copy.deepcopy(HELM_PROOF_TARGET),
+                    }
+                ]
+            }
+        }
+    ]
+
+
 def build_helm_proof_spec(
     pre_spec: object, plan_sha256: object
 ) -> dict[str, object]:
@@ -5196,11 +5267,7 @@ def build_helm_proof_spec(
 
     if not isinstance(pre_spec, Mapping):
         raise TransactionError("HELM_PROOF_SPEC_INVALID")
-    if (
-        not isinstance(plan_sha256, str)
-        or SHA256_RE.fullmatch(plan_sha256) is None
-    ):
-        raise TransactionError("HELM_PROOF_PLAN_SHA256_INVALID")
+    post_renderers = helm_proof_post_renderers(plan_sha256)
     changed_spec = copy.deepcopy(dict(pre_spec))
     if "commonMetadata" in changed_spec:
         common = changed_spec["commonMetadata"]
@@ -5218,9 +5285,9 @@ def build_helm_proof_spec(
         changed_annotations = {}
     if PROOF_ANNOTATION in changed_annotations:
         raise TransactionError("HELM_PROOF_ANNOTATION_COLLISION")
-    changed_annotations[PROOF_ANNOTATION] = plan_sha256
-    changed_common["annotations"] = changed_annotations
-    changed_spec["commonMetadata"] = changed_common
+    if "postRenderers" in changed_spec:
+        raise TransactionError("HELM_PROOF_POST_RENDERERS_COLLISION")
+    changed_spec["postRenderers"] = post_renderers
     return changed_spec
 
 
@@ -5425,7 +5492,12 @@ def wait_helm(
         try:
             current = client.get(url)
             snapshot = validate_site_helm_release(
-                current, namespace, name, version, upstream_digest
+                current,
+                namespace,
+                name,
+                version,
+                upstream_digest,
+                expected_proof_annotation=expected_annotation,
             )
             spec = current.get("spec")
             if not isinstance(spec, Mapping):
@@ -5441,12 +5513,12 @@ def wait_helm(
                 or snapshot.get("historyAction") not in (None, "upgrade")
             ):
                 raise TransactionError("HELM_PROOF_NOT_CONVERGED")
-            annotations = spec.get("commonMetadata")
-            annotations = annotations.get("annotations") if isinstance(annotations, Mapping) else None
             if expected_annotation is not None:
-                if not isinstance(annotations, Mapping) or annotations.get(PROOF_ANNOTATION) != expected_annotation:
+                if spec.get("postRenderers") != helm_proof_post_renderers(
+                    expected_annotation
+                ):
                     raise TransactionError("HELM_PROOF_ANNOTATION_NOT_APPLIED")
-            elif isinstance(annotations, Mapping) and PROOF_ANNOTATION in annotations:
+            elif "postRenderers" in spec:
                 raise TransactionError("HELM_PROOF_ANNOTATION_NOT_RESTORED")
             return snapshot
         except TransactionError as exc:
@@ -8087,7 +8159,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v036",
+        "platform_release_contract_recovery_v037",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),

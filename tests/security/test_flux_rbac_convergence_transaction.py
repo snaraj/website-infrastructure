@@ -405,7 +405,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/recovery.py": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v036-replicaset-semantics.md": 0o600,
+            "changelog.d/141-flux-rbac-v037-service-proof.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -429,9 +429,9 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         ][0]
         transaction.validate_source_manifest_bundle(entries, launcher_digest)
 
-    def test_v036_uses_fresh_versioned_state_root(self):
+    def test_v037_uses_fresh_versioned_state_root(self):
         expected = Path(
-            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.36"
+            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37"
         )
         self.assertEqual(transaction.STATE_ROOT, expected)
         self.assertEqual(transaction.STATE_PARENT, expected.parent)
@@ -948,6 +948,21 @@ class HelmChainContractTests(unittest.TestCase):
 
     def test_helm_proof_spec_builder_is_exact_and_fail_closed(self):
         plan_sha256 = "a" * 64
+        self.assertEqual(
+            transaction.HELM_PROOF_TARGET,
+            {
+                "group": "",
+                "version": "v1",
+                "kind": "Service",
+                "namespace": "naranjo-online",
+                "name": "naranjo-online",
+            },
+        )
+        self.assertEqual(
+            transaction.HELM_PROOF_JSON_POINTER,
+            "/metadata/annotations/"
+            "platform.snaraj.dev~1flux-rbac-convergence-proof",
+        )
         pre_spec = copy.deepcopy(self.valid_release()["spec"])
         pre_spec["commonMetadata"] = {
             "annotations": {"example.test/existing": "kept"},
@@ -956,15 +971,10 @@ class HelmChainContractTests(unittest.TestCase):
         original = copy.deepcopy(pre_spec)
         changed = transaction.build_helm_proof_spec(pre_spec, plan_sha256)
         self.assertEqual(pre_spec, original)
+        self.assertEqual(changed["commonMetadata"], pre_spec["commonMetadata"])
         self.assertEqual(
-            changed["commonMetadata"],
-            {
-                "annotations": {
-                    "example.test/existing": "kept",
-                    transaction.PROOF_ANNOTATION: plan_sha256,
-                },
-                "labels": {"example.test/existing": "kept"},
-            },
+            changed["postRenderers"],
+            transaction.helm_proof_post_renderers(plan_sha256),
         )
 
         cases = {
@@ -989,6 +999,11 @@ class HelmChainContractTests(unittest.TestCase):
                 plan_sha256,
                 "HELM_PROOF_ANNOTATION_COLLISION",
             ),
+            "post-renderer collision": (
+                {**pre_spec, "postRenderers": []},
+                plan_sha256,
+                "HELM_PROOF_POST_RENDERERS_COLLISION",
+            ),
             "plan hash": (
                 pre_spec,
                 "A" * 64,
@@ -1000,6 +1015,70 @@ class HelmChainContractTests(unittest.TestCase):
                 transaction.TransactionError, code
             ):
                 transaction.build_helm_proof_spec(candidate, candidate_hash)
+
+    def test_temporary_helm_proof_allows_only_exact_service_post_renderer(self):
+        plan_sha256 = "a" * 64
+        release = self.valid_release()
+        release["spec"] = transaction.build_helm_proof_spec(
+            release["spec"], plan_sha256
+        )
+        snapshot = transaction.validate_site_helm_release(
+            release,
+            "naranjo-online",
+            "naranjo-online",
+            "0.1.30",
+            self.UPSTREAM,
+            expected_proof_annotation=plan_sha256,
+        )
+        self.assertEqual(snapshot["uid"], UID_THREE)
+        with self.assertRaisesRegex(
+            transaction.TransactionError, "HELM_FORBIDDEN_SPEC_PATH"
+        ):
+            self.validate(release)
+
+        for label, mutate in (
+            (
+                "wrong kind",
+                lambda value: value[0]["kustomize"]["patches"][0][
+                    "target"
+                ].update(kind="Deployment"),
+            ),
+            (
+                "wrong name",
+                lambda value: value[0]["kustomize"]["patches"][0][
+                    "target"
+                ].update(name="other"),
+            ),
+            (
+                "extra patch",
+                lambda value: value[0]["kustomize"]["patches"].append(
+                    copy.deepcopy(value[0]["kustomize"]["patches"][0])
+                ),
+            ),
+            (
+                "wrong value",
+                lambda value: value[0]["kustomize"]["patches"][0].update(
+                    patch=value[0]["kustomize"]["patches"][0]["patch"].replace(
+                        plan_sha256, "b" * 64
+                    )
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                candidate = copy.deepcopy(release)
+                mutate(candidate["spec"]["postRenderers"])
+                with self.assertRaisesRegex(
+                    transaction.TransactionError,
+                    "HELM_PROOF_POST_RENDERERS_INVALID",
+                ):
+                    transaction.validate_site_helm_release(
+                        candidate,
+                        "naranjo-online",
+                        "naranjo-online",
+                        "0.1.30",
+                        self.UPSTREAM,
+                        expected_proof_annotation=plan_sha256,
+                    )
 
     def test_forward_helm_proof_calls_shared_spec_builder_before_write(self):
         plan_sha256 = "a" * 64
@@ -1804,35 +1883,32 @@ class HelmProofInventoryTests(unittest.TestCase):
         }
         active = copy.deepcopy(workloads)
         naranjo = active["naranjo-online/naranjo-online"]
-        for row in naranjo["ownedObjects"]:
-            row["proofAnnotation"] = self.PLAN_SHA
-            row["semanticWithoutProofSha256"] = row["semanticSha256"]
-            row["semanticSha256"] = transaction.sha256_bytes(
-                (row["kind"] + ":active").encode()
-            )
-        deployment = next(
-            row for row in naranjo["ownedObjects"] if row["kind"] == "Deployment"
+        service = next(
+            row for row in naranjo["ownedObjects"] if row["kind"] == "Service"
         )
-        naranjo["proofAnnotation"] = self.PLAN_SHA
-        naranjo["semanticWithoutProofSha256"] = workloads[
-            "naranjo-online/naranjo-online"
-        ]["semanticSha256"]
-        naranjo["semanticSha256"] = deployment["semanticSha256"]
+        service["proofAnnotation"] = self.PLAN_SHA
+        service["semanticWithoutProofSha256"] = service["semanticSha256"]
+        service["semanticSha256"] = transaction.sha256_bytes(b"Service:active")
         plan = {"baselines": {"flux": flux, "workloads": workloads}}
         return plan, flux, workloads, active
 
     def validate_active(self, plan, flux, active):
         upgraded = flux["helm"]["naranjo-online/naranjo-online"]
+        client = object()
         with mock.patch.object(
             transaction, "flux_snapshot", return_value=copy.deepcopy(flux)
-        ), mock.patch.object(
+        ) as flux_snapshot, mock.patch.object(
             transaction, "workload_snapshot", return_value=copy.deepcopy(active)
         ):
-            return transaction.validate_active_helm_proof_inventory(
-                object(), plan, self.PLAN_SHA, upgraded
+            result = transaction.validate_active_helm_proof_inventory(
+                client, plan, self.PLAN_SHA, upgraded
             )
+        flux_snapshot.assert_called_once_with(
+            client, expected_proof_annotation=self.PLAN_SHA
+        )
+        return result
 
-    def test_active_inventory_binds_exact_four_annotation_only_mutations(self):
+    def test_active_inventory_binds_exact_service_only_annotation_mutation(self):
         plan, flux, _workloads, active = self.fixtures()
         evidence = self.validate_active(plan, flux, active)
         self.assertEqual(len(evidence["workloads"]), 2)
@@ -1849,9 +1925,39 @@ class HelmProofInventoryTests(unittest.TestCase):
         }.items():
             with self.subTest(label=label):
                 plan, flux, _workloads, active = self.fixtures()
-                mutate(active["naranjo-online/naranjo-online"]["ownedObjects"][0])
+                service = next(
+                    row
+                    for row in active["naranjo-online/naranjo-online"][
+                        "ownedObjects"
+                    ]
+                    if row["kind"] == "Service"
+                )
+                mutate(service)
                 with self.assertRaises(transaction.TransactionError):
                     self.validate_active(plan, flux, active)
+
+    def test_active_inventory_rejects_any_non_service_owned_mutation(self):
+        plan, flux, _workloads, active = self.fixtures()
+        deployment = next(
+            row
+            for row in active["naranjo-online/naranjo-online"]["ownedObjects"]
+            if row["kind"] == "Deployment"
+        )
+        deployment["semanticSha256"] = "7" * 64
+        with self.assertRaisesRegex(
+            transaction.TransactionError,
+            "HELM_PROOF_UNEXPECTED_OWNED_MUTATION",
+        ):
+            self.validate_active(plan, flux, active)
+
+    def test_active_inventory_rejects_extra_workload_evidence_field(self):
+        plan, flux, _workloads, active = self.fixtures()
+        active["naranjo-online/naranjo-online"]["unexpected"] = "field"
+        with self.assertRaisesRegex(
+            transaction.TransactionError,
+            "HELM_PROOF_WORKLOAD_IDENTITY_DRIFT",
+        ):
+            self.validate_active(plan, flux, active)
 
     def test_active_inventory_rejects_pod_or_unrelated_site_drift(self):
         for label in ("pod", "lidersea"):
@@ -2703,7 +2809,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.36")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.37")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
