@@ -998,6 +998,21 @@ class ExactReleaseMovementTests(unittest.TestCase):
                         old, object(), plan
                     )
 
+    def test_static_object_uid_replacement_after_snapshot_fails_closed(self):
+        for kind in ("Service", "ServiceAccount", "NetworkPolicy"):
+            with self.subTest(kind=kind):
+                old, plan, _flux, _workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                objects["static"][kind]["metadata"]["uid"] = FOREIGN_UID
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_STATIC_OBJECT_IDENTITY_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(
+                        old, object(), plan
+                    )
+
     def test_substituted_planned_static_hash_fails_closed(self):
         old, plan, _flux, _workloads, _controllers, _sites, _objects = (
             _movement_fixture()
