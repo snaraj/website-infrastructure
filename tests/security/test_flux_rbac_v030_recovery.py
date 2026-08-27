@@ -278,11 +278,16 @@ def _workload(marker, generation):
 
 
 def _raw_deployment():
-    labels = {
+    template_labels = {
         "app.kubernetes.io/name": "naranjo-online",
         "app.kubernetes.io/instance": "naranjo-online",
         "app.kubernetes.io/managed-by": "Helm",
         "app.kubernetes.io/version": transaction.RECOVERED_TO_VERSION,
+    }
+    metadata_labels = {
+        **template_labels,
+        "helm.toolkit.fluxcd.io/name": "naranjo-online",
+        "helm.toolkit.fluxcd.io/namespace": "naranjo-online",
     }
 
     def probe(path, period, timeout, failure):
@@ -304,7 +309,7 @@ def _raw_deployment():
             "uid": DEPLOYMENT_UID,
             "resourceVersion": "20",
             "generation": 25,
-            "labels": copy.deepcopy(labels),
+            "labels": copy.deepcopy(metadata_labels),
             "annotations": {
                 "meta.helm.sh/release-name": "naranjo-online",
                 "meta.helm.sh/release-namespace": "naranjo-online",
@@ -331,7 +336,7 @@ def _raw_deployment():
             },
             "template": {
                 "metadata": {
-                    "labels": copy.deepcopy(labels),
+                    "labels": copy.deepcopy(template_labels),
                     "creationTimestamp": None,
                 },
                 "spec": {
@@ -1149,6 +1154,31 @@ class ExactReleaseMovementTests(unittest.TestCase):
                     workloads[transaction.RECOVERED_NARANJO_RELEASE],
                     objects["deployment"],
                 )
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_deployment_flux_owner_labels_are_exact_and_closed(self):
+        def remove_name(labels):
+            labels.pop("helm.toolkit.fluxcd.io/name")
+
+        cases = {
+            "missing name": remove_name,
+            "wrong namespace": lambda labels: labels.__setitem__(
+                "helm.toolkit.fluxcd.io/namespace", "foreign"
+            ),
+            "extra label": lambda labels: labels.__setitem__(
+                "example.invalid/foreign", "true"
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                old, plan, _flux, _workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                mutate(objects["deployment"]["metadata"]["labels"])
                 with self.assertRaisesRegex(
                     transaction.RecoveryRequired,
                     "RECOVERY_NARANJO_DEPLOYMENT_METADATA_INVALID",
