@@ -723,6 +723,16 @@ immutable platform release remains valid after later protected-main merges only
 while its commit is still verified as an ancestor; tag, Release, CI, tree, and
 custody identity remain exact.
 
+The held v0.1.40 recovery then failed closed before any receipt or forward
+mutation because the existing SemVer selector legitimately advanced Lidersea
+once more to signed release 0.1.37. The v0.1.41 successor changes only that
+companion-release authorization and its own release/custody identity: it binds
+the exact 0.1.34-to-0.1.37 chart and image digests, three Helm-history and
+Deployment-generation steps, Deployment revision 15, two ready replicas, zero
+restarts, and the independently captured template and owned-object semantic
+hashes. It does not admit a range, floating tag, extra release, replica change,
+or unrelated drift; rolling the healthy site backward is not a recovery path.
+
 The reviewed release tree must stay unchanged until the held-descriptor stage
 prints `STAGED` and validates the root custody receipt. Only then may the source
 checkout change. After that boundary, checkout bytes are neither input nor

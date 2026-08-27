@@ -67,14 +67,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.40"
+AUTHORIZED_RELEASE_TAG = "v0.1.41"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.40"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.41"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v040-live-drift.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v041-lidersea-v137.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -138,31 +138,31 @@ RECOVERED_TO_IMAGE = (
 RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
 RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
 RECOVERED_LIDERSEA_FROM_VERSION = "0.1.34"
-RECOVERED_LIDERSEA_TO_VERSION = "0.1.36"
-RECOVERED_LIDERSEA_HISTORY_STEP_COUNT = 2
-RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT = 2
-RECOVERED_LIDERSEA_DEPLOYMENT_REVISION = "14"
+RECOVERED_LIDERSEA_TO_VERSION = "0.1.37"
+RECOVERED_LIDERSEA_HISTORY_STEP_COUNT = 3
+RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT = 3
+RECOVERED_LIDERSEA_DEPLOYMENT_REVISION = "15"
 RECOVERED_LIDERSEA_CHART_DIGEST = (
-    "sha256:2bd250a72e05c9ffe408c0b7ad6e5ed12c83085a9d874d239aea0e025988cc33"
+    "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc"
 )
 RECOVERED_LIDERSEA_IMAGE = (
-    "ghcr.io/snaraj/lidersea-com:v0.1.36@"
-    "sha256:9d3977dff5b5d5b18f4e56b60720ce48d39d59ef649776d073e73e43a895341a"
+    "ghcr.io/snaraj/lidersea-com:v0.1.37@"
+    "sha256:22673a01a892da2b644369ee3c2d0339c13ef8eddc1d3423411ce90bbe25d8b1"
 )
 RECOVERED_LIDERSEA_RUNTIME_IMAGE = (
-    "sha256:942a0b4091957e6246ca72ffedc162287cdf69cadaa4a2e2c7aa8fda5a0475a3"
+    "sha256:cc144382646dc18d0ac1fe21c25e7fa7dbaad713f2d377456cb6496da8dfa0c0"
 )
 RECOVERED_LIDERSEA_TEMPLATE_SHA256 = (
-    "94062c2c572f17612e48eabd335dec4efc5e60be0e021196df81c4f6b5aa27e3"
+    "4aae07d2728768784365c6a5273d6e35c2c5abdef92b22c3c149bc4720335f77"
 )
 RECOVERED_LIDERSEA_SEMANTIC_SHA256 = (
-    "ba4670df69461333e84ff584d22f36ccba8f7ecd8052157311679b5a2813779b"
+    "43f4eb5a9fa7994f42d68f7b0f0eacf14a1fe92f49e1dc2ddbd84f763fd7fa23"
 )
 RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256 = {
     "Deployment": RECOVERED_LIDERSEA_SEMANTIC_SHA256,
-    "NetworkPolicy": "ddf0761f5b8e2e1b73c57c8b24d3afca2f49dab2168b5e9c414d122b4a541334",
-    "Service": "6b08ea46914e6a3d5c2c4eb817addb1814bcdb33f33840824175c9229d79fa98",
-    "ServiceAccount": "22431cd2ce20d8083e4f857c8dd800d41f52a6c265dae38fd699132e9e4fc736",
+    "NetworkPolicy": "2013853fae8d444dfd6a7817cb47c16acc9f682d4c28172f83ca4fea232d4c73",
+    "Service": "5b8cc690ab89271db726c1185900808b706f577fa0b106e78a66d4d0ab4a1f95",
+    "ServiceAccount": "260f48a823c59c6df59fb17bcfc502d80abf540c7fa09b61cf3f0e4ee051dfaf",
 }
 RECOVERED_LIDERSEA_OCI = "lidersea-com/lidersea-com-chart"
 RECOVERED_LIDERSEA_RELEASE = "lidersea-com/lidersea-com"
@@ -8191,7 +8191,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v040",
+        "platform_release_contract_recovery_v041",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),

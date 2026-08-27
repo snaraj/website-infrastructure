@@ -59,16 +59,16 @@ SERVICE_CLUSTER_IP_ALT = str(ipaddress.ip_address(0xC0000202))
 POD_IP = str(ipaddress.ip_address(0xC0000265))
 POD_IP_2 = str(ipaddress.ip_address(0xC0000266))
 LIDERSEA_TEMPLATE_SHA256 = (
-    "94062c2c572f17612e48eabd335dec4efc5e60be0e021196df81c4f6b5aa27e3"
+    "4aae07d2728768784365c6a5273d6e35c2c5abdef92b22c3c149bc4720335f77"
 )
 LIDERSEA_SEMANTIC_SHA256 = (
-    "ba4670df69461333e84ff584d22f36ccba8f7ecd8052157311679b5a2813779b"
+    "43f4eb5a9fa7994f42d68f7b0f0eacf14a1fe92f49e1dc2ddbd84f763fd7fa23"
 )
 LIDERSEA_OWNED_SEMANTIC_SHA256 = {
     "Deployment": LIDERSEA_SEMANTIC_SHA256,
-    "NetworkPolicy": "ddf0761f5b8e2e1b73c57c8b24d3afca2f49dab2168b5e9c414d122b4a541334",
-    "Service": "6b08ea46914e6a3d5c2c4eb817addb1814bcdb33f33840824175c9229d79fa98",
-    "ServiceAccount": "22431cd2ce20d8083e4f857c8dd800d41f52a6c265dae38fd699132e9e4fc736",
+    "NetworkPolicy": "2013853fae8d444dfd6a7817cb47c16acc9f682d4c28172f83ca4fea232d4c73",
+    "Service": "5b8cc690ab89271db726c1185900808b706f577fa0b106e78a66d4d0ab4a1f95",
+    "ServiceAccount": "260f48a823c59c6df59fb17bcfc502d80abf540c7fa09b61cf3f0e4ee051dfaf",
 }
 
 
@@ -960,6 +960,23 @@ class ExactReleaseMovementTests(unittest.TestCase):
             LIDERSEA_OWNED_SEMANTIC_SHA256,
         )
 
+    def test_lidersea_release_tuple_is_literal_and_exact(self):
+        self.assertEqual(transaction.RECOVERED_LIDERSEA_TO_VERSION, "0.1.37")
+        self.assertEqual(transaction.RECOVERED_LIDERSEA_HISTORY_STEP_COUNT, 3)
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT, 3
+        )
+        self.assertEqual(transaction.RECOVERED_LIDERSEA_DEPLOYMENT_REVISION, "15")
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_CHART_DIGEST,
+            "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_IMAGE,
+            "ghcr.io/snaraj/lidersea-com:v0.1.37@"
+            "sha256:22673a01a892da2b644369ee3c2d0339c13ef8eddc1d3423411ce90bbe25d8b1",
+        )
+
     def test_recovered_release_tuple_is_literal_and_exact(self):
         self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.49")
         self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 6)
@@ -1027,8 +1044,10 @@ class ExactReleaseMovementTests(unittest.TestCase):
 
     def test_lidersea_companion_release_drift_is_exact_and_closed(self):
         cases = {
+            "chart version": lambda flux, workloads: flux["oci"][transaction.RECOVERED_LIDERSEA_OCI].__setitem__("chartVersion", "0.1.36"),
             "chart digest": lambda flux, workloads: flux["oci"][transaction.RECOVERED_LIDERSEA_OCI].__setitem__("upstreamDigest", "sha256:" + "0" * 64),
             "history step": lambda flux, workloads: flux["helm"][transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("historyRevision", 12 + transaction.RECOVERED_LIDERSEA_HISTORY_STEP_COUNT + 1),
+            "workload generation": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("generation", 12 + transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT + 1),
             "replica shape": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("replicas", 1),
             "runtime image": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["pods"][0].__setitem__("images", ["sha256:" + "0" * 64]),
             "owned identity": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["ownedObjects"][0].__setitem__("uid", FOREIGN_UID),
