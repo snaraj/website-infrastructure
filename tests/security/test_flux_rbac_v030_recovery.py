@@ -10,6 +10,7 @@ import copy
 import contextlib
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import sys
 import unittest
@@ -45,11 +46,16 @@ def _synthetic_uid(digit):
 
 
 DEPLOYMENT_UID = _synthetic_uid("1")
+SERVICE_UID = _synthetic_uid("7")
+SERVICE_ACCOUNT_UID = _synthetic_uid("8")
+NETWORK_POLICY_UID = _synthetic_uid("9")
 POD_UID = _synthetic_uid("2")
 REPLICA_SET_UID = _synthetic_uid("3")
 FOREIGN_UID = _synthetic_uid("4")
 SUBSTITUTED_UID = _synthetic_uid("5")
 POD_UID_2 = _synthetic_uid("6")
+SERVICE_CLUSTER_IP = str(ipaddress.ip_address(0xC0000201))
+SERVICE_CLUSTER_IP_ALT = str(ipaddress.ip_address(0xC0000202))
 
 
 def _canonical(value):
@@ -197,8 +203,33 @@ def _helm(version, marker, revision):
 
 def _owned_objects(marker):
     static = [
-        {"kind": kind, "name": kind.lower(), "semanticSha256": "c" * 64}
-        for kind in ("Service", "ServiceAccount", "NetworkPolicy")
+        {
+            "kind": "Service",
+            "name": "naranjo-online",
+            "apiVersion": "v1",
+            "uid": SERVICE_UID,
+            "semanticSha256": marker * 64,
+            "proofAnnotation": None,
+            "semanticWithoutProofSha256": marker * 64,
+        },
+        {
+            "kind": "ServiceAccount",
+            "name": "naranjo-online",
+            "apiVersion": "v1",
+            "uid": SERVICE_ACCOUNT_UID,
+            "semanticSha256": marker * 64,
+            "proofAnnotation": None,
+            "semanticWithoutProofSha256": marker * 64,
+        },
+        {
+            "kind": "NetworkPolicy",
+            "name": "ingress-to-naranjo-online",
+            "apiVersion": "networking.k8s.io/v1",
+            "uid": NETWORK_POLICY_UID,
+            "semanticSha256": marker * 64,
+            "proofAnnotation": None,
+            "semanticWithoutProofSha256": marker * 64,
+        },
     ]
     return static + [
         {
@@ -377,6 +408,110 @@ def _raw_deployment():
     }
 
 
+def _static_metadata(name, uid):
+    return {
+        "name": name,
+        "namespace": "naranjo-online",
+        "uid": uid,
+        "resourceVersion": "24",
+        "creationTimestamp": "2026-08-25T00:00:00Z",
+        "labels": {
+            "app.kubernetes.io/name": "naranjo-online",
+            "app.kubernetes.io/instance": "naranjo-online",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/version": transaction.RECOVERED_TO_VERSION,
+            "helm.toolkit.fluxcd.io/name": "naranjo-online",
+            "helm.toolkit.fluxcd.io/namespace": "naranjo-online",
+        },
+        "annotations": {
+            "meta.helm.sh/release-name": "naranjo-online",
+            "meta.helm.sh/release-namespace": "naranjo-online",
+        },
+    }
+
+
+def _raw_static_objects():
+    return {
+        "Service": {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": _static_metadata("naranjo-online", SERVICE_UID),
+            "spec": {
+                "clusterIP": SERVICE_CLUSTER_IP,
+                "clusterIPs": [SERVICE_CLUSTER_IP],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": ["IPv4"],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "name": "http",
+                        "port": 8080,
+                        "protocol": "TCP",
+                        "targetPort": "http",
+                    }
+                ],
+                "selector": {
+                    "app.kubernetes.io/name": "naranjo-online",
+                    "app.kubernetes.io/instance": "naranjo-online",
+                },
+                "sessionAffinity": "None",
+                "type": "ClusterIP",
+            },
+            "status": {"loadBalancer": {}},
+        },
+        "ServiceAccount": {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": _static_metadata(
+                "naranjo-online", SERVICE_ACCOUNT_UID
+            ),
+            "automountServiceAccountToken": False,
+        },
+        "NetworkPolicy": {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _static_metadata(
+                "ingress-to-naranjo-online", NETWORK_POLICY_UID
+            ),
+            "spec": {
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "naranjo-online",
+                        "app.kubernetes.io/instance": "naranjo-online",
+                    }
+                },
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [
+                    {
+                        "from": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": (
+                                            "cloudflare-public"
+                                        )
+                                    }
+                                },
+                                "podSelector": {
+                                    "matchLabels": {
+                                        "app.kubernetes.io/name": (
+                                            "cloudflare-public"
+                                        ),
+                                        "app.kubernetes.io/instance": (
+                                            "naranjo-online-tunnel"
+                                        ),
+                                    }
+                                },
+                            }
+                        ],
+                        "ports": [{"port": 8080, "protocol": "TCP"}],
+                    }
+                ],
+            },
+        },
+    }
+
+
 def _sync_workload_with_deployment(workload, deployment):
     semantic_sha256 = transaction.semantic_hash(deployment)
     workload.update(
@@ -395,6 +530,22 @@ def _sync_workload_with_deployment(workload, deployment):
     owned_deployment["uid"] = deployment["metadata"]["uid"]
     owned_deployment["semanticSha256"] = semantic_sha256
     owned_deployment["semanticWithoutProofSha256"] = semantic_sha256
+
+
+def _sync_workload_with_static_objects(workload, objects):
+    rows = {row["kind"]: row for row in workload["ownedObjects"]}
+    for kind, value in objects.items():
+        proof, without_proof = transaction.semantic_without_proof_annotation(
+            value
+        )
+        rows[kind].update(
+            {
+                "uid": value["metadata"]["uid"],
+                "semanticSha256": transaction.semantic_hash(value),
+                "proofAnnotation": proof,
+                "semanticWithoutProofSha256": without_proof,
+            }
+        )
 
 
 def _owner_reference(kind, name, uid):
@@ -519,13 +670,23 @@ def _movement_fixture():
     controllers = {"source-controller": {"podRestarts": 0}}
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
+    static_objects = _raw_static_objects()
+    planned_static_objects = copy.deepcopy(static_objects)
+    for value in planned_static_objects.values():
+        value["metadata"]["labels"]["app.kubernetes.io/version"] = (
+            transaction.RECOVERED_FROM_VERSION
+        )
     replica_set = _raw_replica_set(deployment)
     pods = [
         _raw_pod(deployment),
         _raw_pod(deployment, POD_UID_2, "fghij"),
     ]
     current_workload = current_workloads[key_release]
+    _sync_workload_with_static_objects(
+        planned_workloads[key_release], planned_static_objects
+    )
     _sync_workload_with_deployment(current_workload, deployment)
+    _sync_workload_with_static_objects(current_workload, static_objects)
     plan = {
         "baselines": {
             "flux": planned_flux,
@@ -549,6 +710,12 @@ def _movement_fixture():
             return [copy.deepcopy(replica_set)]
         if url.endswith("/pods"):
             return copy.deepcopy(pods)
+        if url.endswith("/services"):
+            return [copy.deepcopy(static_objects["Service"])]
+        if url.endswith("/serviceaccounts"):
+            return [copy.deepcopy(static_objects["ServiceAccount"])]
+        if url.endswith("/networkpolicies"):
+            return [copy.deepcopy(static_objects["NetworkPolicy"])]
         raise AssertionError(f"unexpected collection: {url}")
 
     old = SimpleNamespace(
@@ -592,6 +759,10 @@ def _movement_fixture():
             "replicaSet": replica_set,
             "pod": pods[0],
             "pods": pods,
+            "service": static_objects["Service"],
+            "serviceAccount": static_objects["ServiceAccount"],
+            "networkPolicy": static_objects["NetworkPolicy"],
+            "static": static_objects,
         },
     )
 
@@ -710,6 +881,152 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "ownerChainSha256",
             },
         )
+
+    def test_patch_release_static_label_churn_is_accepted_after_live_shape_validation(self):
+        old, plan, _flux, workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        planned_rows = {
+            row["kind"]: row
+            for row in plan["baselines"]["workloads"][
+                transaction.RECOVERED_NARANJO_RELEASE
+            ]["ownedObjects"]
+        }
+        current_rows = {
+            row["kind"]: row
+            for row in workloads[transaction.RECOVERED_NARANJO_RELEASE][
+                "ownedObjects"
+            ]
+        }
+        for kind in ("Service", "ServiceAccount", "NetworkPolicy"):
+            self.assertNotEqual(
+                planned_rows[kind]["semanticSha256"],
+                current_rows[kind]["semanticSha256"],
+            )
+            labels = objects["static"][kind]["metadata"]["labels"]
+            self.assertEqual(
+                labels["app.kubernetes.io/version"],
+                transaction.RECOVERED_TO_VERSION,
+            )
+            self.assertEqual(
+                labels["helm.toolkit.fluxcd.io/name"], "naranjo-online"
+            )
+            self.assertEqual(
+                labels["helm.toolkit.fluxcd.io/namespace"], "naranjo-online"
+            )
+        transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_static_object_shape_and_identity_mutations_fail_closed(self):
+        def service(field, value):
+            return lambda objects: objects["Service"]["spec"].__setitem__(
+                field, value
+            )
+
+        cases = {
+            "extra label": lambda objects: objects["Service"]["metadata"][
+                "labels"
+            ].__setitem__("example.invalid/foreign", "true"),
+            "extra annotation": lambda objects: objects["NetworkPolicy"][
+                "metadata"
+            ]["annotations"].__setitem__("example.invalid/foreign", "true"),
+            "Service selector": service(
+                "selector", {"app.kubernetes.io/name": "foreign"}
+            ),
+            "Service port": service(
+                "ports",
+                [
+                    {
+                        "name": "http",
+                        "port": 8081,
+                        "protocol": "TCP",
+                        "targetPort": "http",
+                    }
+                ],
+            ),
+            "Service type": service("type", "LoadBalancer"),
+            "Service extra behavior": service(
+                "externalTrafficPolicy", "Local"
+            ),
+            "Service allocated IP mismatch": service(
+                "clusterIPs", [SERVICE_CLUSTER_IP_ALT]
+            ),
+            "Service allocated IP substitution": lambda objects: (
+                objects["Service"]["spec"].__setitem__(
+                    "clusterIP", SERVICE_CLUSTER_IP_ALT
+                ),
+                objects["Service"]["spec"].__setitem__(
+                    "clusterIPs", [SERVICE_CLUSTER_IP_ALT]
+                ),
+            ),
+            "ServiceAccount token": lambda objects: objects[
+                "ServiceAccount"
+            ].__setitem__("automountServiceAccountToken", True),
+            "ServiceAccount secret": lambda objects: objects[
+                "ServiceAccount"
+            ].__setitem__("secrets", [{"name": "token-ref"}]),
+            "NetworkPolicy widened peer": lambda objects: objects[
+                "NetworkPolicy"
+            ]["spec"]["ingress"][0]["from"][0].pop("podSelector"),
+            "NetworkPolicy egress": lambda objects: objects[
+                "NetworkPolicy"
+            ]["spec"].__setitem__("egress", [{}]),
+            "NetworkPolicy policy type": lambda objects: objects[
+                "NetworkPolicy"
+            ]["spec"].__setitem__("policyTypes", ["Ingress"]),
+            "version label mismatch": lambda objects: objects["Service"][
+                "metadata"
+            ]["labels"].__setitem__(
+                "app.kubernetes.io/version",
+                transaction.RECOVERED_FROM_VERSION,
+            ),
+            "UID replacement": lambda objects: objects["Service"][
+                "metadata"
+            ].__setitem__("uid", FOREIGN_UID),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                old, plan, _flux, workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                mutate(objects["static"])
+                _sync_workload_with_static_objects(
+                    workloads[transaction.RECOVERED_NARANJO_RELEASE],
+                    objects["static"],
+                )
+                with self.assertRaises(transaction.RecoveryRequired):
+                    transaction.accepted_naranjo_movement(
+                        old, object(), plan
+                    )
+
+    def test_static_object_uid_replacement_after_snapshot_fails_closed(self):
+        for kind in ("Service", "ServiceAccount", "NetworkPolicy"):
+            with self.subTest(kind=kind):
+                old, plan, _flux, _workloads, _controllers, _sites, objects = (
+                    _movement_fixture()
+                )
+                objects["static"][kind]["metadata"]["uid"] = FOREIGN_UID
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_STATIC_OBJECT_IDENTITY_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(
+                        old, object(), plan
+                    )
+
+    def test_substituted_planned_static_hash_fails_closed(self):
+        old, plan, _flux, _workloads, _controllers, _sites, _objects = (
+            _movement_fixture()
+        )
+        planned_rows = plan["baselines"]["workloads"][
+            transaction.RECOVERED_NARANJO_RELEASE
+        ]["ownedObjects"]
+        service_row = next(
+            row for row in planned_rows if row["kind"] == "Service"
+        )
+        service_row["semanticSha256"] = "f" * 64
+        service_row["semanticWithoutProofSha256"] = "f" * 64
+        with self.assertRaises(transaction.RecoveryRequired):
+            transaction.accepted_naranjo_movement(old, object(), plan)
 
     def test_known_api_defaults_and_runtime_display_variants_are_accepted(self):
         old, plan, _flux, workloads, _controllers, _sites, objects = (
@@ -1688,7 +2005,7 @@ class RecoveryPlanGateTests(unittest.TestCase):
         release, recovered, read, close = self.validate(
             old, custody, source, receipt
         )
-        release.assert_called_once_with(custody, require_main_tip=True)
+        release.assert_called_once_with(custody, require_main_tip=False)
         self.assertEqual(recovered.call_count, 2)
         read.assert_called_once_with(
             transaction.RECOVERY_RECEIPT_PATH, owner=0, mode=0o600
@@ -1945,7 +2262,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.object(transaction, "acquire_lock", return_value=101)
             )
-            stack.enter_context(
+            release = stack.enter_context(
                 mock.patch.object(
                     transaction,
                     "validate_recovery_release_identity",
@@ -1978,7 +2295,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 mock.patch.object(transaction, "publish_recovery_receipt")
             )
             close = stack.enter_context(mock.patch.object(transaction.os, "close"))
-            yield custody, close, publish, accepted
+            yield custody, close, publish, accepted, release
 
     def test_first_recovery_and_terminal_rerun_are_idempotent(self):
         old, journal, rollback = self.fixture("recovery-required")
@@ -1991,8 +2308,12 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 close,
                 publish,
                 accepted,
+                release,
             ):
                 transaction.recover_v030(custody)
+                release.assert_called_once_with(
+                    custody, require_main_tip=False
+                )
                 self.assertIs(
                     sys.modules["validate_kubeconfig_snapshot"], sentinel
                 )
@@ -2009,6 +2330,13 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 rollback.reset_mock()
                 publish.reset_mock()
                 transaction.recover_v030(custody)
+                self.assertEqual(
+                    release.call_args_list,
+                    [
+                        mock.call(custody, require_main_tip=False),
+                        mock.call(custody, require_main_tip=False),
+                    ],
+                )
                 self.assertIs(
                     sys.modules["validate_kubeconfig_snapshot"], sentinel
                 )
@@ -2040,6 +2368,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 close,
                 publish,
                 _accepted,
+                release,
             ):
                 publish.side_effect = transaction.TransactionError(
                     "injected receipt collision"
@@ -2048,6 +2377,9 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                     transaction.TransactionError, "injected receipt collision"
                 ):
                     transaction.recover_v030(custody)
+                release.assert_called_once_with(
+                    custody, require_main_tip=False
+                )
                 self.assertIs(
                     sys.modules["validate_kubeconfig_snapshot"], sentinel
                 )
@@ -2075,6 +2407,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             _close,
             publish,
             accepted,
+            release,
         ):
             accepted.side_effect = [initial, changed]
             with self.assertRaisesRegex(
@@ -2082,6 +2415,9 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
             ):
                 transaction.recover_v030(custody)
+            release.assert_called_once_with(
+                custody, require_main_tip=False
+            )
         publish.assert_not_called()
         self.assertEqual(
             [call.args[0] for call in old.write_receipt.call_args_list],

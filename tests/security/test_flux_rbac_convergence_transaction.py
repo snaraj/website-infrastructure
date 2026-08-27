@@ -405,7 +405,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/recovery.py": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v032-recovery-forward.md": 0o600,
+            "changelog.d/141-flux-rbac-v033-static-shape.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -429,9 +429,9 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         ][0]
         transaction.validate_source_manifest_bundle(entries, launcher_digest)
 
-    def test_v032_uses_fresh_versioned_state_root(self):
+    def test_v033_uses_fresh_versioned_state_root(self):
         expected = Path(
-            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.32"
+            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.33"
         )
         self.assertEqual(transaction.STATE_ROOT, expected)
         self.assertEqual(transaction.STATE_PARENT, expected.parent)
@@ -2218,6 +2218,7 @@ class PlanLifetimeTests(unittest.TestCase):
 
 class ReleaseOrderingTests(unittest.TestCase):
     SOURCE = "a" * 40
+    LATER_MAIN = "f" * 40
     HEAD = "b" * 40
     TREE = "c" * 40
     BASE = "e" * 40
@@ -2248,6 +2249,8 @@ class ReleaseOrderingTests(unittest.TestCase):
         platform_started,
         release_published,
         platform_updated,
+        main_sha=None,
+        comparison=None,
     ):
         pull_run = {
             "head_sha": self.SOURCE,
@@ -2286,8 +2289,18 @@ class ReleaseOrderingTests(unittest.TestCase):
             if path == f"/repos/{transaction.REPOSITORY}/git/ref/heads/main":
                 return {
                     "ref": "refs/heads/main",
-                    "object": {"type": "commit", "sha": self.SOURCE},
+                    "object": {
+                        "type": "commit",
+                        "sha": main_sha or self.SOURCE,
+                    },
                 }
+            if path == (
+                f"/repos/{transaction.REPOSITORY}/compare/"
+                f"{self.SOURCE}...{main_sha}"
+            ):
+                if comparison is None:
+                    raise AssertionError("unexpected ancestry comparison")
+                return comparison
             if path.startswith(f"/repos/{transaction.REPOSITORY}/pulls/"):
                 return {
                     "number": 17,
@@ -2360,6 +2373,7 @@ class ReleaseOrderingTests(unittest.TestCase):
         associations=None,
         response_mutator=None,
         merge_status_error=None,
+        require_main_tip=True,
         **times,
     ):
         responses = self._responses(**times)
@@ -2385,6 +2399,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 self.TAG,
                 self.Contract(),
                 b"- reviewed transaction\n",
+                require_main_tip=require_main_tip,
             )
         pull_number = association_rows[0]["number"]
         merged_check.assert_called_once_with(
@@ -2401,6 +2416,54 @@ class ReleaseOrderingTests(unittest.TestCase):
         )
         self.assertEqual(receipt["sourceRevision"], self.SOURCE)
         self.assertEqual(receipt["releasePublishedAt"], "2026-08-22T12:01:00Z")
+
+    def test_later_protected_main_accepts_only_exact_release_ancestry(self):
+        times = {
+            "ci_updated": "2026-08-22T12:00:00Z",
+            "platform_started": "2026-08-22T12:00:00Z",
+            "release_published": "2026-08-22T12:01:00Z",
+            "platform_updated": "2026-08-22T12:01:00Z",
+        }
+        receipt = self._verify(
+            require_main_tip=False,
+            main_sha=self.LATER_MAIN,
+            comparison={
+                "status": "ahead",
+                "merge_base_commit": {"sha": self.SOURCE},
+                "base_commit": {"sha": self.SOURCE},
+            },
+            **times,
+        )
+        self.assertEqual(receipt["sourceRevision"], self.SOURCE)
+
+        invalid = {
+            "diverged main": {
+                "status": "diverged",
+                "merge_base_commit": {"sha": self.SOURCE},
+                "base_commit": {"sha": self.SOURCE},
+            },
+            "moved source base": {
+                "status": "ahead",
+                "merge_base_commit": {"sha": self.BASE},
+                "base_commit": {"sha": self.BASE},
+            },
+        }
+        for label, comparison in invalid.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                transaction.TransactionError,
+                "PROTECTED_MAIN_ANCESTRY_INVALID",
+            ):
+                self._verify(
+                    require_main_tip=False,
+                    main_sha=self.LATER_MAIN,
+                    comparison=comparison,
+                    **times,
+                )
+
+        with self.assertRaisesRegex(
+            transaction.TransactionError, "PROTECTED_MAIN_HEAD_MOVED"
+        ):
+            self._verify(main_sha=self.LATER_MAIN, **times)
 
     def test_public_omitted_or_null_merge_commit_sha_is_accepted_with_strong_identity(self):
         delete = object()
@@ -2640,7 +2703,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.32")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.33")
         for rejected in (
             "v0.1.0",
             "v0.1.21",
@@ -2652,6 +2715,9 @@ class ReleaseOrderingTests(unittest.TestCase):
             "v0.1.27",
             "v0.1.28",
             "v0.1.29",
+            "v0.1.30",
+            "v0.1.31",
+            "v0.1.32",
             "v9.9.9",
         ):
             with self.subTest(rejected=rejected), mock.patch.object(
@@ -2685,6 +2751,63 @@ class ReleaseOrderingTests(unittest.TestCase):
                 release_published="2026-08-22T12:00:30Z",
                 platform_updated="2026-08-22T12:01:00Z",
             )
+
+
+class CurrentReleaseExecutionModeTests(unittest.TestCase):
+    def test_build_plan_revalidates_immutable_release_by_main_ancestry(self):
+        target = mock.Mock(release_tag=transaction.AUTHORIZED_RELEASE_TAG)
+        custody = {"sourceRevision": "a" * 40}
+        with mock.patch.object(
+            transaction, "load_desired", return_value={}
+        ), mock.patch.object(
+            transaction, "desired_operations", return_value=[]
+        ), mock.patch.object(
+            transaction, "load_module", return_value=object()
+        ), mock.patch.object(
+            transaction, "read_regular", return_value=b"reviewed fragment\n"
+        ), mock.patch.object(
+            transaction,
+            "verify_release_identity",
+            return_value={"sourceTreeSha": "b" * 40},
+        ) as verify_release, mock.patch.object(
+            transaction,
+            "validate_custody",
+            side_effect=RuntimeError("stop after release validation"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "stop after release validation"
+            ):
+                transaction.build_plan(object(), target, custody)
+        self.assertEqual(
+            verify_release.call_args.args[:2],
+            ("a" * 40, transaction.AUTHORIZED_RELEASE_TAG),
+        )
+        self.assertIs(
+            verify_release.call_args.kwargs["require_main_tip"], False
+        )
+
+    def test_apply_revalidates_immutable_release_by_main_ancestry(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            transaction, "JOURNAL_PATH", Path(temporary) / "journal.json"
+        ), mock.patch.object(
+            transaction,
+            "validate_plan_bindings",
+            side_effect=RuntimeError("stop after release validation"),
+        ) as validate:
+            with self.assertRaisesRegex(
+                RuntimeError, "stop after release validation"
+            ):
+                transaction.apply(
+                    {}, "a" * 64, object(), object(), {"sourceRevision": "b" * 40}
+                )
+        validate.assert_called_once_with(
+            {},
+            "a" * 64,
+            mock.ANY,
+            mock.ANY,
+            {"sourceRevision": "b" * 40},
+            require_main_tip=False,
+        )
 
 
 class DesiredOperationTests(unittest.TestCase):
