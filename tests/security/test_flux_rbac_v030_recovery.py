@@ -932,6 +932,24 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 ):
                     transaction.accepted_naranjo_movement(old, object(), plan)
 
+        for label, field in (
+            ("stale planned observed generation", "observedGeneration"),
+            ("stale planned attempted generation", "lastAttemptedGeneration"),
+        ):
+            with self.subTest(label=label):
+                old, plan, _flux, _workloads, _controllers, _sites, _raw = (
+                    _movement_fixture()
+                )
+                planned = plan["baselines"]["flux"]["helm"][
+                    transaction.RECOVERED_NARANJO_RELEASE
+                ]
+                planned[field] = planned["generation"] - 1
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_HELM_GENERATION_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
     def test_calico_projection_is_bound_into_pod_metadata_proof(self):
         old, plan, _flux, _workloads, _controllers, _sites, _objects = (
             _movement_fixture()
