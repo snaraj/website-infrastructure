@@ -953,6 +953,15 @@ class ExactReleaseMovementTests(unittest.TestCase):
                         ),
                     )
 
+        live["historyRevision"] = planned["historyRevision"] + 5
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired,
+            "RECOVERY_NARANJO_HELM_REVISION_INVALID",
+        ):
+            transaction.accepted_naranjo_movement(
+                old, object(), plan, expected_history_steps=5
+            )
+
     def test_only_restored_proof_generation_increment_is_accepted(self):
         for label, generation, observed, attempted in (
             ("one generation", 6, 6, 6),

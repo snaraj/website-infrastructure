@@ -126,7 +126,7 @@ The protected plan fails closed unless all of these agree:
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
 This one-time executable authorizes exactly platform tag `v0.1.39`, the next
-release after its reviewed `v0.1.37` protected base. `target.json` cannot select
+release after its reviewed `v0.1.38` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
