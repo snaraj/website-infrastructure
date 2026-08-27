@@ -80,6 +80,15 @@ def _valid_movement(rows=None):
     verification_rows["workload"].setdefault("pods", [{"uid": POD_UID}])
     return {
         "verificationRows": verification_rows,
+        "companionRows": {
+            "oci": {"revision": "reviewed", "resourceVersion": "1"},
+            "helm": {"revision": "reviewed", "resourceVersion": "1"},
+            "workload": {"semanticSha256": "c" * 64},
+            "controllers": {
+                name: {"semanticSha256": "d" * 64, "resourceVersion": "1"}
+                for name in transaction.CONTROLLERS
+            },
+        },
         "podProof": {
             "deploymentSha256": "5" * 64,
             "pods": [
@@ -695,13 +704,15 @@ def _lidersea_fixture_rows():
     planned_workload = _workload("3", 12)
     current_workload = copy.deepcopy(planned_workload)
     current_workload["generation"] = 12 + transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT
-    for field in ("templateSha256", "semanticSha256", "semanticWithoutProofSha256"):
-        current_workload[field] = "4" * 64
+    current_workload["templateSha256"] = transaction.RECOVERED_LIDERSEA_TEMPLATE_SHA256
+    current_workload["semanticSha256"] = transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256
+    current_workload["semanticWithoutProofSha256"] = transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256
     for pod in current_workload["pods"]:
         pod["images"] = [transaction.RECOVERED_LIDERSEA_RUNTIME_IMAGE]
     for item in current_workload["ownedObjects"]:
-        item["semanticSha256"] = "4" * 64
-        item["semanticWithoutProofSha256"] = "4" * 64
+        expected = transaction.RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256[item["kind"]]
+        item["semanticSha256"] = expected
+        item["semanticWithoutProofSha256"] = expected
     deployment = {
         "metadata": {
             "name": "lidersea-com",
@@ -995,6 +1006,8 @@ class ExactReleaseMovementTests(unittest.TestCase):
             "replica shape": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("replicas", 1),
             "runtime image": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["pods"][0].__setitem__("images", ["sha256:" + "0" * 64]),
             "owned identity": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["ownedObjects"][0].__setitem__("uid", FOREIGN_UID),
+            "owned semantic pair": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["ownedObjects"][0].update(semanticSha256="f" * 64, semanticWithoutProofSha256="f" * 64),
+            "workload semantic pair": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].update(semanticSha256="f" * 64, semanticWithoutProofSha256="f" * 64),
         }
         for label, mutate in cases.items():
             with self.subTest(label=label):
@@ -2196,6 +2209,12 @@ class RecoveryReceiptBindingTests(unittest.TestCase):
         extra_row = _valid_movement()
         extra_row["verificationRows"]["foreign"] = {"value": "unexpected"}
         cases["extra verification row"] = extra_row
+        missing_companion = _valid_movement()
+        missing_companion["companionRows"].pop("workload")
+        cases["partial companion rows"] = missing_companion
+        foreign_controller = _valid_movement()
+        foreign_controller["companionRows"]["controllers"]["foreign"] = {}
+        cases["foreign companion controller"] = foreign_controller
         extra_proof = _valid_movement()
         extra_proof["podProof"]["foreign"] = "unexpected"
         cases["extra Pod proof field"] = extra_proof
@@ -2802,12 +2821,65 @@ class RecoveryOrchestrationTests(unittest.TestCase):
         rollback.assert_not_called()
         old.write_receipt.assert_not_called()
 
+    def test_companion_semantic_change_between_terminal_reads_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("rolled-back")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["companionRows"]["workload"]["semanticSha256"] = "e" * 64
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            accepted.side_effect = [initial, changed]
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
+            ):
+                transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        publish.assert_not_called()
+        rollback.assert_not_called()
+        old.write_receipt.assert_not_called()
+
+    def test_controller_change_between_terminal_reads_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("rolled-back")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["companionRows"]["controllers"]["helm-controller"][
+            "semanticSha256"
+        ] = "e" * 64
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            accepted.side_effect = [initial, changed]
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
+            ):
+                transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        publish.assert_not_called()
+        rollback.assert_not_called()
+        old.write_receipt.assert_not_called()
+
     def test_resource_version_change_between_valid_terminal_reads_is_accepted(self):
         old, _journal, rollback = self.fixture("rolled-back")
         initial = _valid_movement()
         changed = copy.deepcopy(initial)
         changed["verificationRows"]["oci"]["resourceVersion"] = "999"
         changed["verificationRows"]["helm"]["resourceVersion"] = "1000"
+        changed["companionRows"]["oci"]["resourceVersion"] = "1001"
+        changed["companionRows"]["helm"]["resourceVersion"] = "1002"
+        changed["companionRows"]["controllers"]["helm-controller"][
+            "resourceVersion"
+        ] = "1003"
         with self.patched_recovery(old, rollback) as (
             custody,
             _close,

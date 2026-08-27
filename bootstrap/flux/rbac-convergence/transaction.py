@@ -152,6 +152,18 @@ RECOVERED_LIDERSEA_IMAGE = (
 RECOVERED_LIDERSEA_RUNTIME_IMAGE = (
     "sha256:942a0b4091957e6246ca72ffedc162287cdf69cadaa4a2e2c7aa8fda5a0475a3"
 )
+RECOVERED_LIDERSEA_TEMPLATE_SHA256 = (
+    "94062c2c572f17612e48eabd335dec4efc5e60be0e021196df81c4f6b5aa27e3"
+)
+RECOVERED_LIDERSEA_SEMANTIC_SHA256 = (
+    "ba4670df69461333e84ff584d22f36ccba8f7ecd8052157311679b5a2813779b"
+)
+RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256 = {
+    "Deployment": RECOVERED_LIDERSEA_SEMANTIC_SHA256,
+    "NetworkPolicy": "ddf0761f5b8e2e1b73c57c8b24d3afca2f49dab2168b5e9c414d122b4a541334",
+    "Service": "6b08ea46914e6a3d5c2c4eb817addb1814bcdb33f33840824175c9229d79fa98",
+    "ServiceAccount": "22431cd2ce20d8083e4f857c8dd800d41f52a6c265dae38fd699132e9e4fc736",
+}
 RECOVERED_LIDERSEA_OCI = "lidersea-com/lidersea-com-chart"
 RECOVERED_LIDERSEA_RELEASE = "lidersea-com/lidersea-com"
 RECOVERED_CONTROLLER_GENERATION_STEP_COUNT = 2
@@ -9411,6 +9423,9 @@ def validate_recovered_lidersea_movement(
         or after_generation != before_generation + RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT
         or before_workload.get("replicas") != 2
         or after_workload.get("replicas") != 2
+        or after_workload.get("templateSha256") != RECOVERED_LIDERSEA_TEMPLATE_SHA256
+        or after_workload.get("semanticSha256") != RECOVERED_LIDERSEA_SEMANTIC_SHA256
+        or after_workload.get("semanticWithoutProofSha256") != RECOVERED_LIDERSEA_SEMANTIC_SHA256
         or not same_except(before_workload, after_workload, {"generation", "templateSha256", "semanticSha256", "semanticWithoutProofSha256", "pods", "ownedObjects"})
     ):
         raise RecoveryRequired("RECOVERY_LIDERSEA_WORKLOAD_INVALID")
@@ -9422,7 +9437,15 @@ def validate_recovered_lidersea_movement(
     if set(before_by_kind) != set(old.SITE_INVENTORY_KINDS) or set(after_by_kind) != set(old.SITE_INVENTORY_KINDS):
         raise RecoveryRequired("RECOVERY_LIDERSEA_OWNERSHIP_INVALID")
     for kind in before_by_kind:
-        if not same_except(before_by_kind[kind], after_by_kind[kind], {"semanticSha256", "semanticWithoutProofSha256"}):
+        expected_semantic = RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256.get(str(kind))
+        after_row = after_by_kind[kind]
+        if (
+            expected_semantic is None
+            or after_row.get("proofAnnotation") is not None
+            or after_row.get("semanticSha256") != expected_semantic
+            or after_row.get("semanticWithoutProofSha256") != expected_semantic
+            or not same_except(before_by_kind[kind], after_row, {"semanticSha256", "semanticWithoutProofSha256"})
+        ):
             raise RecoveryRequired("RECOVERY_LIDERSEA_OWNERSHIP_INVALID")
     pods = after_workload.get("pods")
     if not isinstance(pods, list) or len(pods) != 2 or any(not isinstance(row, Mapping) or row.get("restartCounts") != [0] or row.get("images") != [RECOVERED_LIDERSEA_RUNTIME_IMAGE] for row in pods):
@@ -9672,8 +9695,9 @@ def accepted_naranjo_movement(
     )
     if expected_workloads != current_workloads:
         raise RecoveryRequired("RECOVERY_UNEXPECTED_WORKLOAD_DRIFT")
+    current_controllers = old.controller_snapshot(client)
     validate_recovered_controller_drift(
-        baselines.get("controllers"), old.controller_snapshot(client)
+        baselines.get("controllers"), current_controllers
     )
     if old.public_health() != baselines.get("publicSites"):
         raise RecoveryRequired("RECOVERY_PUBLIC_SITE_DRIFT")
@@ -9689,6 +9713,12 @@ def accepted_naranjo_movement(
             "helm": copy.deepcopy(dict(new_helm)),
             "workload": copy.deepcopy(dict(new_workload)),
         },
+        "companionRows": {
+            "oci": copy.deepcopy(dict(current_oci[RECOVERED_LIDERSEA_OCI])),
+            "helm": copy.deepcopy(dict(current_helm[RECOVERED_LIDERSEA_RELEASE])),
+            "workload": copy.deepcopy(dict(current_workloads[RECOVERED_LIDERSEA_RELEASE])),
+            "controllers": copy.deepcopy(dict(current_controllers)),
+        },
         "podProof": pod_proof,
     }
 
@@ -9698,9 +9728,10 @@ def validated_recovery_movement(
 ) -> tuple[Mapping[str, object], Mapping[str, object]]:
     """Validate the exact nonempty movement schema before use or publication."""
 
-    if set(movement) != {"verificationRows", "podProof"}:
+    if set(movement) != {"verificationRows", "companionRows", "podProof"}:
         raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
     rows = movement.get("verificationRows")
+    companion_rows = movement.get("companionRows")
     pod_proof = movement.get("podProof")
     if (
         not isinstance(rows, Mapping)
@@ -9709,6 +9740,14 @@ def validated_recovery_movement(
             not isinstance(rows.get(name), Mapping) or not rows.get(name)
             for name in ("oci", "helm", "workload")
         )
+        or not isinstance(companion_rows, Mapping)
+        or set(companion_rows) != {"oci", "helm", "workload", "controllers"}
+        or any(
+            not isinstance(companion_rows.get(name), Mapping)
+            or not companion_rows.get(name)
+            for name in ("oci", "helm", "workload", "controllers")
+        )
+        or set(companion_rows["controllers"]) != set(CONTROLLERS)
         or not isinstance(pod_proof, Mapping)
         or set(pod_proof) != {"deploymentSha256", "pods"}
         or SHA256_RE.fullmatch(str(pod_proof.get("deploymentSha256"))) is None
@@ -9769,6 +9808,27 @@ def stable_recovery_movement(movement: Mapping[str, object]) -> bytes:
         raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
     for name in ("oci", "helm"):
         row = rows.get(name)
+        if not isinstance(row, MutableMapping) or (
+            row.get("resourceVersion") is not None
+            and not isinstance(row.get("resourceVersion"), str)
+        ):
+            raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+        row.pop("resourceVersion", None)
+    companion_rows = stable.get("companionRows")
+    if not isinstance(companion_rows, MutableMapping):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    for name in ("oci", "helm"):
+        row = companion_rows.get(name)
+        if not isinstance(row, MutableMapping) or (
+            row.get("resourceVersion") is not None
+            and not isinstance(row.get("resourceVersion"), str)
+        ):
+            raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+        row.pop("resourceVersion", None)
+    controllers = companion_rows.get("controllers")
+    if not isinstance(controllers, MutableMapping) or set(controllers) != set(CONTROLLERS):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    for row in controllers.values():
         if not isinstance(row, MutableMapping) or (
             row.get("resourceVersion") is not None
             and not isinstance(row.get("resourceVersion"), str)
