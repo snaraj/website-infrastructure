@@ -569,6 +569,8 @@ def _owner_reference(kind, name, uid):
 def _raw_replica_set(deployment):
     labels = copy.deepcopy(deployment["spec"]["template"]["metadata"]["labels"])
     labels["pod-template-hash"] = "reviewedhash"
+    selector_labels = copy.deepcopy(deployment["spec"]["selector"]["matchLabels"])
+    selector_labels["pod-template-hash"] = "reviewedhash"
     replicas = deployment["spec"]["replicas"]
     return {
         "apiVersion": "apps/v1",
@@ -580,11 +582,9 @@ def _raw_replica_set(deployment):
             "resourceVersion": "21",
             "labels": labels,
             "annotations": {
+                **copy.deepcopy(deployment["metadata"]["annotations"]),
                 "deployment.kubernetes.io/desired-replicas": str(replicas),
                 "deployment.kubernetes.io/max-replicas": str(replicas),
-                "deployment.kubernetes.io/revision": deployment["metadata"][
-                    "annotations"
-                ]["deployment.kubernetes.io/revision"],
             },
             "ownerReferences": [
                 _owner_reference("Deployment", "naranjo-online", DEPLOYMENT_UID)
@@ -593,7 +593,7 @@ def _raw_replica_set(deployment):
         "spec": {
             "replicas": replicas,
             "minReadySeconds": 0,
-            "selector": {"matchLabels": copy.deepcopy(labels)},
+            "selector": {"matchLabels": selector_labels},
             "template": {
                 "metadata": {
                     "labels": copy.deepcopy(labels),
@@ -1555,6 +1555,20 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "example.invalid/foreign"
             ] = "true"
 
+        def changed_replica_inherited_annotation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["metadata"]["annotations"][
+                "platform.snaraj.dev/deployment-ready"
+            ] = "false"
+
+        def widened_replica_selector(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["replicaSet"]["spec"]["selector"]["matchLabels"][
+                "example.invalid/foreign"
+            ] = "true"
+
         def extra_pod_label(
             _plan, _flux, _workloads, _controllers, _sites, objects
         ):
@@ -1646,6 +1660,10 @@ class ExactReleaseMovementTests(unittest.TestCase):
             ),
             "ReplicaSet owner UID": replica_owner_field("uid", FOREIGN_UID),
             "ReplicaSet extra annotation": extra_replica_annotation,
+            "ReplicaSet changed inherited annotation": (
+                changed_replica_inherited_annotation
+            ),
+            "ReplicaSet widened selector": widened_replica_selector,
             "Pod extra metadata label": extra_pod_label,
             "ReplicaSet extra metadata label": extra_replica_label,
             "changed live toleration": changed_live_toleration,

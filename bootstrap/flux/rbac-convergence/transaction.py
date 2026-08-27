@@ -67,14 +67,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.35"
+AUTHORIZED_RELEASE_TAG = "v0.1.36"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.35"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.36"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v035-calico-pod-annotations.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v036-replicaset-semantics.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -8087,7 +8087,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v035",
+        "platform_release_contract_recovery_v036",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -8459,6 +8459,11 @@ def validate_recovered_naranjo_deployment(
         "selector": copy.deepcopy(dict(match_labels)),
         "templateLabels": copy.deepcopy(dict(template_metadata["labels"])),
         "templateSpec": copy.deepcopy(dict(pod_spec)),
+        "replicaAnnotations": {
+            **copy.deepcopy(dict(annotations)),
+            "deployment.kubernetes.io/desired-replicas": str(expected_replicas),
+            "deployment.kubernetes.io/max-replicas": str(expected_replicas),
+        },
         "projection": direct_projection,
         "replicas": expected_replicas,
     }
@@ -8477,6 +8482,7 @@ def validate_recovered_naranjo_pods(
     template_spec = deployment.get("templateSpec")
     deployment_uid = deployment.get("uid")
     deployment_revision = deployment.get("revision")
+    expected_replica_annotations = deployment.get("replicaAnnotations")
     deployment_projection = deployment.get("projection")
     expected_replicas = deployment.get("replicas")
     workload_pods = workload.get("pods")
@@ -8488,6 +8494,7 @@ def validate_recovered_naranjo_pods(
         or old.UID_RE.fullmatch(deployment_uid) is None
         or not isinstance(deployment_revision, str)
         or not deployment_revision.isdecimal()
+        or not isinstance(expected_replica_annotations, Mapping)
         or not isinstance(deployment_projection, Mapping)
         or type(expected_replicas) is not int
         or expected_replicas not in {1, 2}
@@ -8820,11 +8827,8 @@ def validate_recovered_naranjo_pods(
         )
         expected_replica_labels = dict(template_labels)
         expected_replica_labels["pod-template-hash"] = pod_template_hash
-        expected_replica_annotations = {
-            "deployment.kubernetes.io/desired-replicas": str(expected_replicas),
-            "deployment.kubernetes.io/max-replicas": str(expected_replicas),
-            "deployment.kubernetes.io/revision": deployment_revision,
-        }
+        expected_replica_selector_labels = dict(selector)
+        expected_replica_selector_labels["pod-template-hash"] = pod_template_hash
         allowed_replica_metadata = set(old.SERVER_METADATA) | {
             "name",
             "namespace",
@@ -8851,7 +8855,8 @@ def validate_recovered_naranjo_pods(
             or replica_spec.get("minReadySeconds") not in (None, 0)
             or not isinstance(replica_selector, Mapping)
             or set(replica_selector) != {"matchLabels"}
-            or replica_selector.get("matchLabels") != expected_replica_labels
+            or replica_selector.get("matchLabels")
+            != expected_replica_selector_labels
             or not isinstance(replica_template_metadata, Mapping)
             or not set(replica_template_metadata).issubset(
                 {"labels", "creationTimestamp"}
