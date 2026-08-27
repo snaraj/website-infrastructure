@@ -405,7 +405,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/recovery.py": 0o600,
             "bootstrap/flux/rbac-convergence/transaction.py": 0o700,
-            "changelog.d/141-flux-rbac-v037-service-proof.md": 0o600,
+            "changelog.d/141-flux-rbac-v038-helm-generation-proof.md": 0o600,
             "scripts/ci/platform_release_contract.py": 0o600,
             "scripts/flux_rbac_denial_oracle.py": 0o600,
             "scripts/validate_kubeconfig_snapshot.py": 0o600,
@@ -429,9 +429,9 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
         ][0]
         transaction.validate_source_manifest_bundle(entries, launcher_digest)
 
-    def test_v037_uses_fresh_versioned_state_root(self):
+    def test_v038_uses_fresh_versioned_state_root(self):
         expected = Path(
-            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37"
+            "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.38"
         )
         self.assertEqual(transaction.STATE_ROOT, expected)
         self.assertEqual(transaction.STATE_PARENT, expected.parent)
@@ -2809,7 +2809,7 @@ class ReleaseOrderingTests(unittest.TestCase):
                 transaction.github_request(path)
 
     def test_only_reviewed_one_time_release_tag_reaches_public_reads(self):
-        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.37")
+        self.assertEqual(transaction.AUTHORIZED_RELEASE_TAG, "v0.1.38")
         for rejected in (
             "v0.1.0",
             "v0.1.21",

@@ -174,7 +174,7 @@ def _oci(version, marker):
     }
 
 
-def _helm(version, marker, revision):
+def _helm(version, marker, revision, generation=7):
     chart_digest = (
         transaction.RECOVERED_TO_CHART_DIGEST
         if version == transaction.RECOVERED_TO_VERSION
@@ -183,9 +183,9 @@ def _helm(version, marker, revision):
     return {
         "uid": "helm-uid",
         "resourceVersion": marker,
-        "generation": 7,
-        "observedGeneration": 7,
-        "lastAttemptedGeneration": 7,
+        "generation": generation,
+        "observedGeneration": generation,
+        "lastAttemptedGeneration": generation,
         "attemptedRevision": version,
         "attemptedRevisionDigest": chart_digest,
         "attemptedReleaseAction": "upgrade",
@@ -675,7 +675,11 @@ def _movement_fixture():
     key_release = transaction.RECOVERED_NARANJO_RELEASE
     planned_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_FROM_VERSION, "1")},
-        "helm": {key_release: _helm(transaction.RECOVERED_FROM_VERSION, "1", 19)},
+        "helm": {
+            key_release: _helm(
+                transaction.RECOVERED_FROM_VERSION, "1", 19, generation=5
+            )
+        },
     }
     current_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_TO_VERSION, "2")},
@@ -879,6 +883,15 @@ class ExactReleaseMovementTests(unittest.TestCase):
             movement["verificationRows"]["helm"]["historyRevision"], 23
         )
         self.assertEqual(
+            plan["baselines"]["flux"]["helm"][
+                transaction.RECOVERED_NARANJO_RELEASE
+            ]["generation"],
+            5,
+        )
+        self.assertEqual(
+            movement["verificationRows"]["helm"]["generation"], 7
+        )
+        self.assertEqual(
             movement["verificationRows"]["workload"]["generation"], 25
         )
         self.assertEqual(
@@ -897,6 +910,45 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "ownerChainSha256",
             },
         )
+
+    def test_only_restored_proof_generation_increment_is_accepted(self):
+        for label, generation, observed, attempted in (
+            ("one generation", 6, 6, 6),
+            ("three generations", 8, 8, 8),
+            ("stale observed generation", 7, 6, 7),
+            ("stale attempted generation", 7, 7, 6),
+        ):
+            with self.subTest(label=label):
+                old, plan, flux, _workloads, _controllers, _sites, _raw = (
+                    _movement_fixture()
+                )
+                helm = flux["helm"][transaction.RECOVERED_NARANJO_RELEASE]
+                helm["generation"] = generation
+                helm["observedGeneration"] = observed
+                helm["lastAttemptedGeneration"] = attempted
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_HELM_GENERATION_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
+        for label, field in (
+            ("stale planned observed generation", "observedGeneration"),
+            ("stale planned attempted generation", "lastAttemptedGeneration"),
+        ):
+            with self.subTest(label=label):
+                old, plan, _flux, _workloads, _controllers, _sites, _raw = (
+                    _movement_fixture()
+                )
+                planned = plan["baselines"]["flux"]["helm"][
+                    transaction.RECOVERED_NARANJO_RELEASE
+                ]
+                planned[field] = planned["generation"] - 1
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_HELM_GENERATION_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
 
     def test_calico_projection_is_bound_into_pod_metadata_proof(self):
         old, plan, _flux, _workloads, _controllers, _sites, _objects = (
