@@ -125,7 +125,7 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.38`, the next
+This one-time executable authorizes exactly platform tag `v0.1.39`, the next
 release after its reviewed `v0.1.37` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
@@ -146,7 +146,7 @@ unchanged. Prepare a new local `target.json` through the owner-controlled
 read-only ceremony, then install it as:
 
 ```text
-/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.38/input/target.json
+/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.39/input/target.json
 owner: root:root
 mode: 0600
 ```
@@ -154,7 +154,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.38`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.39`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
@@ -177,7 +177,7 @@ ceremony; do not query or expose Secret data to populate this file.
 ## Root custody and stage zero
 
 Protected state lives under
-`/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.38`, with root ownership and
+`/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.39`, with root ownership and
 mode 0700 directories. Plans, journals, receipts, the private target, and
 custodied source files are mode 0600 except for both the mode-0700 custodied
 transaction blob and its mode-0700 installed launcher copy.
@@ -214,11 +214,17 @@ It accepts no other plan, incident, release movement, site, controller change,
 or unrelated drift. It reuses the v0.1.30 journal's existing crash-safe
 rollback and terminal receipt machinery, restores the original verifier even
 on failure, and stops after publishing both the old rolled-back receipt and a
-root-only v0.1.38 receipt binding the recovery release, terminal journal, exact
+root-only v0.1.39 receipt binding the recovery release, terminal journal, exact
 chart/image movement, and custody hashes.
+This successor is only the terminal receipt continuation after v0.1.38 has
+already restored the old journal. It requires that exact rolled-back terminal
+state and the observed six-entry Helm history movement: four protected site
+releases plus the two same-chart reconciliations caused by restoring the two
+site reconciler Roles. It rejects the original nonterminal incident, any other
+history count, and every chart, image, generation, workload, or ownership drift.
 Run it once through the same isolated root process boundary with only `LC_ALL=C`
-and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.38-peeled-commit>`.
-Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.38
+and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.39-peeled-commit>`.
+Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.39
 plan. The `--plan` mode revalidates the exact root-only recovery receipt and
 its matching terminal v0.1.30 journal evidence before opening the fresh plan;
 the recovery mode never plans or applies forward state.

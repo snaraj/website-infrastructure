@@ -63,18 +63,18 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.37 and can therefore
+# selector.  Its protected-base candidate follows v0.1.38 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.38"
+AUTHORIZED_RELEASE_TAG = "v0.1.39"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.38"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.39"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v038-helm-generation-proof.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v039-terminal-history.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -125,6 +125,7 @@ RECOVERED_INITIAL_OPERATION_COUNT = 18
 RECOVERED_FROM_VERSION = "0.1.42"
 RECOVERED_TO_VERSION = "0.1.46"
 RECOVERED_RELEASE_STEP_COUNT = 4
+RECOVERED_TERMINAL_HISTORY_STEP_COUNT = 6
 RECOVERED_TO_DEPLOYMENT_REVISION = "21"
 RECOVERED_TO_CHART_DIGEST = (
     "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e7a67cf68"
@@ -8159,7 +8160,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v038",
+        "platform_release_contract_recovery_v039",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -9312,7 +9313,11 @@ def validate_recovered_naranjo_static_objects(
 
 
 def accepted_naranjo_movement(
-    old: ModuleType, client: object, plan: Mapping[str, object]
+    old: ModuleType,
+    client: object,
+    plan: Mapping[str, object],
+    *,
+    expected_history_steps: int = RECOVERED_RELEASE_STEP_COUNT,
 ) -> dict[str, object]:
     baselines = plan.get("baselines")
     if not isinstance(baselines, Mapping):
@@ -9426,10 +9431,15 @@ def accepted_naranjo_movement(
     old_history_revision = old_helm.get("historyRevision")
     new_history_revision = new_helm.get("historyRevision")
     if (
-        type(old_history_revision) is not int
+        expected_history_steps
+        not in {
+            RECOVERED_RELEASE_STEP_COUNT,
+            RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
+        }
+        or type(old_history_revision) is not int
         or type(new_history_revision) is not int
         or new_history_revision
-        != old_history_revision + RECOVERED_RELEASE_STEP_COUNT
+        != old_history_revision + expected_history_steps
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_HELM_REVISION_INVALID")
 
@@ -9847,13 +9857,8 @@ def recover_v030(custody: Mapping[str, object]) -> None:
             plan,
             journal.document,
         )
-        if journal.document.get("state") == "recovery-required":
-            old.write_receipt(
-                "recovery-required",
-                RECOVERED_PLAN_SHA256,
-                RECOVERED_SOURCE_REVISION,
-                journal,
-            )
+        if journal.document.get("state") != "rolled-back":
+            raise RecoveryRequired("RECOVERY_V038_TERMINAL_REQUIRED")
         if plan_sha256 != RECOVERED_PLAN_SHA256:
             raise RecoveryRequired("RECOVERY_PLAN_DIGEST_INVALID")
         target = old.load_target()
@@ -9881,13 +9886,19 @@ def recover_v030(custody: Mapping[str, object]) -> None:
                 require_apply_ack=False,
                 require_main_tip=False,
             )
-            initial_movement = accepted_naranjo_movement(old, client, plan)
-            if journal.document.get("state") != "rolled-back":
-                run_recovered_rollback_once(
-                    old, client, plan, journal, initial_movement
-                )
+            initial_movement = accepted_naranjo_movement(
+                old,
+                client,
+                plan,
+                expected_history_steps=RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
+            )
             validate_recovered_incident(old, plan, journal.document)
-            terminal_movement = accepted_naranjo_movement(old, client, plan)
+            terminal_movement = accepted_naranjo_movement(
+                old,
+                client,
+                plan,
+                expected_history_steps=RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
+            )
             if canonical_json(initial_movement) != canonical_json(
                 terminal_movement
             ):

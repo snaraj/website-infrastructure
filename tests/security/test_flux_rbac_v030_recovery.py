@@ -851,6 +851,7 @@ class ExactReleaseMovementTests(unittest.TestCase):
     def test_recovered_release_tuple_is_literal_and_exact(self):
         self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.46")
         self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 4)
+        self.assertEqual(transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT, 6)
         self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "21")
         self.assertEqual(
             transaction.RECOVERED_TO_CHART_DIGEST,
@@ -910,6 +911,47 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "ownerChainSha256",
             },
         )
+
+    def test_exact_terminal_history_movement_is_explicit_and_closed(self):
+        old, plan, flux, _workloads, _controllers, _sites, _raw = (
+            _movement_fixture()
+        )
+        planned = plan["baselines"]["flux"]["helm"][
+            transaction.RECOVERED_NARANJO_RELEASE
+        ]
+        live = flux["helm"][transaction.RECOVERED_NARANJO_RELEASE]
+        live["historyRevision"] = (
+            planned["historyRevision"]
+            + transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT
+        )
+        with self.assertRaisesRegex(
+            transaction.RecoveryRequired,
+            "RECOVERY_NARANJO_HELM_REVISION_INVALID",
+        ):
+            transaction.accepted_naranjo_movement(old, object(), plan)
+        movement = transaction.accepted_naranjo_movement(
+            old,
+            object(),
+            plan,
+            expected_history_steps=transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
+        )
+        self.assertEqual(movement["verificationRows"]["helm"]["historyRevision"], 25)
+
+        for delta in (5, 7):
+            with self.subTest(delta=delta):
+                live["historyRevision"] = planned["historyRevision"] + delta
+                with self.assertRaisesRegex(
+                    transaction.RecoveryRequired,
+                    "RECOVERY_NARANJO_HELM_REVISION_INVALID",
+                ):
+                    transaction.accepted_naranjo_movement(
+                        old,
+                        object(),
+                        plan,
+                        expected_history_steps=(
+                            transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT
+                        ),
+                    )
 
     def test_only_restored_proof_generation_increment_is_accepted(self):
         for label, generation, observed, attempted in (
@@ -2483,8 +2525,8 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             close = stack.enter_context(mock.patch.object(transaction.os, "close"))
             yield custody, close, publish, accepted, release
 
-    def test_first_recovery_and_terminal_rerun_are_idempotent(self):
-        old, journal, rollback = self.fixture("recovery-required")
+    def test_only_terminal_v038_recovery_is_idempotent(self):
+        old, journal, rollback = self.fixture("rolled-back")
         previous = sys.modules.get("validate_kubeconfig_snapshot")
         sentinel = SimpleNamespace(name="previous-validator")
         sys.modules["validate_kubeconfig_snapshot"] = sentinel
@@ -2506,9 +2548,9 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 self.assertEqual(journal.document["state"], "rolled-back")
                 self.assertEqual(
                     [call.args[0] for call in old.write_receipt.call_args_list],
-                    ["recovery-required", "rolled-back"],
+                    ["rolled-back"],
                 )
-                rollback.assert_called_once()
+                rollback.assert_not_called()
                 publish.assert_called_once()
                 self.assertEqual(accepted.call_count, 2)
 
@@ -2533,6 +2575,13 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 rollback.assert_not_called()
                 publish.assert_called_once()
                 self.assertEqual(accepted.call_count, 4)
+                self.assertTrue(
+                    all(
+                        call.kwargs.get("expected_history_steps")
+                        == transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT
+                        for call in accepted.call_args_list
+                    )
+                )
                 self.assertEqual(
                     sorted(call.args[0] for call in close.call_args_list),
                     [101, 101, 202, 202],
@@ -2543,8 +2592,28 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             else:
                 sys.modules["validate_kubeconfig_snapshot"] = previous
 
-    def test_terminal_receipt_failure_restores_validator_and_locks(self):
+    def test_nonterminal_v038_state_fails_before_cluster_access(self):
         old, _journal, rollback = self.fixture("recovery-required")
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired, "RECOVERY_V038_TERMINAL_REQUIRED"
+            ):
+                transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        accepted.assert_not_called()
+        rollback.assert_not_called()
+        publish.assert_not_called()
+        old.KubeClient.assert_not_called()
+        old.write_receipt.assert_not_called()
+
+    def test_terminal_receipt_failure_restores_validator_and_locks(self):
+        old, _journal, rollback = self.fixture("rolled-back")
         previous = sys.modules.get("validate_kubeconfig_snapshot")
         sentinel = SimpleNamespace(name="previous-validator")
         sys.modules["validate_kubeconfig_snapshot"] = sentinel
@@ -2571,7 +2640,7 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     [call.args[0] for call in old.write_receipt.call_args_list],
-                    ["recovery-required", "rolled-back"],
+                    ["rolled-back"],
                 )
                 self.assertEqual(
                     sorted(call.args[0] for call in close.call_args_list),
@@ -2583,8 +2652,8 @@ class RecoveryOrchestrationTests(unittest.TestCase):
             else:
                 sys.modules["validate_kubeconfig_snapshot"] = previous
 
-    def test_runtime_proof_change_during_rollback_fails_before_receipt(self):
-        old, _journal, rollback = self.fixture("recovery-required")
+    def test_runtime_proof_change_between_terminal_reads_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("rolled-back")
         initial = _valid_movement()
         changed = copy.deepcopy(initial)
         changed["podProof"]["pods"][0]["podSpecSha256"] = "c" * 64
@@ -2605,10 +2674,8 @@ class RecoveryOrchestrationTests(unittest.TestCase):
                 custody, require_main_tip=False
             )
         publish.assert_not_called()
-        self.assertEqual(
-            [call.args[0] for call in old.write_receipt.call_args_list],
-            ["recovery-required"],
-        )
+        rollback.assert_not_called()
+        old.write_receipt.assert_not_called()
 
 
 class RecoveryDispatchTests(unittest.TestCase):

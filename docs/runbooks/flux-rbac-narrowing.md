@@ -695,6 +695,14 @@ v0.1.38 recovery admits only that exact two-generation bookkeeping increment,
 requires all three counters to remain synchronized, and leaves the closed
 chart, image, history, spec, semantic, workload, UID, and ownership checks
 unchanged. Any other increment or mismatched counter still stops recovery.
+The v0.1.38 recovery successfully restored the old journal but then stopped
+before publishing its new receipt because restoring the two site reconciler
+Roles caused two same-chart Helm history entries. The v0.1.39 continuation
+accepts only that already rolled-back terminal journal and exactly six history
+steps from the captured baseline: the original four protected site releases
+plus those two reconciliations. It rejects a nonterminal journal and history
+deltas of five, seven, or any other value; chart, image, generation, workload,
+ownership, and runtime proof checks remain unchanged.
 For the three static Helm-owned objects it admits only the chart-version label
 movement: their UIDs and exact live safe shapes are closed, and projecting that
 single label back to 0.1.42 must reproduce the captured semantic hashes. The
