@@ -898,6 +898,44 @@ class ExactReleaseMovementTests(unittest.TestCase):
             },
         )
 
+    def test_calico_projection_is_bound_into_pod_metadata_proof(self):
+        old, plan, _flux, _workloads, _controllers, _sites, _objects = (
+            _movement_fixture()
+        )
+        baseline = transaction.accepted_naranjo_movement(
+            old, object(), plan
+        )["podProof"]["pods"]
+
+        old, plan, _flux, _workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        objects["pod"]["metadata"]["annotations"][
+            "cni.projectcalico.org/containerID"
+        ] = "c" * 64
+        changed = transaction.accepted_naranjo_movement(
+            old, object(), plan
+        )["podProof"]["pods"]
+
+        self.assertEqual(len(baseline), len(changed))
+        changed_metadata_rows = 0
+        for before, after in zip(baseline, changed, strict=True):
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in before.items()
+                    if key != "podMetadataSha256"
+                },
+                {
+                    key: value
+                    for key, value in after.items()
+                    if key != "podMetadataSha256"
+                },
+            )
+            changed_metadata_rows += (
+                before["podMetadataSha256"] != after["podMetadataSha256"]
+            )
+        self.assertEqual(changed_metadata_rows, 1)
+
     def test_patch_release_static_label_churn_is_accepted_after_live_shape_validation(self):
         old, plan, _flux, workloads, _controllers, _sites, objects = (
             _movement_fixture()
