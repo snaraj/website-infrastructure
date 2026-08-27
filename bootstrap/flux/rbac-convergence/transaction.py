@@ -67,14 +67,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.33"
+AUTHORIZED_RELEASE_TAG = "v0.1.34"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.33"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.34"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v033-static-shape.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v034-flux-labels.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -8087,7 +8087,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v033",
+        "platform_release_contract_recovery_v034",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -8256,11 +8256,16 @@ def validate_recovered_naranjo_deployment(
             "timeoutSeconds": value.get("timeoutSeconds"),
         }
 
-    labels = {
+    template_labels = {
         "app.kubernetes.io/name": "naranjo-online",
         "app.kubernetes.io/instance": "naranjo-online",
         "app.kubernetes.io/managed-by": "Helm",
         "app.kubernetes.io/version": RECOVERED_TO_VERSION,
+    }
+    metadata_labels = {
+        **template_labels,
+        "helm.toolkit.fluxcd.io/name": "naranjo-online",
+        "helm.toolkit.fluxcd.io/namespace": "naranjo-online",
     }
     annotations = metadata.get("annotations")
     expected_annotations = {
@@ -8284,7 +8289,7 @@ def validate_recovered_naranjo_deployment(
         not isinstance(annotations, Mapping)
         or metadata.get("name") != "naranjo-online"
         or metadata.get("namespace") != "naranjo-online"
-        or metadata.get("labels") != labels
+        or metadata.get("labels") != metadata_labels
         or metadata.get("deletionTimestamp") is not None
         or not set(metadata).issubset(allowed_metadata)
         or not set(expected_annotations).issubset(annotations)
@@ -8376,7 +8381,7 @@ def validate_recovered_naranjo_deployment(
         "livenessProbe": probe("livenessProbe"),
     }
     expected = {
-        "metadataLabels": labels,
+        "metadataLabels": metadata_labels,
         "deploymentReady": "true",
         "mediaReady": "false",
         "revisionHistoryLimit": 3,
@@ -8388,7 +8393,7 @@ def validate_recovered_naranjo_deployment(
             "app.kubernetes.io/name": "naranjo-online",
             "app.kubernetes.io/instance": "naranjo-online",
         }},
-        "templateLabels": labels,
+        "templateLabels": template_labels,
         "serviceAccountName": "naranjo-online",
         "automount": False,
         "podSecurityContext": {
