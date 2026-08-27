@@ -63,18 +63,18 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.36 and can therefore
+# selector.  Its protected-base candidate follows v0.1.37 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.37"
+AUTHORIZED_RELEASE_TAG = "v0.1.38"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.38"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v037-service-proof.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v038-helm-generation-proof.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -8159,7 +8159,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v037",
+        "platform_release_contract_recovery_v038",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -9398,6 +9398,9 @@ def accepted_naranjo_movement(
         new_helm,
         {
             "resourceVersion",
+            "generation",
+            "observedGeneration",
+            "lastAttemptedGeneration",
             "attemptedRevision",
             "attemptedRevisionDigest",
             "historyRevision",
@@ -9408,6 +9411,18 @@ def accepted_naranjo_movement(
         },
     ):
         raise RecoveryRequired("RECOVERY_NARANJO_HELM_SCOPE_INVALID")
+    old_helm_generation = old_helm.get("generation")
+    new_helm_generation = new_helm.get("generation")
+    if (
+        type(old_helm_generation) is not int
+        or type(new_helm_generation) is not int
+        or new_helm_generation != old_helm_generation + 2
+        or old_helm.get("observedGeneration") != old_helm_generation
+        or old_helm.get("lastAttemptedGeneration") != old_helm_generation
+        or new_helm.get("observedGeneration") != new_helm_generation
+        or new_helm.get("lastAttemptedGeneration") != new_helm_generation
+    ):
+        raise RecoveryRequired("RECOVERY_NARANJO_HELM_GENERATION_INVALID")
     old_history_revision = old_helm.get("historyRevision")
     new_history_revision = new_helm.get("historyRevision")
     if (

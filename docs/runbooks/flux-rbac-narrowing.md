@@ -687,6 +687,14 @@ and verified the complete prestate. The v0.1.37 repair instead targets exactly
 the existing Naranjo Service with one temporary plan-hash-bound post-renderer;
 the Deployment, ReplicaSet, Pods, ServiceAccount, NetworkPolicy, and Lidersea
 inventory must remain semantically exact throughout.
+The v0.1.37 recovery then failed closed before planning because that restored
+proof had legitimately advanced the Naranjo HelmRelease generation,
+observed-generation, and last-attempted-generation counters from 5 to 7 while
+returning the spec and semantic hashes exactly to the captured state. The
+v0.1.38 recovery admits only that exact two-generation bookkeeping increment,
+requires all three counters to remain synchronized, and leaves the closed
+chart, image, history, spec, semantic, workload, UID, and ownership checks
+unchanged. Any other increment or mismatched counter still stops recovery.
 For the three static Helm-owned objects it admits only the chart-version label
 movement: their UIDs and exact live safe shapes are closed, and projecting that
 single label back to 0.1.42 must reproduce the captured semantic hashes. The
