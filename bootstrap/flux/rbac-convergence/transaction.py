@@ -63,18 +63,18 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 FORWARD_FAILURE_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # This is a closed, one-time migration executable, not a generic release
-# selector.  Its protected-base candidate follows v0.1.38 and can therefore
+# selector.  Its protected-base candidate follows v0.1.39 and can therefore
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.39"
+AUTHORIZED_RELEASE_TAG = "v0.1.40"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.39"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.40"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v039-terminal-history.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v040-live-drift.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -123,19 +123,38 @@ RECOVERED_CUSTODY_SHA256 = (
 RECOVERED_INITIAL_SEQUENCE = 47
 RECOVERED_INITIAL_OPERATION_COUNT = 18
 RECOVERED_FROM_VERSION = "0.1.42"
-RECOVERED_TO_VERSION = "0.1.46"
-RECOVERED_RELEASE_STEP_COUNT = 4
-RECOVERED_TERMINAL_HISTORY_STEP_COUNT = 6
-RECOVERED_TO_DEPLOYMENT_REVISION = "21"
+RECOVERED_TO_VERSION = "0.1.49"
+RECOVERED_RELEASE_STEP_COUNT = 6
+RECOVERED_TERMINAL_HISTORY_STEP_COUNT = 8
+RECOVERED_WORKLOAD_GENERATION_STEP_COUNT = 8
+RECOVERED_TO_DEPLOYMENT_REVISION = "23"
 RECOVERED_TO_CHART_DIGEST = (
-    "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e7a67cf68"
+    "sha256:0fbbf8e87b22002d5435c272a19af37a577012ae20ccf0a1be5f6b96cca90ad1"
 )
 RECOVERED_TO_IMAGE = (
-    "ghcr.io/snaraj/naranjo-online:v0.1.46@"
-    "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470"
+    "ghcr.io/snaraj/naranjo-online:v0.1.49@"
+    "sha256:05ec0b573e3e8dcfad8c4f84a800410f50f0fbadddd88ad199a46f22764c5633"
 )
 RECOVERED_NARANJO_OCI = "naranjo-online/naranjo-online-chart"
 RECOVERED_NARANJO_RELEASE = "naranjo-online/naranjo-online"
+RECOVERED_LIDERSEA_FROM_VERSION = "0.1.34"
+RECOVERED_LIDERSEA_TO_VERSION = "0.1.36"
+RECOVERED_LIDERSEA_HISTORY_STEP_COUNT = 2
+RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT = 2
+RECOVERED_LIDERSEA_DEPLOYMENT_REVISION = "14"
+RECOVERED_LIDERSEA_CHART_DIGEST = (
+    "sha256:2bd250a72e05c9ffe408c0b7ad6e5ed12c83085a9d874d239aea0e025988cc33"
+)
+RECOVERED_LIDERSEA_IMAGE = (
+    "ghcr.io/snaraj/lidersea-com:v0.1.36@"
+    "sha256:9d3977dff5b5d5b18f4e56b60720ce48d39d59ef649776d073e73e43a895341a"
+)
+RECOVERED_LIDERSEA_RUNTIME_IMAGE = (
+    "sha256:942a0b4091957e6246ca72ffedc162287cdf69cadaa4a2e2c7aa8fda5a0475a3"
+)
+RECOVERED_LIDERSEA_OCI = "lidersea-com/lidersea-com-chart"
+RECOVERED_LIDERSEA_RELEASE = "lidersea-com/lidersea-com"
+RECOVERED_CONTROLLER_GENERATION_STEP_COUNT = 2
 
 TRANSACTION_ANNOTATION = "platform.snaraj.dev/flux-rbac-transaction"
 PROOF_ANNOTATION = "platform.snaraj.dev/flux-rbac-convergence-proof"
@@ -8160,7 +8179,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v039",
+        "platform_release_contract_recovery_v040",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -9312,6 +9331,122 @@ def validate_recovered_naranjo_static_objects(
             )
 
 
+def validate_recovered_controller_drift(
+    planned: object, current: object
+) -> None:
+    """Allow only the two already-observed controller metadata rollouts."""
+
+    names = {"source-controller", "kustomize-controller", "helm-controller"}
+    if not isinstance(planned, Mapping) or not isinstance(current, Mapping) or set(planned) != names or set(current) != names:
+        raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+    if planned["source-controller"] != current["source-controller"]:
+        raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+    mutable = {"generation", "podUid", "resourceVersion", "rollbackObject"}
+    for name in ("kustomize-controller", "helm-controller"):
+        before, after = planned[name], current[name]
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping) or set(before) != set(after):
+            raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+        if any(before[key] != after[key] for key in set(before) - mutable):
+            raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+        before_generation, after_generation = before.get("generation"), after.get("generation")
+        if (
+            type(before_generation) is not int
+            or type(after_generation) is not int
+            or after_generation != before_generation + RECOVERED_CONTROLLER_GENERATION_STEP_COUNT
+            or before.get("uid") != after.get("uid")
+            or before.get("podReplicaSetUid") != after.get("podReplicaSetUid")
+            or before.get("podRestarts") != 0
+            or after.get("podRestarts") != 0
+        ):
+            raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+
+
+def validate_recovered_lidersea_movement(
+    old: ModuleType,
+    client: object,
+    planned_flux: Mapping[str, object],
+    current_flux: Mapping[str, object],
+    planned_workloads: Mapping[str, object],
+    current_workloads: Mapping[str, object],
+) -> None:
+    """Admit only the signed Lidersea release that landed during recovery."""
+
+    planned_oci, current_oci = planned_flux.get("oci"), current_flux.get("oci")
+    planned_helm, current_helm = planned_flux.get("helm"), current_flux.get("helm")
+    if any(not isinstance(value, Mapping) for value in (planned_oci, current_oci, planned_helm, current_helm)):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_BASELINE_INVALID")
+    before_oci, after_oci = planned_oci.get(RECOVERED_LIDERSEA_OCI), current_oci.get(RECOVERED_LIDERSEA_OCI)
+    before_helm, after_helm = planned_helm.get(RECOVERED_LIDERSEA_RELEASE), current_helm.get(RECOVERED_LIDERSEA_RELEASE)
+    before_workload, after_workload = planned_workloads.get(RECOVERED_LIDERSEA_RELEASE), current_workloads.get(RECOVERED_LIDERSEA_RELEASE)
+    if any(not isinstance(value, Mapping) for value in (before_oci, after_oci, before_helm, after_helm, before_workload, after_workload)):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_BASELINE_INVALID")
+
+    def same_except(before: Mapping[str, object], after: Mapping[str, object], mutable: set[str]) -> bool:
+        return set(before) == set(after) and all(before[key] == after[key] for key in set(before) - mutable)
+
+    if (
+        before_oci.get("chartVersion") != RECOVERED_LIDERSEA_FROM_VERSION
+        or after_oci.get("chartVersion") != RECOVERED_LIDERSEA_TO_VERSION
+        or after_oci.get("upstreamDigest") != RECOVERED_LIDERSEA_CHART_DIGEST
+        or after_oci.get("sourceVerifiedReason") != "Succeeded"
+        or not same_except(before_oci, after_oci, {"resourceVersion", "revision", "chartVersion", "upstreamDigest", "storedArtifactDigest"})
+    ):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_OCI_INVALID")
+    before_history, after_history = before_helm.get("historyRevision"), after_helm.get("historyRevision")
+    if (
+        after_helm.get("attemptedRevisionDigest") != RECOVERED_LIDERSEA_CHART_DIGEST
+        or after_helm.get("historyOciDigest") != RECOVERED_LIDERSEA_CHART_DIGEST
+        or str(after_helm.get("historyChartVersion", "")).split("+", 1)[0] != RECOVERED_LIDERSEA_TO_VERSION
+        or before_helm.get("generation") != after_helm.get("generation")
+        or type(before_history) is not int
+        or type(after_history) is not int
+        or after_history != before_history + RECOVERED_LIDERSEA_HISTORY_STEP_COUNT
+        or not same_except(before_helm, after_helm, {"resourceVersion", "attemptedRevision", "attemptedRevisionDigest", "historyRevision", "historyChartVersion", "historyOciDigest", "historyDigest"})
+    ):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_HELM_INVALID")
+    before_generation, after_generation = before_workload.get("generation"), after_workload.get("generation")
+    if (
+        type(before_generation) is not int
+        or type(after_generation) is not int
+        or after_generation != before_generation + RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT
+        or before_workload.get("replicas") != 2
+        or after_workload.get("replicas") != 2
+        or not same_except(before_workload, after_workload, {"generation", "templateSha256", "semanticSha256", "semanticWithoutProofSha256", "pods", "ownedObjects"})
+    ):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_WORKLOAD_INVALID")
+    before_owned, after_owned = before_workload.get("ownedObjects"), after_workload.get("ownedObjects")
+    if not isinstance(before_owned, list) or not isinstance(after_owned, list):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_OWNERSHIP_INVALID")
+    before_by_kind = {row.get("kind"): row for row in before_owned if isinstance(row, Mapping)}
+    after_by_kind = {row.get("kind"): row for row in after_owned if isinstance(row, Mapping)}
+    if set(before_by_kind) != set(old.SITE_INVENTORY_KINDS) or set(after_by_kind) != set(old.SITE_INVENTORY_KINDS):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_OWNERSHIP_INVALID")
+    for kind in before_by_kind:
+        if not same_except(before_by_kind[kind], after_by_kind[kind], {"semanticSha256", "semanticWithoutProofSha256"}):
+            raise RecoveryRequired("RECOVERY_LIDERSEA_OWNERSHIP_INVALID")
+    pods = after_workload.get("pods")
+    if not isinstance(pods, list) or len(pods) != 2 or any(not isinstance(row, Mapping) or row.get("restartCounts") != [0] or row.get("images") != [RECOVERED_LIDERSEA_RUNTIME_IMAGE] for row in pods):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_POD_STATE_INVALID")
+    deployments = old.collection_items(client, "/apis/apps/v1/namespaces/lidersea-com/deployments")
+    matches = [row for row in deployments if isinstance(row.get("metadata"), Mapping) and row["metadata"].get("name") == "lidersea-com"]
+    if len(matches) != 1:
+        raise RecoveryRequired("RECOVERY_LIDERSEA_DEPLOYMENT_INVALID")
+    deployment = matches[0]
+    metadata, spec = deployment.get("metadata"), deployment.get("spec")
+    containers = spec.get("template", {}).get("spec", {}).get("containers") if isinstance(spec, Mapping) else None
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(spec, Mapping)
+        or metadata.get("generation") != after_generation
+        or metadata.get("annotations", {}).get("deployment.kubernetes.io/revision") != RECOVERED_LIDERSEA_DEPLOYMENT_REVISION
+        or spec.get("replicas") != 2
+        or not isinstance(containers, list)
+        or len(containers) != 1
+        or containers[0].get("image") != RECOVERED_LIDERSEA_IMAGE
+    ):
+        raise RecoveryRequired("RECOVERY_LIDERSEA_DEPLOYMENT_INVALID")
+
+
 def accepted_naranjo_movement(
     old: ModuleType,
     client: object,
@@ -9332,6 +9467,14 @@ def accepted_naranjo_movement(
     current_workloads = old.workload_snapshot(client)
     old.validate_helm_workload_inventory(current_flux, current_workloads)
     old.validate_clean_workload_baseline(current_workloads)
+    validate_recovered_lidersea_movement(
+        old,
+        client,
+        planned_flux,
+        current_flux,
+        planned_workloads,
+        current_workloads,
+    )
     planned_oci = planned_flux.get("oci")
     planned_helm = planned_flux.get("helm")
     current_oci = current_flux.get("oci")
@@ -9448,6 +9591,7 @@ def accepted_naranjo_movement(
         new_workload,
         {
             "generation",
+            "replicas",
             "templateSha256",
             "semanticSha256",
             "semanticWithoutProofSha256",
@@ -9461,7 +9605,8 @@ def accepted_naranjo_movement(
     if (
         type(old_generation) is not int
         or type(new_generation) is not int
-        or new_generation != old_generation + RECOVERED_RELEASE_STEP_COUNT
+        or new_generation
+        != old_generation + RECOVERED_WORKLOAD_GENERATION_STEP_COUNT
         or new_workload.get("semanticSha256")
         != new_workload.get("semanticWithoutProofSha256")
     ):
@@ -9514,16 +9659,22 @@ def accepted_naranjo_movement(
     expected_flux = copy.deepcopy(dict(planned_flux))
     expected_flux["oci"][RECOVERED_NARANJO_OCI] = copy.deepcopy(new_oci)  # type: ignore[index]
     expected_flux["helm"][RECOVERED_NARANJO_RELEASE] = copy.deepcopy(new_helm)  # type: ignore[index]
+    expected_flux["oci"][RECOVERED_LIDERSEA_OCI] = copy.deepcopy(current_oci[RECOVERED_LIDERSEA_OCI])  # type: ignore[index]
+    expected_flux["helm"][RECOVERED_LIDERSEA_RELEASE] = copy.deepcopy(current_helm[RECOVERED_LIDERSEA_RELEASE])  # type: ignore[index]
     if old.flux_baseline_without_resource_versions(
         expected_flux
     ) != old.flux_baseline_without_resource_versions(current_flux):
         raise RecoveryRequired("RECOVERY_UNEXPECTED_FLUX_DRIFT")
     expected_workloads = copy.deepcopy(dict(planned_workloads))
     expected_workloads[RECOVERED_NARANJO_RELEASE] = copy.deepcopy(new_workload)
+    expected_workloads[RECOVERED_LIDERSEA_RELEASE] = copy.deepcopy(
+        current_workloads[RECOVERED_LIDERSEA_RELEASE]
+    )
     if expected_workloads != current_workloads:
         raise RecoveryRequired("RECOVERY_UNEXPECTED_WORKLOAD_DRIFT")
-    if old.controller_snapshot(client) != baselines.get("controllers"):
-        raise RecoveryRequired("RECOVERY_CONTROLLER_DRIFT")
+    validate_recovered_controller_drift(
+        baselines.get("controllers"), old.controller_snapshot(client)
+    )
     if old.public_health() != baselines.get("publicSites"):
         raise RecoveryRequired("RECOVERY_PUBLIC_SITE_DRIFT")
     deployment_proof = validate_recovered_naranjo_deployment(
@@ -9607,6 +9758,24 @@ def validated_recovery_movement(
     ):
         raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
     return rows, pod_proof
+
+
+def stable_recovery_movement(movement: Mapping[str, object]) -> bytes:
+    """Exclude API concurrency tokens after both snapshots validate fully."""
+
+    stable = copy.deepcopy(dict(movement))
+    rows = stable.get("verificationRows")
+    if not isinstance(rows, MutableMapping):
+        raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+    for name in ("oci", "helm"):
+        row = rows.get(name)
+        if not isinstance(row, MutableMapping) or (
+            row.get("resourceVersion") is not None
+            and not isinstance(row.get("resourceVersion"), str)
+        ):
+            raise RecoveryRequired("RECOVERY_VERIFICATION_ROWS_INVALID")
+        row.pop("resourceVersion", None)
+    return canonical_json(stable)
 
 
 def run_recovered_rollback_once(
@@ -9899,9 +10068,9 @@ def recover_v030(custody: Mapping[str, object]) -> None:
                 plan,
                 expected_history_steps=RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
             )
-            if canonical_json(initial_movement) != canonical_json(
-                terminal_movement
-            ):
+            if stable_recovery_movement(
+                initial_movement
+            ) != stable_recovery_movement(terminal_movement):
                 raise RecoveryRequired("RECOVERY_TERMINAL_MOVEMENT_CHANGED")
             old.write_receipt(
                 "rolled-back",

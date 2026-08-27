@@ -703,6 +703,15 @@ steps from the captured baseline: the original four protected site releases
 plus those two reconciliations. It rejects a nonterminal journal and history
 deltas of five, seven, or any other value; chart, image, generation, workload,
 ownership, and runtime proof checks remain unchanged.
+Before that continuation could publish its receipt, the pre-GitOps OCI SemVer
+selector legitimately advanced Naranjo to the protected 0.1.49 release and its
+reviewed one-replica shape. The v0.1.40 successor binds that exact chart and
+image digest, eight-entry Helm-history delta, Deployment revision 23, and eight
+Deployment generations while keeping release count separate. It still rejects
+any other chart, image, replica count, history, generation, ownership, runtime,
+or unrelated-resource change. The same closed receipt binds Lidersea's signed
+0.1.34-to-0.1.36 progression and the two controller metadata-only rollouts that
+preserved images, arguments, ReplicaSet identities, and zero restart counts.
 For the three static Helm-owned objects it admits only the chart-version label
 movement: their UIDs and exact live safe shapes are closed, and projecting that
 single label back to 0.1.42 must reproduce the captured semantic hashes. The
