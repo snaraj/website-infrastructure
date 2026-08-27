@@ -64,6 +64,9 @@ LIDERSEA_TEMPLATE_SHA256 = (
 LIDERSEA_SEMANTIC_SHA256 = (
     "43f4eb5a9fa7994f42d68f7b0f0eacf14a1fe92f49e1dc2ddbd84f763fd7fa23"
 )
+LIDERSEA_RUNTIME_IMAGE = (
+    "sha256:cc144382646dc18d0ac1fe21c25e7fa7dbaad713f2d377456cb6496da8dfa0c0"
+)
 LIDERSEA_OWNED_SEMANTIC_SHA256 = {
     "Deployment": LIDERSEA_SEMANTIC_SHA256,
     "NetworkPolicy": "2013853fae8d444dfd6a7817cb47c16acc9f682d4c28172f83ca4fea232d4c73",
@@ -720,7 +723,7 @@ def _lidersea_fixture_rows():
     current_workload["semanticSha256"] = LIDERSEA_SEMANTIC_SHA256
     current_workload["semanticWithoutProofSha256"] = LIDERSEA_SEMANTIC_SHA256
     for pod in current_workload["pods"]:
-        pod["images"] = [transaction.RECOVERED_LIDERSEA_RUNTIME_IMAGE]
+        pod["images"] = [LIDERSEA_RUNTIME_IMAGE]
     for item in current_workload["ownedObjects"]:
         expected = LIDERSEA_OWNED_SEMANTIC_SHA256[item["kind"]]
         item["semanticSha256"] = expected
@@ -975,6 +978,10 @@ class ExactReleaseMovementTests(unittest.TestCase):
             transaction.RECOVERED_LIDERSEA_IMAGE,
             "ghcr.io/snaraj/lidersea-com:v0.1.37@"
             "sha256:22673a01a892da2b644369ee3c2d0339c13ef8eddc1d3423411ce90bbe25d8b1",
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_RUNTIME_IMAGE,
+            LIDERSEA_RUNTIME_IMAGE,
         )
 
     def test_recovered_release_tuple_is_literal_and_exact(self):
