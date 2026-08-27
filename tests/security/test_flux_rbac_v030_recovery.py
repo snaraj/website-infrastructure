@@ -58,6 +58,18 @@ SERVICE_CLUSTER_IP = str(ipaddress.ip_address(0xC0000201))
 SERVICE_CLUSTER_IP_ALT = str(ipaddress.ip_address(0xC0000202))
 POD_IP = str(ipaddress.ip_address(0xC0000265))
 POD_IP_2 = str(ipaddress.ip_address(0xC0000266))
+LIDERSEA_TEMPLATE_SHA256 = (
+    "94062c2c572f17612e48eabd335dec4efc5e60be0e021196df81c4f6b5aa27e3"
+)
+LIDERSEA_SEMANTIC_SHA256 = (
+    "ba4670df69461333e84ff584d22f36ccba8f7ecd8052157311679b5a2813779b"
+)
+LIDERSEA_OWNED_SEMANTIC_SHA256 = {
+    "Deployment": LIDERSEA_SEMANTIC_SHA256,
+    "NetworkPolicy": "ddf0761f5b8e2e1b73c57c8b24d3afca2f49dab2168b5e9c414d122b4a541334",
+    "Service": "6b08ea46914e6a3d5c2c4eb817addb1814bcdb33f33840824175c9229d79fa98",
+    "ServiceAccount": "22431cd2ce20d8083e4f857c8dd800d41f52a6c265dae38fd699132e9e4fc736",
+}
 
 
 def _canonical(value):
@@ -704,13 +716,13 @@ def _lidersea_fixture_rows():
     planned_workload = _workload("3", 12)
     current_workload = copy.deepcopy(planned_workload)
     current_workload["generation"] = 12 + transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT
-    current_workload["templateSha256"] = transaction.RECOVERED_LIDERSEA_TEMPLATE_SHA256
-    current_workload["semanticSha256"] = transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256
-    current_workload["semanticWithoutProofSha256"] = transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256
+    current_workload["templateSha256"] = LIDERSEA_TEMPLATE_SHA256
+    current_workload["semanticSha256"] = LIDERSEA_SEMANTIC_SHA256
+    current_workload["semanticWithoutProofSha256"] = LIDERSEA_SEMANTIC_SHA256
     for pod in current_workload["pods"]:
         pod["images"] = [transaction.RECOVERED_LIDERSEA_RUNTIME_IMAGE]
     for item in current_workload["ownedObjects"]:
-        expected = transaction.RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256[item["kind"]]
+        expected = LIDERSEA_OWNED_SEMANTIC_SHA256[item["kind"]]
         item["semanticSha256"] = expected
         item["semanticWithoutProofSha256"] = expected
     deployment = {
@@ -934,6 +946,20 @@ class ExactIncidentFingerprintTests(unittest.TestCase):
 
 
 class ExactReleaseMovementTests(unittest.TestCase):
+    def test_lidersea_semantic_authorization_has_independent_literal_oracle(self):
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_TEMPLATE_SHA256,
+            LIDERSEA_TEMPLATE_SHA256,
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256,
+            LIDERSEA_SEMANTIC_SHA256,
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256,
+            LIDERSEA_OWNED_SEMANTIC_SHA256,
+        )
+
     def test_recovered_release_tuple_is_literal_and_exact(self):
         self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.49")
         self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 6)
