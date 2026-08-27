@@ -56,6 +56,8 @@ SUBSTITUTED_UID = _synthetic_uid("5")
 POD_UID_2 = _synthetic_uid("6")
 SERVICE_CLUSTER_IP = str(ipaddress.ip_address(0xC0000201))
 SERVICE_CLUSTER_IP_ALT = str(ipaddress.ip_address(0xC0000202))
+POD_IP = str(ipaddress.ip_address(0xC0000265))
+POD_IP_2 = str(ipaddress.ip_address(0xC0000266))
 
 
 def _canonical(value):
@@ -622,6 +624,8 @@ def _raw_pod(deployment, uid=POD_UID, suffix="abcde"):
             "tolerationSeconds": 300,
         },
     ]
+    pod_ip = POD_IP if uid == POD_UID else POD_IP_2
+    container_id = "a" * 64 if uid == POD_UID else "b" * 64
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -631,6 +635,11 @@ def _raw_pod(deployment, uid=POD_UID, suffix="abcde"):
             "uid": uid,
             "resourceVersion": "22",
             "labels": labels,
+            "annotations": {
+                "cni.projectcalico.org/containerID": container_id,
+                "cni.projectcalico.org/podIP": f"{pod_ip}/32",
+                "cni.projectcalico.org/podIPs": f"{pod_ip}/32",
+            },
             "ownerReferences": [
                 _owner_reference(
                     "ReplicaSet", "naranjo-online-reviewedhash", REPLICA_SET_UID
@@ -640,6 +649,8 @@ def _raw_pod(deployment, uid=POD_UID, suffix="abcde"):
         "spec": spec,
         "status": {
             "phase": "Running",
+            "podIP": pod_ip,
+            "podIPs": [{"ip": pod_ip}],
             "conditions": [{"type": "Ready", "status": "True"}],
             "containerStatuses": [
                 {
@@ -886,6 +897,44 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "ownerChainSha256",
             },
         )
+
+    def test_calico_projection_is_bound_into_pod_metadata_proof(self):
+        old, plan, _flux, _workloads, _controllers, _sites, _objects = (
+            _movement_fixture()
+        )
+        baseline = transaction.accepted_naranjo_movement(
+            old, object(), plan
+        )["podProof"]["pods"]
+
+        old, plan, _flux, _workloads, _controllers, _sites, objects = (
+            _movement_fixture()
+        )
+        objects["pod"]["metadata"]["annotations"][
+            "cni.projectcalico.org/containerID"
+        ] = "c" * 64
+        changed = transaction.accepted_naranjo_movement(
+            old, object(), plan
+        )["podProof"]["pods"]
+
+        self.assertEqual(len(baseline), len(changed))
+        changed_metadata_rows = 0
+        for before, after in zip(baseline, changed, strict=True):
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in before.items()
+                    if key != "podMetadataSha256"
+                },
+                {
+                    key: value
+                    for key, value in after.items()
+                    if key != "podMetadataSha256"
+                },
+            )
+            changed_metadata_rows += (
+                before["podMetadataSha256"] != after["podMetadataSha256"]
+            )
+        self.assertEqual(changed_metadata_rows, 1)
 
     def test_patch_release_static_label_churn_is_accepted_after_live_shape_validation(self):
         old, plan, _flux, workloads, _controllers, _sites, objects = (
@@ -1447,6 +1496,31 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 )
             }
 
+        def calico_annotation(field, value):
+            def mutate(
+                _plan, _flux, _workloads, _controllers, _sites, objects
+            ):
+                objects["pod"]["metadata"]["annotations"][field] = value
+
+            return mutate
+
+        def extra_calico_annotation(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["metadata"]["annotations"][
+                "example.invalid/foreign"
+            ] = "true"
+
+        def mismatched_status_pod_ip(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["status"]["podIP"] = POD_IP_2
+
+        def extra_status_pod_ip(
+            _plan, _flux, _workloads, _controllers, _sites, objects
+        ):
+            objects["pod"]["status"]["podIPs"].append({"ip": POD_IP_2})
+
         def owned_deployment_projection(
             _plan, _flux, workloads, _controllers, _sites, _objects
         ):
@@ -1547,6 +1621,18 @@ class ExactReleaseMovementTests(unittest.TestCase):
             "Pod finalizer": pod_finalizer,
             "ReplicaSet finalizer": replica_set_finalizer,
             "Pod behavior annotation": pod_behavior_annotation,
+            "Calico extra annotation": extra_calico_annotation,
+            "Calico malformed container ID": calico_annotation(
+                "cni.projectcalico.org/containerID", "not-a-container-id"
+            ),
+            "Calico non-host prefix": calico_annotation(
+                "cni.projectcalico.org/podIP", f"{POD_IP}/24"
+            ),
+            "Calico aggregate mismatch": calico_annotation(
+                "cni.projectcalico.org/podIPs", f"{POD_IP_2}/32"
+            ),
+            "Calico Pod status mismatch": mismatched_status_pod_ip,
+            "Calico extra status IP": extra_status_pod_ip,
             "owned Deployment semantic projection": owned_deployment_projection,
             "Pod owner controller": pod_owner_field("controller", False),
             "Pod owner API version": pod_owner_field("apiVersion", "v1"),
