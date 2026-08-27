@@ -58,6 +58,18 @@ SERVICE_CLUSTER_IP = str(ipaddress.ip_address(0xC0000201))
 SERVICE_CLUSTER_IP_ALT = str(ipaddress.ip_address(0xC0000202))
 POD_IP = str(ipaddress.ip_address(0xC0000265))
 POD_IP_2 = str(ipaddress.ip_address(0xC0000266))
+LIDERSEA_TEMPLATE_SHA256 = (
+    "94062c2c572f17612e48eabd335dec4efc5e60be0e021196df81c4f6b5aa27e3"
+)
+LIDERSEA_SEMANTIC_SHA256 = (
+    "ba4670df69461333e84ff584d22f36ccba8f7ecd8052157311679b5a2813779b"
+)
+LIDERSEA_OWNED_SEMANTIC_SHA256 = {
+    "Deployment": LIDERSEA_SEMANTIC_SHA256,
+    "NetworkPolicy": "ddf0761f5b8e2e1b73c57c8b24d3afca2f49dab2168b5e9c414d122b4a541334",
+    "Service": "6b08ea46914e6a3d5c2c4eb817addb1814bcdb33f33840824175c9229d79fa98",
+    "ServiceAccount": "22431cd2ce20d8083e4f857c8dd800d41f52a6c265dae38fd699132e9e4fc736",
+}
 
 
 def _canonical(value):
@@ -80,6 +92,15 @@ def _valid_movement(rows=None):
     verification_rows["workload"].setdefault("pods", [{"uid": POD_UID}])
     return {
         "verificationRows": verification_rows,
+        "companionRows": {
+            "oci": {"revision": "reviewed", "resourceVersion": "1"},
+            "helm": {"revision": "reviewed", "resourceVersion": "1"},
+            "workload": {"semanticSha256": "c" * 64},
+            "controllers": {
+                name: {"semanticSha256": "d" * 64, "resourceVersion": "1"}
+                for name in transaction.CONTROLLERS
+            },
+        },
         "podProof": {
             "deploymentSha256": "5" * 64,
             "pods": [
@@ -247,10 +268,11 @@ def _owned_objects(marker):
 
 
 def _workload(marker, generation):
+    replicas = 1 if marker == "2" else 2
     return {
         "uid": DEPLOYMENT_UID,
         "generation": generation,
-        "replicas": 2,
+        "replicas": replicas,
         "templateSha256": marker * 64,
         "semanticSha256": marker * 64,
         "proofAnnotation": None,
@@ -265,7 +287,7 @@ def _workload(marker, generation):
                     else "old-reviewed-image"
                 ],
             },
-            {
+            *([{
                 "uid": POD_UID_2,
                 "restartCounts": [0],
                 "images": [
@@ -273,7 +295,7 @@ def _workload(marker, generation):
                     if marker == "2"
                     else "old-reviewed-image"
                 ],
-            },
+            }] if replicas == 2 else []),
         ],
         "ownedObjects": _owned_objects(marker),
     }
@@ -310,18 +332,18 @@ def _raw_deployment():
             "namespace": "naranjo-online",
             "uid": DEPLOYMENT_UID,
             "resourceVersion": "20",
-            "generation": 25,
+            "generation": 21 + transaction.RECOVERED_WORKLOAD_GENERATION_STEP_COUNT,
             "labels": copy.deepcopy(metadata_labels),
             "annotations": {
                 "meta.helm.sh/release-name": "naranjo-online",
                 "meta.helm.sh/release-namespace": "naranjo-online",
                 "platform.snaraj.dev/deployment-ready": "true",
                 "platform.snaraj.dev/media-storage-ready": "false",
-                "deployment.kubernetes.io/revision": "21",
+                "deployment.kubernetes.io/revision": transaction.RECOVERED_TO_DEPLOYMENT_REVISION,
             },
         },
         "spec": {
-            "replicas": 2,
+            "replicas": 1,
             "revisionHistoryLimit": 3,
             "progressDeadlineSeconds": 600,
             "minReadySeconds": 0,
@@ -670,6 +692,77 @@ def _raw_pod(deployment, uid=POD_UID, suffix="abcde"):
     }
 
 
+def _lidersea_fixture_rows():
+    planned_oci = _oci(transaction.RECOVERED_LIDERSEA_FROM_VERSION, "3")
+    current_oci = copy.deepcopy(planned_oci)
+    current_oci.update(
+        resourceVersion="4",
+        revision=f"{transaction.RECOVERED_LIDERSEA_TO_VERSION}@{transaction.RECOVERED_LIDERSEA_CHART_DIGEST}",
+        chartVersion=transaction.RECOVERED_LIDERSEA_TO_VERSION,
+        upstreamDigest=transaction.RECOVERED_LIDERSEA_CHART_DIGEST,
+        storedArtifactDigest="sha256:" + "4" * 64,
+    )
+    planned_helm = _helm(transaction.RECOVERED_LIDERSEA_FROM_VERSION, "3", 12, generation=4)
+    current_helm = copy.deepcopy(planned_helm)
+    current_helm.update(
+        resourceVersion="4",
+        attemptedRevision=transaction.RECOVERED_LIDERSEA_TO_VERSION,
+        attemptedRevisionDigest=transaction.RECOVERED_LIDERSEA_CHART_DIGEST,
+        historyRevision=12 + transaction.RECOVERED_LIDERSEA_HISTORY_STEP_COUNT,
+        historyChartVersion=transaction.RECOVERED_LIDERSEA_TO_VERSION,
+        historyOciDigest=transaction.RECOVERED_LIDERSEA_CHART_DIGEST,
+        historyDigest="sha256:" + "4" * 64,
+    )
+    planned_workload = _workload("3", 12)
+    current_workload = copy.deepcopy(planned_workload)
+    current_workload["generation"] = 12 + transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT
+    current_workload["templateSha256"] = LIDERSEA_TEMPLATE_SHA256
+    current_workload["semanticSha256"] = LIDERSEA_SEMANTIC_SHA256
+    current_workload["semanticWithoutProofSha256"] = LIDERSEA_SEMANTIC_SHA256
+    for pod in current_workload["pods"]:
+        pod["images"] = [transaction.RECOVERED_LIDERSEA_RUNTIME_IMAGE]
+    for item in current_workload["ownedObjects"]:
+        expected = LIDERSEA_OWNED_SEMANTIC_SHA256[item["kind"]]
+        item["semanticSha256"] = expected
+        item["semanticWithoutProofSha256"] = expected
+    deployment = {
+        "metadata": {
+            "name": "lidersea-com",
+            "generation": 12 + transaction.RECOVERED_LIDERSEA_WORKLOAD_GENERATION_STEP_COUNT,
+            "annotations": {"deployment.kubernetes.io/revision": transaction.RECOVERED_LIDERSEA_DEPLOYMENT_REVISION},
+        },
+        "spec": {
+            "replicas": 2,
+            "template": {"spec": {"containers": [{"image": transaction.RECOVERED_LIDERSEA_IMAGE}]}},
+        },
+    }
+    return planned_oci, current_oci, planned_helm, current_helm, planned_workload, current_workload, deployment
+
+
+def _controller_fixture_rows():
+    planned = {"source-controller": {"podRestarts": 3, "generation": 2}}
+    current = copy.deepcopy(planned)
+    for name, uid in (("kustomize-controller", "kustomize-uid"), ("helm-controller", "helm-uid")):
+        planned[name] = {
+            "uid": uid,
+            "resourceVersion": "1",
+            "generation": 5,
+            "podUid": f"{uid}-old-pod",
+            "podReplicaSetUid": f"{uid}-rs",
+            "podRestarts": 0,
+            "semanticSha256": "a" * 64,
+            "rollbackObject": {"generation": 5},
+        }
+        current[name] = {
+            **planned[name],
+            "resourceVersion": "2",
+            "generation": 7,
+            "podUid": f"{uid}-new-pod",
+            "rollbackObject": {"generation": 7},
+        }
+    return planned, current
+
+
 def _movement_fixture():
     key_oci = transaction.RECOVERED_NARANJO_OCI
     key_release = transaction.RECOVERED_NARANJO_RELEASE
@@ -683,11 +776,17 @@ def _movement_fixture():
     }
     current_flux = {
         "oci": {key_oci: _oci(transaction.RECOVERED_TO_VERSION, "2")},
-        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 23)},
+        "helm": {key_release: _helm(transaction.RECOVERED_TO_VERSION, "2", 19 + transaction.RECOVERED_RELEASE_STEP_COUNT)},
     }
     planned_workloads = {key_release: _workload("1", 21)}
-    current_workloads = {key_release: _workload("2", 25)}
-    controllers = {"source-controller": {"podRestarts": 0}}
+    current_workloads = {key_release: _workload("2", 21 + transaction.RECOVERED_WORKLOAD_GENERATION_STEP_COUNT)}
+    lrows = _lidersea_fixture_rows()
+    lkey = transaction.RECOVERED_LIDERSEA_RELEASE
+    loci = transaction.RECOVERED_LIDERSEA_OCI
+    planned_flux["oci"][loci], current_flux["oci"][loci] = lrows[0], lrows[1]
+    planned_flux["helm"][lkey], current_flux["helm"][lkey] = lrows[2], lrows[3]
+    planned_workloads[lkey], current_workloads[lkey] = lrows[4], lrows[5]
+    planned_controllers, controllers = _controller_fixture_rows()
     public_sites = {"naranjo.online": {"status": 200}}
     deployment = _raw_deployment()
     static_objects = _raw_static_objects()
@@ -697,10 +796,7 @@ def _movement_fixture():
             transaction.RECOVERED_FROM_VERSION
         )
     replica_set = _raw_replica_set(deployment)
-    pods = [
-        _raw_pod(deployment),
-        _raw_pod(deployment, POD_UID_2, "fghij"),
-    ]
+    pods = [_raw_pod(deployment)]
     current_workload = current_workloads[key_release]
     _sync_workload_with_static_objects(
         planned_workloads[key_release], planned_static_objects
@@ -711,7 +807,7 @@ def _movement_fixture():
         "baselines": {
             "flux": planned_flux,
             "workloads": planned_workloads,
-            "controllers": copy.deepcopy(controllers),
+            "controllers": copy.deepcopy(planned_controllers),
             "publicSites": copy.deepcopy(public_sites),
         }
     }
@@ -725,6 +821,8 @@ def _movement_fixture():
 
     def collection(_client, url):
         if url.endswith("/deployments"):
+            if "/namespaces/lidersea-com/" in url:
+                return [copy.deepcopy(lrows[6])]
             return [copy.deepcopy(deployment)]
         if url.endswith("/replicasets"):
             return [copy.deepcopy(replica_set)]
@@ -848,23 +946,38 @@ class ExactIncidentFingerprintTests(unittest.TestCase):
 
 
 class ExactReleaseMovementTests(unittest.TestCase):
+    def test_lidersea_semantic_authorization_has_independent_literal_oracle(self):
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_TEMPLATE_SHA256,
+            LIDERSEA_TEMPLATE_SHA256,
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_SEMANTIC_SHA256,
+            LIDERSEA_SEMANTIC_SHA256,
+        )
+        self.assertEqual(
+            transaction.RECOVERED_LIDERSEA_OWNED_SEMANTIC_SHA256,
+            LIDERSEA_OWNED_SEMANTIC_SHA256,
+        )
+
     def test_recovered_release_tuple_is_literal_and_exact(self):
-        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.46")
-        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 4)
-        self.assertEqual(transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT, 6)
-        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "21")
+        self.assertEqual(transaction.RECOVERED_TO_VERSION, "0.1.49")
+        self.assertEqual(transaction.RECOVERED_RELEASE_STEP_COUNT, 6)
+        self.assertEqual(transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT, 8)
+        self.assertEqual(transaction.RECOVERED_WORKLOAD_GENERATION_STEP_COUNT, 8)
+        self.assertEqual(transaction.RECOVERED_TO_DEPLOYMENT_REVISION, "23")
         self.assertEqual(
             transaction.RECOVERED_TO_CHART_DIGEST,
-            "sha256:a20f74c9b60463c552c47071e42883828a610f3a5d2b00f3524b165e"
-            "7a67cf68",
+            "sha256:0fbbf8e87b22002d5435c272a19af37a577012ae20ccf0a1be5f6b96c"
+            "ca90ad1",
         )
         self.assertEqual(
             transaction.RECOVERED_TO_IMAGE,
-            "ghcr.io/snaraj/naranjo-online:v0.1.46@"
-            "sha256:ee9688618a35a2982ac939f5b527d51698e7a9f5a8ea75e0910807b044c15470",
+            "ghcr.io/snaraj/naranjo-online:v0.1.49@"
+            "sha256:05ec0b573e3e8dcfad8c4f84a800410f50f0fbadddd88ad199a46f22764c5633",
         )
 
-    def test_exact_four_release_two_replica_movement_is_accepted(self):
+    def test_exact_six_release_one_replica_movement_is_accepted(self):
         old, plan, current_flux, current_workloads, _controllers, _sites, _raw = (
             _movement_fixture()
         )
@@ -881,7 +994,7 @@ class ExactReleaseMovementTests(unittest.TestCase):
             set(movement["podProof"]), {"deploymentSha256", "pods"}
         )
         self.assertEqual(
-            movement["verificationRows"]["helm"]["historyRevision"], 23
+            movement["verificationRows"]["helm"]["historyRevision"], 25
         )
         self.assertEqual(
             plan["baselines"]["flux"]["helm"][
@@ -893,12 +1006,12 @@ class ExactReleaseMovementTests(unittest.TestCase):
             movement["verificationRows"]["helm"]["generation"], 7
         )
         self.assertEqual(
-            movement["verificationRows"]["workload"]["generation"], 25
+            movement["verificationRows"]["workload"]["generation"], 29
         )
         self.assertEqual(
-            movement["verificationRows"]["workload"]["replicas"], 2
+            movement["verificationRows"]["workload"]["replicas"], 1
         )
-        self.assertEqual(len(movement["podProof"]["pods"]), 2)
+        self.assertEqual(len(movement["podProof"]["pods"]), 1)
         self.assertEqual(
             set(movement["podProof"]["pods"][0]),
             {
@@ -911,6 +1024,39 @@ class ExactReleaseMovementTests(unittest.TestCase):
                 "ownerChainSha256",
             },
         )
+
+    def test_lidersea_companion_release_drift_is_exact_and_closed(self):
+        cases = {
+            "chart digest": lambda flux, workloads: flux["oci"][transaction.RECOVERED_LIDERSEA_OCI].__setitem__("upstreamDigest", "sha256:" + "0" * 64),
+            "history step": lambda flux, workloads: flux["helm"][transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("historyRevision", 12 + transaction.RECOVERED_LIDERSEA_HISTORY_STEP_COUNT + 1),
+            "replica shape": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].__setitem__("replicas", 1),
+            "runtime image": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["pods"][0].__setitem__("images", ["sha256:" + "0" * 64]),
+            "owned identity": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["ownedObjects"][0].__setitem__("uid", FOREIGN_UID),
+            "owned semantic pair": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE]["ownedObjects"][0].update(semanticSha256="f" * 64, semanticWithoutProofSha256="f" * 64),
+            "workload semantic pair": lambda flux, workloads: workloads[transaction.RECOVERED_LIDERSEA_RELEASE].update(semanticSha256="f" * 64, semanticWithoutProofSha256="f" * 64),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                old, plan, flux, workloads, _controllers, _sites, _objects = _movement_fixture()
+                mutate(flux, workloads)
+                with self.assertRaises(transaction.RecoveryRequired):
+                    transaction.accepted_naranjo_movement(old, object(), plan)
+
+    def test_controller_metadata_rollout_is_exact_and_closed(self):
+        planned, current = _controller_fixture_rows()
+        transaction.validate_recovered_controller_drift(planned, current)
+        for label, mutate in {
+            "generation": lambda rows: rows["helm-controller"].__setitem__("generation", 8),
+            "deployment uid": lambda rows: rows["helm-controller"].__setitem__("uid", "foreign"),
+            "replicaset uid": lambda rows: rows["helm-controller"].__setitem__("podReplicaSetUid", "foreign"),
+            "restart": lambda rows: rows["helm-controller"].__setitem__("podRestarts", 1),
+            "semantic": lambda rows: rows["helm-controller"].__setitem__("semanticSha256", "b" * 64),
+        }.items():
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(current)
+                mutate(mutated)
+                with self.assertRaisesRegex(transaction.RecoveryRequired, "RECOVERY_CONTROLLER_DRIFT"):
+                    transaction.validate_recovered_controller_drift(planned, mutated)
 
     def test_exact_terminal_history_movement_is_explicit_and_closed(self):
         old, plan, flux, _workloads, _controllers, _sites, _raw = (
@@ -935,9 +1081,12 @@ class ExactReleaseMovementTests(unittest.TestCase):
             plan,
             expected_history_steps=transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT,
         )
-        self.assertEqual(movement["verificationRows"]["helm"]["historyRevision"], 25)
+        self.assertEqual(movement["verificationRows"]["helm"]["historyRevision"], 27)
 
-        for delta in (5, 7):
+        for delta in (
+            transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT - 1,
+            transaction.RECOVERED_TERMINAL_HISTORY_STEP_COUNT + 1,
+        ):
             with self.subTest(delta=delta):
                 live["historyRevision"] = planned["historyRevision"] + delta
                 with self.assertRaisesRegex(
@@ -953,13 +1102,13 @@ class ExactReleaseMovementTests(unittest.TestCase):
                         ),
                     )
 
-        live["historyRevision"] = planned["historyRevision"] + 5
+        live["historyRevision"] = planned["historyRevision"] + 7
         with self.assertRaisesRegex(
             transaction.RecoveryRequired,
             "RECOVERY_NARANJO_HELM_REVISION_INVALID",
         ):
             transaction.accepted_naranjo_movement(
-                old, object(), plan, expected_history_steps=5
+                old, object(), plan, expected_history_steps=7
             )
 
     def test_only_restored_proof_generation_increment_is_accepted(self):
@@ -1230,14 +1379,16 @@ class ExactReleaseMovementTests(unittest.TestCase):
         )
 
         movement = transaction.accepted_naranjo_movement(old, object(), plan)
-        self.assertEqual(len(movement["podProof"]["pods"]), 2)
+        self.assertEqual(len(movement["podProof"]["pods"]), 1)
 
-    def test_three_and_five_release_steps_fail_closed(self):
+    def test_adjacent_history_and_workload_generation_deltas_fail_closed(self):
         for field in ("Helm history", "workload generation"):
-            for label, delta in {
-                "one-short": 3,
-                "one-extra": 5,
-            }.items():
+            expected = (
+                transaction.RECOVERED_RELEASE_STEP_COUNT
+                if field == "Helm history"
+                else transaction.RECOVERED_WORKLOAD_GENERATION_STEP_COUNT
+            )
+            for label, delta in {"one-short": expected - 1, "one-extra": expected + 1}.items():
                 with self.subTest(field=field, label=label):
                     old, plan, flux, workloads, _controllers, _sites, objects = (
                         _movement_fixture()
@@ -1269,12 +1420,12 @@ class ExactReleaseMovementTests(unittest.TestCase):
         for label, mutate in {
             "desired annotation": lambda replica_set: replica_set["metadata"][
                 "annotations"
-            ].__setitem__("deployment.kubernetes.io/desired-replicas", "1"),
+            ].__setitem__("deployment.kubernetes.io/desired-replicas", "2"),
             "max annotation": lambda replica_set: replica_set["metadata"][
                 "annotations"
-            ].__setitem__("deployment.kubernetes.io/max-replicas", "1"),
+            ].__setitem__("deployment.kubernetes.io/max-replicas", "2"),
             "spec replicas": lambda replica_set: replica_set["spec"].__setitem__(
-                "replicas", 1
+                "replicas", 2
             ),
         }.items():
             with self.subTest(label=label):
@@ -1291,7 +1442,11 @@ class ExactReleaseMovementTests(unittest.TestCase):
                     )
 
     def test_coherent_deployment_revision_substitution_fails_closed(self):
-        for substituted_revision in ("20", "22"):
+        expected_revision = int(transaction.RECOVERED_TO_DEPLOYMENT_REVISION)
+        for substituted_revision in (
+            str(expected_revision - 1),
+            str(expected_revision + 1),
+        ):
             with self.subTest(revision=substituted_revision):
                 old, plan, _flux, workloads, _controllers, _sites, objects = (
                     _movement_fixture()
@@ -1569,7 +1724,7 @@ class ExactReleaseMovementTests(unittest.TestCase):
         def substituted_direct_replicas(
             _plan, _flux, _workloads, _controllers, _sites, objects
         ):
-            objects["deployment"]["spec"]["replicas"] = 1
+            objects["deployment"]["spec"]["replicas"] = 2
 
         def substituted_direct_generation(
             _plan, _flux, _workloads, _controllers, _sites, objects
@@ -2080,6 +2235,12 @@ class RecoveryReceiptBindingTests(unittest.TestCase):
         extra_row = _valid_movement()
         extra_row["verificationRows"]["foreign"] = {"value": "unexpected"}
         cases["extra verification row"] = extra_row
+        missing_companion = _valid_movement()
+        missing_companion["companionRows"].pop("workload")
+        cases["partial companion rows"] = missing_companion
+        foreign_controller = _valid_movement()
+        foreign_controller["companionRows"]["controllers"]["foreign"] = {}
+        cases["foreign companion controller"] = foreign_controller
         extra_proof = _valid_movement()
         extra_proof["podProof"]["foreign"] = "unexpected"
         cases["extra Pod proof field"] = extra_proof
@@ -2685,6 +2846,79 @@ class RecoveryOrchestrationTests(unittest.TestCase):
         publish.assert_not_called()
         rollback.assert_not_called()
         old.write_receipt.assert_not_called()
+
+    def test_companion_semantic_change_between_terminal_reads_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("rolled-back")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["companionRows"]["workload"]["semanticSha256"] = "e" * 64
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            accepted.side_effect = [initial, changed]
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
+            ):
+                transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        publish.assert_not_called()
+        rollback.assert_not_called()
+        old.write_receipt.assert_not_called()
+
+    def test_controller_change_between_terminal_reads_fails_before_receipt(self):
+        old, _journal, rollback = self.fixture("rolled-back")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["companionRows"]["controllers"]["helm-controller"][
+            "semanticSha256"
+        ] = "e" * 64
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            accepted.side_effect = [initial, changed]
+            with self.assertRaisesRegex(
+                transaction.RecoveryRequired,
+                "RECOVERY_TERMINAL_MOVEMENT_CHANGED",
+            ):
+                transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        publish.assert_not_called()
+        rollback.assert_not_called()
+        old.write_receipt.assert_not_called()
+
+    def test_resource_version_change_between_valid_terminal_reads_is_accepted(self):
+        old, _journal, rollback = self.fixture("rolled-back")
+        initial = _valid_movement()
+        changed = copy.deepcopy(initial)
+        changed["verificationRows"]["oci"]["resourceVersion"] = "999"
+        changed["verificationRows"]["helm"]["resourceVersion"] = "1000"
+        changed["companionRows"]["oci"]["resourceVersion"] = "1001"
+        changed["companionRows"]["helm"]["resourceVersion"] = "1002"
+        changed["companionRows"]["controllers"]["helm-controller"][
+            "resourceVersion"
+        ] = "1003"
+        with self.patched_recovery(old, rollback) as (
+            custody,
+            _close,
+            publish,
+            accepted,
+            release,
+        ):
+            accepted.side_effect = [initial, changed]
+            transaction.recover_v030(custody)
+            release.assert_called_once_with(custody, require_main_tip=False)
+        publish.assert_called_once()
+        rollback.assert_not_called()
+        old.write_receipt.assert_called_once()
 
 
 class RecoveryDispatchTests(unittest.TestCase):
