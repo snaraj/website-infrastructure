@@ -59,10 +59,13 @@ It does the same for the fixed ClusterRoleBinding and RoleBinding collection
 paths using only `rbac.authorization.k8s.io/v1`. Present conflicting TypeMeta,
 an unknown site kind, or a missing/extra owned object still fails closed.
 
-It also makes and restores one collision-free `commonMetadata` annotation on
-the existing naranjo HelmRelease as a journaled runtime proof. The final state
-must match the captured HelmRelease semantics and the accepted workload
-baseline.
+It also makes and restores one collision-free, plan-hash annotation on exactly
+the existing naranjo Service through one exact temporary Helm post-renderer.
+That proves the controller-to-site-reconciler write path without changing the
+Deployment, ReplicaSet, Pods, ServiceAccount, NetworkPolicy, or unrelated site.
+The normal and restored HelmRelease specifications still forbid every
+post-renderer. The final state must match the captured HelmRelease semantics
+and the accepted workload baseline.
 
 The transaction never reads or applies
 `kubernetes/flux-system/access.yaml`. It does not install Flux, reconcile its
@@ -122,8 +125,8 @@ The protected plan fails closed unless all of these agree:
 - every touched object's captured UID, resourceVersion, and semantic prestate;
 - the exact canonical plan bytes and the owner-reviewed plan SHA-256.
 
-This one-time executable authorizes exactly platform tag `v0.1.36`, the next
-release after its reviewed `v0.1.35` protected base. `target.json` cannot select
+This one-time executable authorizes exactly platform tag `v0.1.37`, the next
+release after its reviewed `v0.1.36` protected base. `target.json` cannot select
 another otherwise-valid SemVer tag. If protected `main` advances before this
 candidate merges, stop and regenerate the candidate, tag binding, source
 manifest, tests, and review receipts together; do not reinterpret this blob for
@@ -143,7 +146,7 @@ unchanged. Prepare a new local `target.json` through the owner-controlled
 read-only ceremony, then install it as:
 
 ```text
-/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.36/input/target.json
+/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37/input/target.json
 owner: root:root
 mode: 0600
 ```
@@ -151,7 +154,7 @@ mode: 0600
 Keep the real file and its values out of Git, issues, pull requests, receipts,
 and terminal transcripts. Its fields mean:
 
-- `releaseTag`: exactly `v0.1.36`, whose immutable platform Release targets the
+- `releaseTag`: exactly `v0.1.37`, whose immutable platform Release targets the
   same source revision staged into custody;
 - `kubectl`: an absolute path to the reviewed Linux executable whose
   architecture-specific digest is pinned by the custodied `versions.env`;
@@ -174,7 +177,7 @@ ceremony; do not query or expose Secret data to populate this file.
 ## Root custody and stage zero
 
 Protected state lives under
-`/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.36`, with root ownership and
+`/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.37`, with root ownership and
 mode 0700 directories. Plans, journals, receipts, the private target, and
 custodied source files are mode 0600 except for both the mode-0700 custodied
 transaction blob and its mode-0700 installed launcher copy.
@@ -211,11 +214,11 @@ It accepts no other plan, incident, release movement, site, controller change,
 or unrelated drift. It reuses the v0.1.30 journal's existing crash-safe
 rollback and terminal receipt machinery, restores the original verifier even
 on failure, and stops after publishing both the old rolled-back receipt and a
-root-only v0.1.36 receipt binding the recovery release, terminal journal, exact
+root-only v0.1.37 receipt binding the recovery release, terminal journal, exact
 chart/image movement, and custody hashes.
 Run it once through the same isolated root process boundary with only `LC_ALL=C`
-and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.36-peeled-commit>`.
-Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.36
+and `CONFIRM_FLUX_RBAC_RECOVERY=recover-v030-<reviewed-old-plan-sha256>-with-<v0.1.37-peeled-commit>`.
+Only after `RECOVERED_V030` may the owner prepare and review a fresh v0.1.37
 plan. The `--plan` mode revalidates the exact root-only recovery receipt and
 its matching terminal v0.1.30 journal evidence before opening the fresh plan;
 the recovery mode never plans or applies forward state.

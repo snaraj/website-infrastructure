@@ -675,12 +675,18 @@ every registry or host-side violation. On a violation or doubt, stop, preserve
 all state, and use owner-reviewed recovery. Never compensate with `access.yaml`,
 manual kubectl, a forward retry, or a replan.
 
-The v0.1.36 release carries one owner-attended recovery for the authenticated
+The v0.1.37 release revalidates the already terminal authenticated
 v0.1.30 sequence-47 stop caused solely by Naranjo moving from 0.1.42 through
 exactly four sequential protected releases ending at 0.1.46. That mode must
-terminalize the old journal and publish its rolled-back receipt before a fresh
-v0.1.36 plan is captured. It does not broaden the normal rollback classifier,
-accept another release movement, or perform forward work.
+confirm the old rolled-back journal and publish a release-bound receipt before
+a fresh v0.1.37 plan is captured. It does not broaden the normal rollback
+classifier, accept another release movement, or perform forward work. The
+v0.1.36 forward attempt itself reached the Helm runtime proof, detected that
+site-wide common metadata legitimately rolled the Deployment, and then restored
+and verified the complete prestate. The v0.1.37 repair instead targets exactly
+the existing Naranjo Service with one temporary plan-hash-bound post-renderer;
+the Deployment, ReplicaSet, Pods, ServiceAccount, NetworkPolicy, and Lidersea
+inventory must remain semantically exact throughout.
 For the three static Helm-owned objects it admits only the chart-version label
 movement: their UIDs and exact live safe shapes are closed, and projecting that
 single label back to 0.1.42 must reproduce the captured semantic hashes. The
@@ -807,10 +813,11 @@ or change effective action by editing the plan.
    performs no ad-hoc Pod deletion, eviction, or scale-down. Reconfirm that
    rolled-out Deployment is fully ready without `cluster-admin`, then perform
    the separately plan-bound controlled upgrade of one existing HelmRelease
-   using only a collision-free
-   `spec.commonMetadata.annotations` change. Require current observed generation,
+   using only a collision-free, Service-targeted temporary
+   `spec.postRenderers.kustomize.patches` annotation. Require current observed generation,
    exactly one `Ready=True` with `reason=UpgradeSucceeded`, a later deployed Helm
-   revision, and a ready workload. Restore the captured spec under
+   revision, the exact Service UID with only the proof annotation changed, and
+   an otherwise byte-semantic-identical ready workload. Restore the captured spec under
    resourceVersion preconditions and prove the final Flux/workload state matches
    the accepted plan. Any concurrent change is `recovery-required`, never an
    overwrite opportunity.
