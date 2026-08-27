@@ -67,14 +67,14 @@ TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 # enter custody only through the one platform release that this change creates.
 # If the protected base advances before merge, the candidate and this binding
 # must be regenerated and reviewed together.
-AUTHORIZED_RELEASE_TAG = "v0.1.34"
+AUTHORIZED_RELEASE_TAG = "v0.1.35"
 DNS_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?\Z")
 UID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 
 STATE_ROOT = Path(
-    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.34"
+    "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.35"
 )
 STATE_PARENT = STATE_ROOT.parent
 CUSTODY_ROOT = STATE_ROOT / "custody"
@@ -98,7 +98,7 @@ ORACLE_REL = "scripts/flux_rbac_denial_oracle.py"
 KUBECONFIG_VALIDATOR_REL = "scripts/validate_kubeconfig_snapshot.py"
 PLATFORM_CONTRACT_REL = "scripts/ci/platform_release_contract.py"
 VERSIONS_REL = "versions.env"
-RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v034-flux-labels.md"
+RELEASE_FRAGMENT_REL = "changelog.d/141-flux-rbac-v035-calico-pod-annotations.md"
 
 RECOVERED_STATE_ROOT = Path(
     "/var/lib/website-infrastructure/flux-rbac-convergence-v0.1.30"
@@ -8087,7 +8087,7 @@ def validate_recovery_release_identity(
         raise TransactionError("RECOVERY_RUNTIME_CUSTODY_SUBSTITUTED")
     contract = load_module(
         custody_path(PLATFORM_CONTRACT_REL),
-        "platform_release_contract_recovery_v034",
+        "platform_release_contract_recovery_v035",
     )
     source = verify_release_identity(
         str(custody["sourceRevision"]),
@@ -8552,6 +8552,50 @@ def validate_recovered_naranjo_pods(
             "uid": reference["uid"],
         }
 
+    def calico_annotations(
+        value: Mapping[str, object], status: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Validate Calico's exact runtime-only Pod network projection."""
+
+        container_id_key = "cni.projectcalico.org/containerID"
+        pod_ip_key = "cni.projectcalico.org/podIP"
+        pod_ips_key = "cni.projectcalico.org/podIPs"
+        if set(value) != {container_id_key, pod_ip_key, pod_ips_key}:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_ANNOTATIONS_INVALID")
+        container_id = value.get(container_id_key)
+        annotated_ip = value.get(pod_ip_key)
+        annotated_ips = value.get(pod_ips_key)
+        status_ip = status.get("podIP")
+        status_ips = status.get("podIPs")
+        if (
+            not isinstance(container_id, str)
+            or SHA256_RE.fullmatch(container_id) is None
+            or not isinstance(annotated_ip, str)
+            or not isinstance(annotated_ips, str)
+            or not isinstance(status_ip, str)
+            or not isinstance(status_ips, list)
+            or len(status_ips) != 1
+            or not isinstance(status_ips[0], Mapping)
+            or set(status_ips[0]) != {"ip"}
+            or status_ips[0].get("ip") != status_ip
+            or annotated_ips != annotated_ip
+        ):
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_ANNOTATIONS_INVALID")
+        try:
+            interface = ipaddress.ip_interface(annotated_ip)
+        except ValueError as exc:
+            raise RecoveryRequired(
+                "RECOVERY_NARANJO_POD_ANNOTATIONS_INVALID"
+            ) from exc
+        canonical_host = f"{interface.ip}/{interface.max_prefixlen}"
+        if annotated_ip != canonical_host or str(interface.ip) != status_ip:
+            raise RecoveryRequired("RECOVERY_NARANJO_POD_ANNOTATIONS_INVALID")
+        return {
+            container_id_key: container_id,
+            pod_ip_key: annotated_ip,
+            pod_ips_key: annotated_ips,
+        }
+
     replica_sets = old.collection_items(
         client, "/apis/apps/v1/namespaces/naranjo-online/replicasets"
     )
@@ -8698,10 +8742,13 @@ def validate_recovered_naranjo_pods(
             or not isinstance(metadata.get("name"), str)
             or old.DNS_RE.fullmatch(str(metadata.get("name"))) is None
             or not set(metadata).issubset(allowed_pod_metadata)
-            or pod_annotations not in (None, {})
+            or not isinstance(pod_annotations, Mapping)
             or metadata.get("deletionTimestamp") is not None
         ):
             raise RecoveryRequired("RECOVERY_NARANJO_POD_INVALID")
+        validated_calico_annotations = calico_annotations(
+            pod_annotations, pod_status
+        )
         pod_uid, _pod_resource_version = old.live_identity(pod)
         expected_row = expected_rows.get(pod_uid)
         if expected_row is None or pod_uid in observed_uids:
@@ -8874,6 +8921,7 @@ def validate_recovered_naranjo_pods(
             "name": metadata["name"],
             "namespace": metadata["namespace"],
             "labels": copy.deepcopy(dict(labels)),
+            "annotations": validated_calico_annotations,
             "ownerReference": pod_owner,
         }
         replica_metadata_projection = {
