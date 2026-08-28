@@ -172,6 +172,24 @@ validate_identity_runs() {
     --platform-run-json "${legacy_platform_run_json}" >/dev/null
 }
 
+validate_selector_transition() {
+  local predecessor_digest="$1" predecessor_build_sha="$2"
+  [[ "${predecessor_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+  [[ "${predecessor_build_sha}" =~ ^[0-9a-f]{40}$ ]]
+  [[ "${SELECTOR_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+  [[ "${SELECTOR_BUILD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+
+  if git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" -- \
+    cmd/platform-release-selector internal/releaseselector go.mod; then
+    test "${SELECTOR_IMAGE_DIGEST}" = "${predecessor_digest}"
+    test "${SELECTOR_BUILD_SHA}" = "${predecessor_build_sha}"
+  else
+    test "${SELECTOR_IMAGE_DIGEST}" != "${predecessor_digest}"
+    test "${SELECTOR_BUILD_SHA}" = "${SOURCE_SHA}"
+    test "${SELECTOR_BUILD_SHA}" != "${predecessor_build_sha}"
+  fi
+}
+
 run_write_gh() {
   GH_TOKEN="${write_token}" gh "$@"
 }
@@ -370,8 +388,8 @@ classify_predecessor_release() {
       --source-sha "${BASE_SHA}" --tag-object-sha "${tag_object}" \
       --source-tree-sha "${tree_sha}" \
       --selector-build-sha "${predecessor_build_sha}")"
-    test "${predecessor_selector_digest}" = "${SELECTOR_IMAGE_DIGEST}"
-    test "${predecessor_build_sha}" = "${SELECTOR_BUILD_SHA}"
+    validate_selector_transition \
+      "${predecessor_selector_digest}" "${predecessor_build_sha}"
     validate_identity_runs "${identity_download}"
   else
     # v0.1.40 is the sole immutable zero-asset predecessor. Derive its exact
