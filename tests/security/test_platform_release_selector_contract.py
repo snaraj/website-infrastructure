@@ -291,6 +291,47 @@ spec:
         self.assertIn('--main-runs-json "${legacy_main_runs_json}"', zero_asset)
         self.assertIn('--platform-runs-json "${legacy_platform_runs_json}"', zero_asset)
 
+    def test_selector_scan_exceptions_are_exact_package_bound_and_expiring(self):
+        expected = {
+            "CVE-2026-33818": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-39821": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-46600": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56853": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56858": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56859": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56860": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56862": "pkg:golang/stdlib@v1.26.5",
+            "CVE-2026-56864": "pkg:golang/golang.org/x/mod@v0.38.0",
+            "CVE-2026-56865": "pkg:golang/golang.org/x/mod@v0.38.0",
+        }
+        policy = json.loads(
+            (ROOT / "policies/platform-selector-trivy-ignore.yaml").read_text()
+        )
+        self.assertEqual(set(policy), {"vulnerabilities"})
+        entries = policy["vulnerabilities"]
+        self.assertEqual(len(entries), len(expected))
+        self.assertEqual({entry["id"] for entry in entries}, set(expected))
+        for entry in entries:
+            with self.subTest(vulnerability=entry["id"]):
+                self.assertEqual(
+                    set(entry),
+                    {"id", "purls", "paths", "expired_at", "statement"},
+                )
+                self.assertEqual(entry["purls"], [expected[entry["id"]]])
+                self.assertEqual(entry["paths"], ["usr/local/bin/cosign"])
+                self.assertEqual(entry["expired_at"], "2026-09-15T00:00:00Z")
+                self.assertIn("issue 222", entry["statement"])
+
+        workflow = (ROOT / ".github/workflows/platform-release.yml").read_text()
+        ignore = "--ignorefile policies/platform-selector-trivy-ignore.yaml"
+        self.assertEqual(workflow.count(ignore), 1)
+        selector_scan = workflow.split(
+            "- name: Sign and attest the first selector digest", 1
+        )[1].split("- name: Bind the selector digest used by release identity", 1)[0]
+        self.assertIn("--image-src remote --platform linux/arm64", selector_scan)
+        self.assertIn("--ignore-unfixed=false", selector_scan)
+        self.assertIn(ignore, selector_scan)
+
     def test_issue_211_pvc_grant_remains_namespaced_and_exact(self):
         access = (ROOT / "kubernetes/flux-system/access.yaml").read_text()
         naranjo = access.split(

@@ -446,10 +446,76 @@ def validate_transition(
     del first_parent  # Both enabled merge methods require the same linear range.
     base_sha = _exact_commit(repository, base_sha, "base SHA")
     head_sha = _exact_commit(repository, head_sha, "head SHA")
-    intents = _release_surface_intents(repository, base_sha, head_sha)
-    if len(intents) != 1:
-        raise ContractError("release range must add exactly one changelog fragment")
-    return intents[0]
+    try:
+        intents = _release_surface_intents(repository, base_sha, head_sha)
+        if len(intents) == 1:
+            return intents[0]
+        original_error = ContractError(
+            "release range must add exactly one changelog fragment"
+        )
+    except ContractError as exc:
+        original_error = exc
+
+    try:
+        return _validate_unpublished_fragment_edit(repository, base_sha, head_sha)
+    except ContractError:
+        raise original_error
+
+
+def _validate_unpublished_fragment_edit(
+    repository: Path, base_sha: str, head_sha: str
+) -> FragmentIntent:
+    """Allow only an exact edit to the one fragment pending since the latest tag."""
+    _linear_commits(repository, base_sha, head_sha)
+    ledger = _platform_tag_boundaries(repository)
+    if _git(repository, "tag", "--points-at", base_sha) or _git(
+        repository, "tag", "--points-at", head_sha
+    ):
+        raise ContractError("an unpublished fragment edit cannot use a tagged endpoint")
+
+    latest = ledger[-1]
+    if not _is_ancestor(repository, latest.source_sha, base_sha):
+        raise ContractError("the latest platform tag must be an ancestor of the base")
+
+    base_intents = _release_surface_intents(repository, latest.source_sha, base_sha)
+    head_intents = _release_surface_intents(repository, latest.source_sha, head_sha)
+    if len(base_intents) != 1 or len(head_intents) != 1:
+        raise ContractError(
+            "base and head must each contain exactly one unpublished fragment"
+        )
+    base_intent = base_intents[0]
+    head_intent = head_intents[0]
+    if base_intent.fragment_path != head_intent.fragment_path:
+        raise ContractError("base and head must contain the same unpublished fragment")
+
+    pathspec = ("--", "VERSION", "CHANGELOG.md", "changelog.d")
+    changed = _nul_paths(
+        repository,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        base_sha,
+        head_sha,
+        *pathspec,
+    )
+    modified = _nul_paths(
+        repository,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=M",
+        "-z",
+        base_sha,
+        head_sha,
+        *pathspec,
+    )
+    expected = (base_intent.fragment_path,)
+    if changed != expected or modified != expected:
+        raise ContractError(
+            "release surface must only modify the one unpublished fragment"
+        )
+    return head_intent
 
 
 def _platform_tag_boundaries(repository: Path) -> tuple[TagBoundary, ...]:
