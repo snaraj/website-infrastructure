@@ -202,6 +202,12 @@ and dependency-governed Draft capacity is recorded durably in
   a site release permanently, and blocked every subsequent deploy. Record the
   owner or platform (peer) ruling here when it arrives, including whether
   release-retention fields belong to this lane.
+  **Owner ruling 2026-08-28:** the exact version-neutral
+  `app.kubernetes.io/managed-by: fluxcd` label on both site HelmRelease
+  objects is DELIVERY-owned for issue #240. It supplies the ordinary
+  post-bootstrap #189 reconciliation witness and a stable offline inventory
+  marker without changing either release spec. This ruling grants no standing
+  ownership of other metadata or fields in these manifests.
 - `kubernetes/platform/cloudflare-public/**` — DELIVERY, DERIVED from the
   Cloudflare/edge re-cut recorded in the paragraph above, not granted
   here: that re-cut names only `infrastructure/cloudflare/**` and the

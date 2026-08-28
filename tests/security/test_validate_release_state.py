@@ -36,12 +36,14 @@ def website_release_text(
     deployment_ready=True,
     extra_values="",
     max_history: "str | None" = "2",
+    managed_by: "str | None" = "fluxcd",
 ):
     """Return one complete canonical website HelmRelease fixture.
 
-    ``max_history`` is parameterised, and ``None`` omits the line entirely, so
-    the retention guard can be shown to reject both a raised value and an
-    absent one rather than merely accepting the canonical fixture.
+    ``max_history`` and ``managed_by`` are parameterised, and ``None`` omits
+    each line or mapping entirely, so both closed-shape guards can be shown to
+    reject absence and substitution rather than merely accepting the canonical
+    fixture.
     """
 
     return (
@@ -50,6 +52,7 @@ def website_release_text(
         "metadata:\n"
         "  name: {name}\n"
         "  namespace: {name}\n"
+        "{managed_by}"
         "  annotations:\n"
         "    platform.snaraj.dev/readiness: {readiness}\n"
         "spec:\n"
@@ -82,6 +85,13 @@ def website_release_text(
         extra_values=extra_values,
         max_history=(
             "" if max_history is None else "  maxHistory: {}\n".format(max_history)
+        ),
+        managed_by=(
+            ""
+            if managed_by is None
+            else "  labels:\n    app.kubernetes.io/managed-by: {}\n".format(
+                managed_by
+            )
         ),
     )
 
@@ -219,6 +229,25 @@ class StrictReleaseStateTests(unittest.TestCase):
                 MODULE.load_helm_release("naranjo-online", root).values,
                 {("deploymentReady",): "true"},
             )
+
+    def test_site_management_label_is_exact_and_required(self):
+        """Both direct site paths carry one stable source-owned marker."""
+
+        for name in SITE_NAMES:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                release = release_path(root, name)
+                for value in (None, "Helm", "flux", "FluxCD"):
+                    with self.subTest(name=name, managed_by=value):
+                        write_lf(
+                            release,
+                            website_release_text(name, managed_by=value),
+                        )
+                        with self.assertRaises(MODULE.CanonicalYamlError):
+                            MODULE.load_helm_release(name, root)
+
+                write_lf(release, website_release_text(name))
+                self.assertTrue(MODULE.load_helm_release(name, root).suspended)
 
     def test_duplicate_critical_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -202,6 +202,8 @@ def write_site_release(
         "metadata:\n"
         "  name: {slug}\n"
         "  namespace: {slug}\n"
+        "  labels:\n"
+        "    app.kubernetes.io/managed-by: fluxcd\n"
         "  annotations:\n"
         "    platform.snaraj.dev/readiness: {readiness}\n"
         "spec:\n"

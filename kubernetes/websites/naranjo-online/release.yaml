@@ -3,6 +3,8 @@ kind: HelmRelease
 metadata:
   name: naranjo-online
   namespace: naranjo-online
+  labels:
+    app.kubernetes.io/managed-by: fluxcd
   annotations:
     platform.snaraj.dev/readiness: active-via-signature-verified-chart
 spec:

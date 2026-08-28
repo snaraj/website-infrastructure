@@ -394,26 +394,37 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
         "metadata:",
         "  name: {}".format(name),
         "  namespace: {}".format(contract["namespace"]),
-        "  annotations:",
-        "    platform.snaraj.dev/readiness: {}".format(contract["readiness"]),
-        "spec:",
-        re.compile(r"  suspend: (?:true|false)\Z"),
-        "  interval: 10m0s",
-        # Retention is pinned to an exact literal, not a range, because Helm
-        # stores every release revision as a Secret in the release namespace
-        # and prunes history to maxHistory-1 BEFORE writing the new revision.
-        # A retention value that can reach the namespace Secret budget makes
-        # the prune free nothing and the create fail closed against quota,
-        # which wedges the release permanently — no reconcile recovers it, and
-        # every later deploy of that identity is blocked (issue #198). Leaving
-        # the field unset is the same failure by another route: helm-controller
-        # then applies its own five-revision default. Pinning the literal here
-        # means dropping, raising, or omitting retention is a hard gate failure
-        # rather than a deploy that stops working several releases later.
-        "  maxHistory: 2",
-        "  releaseName: {}".format(name),
-        "  serviceAccountName: helm-reconciler",
     ]
+    if contract["repository"] is not None:
+        common.extend(
+            [
+                "  labels:",
+                "    app.kubernetes.io/managed-by: fluxcd",
+            ]
+        )
+    common.extend(
+        [
+            "  annotations:",
+            "    platform.snaraj.dev/readiness: {}".format(contract["readiness"]),
+            "spec:",
+            re.compile(r"  suspend: (?:true|false)\Z"),
+            "  interval: 10m0s",
+            # Retention is pinned to an exact literal, not a range, because Helm
+            # stores every release revision as a Secret in the release namespace
+            # and prunes history to maxHistory-1 BEFORE writing the new revision.
+            # A retention value that can reach the namespace Secret budget makes
+            # the prune free nothing and the create fail closed against quota,
+            # which wedges the release permanently — no reconcile recovers it, and
+            # every later deploy of that identity is blocked (issue #198). Leaving
+            # the field unset is the same failure by another route: helm-controller
+            # then applies its own five-revision default. Pinning the literal here
+            # means dropping, raising, or omitting retention is a hard gate failure
+            # rather than a deploy that stops working several releases later.
+            "  maxHistory: 2",
+            "  releaseName: {}".format(name),
+            "  serviceAccountName: helm-reconciler",
+        ]
+    )
     if contract["repository"] is not None:
         common.extend(
             [
