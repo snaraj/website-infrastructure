@@ -214,8 +214,8 @@ site_chart_urls := {
 # The annotation is not a selector; exact ref.digest is load-bearing.
 site_chart_releases := {
   "naranjo-online": {
-    "tag": "0.1.53",
-    "digest": "sha256:c8add2688d4fe03a1a72096755d447100b9a06e3b4053595606753147f34a3cd",
+    "tag": "0.1.54",
+    "digest": "sha256:7223dd78f308c1e211da71f6e062195724aaedc47962b0a04907eeb0baf2d7bb",
   },
   "lidersea-com": {
     "tag": "0.1.37",
