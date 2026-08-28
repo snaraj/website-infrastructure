@@ -127,7 +127,7 @@ if [[ -s "$source_preflight" ]]; then
   check_live source gitrepository.source.toolkit.fluxcd.io any "$source_preflight" target
   capture_consumers post preflight
 else
-  [[ $tag == v0.1.41 ]]
+  [[ $tag == v0.1.42 ]]
   capture_consumers initial preflight
 fi
 site_chain_state="$(check_site_chain)"
@@ -166,7 +166,7 @@ migrate_oci lidersea-com
 # foreign consumer cannot ride the source creation race.
 capture_consumers contained source-commit
 source_live="$work/source.live.json"; get_live gitrepository.source.toolkit.fluxcd.io flux-system "$source_live"
-if [[ ! -s "$source_live" ]]; then [[ $tag == v0.1.41 ]]; render source target >"$work/source.desired.json"; verify_endpoints; "${kube[@]}" -n flux-system create -f "$work/source.desired.json" >/dev/null; get_live gitrepository.source.toolkit.fluxcd.io flux-system "$source_live"; fi
+if [[ ! -s "$source_live" ]]; then [[ $tag == v0.1.42 ]]; render source target >"$work/source.desired.json"; verify_endpoints; "${kube[@]}" -n flux-system create -f "$work/source.desired.json" >/dev/null; get_live gitrepository.source.toolkit.fluxcd.io flux-system "$source_live"; fi
 check_live source gitrepository.source.toolkit.fluxcd.io any "$source_live" target
 contain
 wait_ready source gitrepository.source.toolkit.fluxcd.io flux-system "$tag" "$sha" target

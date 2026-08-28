@@ -186,7 +186,7 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Flux live-vs-reviewed drift | Open serialization gate: `v0.1.40` publication alone is not #141 terminal execution/convergence evidence, which remains required before combined #195/#189 can advance |
 | `flux-system` egress policy | Committed desired state only. The #141 transaction explicitly excludes `kubernetes/flux-system/access.yaml`; no live application or health is claimed |
 | Flux site desired state | Combined #195/#189 candidate: both manifests are unsuspended at the exact currently healthy signed chart digests (naranjo `0.1.51`, lidersea `0.1.37`) behind one exact-tag source and two direct `prune: false`, `deletionPolicy: Orphan` reconcilers; no live equivalence, readiness, or traffic is claimed |
-| Flux bootstrap (site sync only) | Combined-release candidate targets exact `v0.1.41` through an owner-attended create-or-exact transaction with suspended staging and containment; it does not reconcile SOPS, controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
+| Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.42` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` is never selected. It does not reconcile SOPS, controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
 | SOPS key ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |

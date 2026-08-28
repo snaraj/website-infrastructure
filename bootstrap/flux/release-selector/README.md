@@ -76,10 +76,11 @@ selector stays suspended while the two sites become Ready in order, then its
 authority and permanent schedule are restored.
 
 The initial source-absent bootstrap runs only from a clean checkout of the exact
-annotated `v0.1.41` Release. Recovery after the source advances requires a clean
-checkout of the exact canonical annotated Release already named by the live
-source; a stale, future, or mismatched checkout stops before mutation. After
-reviewing the selector digest and private API backend set, invoke:
+annotated `v0.1.42` Release. Burned `v0.1.41` is never selected. Recovery after
+the source advances requires a clean checkout of the exact canonical annotated
+Release already named by the live source; a stale, future, or mismatched
+checkout stops before mutation. After reviewing the selector digest and private
+API backend set, invoke:
 
 ```console
 bootstrap/flux/release-selector/bootstrap.sh \

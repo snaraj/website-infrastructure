@@ -308,7 +308,7 @@ def validate_attestations(path: Path, digest: str, build_sha: str) -> None:
             raise SystemExit("selector attestation payload is invalid") from error
         if (
             not isinstance(statement, dict)
-            or statement.get("_type") != "https://in-toto.io/Statement/v1"
+            or statement.get("_type") != "https://in-toto.io/Statement/v0.1"
             or statement.get("predicateType") != "https://slsa.dev/provenance/v1"
         ):
             raise SystemExit("selector attestation predicate type is foreign")

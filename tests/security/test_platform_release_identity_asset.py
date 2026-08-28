@@ -154,7 +154,8 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
         *,
         staged: bool = False,
     ) -> dict[str, object]:
-        download_component = "untagged-draft" if staged else cls.TAG
+        server_draft_tag = "untagged-aaaaaaaaaaaaaaaaaaaa"
+        download_component = server_draft_tag if staged else cls.TAG
         assets = []
         for asset_id, name, payload in (
             (cls.ASSET_ID, MODULE.RELEASE_IDENTITY_ASSET_NAME, identity),
@@ -191,7 +192,7 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             )
         return {
             "id": cls.RELEASE_ID,
-            "tag_name": cls.TAG,
+            "tag_name": server_draft_tag if staged else cls.TAG,
             "target_commitish": cls.SOURCE,
             "name": f"Platform {cls.TAG}",
             "body": "## Informational notes only\n\nNot a trust input.\n",
@@ -706,7 +707,8 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             'cmp -s "${identity_asset}" "${identity_download}"',
             'cmp -s "${identity_bundle}" "${bundle_download}"',
             "staged-identity-release-record",
-            "printf '{\"draft\":false}",
+            "'{body:$body,draft:false,name:$name,prerelease:false,"
+            "tag_name:$tag,target_commitish:$target}'",
         )
         cursor = -1
         for token in ordered:
