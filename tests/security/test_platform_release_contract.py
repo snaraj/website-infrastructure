@@ -85,6 +85,15 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         '--identity "${identity_download}" --bundle "${bundle_download}"',
         '--source-tree-sha "${tree_sha}"',
         "identity-run-records",
+        "validate_selector_transition",
+        '[[ "${SELECTOR_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]',
+        'git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" --',
+        "cmd/platform-release-selector internal/releaseselector go.mod",
+        'test "${SELECTOR_IMAGE_DIGEST}" = "${predecessor_digest}"',
+        'test "${SELECTOR_IMAGE_DIGEST}" != "${predecessor_digest}"',
+        'test "${SELECTOR_BUILD_SHA}" = "${predecessor_build_sha}"',
+        'test "${SELECTOR_BUILD_SHA}" = "${SOURCE_SHA}"',
+        'test "${SELECTOR_BUILD_SHA}" != "${predecessor_build_sha}"',
         "identity-release-state",
         '--http-status "${status}" --require "${required}"',
         "burned_source_sha='6d85c2b01dd4bd66add4192372b26bcdf1b0a951'",
@@ -181,6 +190,7 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "identity-release-state": 1,
         'upload_identity_asset "${release_id}"': 2,
         "validate_platform_predecessor.py": 2,
+        "validate_selector_transition": 2,
         "cosign sign-blob": 1,
         "cosign verify-blob": 1,
         'run_write_gh release create "${recovery_tag}"': 1,
@@ -2949,6 +2959,85 @@ class PublicationTransactionShellTests(unittest.TestCase):
             mutant = script[:start] + mutant_classifier + script[end:]
             with self.subTest(mutant=index), self.assertRaises(ValueError):
                 validate_single_asset_publication_transaction(mutant)
+
+    def test_selector_transition_accepts_only_exact_reuse_or_source_build(self):
+        script = self.script()
+        validate_single_asset_publication_transaction(script)
+        call = (
+            '    validate_selector_transition \\\n'
+            '      "${predecessor_selector_digest}" "${predecessor_build_sha}"'
+        )
+        self.assertIn(call, script)
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script.replace(call, "    :", 1)
+            )
+        start = script.index("validate_selector_transition() {")
+        end = script.index("\n}\n", start) + 3
+        function = script[start:end]
+        digest_a = "sha256:" + "a" * 64
+        digest_b = "sha256:" + "b" * 64
+        source = "a" * 40
+        base = "c" * 40
+        predecessor_build = "b" * 40
+
+        harness = r'''set -euo pipefail
+git() {
+  test "$#" = 8
+  test "$1" = diff
+  test "$2" = --quiet
+  test "$3" = "${BASE_SHA}"
+  test "$4" = "${SOURCE_SHA}"
+  test "$5" = --
+  test "$6" = cmd/platform-release-selector
+  test "$7" = internal/releaseselector
+  test "$8" = go.mod
+  test "${MOCK_CHANGED}" != true
+}
+''' + function + '''
+validate_selector_transition "${PREDECESSOR_DIGEST}" "${PREDECESSOR_BUILD_SHA}"
+'''
+
+        cases = (
+            (False, digest_a, predecessor_build, True),
+            (True, digest_b, source, True),
+            (False, digest_b, predecessor_build, False),
+            (False, digest_a, source, False),
+            (True, digest_a, source, False),
+            (True, digest_b, predecessor_build, False),
+            (True, digest_b, "d" * 40, False),
+            (True, "sha256:short", source, False),
+            (True, digest_b, "short", False),
+        )
+        for changed, digest, build_sha, accepted in cases:
+            with self.subTest(
+                changed=changed, digest=digest, build_sha=build_sha
+            ):
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "BASE_SHA": base,
+                        "SOURCE_SHA": source,
+                        "SELECTOR_IMAGE_DIGEST": digest,
+                        "SELECTOR_BUILD_SHA": build_sha,
+                        "PREDECESSOR_DIGEST": digest_a,
+                        "PREDECESSOR_BUILD_SHA": predecessor_build,
+                        "MOCK_CHANGED": str(changed).lower(),
+                    }
+                )
+                completed = subprocess.run(
+                    [self.bash_executable(), "-c", harness],
+                    env=environment,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=10,
+                )
+                self.assertEqual(completed.returncode == 0, accepted)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "")
 
     def test_event_tag_and_notes_are_rederived_from_checked_out_ledger(self):
         script = self.script()
