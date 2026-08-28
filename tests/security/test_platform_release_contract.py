@@ -87,15 +87,19 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "identity-run-records",
         "identity-release-state",
         '--http-status "${status}" --require "${required}"',
-        "burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'",
-        "burned_tag='v0.1.41'",
-        "burned_draft_id='378293955'",
-        "burned_draft_tag='untagged-a4e9ac48228029344306'",
+        "burned_source_sha='6d85c2b01dd4bd66add4192372b26bcdf1b0a951'",
+        "burned_tag='v0.1.42'",
+        "burned_draft_id='378336604'",
+        "burned_main_run_id='33152936164'",
+        "burned_platform_run_id='33153400419'",
+        "burned_selector_digest='sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61'",
         "run_write_gh api --paginate --slurp",
         'repos/${GITHUB_REPOSITORY}/releases?per_page=100',
         "release-draft-state",
         '--expected-release-id "${burned_draft_id}"',
-        '--expected-server-tag "${burned_draft_tag}"',
+        "--expected-asset-count 2",
+        "burned-partial-release-record",
+        "validate_burned_partial",
         'run_write_gh api --method DELETE',
         'repos/${GITHUB_REPOSITORY}/releases/${release_id}',
         "retire_burned_partial_draft",
@@ -171,7 +175,7 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         raise ValueError("current release-notes command drifted or gained a stray shell command")
 
     exact_counts = {
-        "release-draft-record": 3,
+        "release-draft-record": 1,
         "release-draft-state": 3,
         "staged-identity-release-record": 1,
         "identity-release-state": 1,
@@ -225,6 +229,34 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
     if legacy.count("validate_platform_predecessor.py") != 2:
         raise ValueError("legacy predecessor must be validated before and after run retrieval")
 
+    burned_start = transaction.index("validate_burned_partial() {")
+    burned_end = transaction.index("\n}\n", burned_start)
+    burned = transaction[burned_start:burned_end]
+    burned_order = (
+        '${api}/releases/${burned_draft_id}',
+        "write_burned_notes",
+        'download_identity_pair "${release_json}"',
+        'actions/runs/${burned_main_run_id}/attempts/${burned_run_attempt}',
+        'actions/runs/${burned_platform_run_id}/attempts/${burned_run_attempt}',
+        "burned-partial-release-record",
+        'test "${digest}" = "${burned_selector_digest}"',
+        'test "${digest}" = "${SELECTOR_IMAGE_DIGEST}"',
+        'test "${SELECTOR_BUILD_SHA}" = "${burned_source_sha}"',
+    )
+    burned_positions = [burned.index(token) for token in burned_order]
+    if burned_positions != sorted(burned_positions):
+        raise ValueError("burned partial validation order drifted")
+
+    retire_start = transaction.index("retire_burned_partial_draft() {")
+    retire_end = transaction.index("complete_recovery_release() {", retire_start)
+    retirement = transaction[retire_start:retire_end]
+    if not (
+        retirement.index("validate_burned_partial")
+        < retirement.index("run_write_gh api --method DELETE")
+        < retirement.rindex("validate_burned_partial")
+    ):
+        raise ValueError("burned draft deletion lost pre/post validation")
+
     current_start = transaction.index("publish_current_release() {")
     current = transaction[current_start:]
     ordered = (
@@ -254,7 +286,12 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
     if current.rindex("classify_current_release exact") < positions[-1]:
         raise ValueError("immutable publication lacks a terminal exact-state observation")
 
-    expected_incident_versions = {"v0.1.40": 4, "v0.1.41": 4, "v0.1.42": 2}
+    expected_incident_versions = {
+        "v0.1.40": 3,
+        "v0.1.41": 4,
+        "v0.1.42": 1,
+        "v0.1.43": 2,
+    }
     for version, expected in expected_incident_versions.items():
         if transaction.count(version) != expected:
             raise ValueError(
@@ -269,6 +306,8 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "0.1.41",
         "v0.1.42",
         "0.1.42",
+        "v0.1.43",
+        "0.1.43",
     }
     foreign_versions = set(re.findall(VERSION_LITERAL, transaction)) - allowed_versions
     if foreign_versions:
@@ -2934,11 +2973,14 @@ class PublicationTransactionShellTests(unittest.TestCase):
             "0.1.41",
             "v0.1.42",
             "0.1.42",
+            "v0.1.43",
+            "0.1.43",
         }
         self.assertEqual(set(re.findall(VERSION_LITERAL, script)) - allowed, set())
-        self.assertEqual(script.count("v0.1.40"), 4)
+        self.assertEqual(script.count("v0.1.40"), 3)
         self.assertEqual(script.count("v0.1.41"), 4)
-        self.assertEqual(script.count("v0.1.42"), 2)
+        self.assertEqual(script.count("v0.1.42"), 1)
+        self.assertEqual(script.count("v0.1.43"), 2)
         for foreign in ("v0.1.31", "v0.1.34", "v9.9.9"):
             with self.subTest(foreign=foreign), self.assertRaises(ValueError):
                 validate_single_asset_publication_transaction(
@@ -3303,11 +3345,11 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
         )
         self.assertEqual(raced_calls.count("/releases/tags/"), 3)
 
-    def test_only_burned_v0141_to_v0142_accepts_a_missing_release(self):
+    def test_only_burned_v0142_to_v0143_accepts_a_missing_release(self):
         completed, output, calls = self.execute(
             base_tag=MODULE.BURNED_PARTIAL_TAG,
             base_source=MODULE.BURNED_PARTIAL_SOURCE_SHA,
-            target_tag="v0.1.42",
+            target_tag="v0.1.43",
             release_state="missing",
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
@@ -3315,7 +3357,7 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
         self.assertEqual(calls.count("/releases/tags/"), 1)
         self.assertNotIn("SLEEP", calls)
 
-        for near_target in ("v0.1.41", "v0.1.43"):
+        for near_target in ("v0.1.42", "v0.1.44"):
             with self.subTest(target=near_target):
                 denied, denied_output, denied_calls = self.execute(
                     base_tag=MODULE.BURNED_PARTIAL_TAG,
@@ -4383,9 +4425,10 @@ class WorkflowStructureTests(unittest.TestCase):
             "SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector",
             "Install checksum-verified release tools",
             "Select the immutable selector image lineage",
-            '[ "${BASE_SHA}" = 77f32682b45f7bed845b245e6477c11539b67bcd ]',
-            '[ "${BASE_TAG}" = v0.1.41 ]',
-            '[ "${TAG}" = v0.1.42 ]',
+            '[ "${BASE_SHA}" = 6d85c2b01dd4bd66add4192372b26bcdf1b0a951 ]',
+            '[ "${BASE_TAG}" = v0.1.42 ]',
+            '[ "${TAG}" = v0.1.43 ]',
+            "'sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61'",
             'test "${predecessor_status}" = 404',
             'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
             "platform-release-identity.v1.json.sigstore.json",
@@ -4535,7 +4578,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "classify_predecessor_tag",
             '[ "${base_sha}" = "${burned_source_sha}" ]',
             '[ "${base_tag}" = "${burned_tag}" ]',
-            '[ "${target_tag}" = v0.1.42 ]',
+            '[ "${target_tag}" = v0.1.43 ]',
             'classify_predecessor_release absent "${base_tag}" "${base_sha}"',
             "classify_predecessor_release exact",
             "classify_predecessor_release absent",
@@ -4715,7 +4758,7 @@ class WorkflowStructureTests(unittest.TestCase):
             < publish_job.index("Select the immutable selector image lineage")
         ):
             raise ValueError("Cosign must be installed before receipt consumption")
-        if publish_job.count("state=reuse") != 2 or publish_job.count("state=build") != 2:
+        if publish_job.count("state=reuse") != 3 or publish_job.count("state=build") != 1:
             raise ValueError("selector reuse and reviewed first-build branches drifted")
         for repeated in (
             "BASE_SHA: ${{ steps.release.outputs.base_sha }}",

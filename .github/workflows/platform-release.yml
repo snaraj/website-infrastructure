@@ -326,11 +326,15 @@ jobs:
             "${api}/releases/tags/${BASE_TAG}")"
           predecessor_tag_object="$(fetch_tag "${BASE_TAG}" "${BASE_SHA}" \
             "${predecessor_ref}" "${predecessor_tag}")"
-          if [ "${BASE_SHA}" = 77f32682b45f7bed845b245e6477c11539b67bcd ] && \
-             [ "${BASE_TAG}" = v0.1.41 ] && [ "${TAG}" = v0.1.42 ]; then
+          if [ "${BASE_SHA}" = 6d85c2b01dd4bd66add4192372b26bcdf1b0a951 ] && \
+             [ "${BASE_TAG}" = v0.1.42 ] && [ "${TAG}" = v0.1.43 ]; then
             test "${predecessor_status}" = 404
-            printf 'state=build\ndigest=\nbuild_sha=%s\n' \
-              "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+            # Reuse only the immutable selector digest already signed and
+            # attested by the exact failed v0.1.42 attempt. The publisher
+            # independently validates that incident before any draft delete.
+            printf 'state=reuse\ndigest=%s\nbuild_sha=%s\n' \
+              'sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61' \
+              "${BASE_SHA}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           test "${predecessor_status}" = 200

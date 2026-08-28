@@ -19,12 +19,12 @@ workload indexes; chart trust remains each chart's exact Cosign signature.
 
 | site and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |
 | --- | --- | --- | --- | --- | --- |
-| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.53` | `sha256:c8add2688d4fe03a1a72096755d447100b9a06e3b4053595606753147f34a3cd` / `sha256:4713d6ebbab96d1817a590df45d9c69719d1da9be48c27e3f239d08d13395ddd` / `sha256:323e22b1e73db281877fa2ed521d8c9bf7953732b05fa3e2eb07c996dacc5303` | name/version/appVersion `naranjo-online` / `0.1.53` / `0.1.53` | `ghcr.io/snaraj/naranjo-online:v0.1.53@sha256:221730f73e113ddfa343e1d9ab768feb0fcbc7c98a23ffe70321a27c6303fae2` | `sha256:4022df25b0d3fe0a0220c2347d602b06007b3ad58b8118ea436d78c8bb1863de` |
+| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.54` | `sha256:7223dd78f308c1e211da71f6e062195724aaedc47962b0a04907eeb0baf2d7bb` / `sha256:34336fc8887ca9d4e540674d85f726d830974cb8f909f5202b9bd58a7f85a609` / `sha256:56d37664cfedcddafcc9bd440b69e27b1f386012b9fe55868dd7d0e8d773a494` | name/version/appVersion `naranjo-online` / `0.1.54` / `0.1.54` | `ghcr.io/snaraj/naranjo-online:v0.1.54@sha256:8f3eeac4caa0bbc8c88f1e9725e9eeb7e074ece3f7c53a77ada52fea28667c78` | `sha256:3a4477a4d983487e2b9d0aee8b556502d9db3fc56b72d0bc111eb83bb71fc5c3` |
 | lidersea.com — `ghcr.io/snaraj/charts/lidersea-com` | `0.1.37` | `sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc` / `sha256:cbcc79cb9b45df8312038bee110559cf8f79588e6cf2000c7b5a1b7972afef0c` / `sha256:56a91426551dcf1e3718b37b4919d2db940199ad50e496b6e57ba385388e058c` | name/version/appVersion `lidersea-com` / `0.1.37` / `0.1.37` | `ghcr.io/snaraj/lidersea-com:v0.1.37@sha256:22673a01a892da2b644369ee3c2d0339c13ef8eddc1d3423411ce90bbe25d8b1` | `sha256:c58f87669482096362f7a4db307403f1bcee9859c643a24f23d627c08a434db4` |
 
 Publisher Release bindings:
 
-- naranjo.online: protected-main source `0fd48dcdf06bf73651852758b016bd6a732239b3`; immutable Release asset `sha256:2b1fe41476666e363b3dc8aef9ef0ad2d7c2c6cf61c87fbbe02546f006a6d77d`.
+- naranjo.online: protected-main source `0438570c8f0ccb40ceb0869b86cb461823c8c447`; immutable Release asset `sha256:2568aca870eff2495d217afbdd933389d2236552c704bb83b321201db7081599`.
 - lidersea.com: protected-main source `8115ec9c277af14892b41d1f712f81fe4aab16d4`; immutable Release asset `sha256:cc1e2086d2840dcfdca8f5024234d13a92afba0b21bf9cdfbd1389dc23dbc42e`.
 
 Each signed OCI manifest contained exactly one layer with
@@ -39,8 +39,8 @@ Cosign accepted only these certificate subjects, with issuer
 
 Exact-layer inspection hashes provide a reproducible custody check:
 
-- naranjo `Chart.yaml`: `sha256:594c1651b4317deda98a54191744392215d19783070624d2310848c0e614cfa8`
-- naranjo `values.yaml`: `sha256:f7c99f7d77ea7d3b6890d7893decb212c8a4b32775461e4a4cb1872ecfcd7108`
+- naranjo `Chart.yaml`: `sha256:3114f08f179c83043a9eb43f4694fd5ad7673d8b73593d14eb1e8ddfc18c4c6e`
+- naranjo `values.yaml`: `sha256:f155102a52bf1dfe7be161aeba24b450b04ab39a24c260a300ef04bffd4ae068`
 - lidersea `Chart.yaml`: `sha256:84ec99f85435b09abfa10e1bdd610181ee127d8eaa34e26133c0c758743b0ce4`
 - lidersea `values.yaml`: `sha256:34a22b862f6c2eb179abf911ca1b880a4d9e4d16f2f91a09483896aa0d2768c8`
 

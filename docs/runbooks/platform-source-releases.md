@@ -50,7 +50,7 @@ For an untagged successful main SHA, the publisher:
 2. validates the complete post-floor ledger;
 3. requires the latest tag and immutable Release to be exact, consuming the
    canonical identity asset pair after the one-time `v0.1.40` bridge, except
-   for the exact burned `v0.1.41` to `v0.1.42` recovery described below;
+   for the exact burned `v0.1.42` to `v0.1.43` recovery described below;
 4. requires exactly one newly added fragment since that predecessor;
 5. derives `next = latest patch + 1` without reading `VERSION`;
 6. renders deterministic notes containing the source SHA, fragment path,
@@ -65,17 +65,18 @@ proved after ordering and immediately before the write job. That job rebinds the
 window once and revalidates the exact predecessor tag and Release before every
 mutation boundary; renewed pending, absent, mutable, or foreign state fails.
 
-`v0.1.41` is one closed pre-Flux publication incident. Its exact annotated tag
-at `77f32682b45f7bed845b245e6477c11539b67bcd` remains an immutable ledger
-boundary and is never selected by bootstrap or the runtime selector. The sole
-`v0.1.41` to `v0.1.42` edge may observe the predecessor Release as absent. In
-the write job only, the publisher enumerates the complete authenticated Release
-inventory, accepts either the exact known zero-asset mutable draft or its clean
-absence, deletes only that exact draft Release ID, and proves both its absence
-and the unchanged annotated tag before creating `v0.1.42`. The successor still
-requires fresh protected-main CI, a new exact annotated tag, two signed identity
-assets, and an immutable published Release. Every later edge returns to the
-ordinary complete-predecessor rule.
+`v0.1.41` and `v0.1.42` are closed pre-Flux publication incidents. Their exact
+annotated tags remain immutable ledger boundaries and are never selected by
+bootstrap or the runtime selector. The sole `v0.1.42` to `v0.1.43` edge may
+observe the predecessor Release as absent. In the write job only, the publisher
+enumerates the complete authenticated Release inventory, accepts either the
+exact known signed two-asset `v0.1.42` draft or its clean absence, validates its
+source, tag object, tree, workflow attempts, asset IDs, bytes, digests, signature,
+and shared staged download token, then deletes only that exact draft Release ID.
+It proves both draft absence and the unchanged annotated tag before creating
+`v0.1.43`. The successor still requires fresh protected-main CI, a new exact
+annotated tag, two signed identity assets, and an immutable published Release.
+Every later edge returns to the ordinary complete-predecessor rule.
 
 An exact existing tag at the source is an idempotent replay. A lightweight,
 skipped, reversed, moved, foreign, or non-ancestral tag; a missing earlier tag;
@@ -88,7 +89,7 @@ and C arrive before A is published, A sees one fragment and may publish; B sees 
 and returns the distinct pending status; C sees three and does the same. Each
 later workflow fetches tags and retries only that pending status. Once A's exact
 tag and immutable Release both exist, B derives the next patch; once B is exact,
-C does. Outside the exact burned `v0.1.41` recovery edge, a tag without its
+C does. Outside the exact burned `v0.1.42` recovery edge, a tag without its
 exact Release remains pending and cannot allocate the next patch. Unsafe ledger
 states are never retried as contention. A bounded timeout fails the workflow
 without allocating or moving a tag; the exact SHA can be rerun normally.

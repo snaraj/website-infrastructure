@@ -37,6 +37,50 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
     RELEASE_ID = 300
     ASSET_ID = 900
 
+    def test_v0142_incident_constants_are_exact_and_closed(self) -> None:
+        self.assertEqual(
+            {
+                "tag": MODULE.BURNED_PARTIAL_TAG,
+                "source": MODULE.BURNED_PARTIAL_SOURCE_SHA,
+                "tag_object": MODULE.BURNED_PARTIAL_TAG_OBJECT_SHA,
+                "tree": MODULE.BURNED_PARTIAL_TREE_SHA,
+                "draft_id": MODULE.BURNED_PARTIAL_DRAFT_ID,
+                "download_token_sha256": MODULE.BURNED_PARTIAL_DOWNLOAD_TOKEN_SHA256,
+                "identity_id": MODULE.BURNED_PARTIAL_IDENTITY_ASSET_ID,
+                "identity_sha256": MODULE.BURNED_PARTIAL_IDENTITY_SHA256,
+                "bundle_id": MODULE.BURNED_PARTIAL_BUNDLE_ASSET_ID,
+                "bundle_sha256": MODULE.BURNED_PARTIAL_BUNDLE_SHA256,
+                "main_run": MODULE.BURNED_PARTIAL_MAIN_RUN_ID,
+                "platform_run": MODULE.BURNED_PARTIAL_PLATFORM_RUN_ID,
+                "run_attempt": MODULE.BURNED_PARTIAL_RUN_ATTEMPT,
+                "selector": MODULE.BURNED_PARTIAL_SELECTOR_DIGEST,
+            },
+            {
+                "tag": "v0.1.42",
+                "source": "6d85c2b01dd4bd66add4192372b26bcdf1b0a951",
+                "tag_object": "9821c1bdb462bb76a9a8c89d5523ab44cdab35e2",
+                "tree": "ac999a9d0f1626df897d66903ed52c42a26e65a9",
+                "draft_id": 378336604,
+                "download_token_sha256": (
+                    "b20952c4af11ed71690a8f921cf4010982ef458806d97d2c6073215c28c5644c"
+                ),
+                "identity_id": 533468594,
+                "identity_sha256": (
+                    "36d9be841c616aee31a72484f3dddafaa419363c35aa3056bdb3a13becf091f8"
+                ),
+                "bundle_id": 533468609,
+                "bundle_sha256": (
+                    "c98827ef92cfb2727128b6acd227ad9a111cada5682a9f1cda7fb6b1e814ca3c"
+                ),
+                "main_run": 33152936164,
+                "platform_run": 33153400419,
+                "run_attempt": 1,
+                "selector": (
+                    "sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61"
+                ),
+            },
+        )
+
     @classmethod
     def receipt_bytes(cls) -> bytes:
         return (
@@ -192,7 +236,9 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             )
         return {
             "id": cls.RELEASE_ID,
-            "tag_name": server_draft_tag if staged else cls.TAG,
+            # GitHub keeps the canonical draft tag_name while exposing the
+            # mutable draft download namespace only in asset URLs.
+            "tag_name": cls.TAG,
             "target_commitish": cls.SOURCE,
             "name": f"Platform {cls.TAG}",
             "body": "## Informational notes only\n\nNot a trust input.\n",
@@ -210,32 +256,32 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             sites["naranjo-online"]["chart"],
             {
                 "layer_digest": (
-                    "sha256:323e22b1e73db281877fa2ed5"
-                    "21d8c9bf7953732b05fa3e2eb"
-                    "07c996dacc5303"
+                    "sha256:56d37664cfedcddafcc9bd440"
+                    "b69e27b1f386012b9fe55868d"
+                    "d7d0e8d773a494"
                 ),
                 "manifest_digest": (
-                    "sha256:c8add2688d4fe03a1a7209675"
-                    "5d447100b9a06e3b405359560"
-                    "6753147f34a3cd"
+                    "sha256:7223dd78f308c1e211da71f6"
+                    "e062195724aaedc47962b0a04"
+                    "907eeb0baf2d7bb"
                 ),
                 "repository": "ghcr.io/snaraj/charts/naranjo-online",
-                "version": "0.1.53",
+                "version": "0.1.54",
             },
         )
         self.assertEqual(
             sites["naranjo-online"]["workload"],
             {
                 "arm64_digest": (
-                    "sha256:4022df25b0d3fe0a0220c234"
-                    "7d602b06007b3ad58b8118ea"
-                    "436d78c8bb1863de"
+                    "sha256:3a4477a4d983487e2b9d0aee"
+                    "8b556502d9db3fc56b72d0bc"
+                    "111eb83bb71fc5c3"
                 ),
                 "image": (
-                    "ghcr.io/snaraj/naranjo-online:v0.1.53@"
-                    "sha256:221730f73e113ddfa343e1d9"
-                    "ab768feb0fcbc7c98a23ffe7"
-                    "0321a27c6303fae2"
+                    "ghcr.io/snaraj/naranjo-online:v0.1.54@"
+                    "sha256:8f3eeac4caa0bbc8c88f1e9"
+                    "725e9eeb7e074ece3f7c53a7"
+                    "7ada52fea28667c78"
                 ),
             },
         )
@@ -329,6 +375,88 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             tag=self.TAG,
             source_sha=self.SOURCE,
         )
+
+    def test_staged_urls_and_asset_labels_accept_only_github_normalization(self) -> None:
+        identity = self.canonical(self.evidence())
+        bundle = self.bundle(identity)
+        staged = self.release(identity, bundle, staged=True)
+
+        for label in (None, ""):
+            exact = copy.deepcopy(staged)
+            for asset in exact["assets"]:
+                asset["label"] = label
+            MODULE.validate_identity_release_record(
+                exact,
+                identity=identity,
+                bundle=bundle,
+                tag=self.TAG,
+                source_sha=self.SOURCE,
+                staged=True,
+            )
+
+        mutations: dict[str, object] = {}
+        missing_label = copy.deepcopy(staged)
+        del missing_label["assets"][0]["label"]
+        mutations["missing label"] = missing_label
+        nonempty_label = copy.deepcopy(staged)
+        nonempty_label["assets"][0]["label"] = "identity"
+        mutations["nonempty label"] = nonempty_label
+        synthetic_tag = copy.deepcopy(staged)
+        synthetic_tag["tag_name"] = "untagged-aaaaaaaaaaaaaaaaaaaa"
+        mutations["synthetic tag_name"] = synthetic_tag
+        mixed_tokens = copy.deepcopy(staged)
+        mixed_tokens["assets"][1]["browser_download_url"] = mixed_tokens[
+            "assets"
+        ][1]["browser_download_url"].replace(
+            "untagged-aaaaaaaaaaaaaaaaaaaa",
+            "untagged-bbbbbbbbbbbbbbbbbbbb",
+        )
+        mutations["mixed tokens"] = mixed_tokens
+
+        base_url = staged["assets"][0]["browser_download_url"]
+        for name, url in {
+            "bad token shape": base_url.replace(
+                "untagged-aaaaaaaaaaaaaaaaaaaa", "untagged-AAAAAAAAAAAAAAAAAAAA"
+            ),
+            "bad owner": base_url.replace("github.com/snaraj/", "github.com/other/"),
+            "bad repository": base_url.replace(
+                "website-infrastructure", "website-infrastructure-fork"
+            ),
+            "bad asset": base_url + ".foreign",
+            "query": base_url + "?download=1",
+            "fragment": base_url + "#asset",
+            "port": base_url.replace("github.com/", "github.com:443/"),
+            "userinfo": base_url.replace(
+                "github.com/", "owner" + chr(64) + "github.com/"
+            ),
+        }.items():
+            changed = copy.deepcopy(staged)
+            changed["assets"][0]["browser_download_url"] = url
+            mutations[name] = changed
+
+        for name, changed in mutations.items():
+            with self.subTest(name=name), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_identity_release_record(
+                    changed,
+                    identity=identity,
+                    bundle=bundle,
+                    tag=self.TAG,
+                    source_sha=self.SOURCE,
+                    staged=True,
+                )
+
+        final_with_synthetic_url = self.release(identity, bundle)
+        final_with_synthetic_url["assets"][0]["browser_download_url"] = (
+            staged["assets"][0]["browser_download_url"]
+        )
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.validate_identity_release_record(
+                final_with_synthetic_url,
+                identity=identity,
+                bundle=bundle,
+                tag=self.TAG,
+                source_sha=self.SOURCE,
+            )
 
     def test_noncanonical_oversized_duplicate_and_semantic_mutations_fail(self) -> None:
         evidence = self.evidence()
@@ -563,6 +691,164 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
                 MODULE.validate_identity_run_records(
                     identity, changed_main, changed_platform
                 )
+
+    def test_burned_partial_is_one_exact_signed_failed_attempt(self) -> None:
+        evidence = self.evidence()
+        evidence["main_ci"]["run_attempt"] = 1
+        evidence["platform_release"]["run_attempt"] = 1
+        identity = self.canonical(evidence)
+        bundle = self.bundle(identity)
+        release = self.release(identity, bundle, staged=True)
+
+        def run(key: str, conclusion: str) -> dict[str, object]:
+            receipt = evidence[key]
+            return {
+                "id": receipt["run_id"],
+                "run_attempt": receipt["run_attempt"],
+                "event": receipt["event"],
+                "head_branch": "main",
+                "head_sha": self.SOURCE,
+                "path": receipt["workflow"],
+                "status": "completed",
+                "conclusion": conclusion,
+                "repository": {"full_name": "snaraj/website-infrastructure"},
+            }
+
+        main = run("main_ci", "success")
+        platform = run("platform_release", "failure")
+        incident = {
+            "BURNED_PARTIAL_TAG": self.TAG,
+            "BURNED_PARTIAL_SOURCE_SHA": self.SOURCE,
+            "BURNED_PARTIAL_TAG_OBJECT_SHA": self.TAG_OBJECT,
+            "BURNED_PARTIAL_TREE_SHA": self.TREE,
+            "BURNED_PARTIAL_DRAFT_ID": self.RELEASE_ID,
+            "BURNED_PARTIAL_DOWNLOAD_TOKEN_SHA256": hashlib.sha256(
+                b"untagged-aaaaaaaaaaaaaaaaaaaa"
+            ).hexdigest(),
+            "BURNED_PARTIAL_IDENTITY_ASSET_ID": self.ASSET_ID,
+            "BURNED_PARTIAL_IDENTITY_SHA256": hashlib.sha256(identity).hexdigest(),
+            "BURNED_PARTIAL_BUNDLE_ASSET_ID": self.ASSET_ID + 1,
+            "BURNED_PARTIAL_BUNDLE_SHA256": hashlib.sha256(bundle).hexdigest(),
+            "BURNED_PARTIAL_MAIN_RUN_ID": 100,
+            "BURNED_PARTIAL_PLATFORM_RUN_ID": 200,
+            "BURNED_PARTIAL_RUN_ATTEMPT": 1,
+            "BURNED_PARTIAL_SELECTOR_DIGEST": self.SELECTOR,
+        }
+
+        def validate(
+            release_record: dict[str, object],
+            identity_payload: bytes = identity,
+            bundle_payload: bytes = bundle,
+            main_record: dict[str, object] = main,
+            platform_record: dict[str, object] = platform,
+        ) -> str:
+            with mock.patch.multiple(MODULE, **incident):
+                return MODULE.validate_burned_partial_release_record(
+                    release_record,
+                    identity=identity_payload,
+                    bundle=bundle_payload,
+                    body=release_record["body"],
+                    main_run_record=main_record,
+                    platform_run_record=platform_record,
+                )
+
+        self.assertEqual(validate(release), self.SELECTOR)
+
+        release_mutations = {
+            "foreign draft id": ("id", self.RELEASE_ID + 1),
+            "moved draft source": ("target_commitish", "0" * 40),
+            "foreign draft tag": ("tag_name", "v0.1.99"),
+        }
+        for name, (field, value) in release_mutations.items():
+            changed = copy.deepcopy(release)
+            changed[field] = value
+            with self.subTest(name=name), self.assertRaises(MODULE.ContractError):
+                validate(changed)
+
+        partial = copy.deepcopy(release)
+        partial["assets"].pop()
+        with self.subTest(name="partial asset inventory"), self.assertRaises(
+            MODULE.ContractError
+        ):
+            validate(partial)
+
+        different_asset_id = copy.deepcopy(release)
+        different_asset_id["assets"][0]["id"] = self.ASSET_ID + 10
+        different_asset_id["assets"][0]["url"] = (
+            "https://api.github.com/repos/snaraj/website-infrastructure/"
+            f"releases/assets/{self.ASSET_ID + 10}"
+        )
+        MODULE.validate_identity_release_record(
+            different_asset_id,
+            identity=identity,
+            bundle=bundle,
+            tag=self.TAG,
+            source_sha=self.SOURCE,
+            staged=True,
+        )
+        with self.subTest(name="coherent foreign asset id"), self.assertRaises(
+            MODULE.ContractError
+        ):
+            validate(different_asset_id)
+
+        different_token = copy.deepcopy(release)
+        for asset in different_token["assets"]:
+            asset["browser_download_url"] = asset["browser_download_url"].replace(
+                "untagged-aaaaaaaaaaaaaaaaaaaa",
+                "untagged-bbbbbbbbbbbbbbbbbbbb",
+            )
+        MODULE.validate_identity_release_record(
+            different_token,
+            identity=identity,
+            bundle=bundle,
+            tag=self.TAG,
+            source_sha=self.SOURCE,
+            staged=True,
+        )
+        with self.subTest(name="coherent foreign staged token"), self.assertRaises(
+            MODULE.ContractError
+        ):
+            validate(different_token)
+
+        altered_evidence = copy.deepcopy(evidence)
+        altered_evidence["changelog"]["fragment_sha256"] = "sha256:" + "0" * 64
+        altered_identity = self.canonical(altered_evidence)
+        altered_bundle = self.bundle(altered_identity)
+        altered_release = self.release(altered_identity, altered_bundle, staged=True)
+        MODULE.validate_identity_release_record(
+            altered_release,
+            identity=altered_identity,
+            bundle=altered_bundle,
+            tag=self.TAG,
+            source_sha=self.SOURCE,
+            staged=True,
+        )
+        with self.subTest(name="coherent foreign identity bytes"), self.assertRaises(
+            MODULE.ContractError
+        ):
+            validate(altered_release, altered_identity, altered_bundle)
+
+        for name, record, field, value in (
+            ("foreign main run", main, "id", 101),
+            ("wrong platform conclusion", platform, "conclusion", "success"),
+            ("incomplete platform run", platform, "status", "in_progress"),
+        ):
+            changed_main = copy.deepcopy(main)
+            changed_platform = copy.deepcopy(platform)
+            changed = changed_main if record is main else changed_platform
+            changed[field] = value
+            with self.subTest(name=name), self.assertRaises(MODULE.ContractError):
+                validate(release, main_record=changed_main, platform_record=changed_platform)
+
+        moved_evidence = copy.deepcopy(evidence)
+        moved_evidence["tag"]["object_sha"] = "0" * 40
+        moved_identity = self.canonical(moved_evidence)
+        moved_bundle = self.bundle(moved_identity)
+        moved_release = self.release(moved_identity, moved_bundle, staged=True)
+        with self.subTest(name="moved annotated tag"), self.assertRaises(
+            MODULE.ContractError
+        ):
+            validate(moved_release, moved_identity, moved_bundle)
 
     def test_renderer_is_deterministic_compact_and_receipt_bound(self) -> None:
         window = MODULE.TransitionWindow(

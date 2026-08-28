@@ -115,14 +115,32 @@ CODEQL_EXACT_STEPS = {
 RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
 RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
 RECOVERY_TAG = "v0.1.0"
-# v0.1.41 failed before publication after GitHub allocated a mutable draft and
-# rewrote its tag_name to a server-private `untagged-*` value.  The annotated
-# public tag is never moved or selected by Flux.  The sole exact draft is
-# retired before v0.1.42 becomes the first complete canonical-asset Release.
-BURNED_PARTIAL_TAG = "v0.1.41"
-BURNED_PARTIAL_SOURCE_SHA = "77f32682b45f7bed845b245e6477c11539b67bcd"
-BURNED_PARTIAL_DRAFT_ID = 378293955
-BURNED_PARTIAL_DRAFT_TAG = "untagged-a4e9ac48228029344306"
+# v0.1.42 failed after its signed identity assets were uploaded to one mutable
+# draft. The annotated public tag is never moved or selected by Flux. The sole
+# exact partial draft is retired before v0.1.43 becomes the first complete
+# canonical-asset Release.
+BURNED_PARTIAL_TAG = "v0.1.42"
+BURNED_PARTIAL_SOURCE_SHA = "6d85c2b01dd4bd66add4192372b26bcdf1b0a951"
+BURNED_PARTIAL_TAG_OBJECT_SHA = "9821c1bdb462bb76a9a8c89d5523ab44cdab35e2"
+BURNED_PARTIAL_TREE_SHA = "ac999a9d0f1626df897d66903ed52c42a26e65a9"
+BURNED_PARTIAL_DRAFT_ID = 378336604
+BURNED_PARTIAL_DOWNLOAD_TOKEN_SHA256 = (
+    "b20952c4af11ed71690a8f921cf4010982ef458806d97d2c6073215c28c5644c"
+)
+BURNED_PARTIAL_IDENTITY_ASSET_ID = 533468594
+BURNED_PARTIAL_IDENTITY_SHA256 = (
+    "36d9be841c616aee31a72484f3dddafaa419363c35aa3056bdb3a13becf091f8"
+)
+BURNED_PARTIAL_BUNDLE_ASSET_ID = 533468609
+BURNED_PARTIAL_BUNDLE_SHA256 = (
+    "c98827ef92cfb2727128b6acd227ad9a111cada5682a9f1cda7fb6b1e814ca3c"
+)
+BURNED_PARTIAL_MAIN_RUN_ID = 33152936164
+BURNED_PARTIAL_PLATFORM_RUN_ID = 33153400419
+BURNED_PARTIAL_RUN_ATTEMPT = 1
+BURNED_PARTIAL_SELECTOR_DIGEST = (
+    "sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61"
+)
 # Issue #164 moves the publisher from commit-authored VERSION boundaries to an
 # immutable tag ledger.  Historical source releases before this exact boundary
 # contain two intentionally absent tags, so the new contiguous state machine
@@ -1994,6 +2012,7 @@ def validate_draft_release_record(
     body: str,
     expected_release_id: int | None = None,
     expected_server_tag: str | None = None,
+    expected_asset_count: int = 0,
 ) -> None:
     """Validate the sole short-lived self-ID draft before publication."""
     source_sha = require_sha(source_sha, "draft Release target SHA")
@@ -2025,8 +2044,11 @@ def validate_draft_release_record(
     author = _object(release_record.get("author"), "draft Release author")
     if author.get("login") != "github-actions[bot]" or author.get("id") != 41898282:
         raise ContractError("draft Release author is not the GitHub Actions bot")
-    if release_record.get("assets") != []:
-        raise ContractError("draft Release asset inventory must be exactly empty")
+    assets = release_record.get("assets")
+    if expected_asset_count not in (0, 2):
+        raise ContractError("draft Release expected asset count is invalid")
+    if not isinstance(assets, list) or len(assets) != expected_asset_count:
+        raise ContractError("draft Release asset inventory count is not exact")
 
 
 def classify_draft_release_state(
@@ -2038,6 +2060,7 @@ def classify_draft_release_state(
     bodies: tuple[str, ...],
     expected_release_id: int | None = None,
     expected_server_tag: str | None = None,
+    expected_asset_count: int = 0,
 ) -> tuple[str, int | None]:
     """Classify one relevant mutable draft from authenticated Release pages."""
     source_sha = require_sha(source_sha, "draft Release target SHA")
@@ -2115,6 +2138,7 @@ def classify_draft_release_state(
         body=body,
         expected_release_id=expected_release_id,
         expected_server_tag=expected_server_tag,
+        expected_asset_count=expected_asset_count,
     )
     return "exact", candidate["id"]
 
@@ -2264,6 +2288,7 @@ def _validate_identity_asset_metadata(
         "uploader",
         "url",
     }
+    staged_download_token: str | None = None
     for name, asset_payload in (
         (RELEASE_IDENTITY_ASSET_NAME, identity),
         (RELEASE_IDENTITY_BUNDLE_ASSET_NAME, bundle),
@@ -2284,19 +2309,36 @@ def _validate_identity_asset_metadata(
             f"{release_record.get('tag_name')}/{name}"
         )
         browser_download_url = asset.get("browser_download_url")
-        staged_download_url = (
-            "https://github.com/snaraj/website-infrastructure/releases/download/"
-            f"{release_record.get('tag_name')}/{name}"
+        staged_match = (
+            re.fullmatch(
+                "https://github\\.com/snaraj/website-infrastructure/"
+                "releases/download/"
+                rf"(?P<token>untagged-[0-9a-f]{{20}})/{re.escape(name)}",
+                browser_download_url,
+            )
+            if isinstance(browser_download_url, str)
+            else None
         )
+        if staged:
+            if staged_match is None:
+                raise ContractError(
+                    "staged platform release identity download URL is foreign"
+                )
+            token = staged_match.group("token")
+            if staged_download_token is None:
+                staged_download_token = token
+            elif token != staged_download_token:
+                raise ContractError(
+                    "staged platform release identity download tokens conflict"
+                )
         if (
             asset.get("name") != name
-            or asset.get("label") is not None
+            or asset.get("label") not in (None, "")
             or asset.get("state") != "uploaded"
             or asset.get("content_type") != "application/json"
             or asset.get("size") != len(asset_payload)
             or asset.get("digest") != asset_digest
             or asset.get("url") != expected_api_url
-            or (staged and browser_download_url != staged_download_url)
             or (not staged and browser_download_url != final_download_url)
         ):
             raise ContractError("platform release identity asset metadata is foreign")
@@ -2415,17 +2457,9 @@ def selector_image_from_release(
         or release != expected_release
     ):
         raise ContractError("selector predecessor release evidence is foreign")
-    release_tag = release_record.get("tag_name")
-    staged_release_tag = (
-        staged
-        and isinstance(release_tag, str)
-        and SERVER_DRAFT_TAG_RE.fullmatch(release_tag) is not None
-    )
     if (
-        release_tag != expected_tag
-        and not staged_release_tag
-    ) or (
-        release_record.get("name") != f"Platform {expected_tag}"
+        release_record.get("tag_name") != expected_tag
+        or release_record.get("name") != f"Platform {expected_tag}"
         or release_record.get("target_commitish") != expected_sha
         or release_record.get("draft") is not staged
         or release_record.get("prerelease") is not False
@@ -2602,21 +2636,26 @@ def validate_identity_run_records(
     identity: bytes,
     main_run_record: Mapping[str, object],
     platform_run_record: Mapping[str, object],
+    *,
+    platform_conclusion: str = "success",
 ) -> None:
     """Prove the signed receipt names two exact successful workflow attempts."""
+    if platform_conclusion not in {"success", "failure"}:
+        raise ContractError("platform Release run conclusion is invalid")
     evidence = _canonical_release_identity(identity)
     source = _object(evidence.get("source"), "release identity source")
     source_sha = require_sha(
         source.get("merge_sha"), "release identity workflow source SHA"
     )
-    for key, actual, workflow, event, receipt_conclusion in (
-        ("main_ci", main_run_record, WORKFLOW_PATH, "push", True),
+    for key, actual, workflow, event, receipt_conclusion, actual_conclusion in (
+        ("main_ci", main_run_record, WORKFLOW_PATH, "push", True, "success"),
         (
             "platform_release",
             platform_run_record,
             PLATFORM_WORKFLOW_PATH,
             "workflow_run",
             False,
+            platform_conclusion,
         ),
     ):
         receipt = _object(evidence.get(key), f"release identity {key}")
@@ -2651,13 +2690,95 @@ def validate_identity_run_records(
             or actual.get("head_sha") != source_sha
             or actual.get("path") != workflow
             or actual.get("status") != "completed"
-            or actual.get("conclusion") != "success"
+            or actual.get("conclusion") != actual_conclusion
             or repository.get("full_name")
             != "snaraj/website-infrastructure"
         ):
             raise ContractError(
                 f"release identity {key} workflow attempt is foreign"
             )
+
+
+def validate_burned_partial_release_record(
+    release_record: Mapping[str, object],
+    *,
+    identity: bytes,
+    bundle: bytes,
+    body: str,
+    main_run_record: Mapping[str, object],
+    platform_run_record: Mapping[str, object],
+) -> str:
+    """Validate the sole signed v0.1.42 partial before retiring its draft."""
+    validate_draft_release_record(
+        release_record,
+        tag=BURNED_PARTIAL_TAG,
+        source_sha=BURNED_PARTIAL_SOURCE_SHA,
+        title=f"Platform {BURNED_PARTIAL_TAG}",
+        body=body,
+        expected_release_id=BURNED_PARTIAL_DRAFT_ID,
+        expected_asset_count=2,
+    )
+    digest = selector_image_from_release(
+        release_record,
+        identity=identity,
+        bundle=bundle,
+        expected_tag=BURNED_PARTIAL_TAG,
+        expected_sha=BURNED_PARTIAL_SOURCE_SHA,
+        expected_selector_build_sha=BURNED_PARTIAL_SOURCE_SHA,
+        expected_tag_object_sha=BURNED_PARTIAL_TAG_OBJECT_SHA,
+        expected_tree_sha=BURNED_PARTIAL_TREE_SHA,
+        staged=True,
+    )
+    if digest != BURNED_PARTIAL_SELECTOR_DIGEST:
+        raise ContractError("burned partial selector digest is foreign")
+    if hashlib.sha256(identity).hexdigest() != BURNED_PARTIAL_IDENTITY_SHA256:
+        raise ContractError("burned partial identity asset bytes are foreign")
+    if hashlib.sha256(bundle).hexdigest() != BURNED_PARTIAL_BUNDLE_SHA256:
+        raise ContractError("burned partial bundle asset bytes are foreign")
+
+    assets = release_record["assets"]
+    by_name = {_object(asset, "burned partial asset")["name"]: asset for asset in assets}
+    expected_assets = {
+        RELEASE_IDENTITY_ASSET_NAME: (
+            BURNED_PARTIAL_IDENTITY_ASSET_ID,
+            BURNED_PARTIAL_IDENTITY_SHA256,
+        ),
+        RELEASE_IDENTITY_BUNDLE_ASSET_NAME: (
+            BURNED_PARTIAL_BUNDLE_ASSET_ID,
+            BURNED_PARTIAL_BUNDLE_SHA256,
+        ),
+    }
+    for name, (asset_id, asset_sha256) in expected_assets.items():
+        asset = _object(by_name.get(name), "burned partial asset")
+        download_url = asset.get("browser_download_url")
+        download_token = download_url.rsplit("/", 2)[-2]
+        if (
+            asset.get("id") != asset_id
+            or asset.get("digest") != f"sha256:{asset_sha256}"
+            or hashlib.sha256(download_token.encode("ascii")).hexdigest()
+            != BURNED_PARTIAL_DOWNLOAD_TOKEN_SHA256
+        ):
+            raise ContractError("burned partial asset identity is foreign")
+
+    evidence = _canonical_release_identity(identity)
+    main_receipt = _object(evidence.get("main_ci"), "burned partial main receipt")
+    platform_receipt = _object(
+        evidence.get("platform_release"), "burned partial platform receipt"
+    )
+    if (
+        main_receipt.get("run_id") != BURNED_PARTIAL_MAIN_RUN_ID
+        or main_receipt.get("run_attempt") != BURNED_PARTIAL_RUN_ATTEMPT
+        or platform_receipt.get("run_id") != BURNED_PARTIAL_PLATFORM_RUN_ID
+        or platform_receipt.get("run_attempt") != BURNED_PARTIAL_RUN_ATTEMPT
+    ):
+        raise ContractError("burned partial workflow receipt is foreign")
+    validate_identity_run_records(
+        identity,
+        main_run_record,
+        platform_run_record,
+        platform_conclusion="failure",
+    )
+    return digest
 
 
 def validate_identity_release_record(
@@ -2908,6 +3029,7 @@ def _parser() -> argparse.ArgumentParser:
     release_draft_record.add_argument("--body", type=Path, required=True)
     release_draft_record.add_argument("--expected-release-id", type=int)
     release_draft_record.add_argument("--expected-server-tag")
+    release_draft_record.add_argument("--expected-asset-count", type=int, default=0)
     release_draft_state = commands.add_parser("release-draft-state")
     release_draft_state.add_argument("--releases-json", type=Path, required=True)
     release_draft_state.add_argument("--tag", required=True)
@@ -2918,9 +3040,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     release_draft_state.add_argument("--expected-release-id", type=int)
     release_draft_state.add_argument("--expected-server-tag")
+    release_draft_state.add_argument("--expected-asset-count", type=int, default=0)
     release_draft_state.add_argument(
         "--require", choices=("absent", "exact"), required=True
     )
+    burned_partial = commands.add_parser("burned-partial-release-record")
+    burned_partial.add_argument("--release-json", type=Path, required=True)
+    burned_partial.add_argument("--identity", type=Path, required=True)
+    burned_partial.add_argument("--bundle", type=Path, required=True)
+    burned_partial.add_argument("--body", type=Path, required=True)
+    burned_partial.add_argument("--main-run-json", type=Path, required=True)
+    burned_partial.add_argument("--platform-run-json", type=Path, required=True)
     identity_release_record = commands.add_parser("identity-release-record")
     identity_release_record.add_argument("--release-json", type=Path, required=True)
     identity_release_record.add_argument("--identity", type=Path, required=True)
@@ -3144,6 +3274,7 @@ def main(argv: list[str] | None = None) -> int:
                 body=args.body.read_text(encoding="utf-8"),
                 expected_release_id=args.expected_release_id,
                 expected_server_tag=args.expected_server_tag,
+                expected_asset_count=args.expected_asset_count,
             )
             print("exact")
         elif args.command == "release-draft-state":
@@ -3155,9 +3286,21 @@ def main(argv: list[str] | None = None) -> int:
                 bodies=tuple(path.read_text(encoding="utf-8") for path in args.body),
                 expected_release_id=args.expected_release_id,
                 expected_server_tag=args.expected_server_tag,
+                expected_asset_count=args.expected_asset_count,
             )
             require_publication_state(state, args.require)
             print(release_id if state == "exact" else state)
+        elif args.command == "burned-partial-release-record":
+            print(
+                validate_burned_partial_release_record(
+                    _read_object(args.release_json),
+                    identity=args.identity.read_bytes(),
+                    bundle=args.bundle.read_bytes(),
+                    body=args.body.read_text(encoding="utf-8"),
+                    main_run_record=_read_object(args.main_run_json),
+                    platform_run_record=_read_object(args.platform_run_json),
+                )
+            )
         elif args.command in {
             "identity-release-record",
             "staged-identity-release-record",
