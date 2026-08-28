@@ -89,20 +89,28 @@ MAIN_CI_EXACT_STEPS = (
 )
 CODEQL_WORKFLOW_NAME = "CodeQL"
 CODEQL_WORKFLOW_PATH = ".github/workflows/codeql.yml"
-CODEQL_JOB_NAME = "analyze (python, none)"
-CODEQL_REQUIRED_STEPS = (
-    "Check out repository",
-    "Initialize CodeQL",
-    "Analyze",
-)
-CODEQL_EXACT_STEPS = (
-    ("Set up job", "success"),
-    *((name, "success") for name in CODEQL_REQUIRED_STEPS),
-    ("Post Analyze", "success"),
-    ("Post Initialize CodeQL", "success"),
-    ("Post Check out repository", "success"),
-    ("Complete job", "success"),
-)
+CODEQL_EXACT_STEPS = {
+    "analyze (python, none)": (
+        ("Set up job", "success"),
+        ("Check out repository", "success"),
+        ("Initialize CodeQL", "success"),
+        ("Analyze", "success"),
+        ("Post Analyze", "success"),
+        ("Post Initialize CodeQL", "success"),
+        ("Post Check out repository", "success"),
+        ("Complete job", "success"),
+    ),
+    "analyze (go, autobuild)": (
+        ("Set up job", "success"),
+        ("Check out repository", "success"),
+        ("Initialize CodeQL", "success"),
+        ("Analyze", "success"),
+        ("Post Analyze", "success"),
+        ("Post Initialize CodeQL", "success"),
+        ("Post Check out repository", "success"),
+        ("Complete job", "success"),
+    ),
+}
 RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
 RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
 RECOVERY_TAG = "v0.1.0"
@@ -1181,7 +1189,7 @@ def classify_codeql_run(
 def codeql_jobs_ready(
     jobs_record: Mapping[str, object], *, run_id: int, run_attempt: int, source_sha: str
 ) -> bool:
-    """Validate the sole exact CodeQL job and ordered step inventory."""
+    """Validate both exact CodeQL jobs and their ordered step inventories."""
     source_sha = require_sha(source_sha, "CodeQL job source SHA")
     if (
         isinstance(run_id, bool)
@@ -1200,41 +1208,59 @@ def codeql_jobs_ready(
         raise ContractError("CodeQL job count must be an integer")
     if total_count == 0 and jobs == []:
         return False
-    if total_count != 1 or len(jobs) != 1:
-        raise ContractError("expected exactly one CodeQL job for the source SHA")
-    job = _object(jobs[0], "CodeQL job")
-    if (
-        job.get("name") != CODEQL_JOB_NAME
-        or job.get("run_id") != run_id
-        or job.get("run_attempt") != run_attempt
-        or job.get("head_sha") != source_sha
-        or job.get("head_branch") != "main"
-        or job.get("workflow_name") != CODEQL_WORKFLOW_NAME
-    ):
-        raise ContractError("CodeQL job identity or source binding is not exact")
-    status = job.get("status")
-    conclusion = job.get("conclusion")
-    if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
-        if conclusion is not None:
-            raise ContractError("incomplete CodeQL job has a foreign conclusion")
-        return False
-    if status != "completed" or conclusion != "success":
-        raise ContractError("CodeQL job did not complete successfully")
-    conclusions: dict[str, str] = {}
-    ordered_steps: list[tuple[str, str]] = []
-    for value in _array(job.get("steps"), "CodeQL job steps"):
-        step = _object(value, "CodeQL job step")
-        name = step.get("name")
-        conclusion = step.get("conclusion")
-        if not isinstance(name, str) or not name or name in conclusions:
-            raise ContractError("CodeQL step names must be non-empty and unique")
-        if not isinstance(conclusion, str) or not conclusion:
-            raise ContractError("CodeQL step conclusion is missing")
-        conclusions[name] = conclusion
-        ordered_steps.append((name, conclusion))
-    if tuple(ordered_steps) != CODEQL_EXACT_STEPS:
-        raise ContractError("CodeQL step order, inventory, or conclusions are not exact")
-    return True
+    if total_count != len(CODEQL_EXACT_STEPS) or len(jobs) != len(CODEQL_EXACT_STEPS):
+        raise ContractError("expected exact Python and Go CodeQL jobs for the source SHA")
+    by_name: dict[str, Mapping[str, object]] = {}
+    for value in jobs:
+        job = _object(value, "CodeQL job")
+        name = job.get("name")
+        if not isinstance(name, str) or not name or name in by_name:
+            raise ContractError("CodeQL job names must be non-empty and unique")
+        by_name[name] = job
+    if set(by_name) != set(CODEQL_EXACT_STEPS):
+        raise ContractError("CodeQL job inventory is not exact")
+
+    pending = False
+    for name, expected_steps in CODEQL_EXACT_STEPS.items():
+        job = by_name[name]
+        if (
+            job.get("run_id") != run_id
+            or job.get("run_attempt") != run_attempt
+            or job.get("head_sha") != source_sha
+            or job.get("head_branch") != "main"
+            or job.get("workflow_name") != CODEQL_WORKFLOW_NAME
+        ):
+            raise ContractError("CodeQL job identity or source binding is not exact")
+        status = job.get("status")
+        conclusion = job.get("conclusion")
+        if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
+            if conclusion is not None:
+                raise ContractError("incomplete CodeQL job has a foreign conclusion")
+            pending = True
+            continue
+        if status != "completed" or conclusion != "success":
+            raise ContractError("CodeQL job did not complete successfully")
+        conclusions: dict[str, str] = {}
+        ordered_steps: list[tuple[str, str]] = []
+        for value in _array(job.get("steps"), "CodeQL job steps"):
+            step = _object(value, "CodeQL job step")
+            step_name = step.get("name")
+            step_conclusion = step.get("conclusion")
+            if (
+                not isinstance(step_name, str)
+                or not step_name
+                or step_name in conclusions
+            ):
+                raise ContractError("CodeQL step names must be non-empty and unique")
+            if not isinstance(step_conclusion, str) or not step_conclusion:
+                raise ContractError("CodeQL step conclusion is missing")
+            conclusions[step_name] = step_conclusion
+            ordered_steps.append((step_name, step_conclusion))
+        if tuple(ordered_steps) != expected_steps:
+            raise ContractError(
+                "CodeQL step order, inventory, or conclusions are not exact"
+            )
+    return not pending
 
 
 def validate_app_provisioning_receipt(

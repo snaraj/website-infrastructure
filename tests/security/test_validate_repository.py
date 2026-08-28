@@ -747,6 +747,59 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertTrue(any("unsafe or unstable" in error for error in secret_errors))
         self.assertTrue(any("unsafe or unstable" in error for error in media_errors))
 
+    def test_public_file_read_ignores_unrelated_ancestor_link_count_churn(self):
+        """A sibling directory cannot make an unchanged public path flaky."""
+
+        for iteration in range(10):
+            with self.subTest(iteration=iteration), tempfile.TemporaryDirectory(
+                prefix="public-path-churn."
+            ) as directory:
+                root = Path(directory).resolve()
+                parent = root / "published"
+                parent.mkdir()
+                public = parent / "candidate.txt"
+                public.write_bytes(b"synthetic\n")
+                sibling = parent / "unrelated-directory"
+                original_read = os.read
+
+                def read_with_churn(descriptor, size):
+                    sibling.mkdir(exist_ok=True)
+                    return original_read(descriptor, size)
+
+                with mock.patch.object(
+                    MODULE.os, "read", side_effect=read_with_churn
+                ):
+                    data, _ = MODULE._read_public_regular_file(public, root)
+                self.assertEqual(data, b"synthetic\n")
+
+    def test_public_file_read_rejects_ancestor_replacement(self):
+        """Ignoring ancestor link counts must not admit an inode replacement."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            parent = root / "published"
+            parent.mkdir()
+            public = parent / "candidate.txt"
+            public.write_bytes(b"synthetic\n")
+            detached = root / "detached"
+            original_read = os.read
+            replaced = False
+
+            def read_after_replacement(descriptor, size):
+                nonlocal replaced
+                if not replaced:
+                    parent.rename(detached)
+                    parent.mkdir()
+                    public.write_bytes(b"synthetic\n")
+                    replaced = True
+                return original_read(descriptor, size)
+
+            with mock.patch.object(
+                MODULE.os, "read", side_effect=read_after_replacement
+            ):
+                with self.assertRaises(MODULE.UnsafePublicPathError):
+                    MODULE._read_public_regular_file(public, root)
+
     def test_privacy_scan_reads_exact_staged_blob_not_safe_worktree_substitute(self):
         """Private staged inventory cannot hide behind a sanitized worktree file."""
 

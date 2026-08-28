@@ -5,12 +5,14 @@
 # attached, instead of surviving as a set of dismissals in the GitHub UI that
 # no checkout can show and no gate can re-verify.
 #
-# WHAT STAYS ANALYZED. The default query suite runs unchanged. `scripts/**` —
-# the platform's production surface, the validators and the redaction tooling
-# that run in the bootstrap path and behind every gate — is fully analyzed and
-# is never excluded here. That surface has already earned the analysis: the
-# findings it raised drove real corrections, including a classifier that
-# accepted a look-alike API group without deriving any authority from it.
+# WHAT STAYS ANALYZED. The default query suite runs unchanged. `scripts/**`
+# contains the validators and redaction tooling that run in the bootstrap path
+# and behind every gate. `cmd/platform-release-selector/**` and
+# `internal/releaseselector/**` contain the Go runtime that validates signed
+# release evidence and advances the live Flux source. All three production
+# surfaces are fully analyzed and are never excluded here. This coverage has
+# already driven real corrections, including a classifier that accepted a
+# look-alike API group without deriving any authority from it.
 #
 # WHAT IS EXCLUDED, AND WHY. The `tests` tree is excluded. Its batteries exist
 # to prove that the secret-detection gates REJECT credential-shaped material,
@@ -40,8 +42,8 @@
 # The scope above is enforced, not merely described:
 # `tests/security/test_codeql_contract.py` pins this file's exact top-level
 # keys and its exact exclusion list, and pins that the workflow still points at
-# it. Widening the exclusion toward `scripts`, or adding a `queries` or
-# `query-filters` stanza that narrows what runs over the production surface,
-# turns the suite red.
+# it. Widening the exclusion toward `scripts`, `cmd`, or `internal`, or adding a
+# `queries` or `query-filters` stanza that narrows what runs over the production
+# surface, turns the suite red.
 paths-ignore:
   - tests

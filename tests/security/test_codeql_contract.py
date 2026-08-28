@@ -13,6 +13,7 @@ CONFIG_REFERENCE = "config-file: ./.github/codeql/codeql-config.yml"
 # surface and must never appear in this set; the assertions below compare
 # against it exactly, so an added entry fails rather than silently widening.
 EXPECTED_EXCLUSIONS = ["tests"]
+PRODUCTION_ROOTS = ("scripts", "cmd", "internal")
 
 
 def config_structure():
@@ -65,20 +66,21 @@ class CodeQlConfigScopeTests(unittest.TestCase):
         self.assertIn("paths-ignore", structure)
         self.assertEqual(structure["paths-ignore"], EXPECTED_EXCLUSIONS)
 
-    def test_production_surface_is_never_excluded(self):
+    def test_production_surfaces_are_never_excluded(self):
         """Named separately from the equality above so the reason survives.
 
-        `scripts/**` is what runs on the host and inside the gates. An
-        exclusion reaching it would hide findings on the only Python in this
-        repository that executes outside a test process.
+        `scripts/**` runs on the host and inside the gates; `cmd/**` and
+        `internal/**` contain the release selector. None may be hidden.
         """
 
         for entry in config_structure().get("paths-ignore", []):
-            with self.subTest(entry=entry):
-                self.assertFalse(
-                    entry == "scripts" or entry.startswith("scripts/"),
-                    "CodeQL must not exclude the production script surface",
-                )
+            for production_root in PRODUCTION_ROOTS:
+                with self.subTest(entry=entry, production_root=production_root):
+                    self.assertFalse(
+                        entry == production_root
+                        or entry.startswith(production_root + "/"),
+                        "CodeQL must not exclude a production surface",
+                    )
 
     def test_config_does_not_narrow_the_query_suite(self):
         """No `queries` or `query-filters`: the default suite runs in full.
@@ -93,21 +95,33 @@ class CodeQlConfigScopeTests(unittest.TestCase):
 
 
 class CodeQlContractTests(unittest.TestCase):
-    """The platform repository carries only Python; site repos scan their own code."""
+    """Analyze both production languages; site repos scan their own code."""
 
-    def test_python_analysis_is_the_single_matrix_entry(self):
+    def test_python_and_go_are_the_exact_production_matrix(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("language: python", workflow)
-        self.assertIn("build-mode: none", workflow)
+        self.assertIn(
+            "          - language: python\n"
+            "            build-mode: none\n"
+            "          - language: go\n"
+            "            build-mode: autobuild\n",
+            workflow,
+        )
+        self.assertEqual(
+            [
+                line.strip()
+                for line in workflow.splitlines()
+                if line.strip().startswith("- language:")
+            ],
+            ["- language: python", "- language: go"],
+        )
         self.assertIn("- name: Initialize CodeQL", workflow)
         self.assertIn("- name: Analyze", workflow)
 
     def test_site_language_lanes_left_with_the_site_repositories(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertNotIn("language: go", workflow)
         self.assertNotIn("language: javascript-typescript", workflow)
         self.assertNotIn("build-mode: manual", workflow)
-        self.assertNotIn("- name: Set up Go", workflow)
+        self.assertNotIn("actions/setup-go", workflow)
         self.assertNotIn("go build", workflow)
         self.assertNotIn("websites/", workflow)
 

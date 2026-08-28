@@ -392,11 +392,11 @@ def codeql_runs_record() -> dict[str, object]:
 
 def codeql_jobs_record() -> dict[str, object]:
     return {
-        "total_count": 1,
+        "total_count": len(MODULE.CODEQL_EXACT_STEPS),
         "jobs": [
             {
-                "id": 6001,
-                "name": "analyze (python, none)",
+                "id": 6001 + index,
+                "name": name,
                 "run_id": 5001,
                 "run_attempt": 1,
                 "head_sha": "a" * 40,
@@ -405,10 +405,13 @@ def codeql_jobs_record() -> dict[str, object]:
                 "status": "completed",
                 "conclusion": "success",
                 "steps": [
-                    {"name": name, "conclusion": conclusion}
-                    for name, conclusion in MODULE.CODEQL_EXACT_STEPS
+                    {"name": step_name, "conclusion": conclusion}
+                    for step_name, conclusion in exact_steps
                 ],
             }
+            for index, (name, exact_steps) in enumerate(
+                MODULE.CODEQL_EXACT_STEPS.items()
+            )
         ],
     }
 
@@ -1991,15 +1994,18 @@ class MainCIJobsReceiptTests(unittest.TestCase):
                 absent, run_id=5001, run_attempt=1, source_sha=self.SOURCE
             )
         )
-        queued = codeql_jobs_record()
-        queued["jobs"][0]["status"] = "in_progress"
-        queued["jobs"][0]["conclusion"] = None
-        self.assertFalse(
-            MODULE.codeql_jobs_ready(
-                queued, run_id=5001, run_attempt=1, source_sha=self.SOURCE
+        pending_records = [absent]
+        for job_index in range(len(MODULE.CODEQL_EXACT_STEPS)):
+            queued = codeql_jobs_record()
+            queued["jobs"][job_index]["status"] = "in_progress"
+            queued["jobs"][job_index]["conclusion"] = None
+            self.assertFalse(
+                MODULE.codeql_jobs_ready(
+                    queued, run_id=5001, run_attempt=1, source_sha=self.SOURCE
+                )
             )
-        )
-        for pending in (absent, queued):
+            pending_records.append(queued)
+        for pending in pending_records:
             with self.subTest(codeql_pending=pending), self.assertRaises(
                 MODULE.ContractError
             ):
@@ -2007,43 +2013,55 @@ class MainCIJobsReceiptTests(unittest.TestCase):
 
         exact = codeql_jobs_record()
         mutations: list[dict[str, object]] = []
-        for field, value in (
-            ("name", "analyze (javascript)"),
-            ("run_id", 5002),
-            ("run_attempt", 2),
-            ("head_sha", "b" * 40),
-            ("head_branch", "feature"),
-            ("workflow_name", "Foreign"),
-            ("status", "completed"),
-            ("conclusion", "failure"),
+        for job_index, (_, expected_steps) in enumerate(
+            MODULE.CODEQL_EXACT_STEPS.items()
         ):
-            changed = copy.deepcopy(exact)
-            changed["jobs"][0][field] = value
-            if field == "status" and value == "completed":
-                changed["jobs"][0]["conclusion"] = "cancelled"
-            mutations.append(changed)
-        for expected_name, expected_conclusion in MODULE.CODEQL_EXACT_STEPS:
-            for conclusion in (None, "success", "skipped", "cancelled", "failure"):
-                if conclusion == expected_conclusion:
-                    continue
+            for field, value in (
+                ("name", "analyze (javascript)"),
+                ("run_id", 5002),
+                ("run_attempt", 2),
+                ("head_sha", "b" * 40),
+                ("head_branch", "feature"),
+                ("workflow_name", "Foreign"),
+                ("status", "completed"),
+                ("conclusion", "failure"),
+            ):
                 changed = copy.deepcopy(exact)
-                if conclusion is None:
-                    changed["jobs"][0]["steps"] = [
-                        step
-                        for step in changed["jobs"][0]["steps"]
-                        if step["name"] != expected_name
-                    ]
-                else:
-                    step = next(
-                        value
-                        for value in changed["jobs"][0]["steps"]
-                        if value["name"] == expected_name
-                    )
-                    step["conclusion"] = conclusion
+                changed["jobs"][job_index][field] = value
+                if field == "status" and value == "completed":
+                    changed["jobs"][job_index]["conclusion"] = "cancelled"
                 mutations.append(changed)
+            for expected_name, expected_conclusion in expected_steps:
+                for conclusion in (
+                    None, "success", "skipped", "cancelled", "failure"
+                ):
+                    if conclusion == expected_conclusion:
+                        continue
+                    changed = copy.deepcopy(exact)
+                    if conclusion is None:
+                        changed["jobs"][job_index]["steps"] = [
+                            step
+                            for step in changed["jobs"][job_index]["steps"]
+                            if step["name"] != expected_name
+                        ]
+                    else:
+                        step = next(
+                            value
+                            for value in changed["jobs"][job_index]["steps"]
+                            if value["name"] == expected_name
+                        )
+                        step["conclusion"] = conclusion
+                    mutations.append(changed)
         changed = copy.deepcopy(exact)
-        changed["total_count"] = 2
+        changed["total_count"] = len(MODULE.CODEQL_EXACT_STEPS) + 1
         changed["jobs"].append(copy.deepcopy(changed["jobs"][0]))
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["total_count"] -= 1
+        changed["jobs"].pop()
+        mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["jobs"][1] = copy.deepcopy(changed["jobs"][0])
         mutations.append(changed)
         changed = copy.deepcopy(exact)
         changed["jobs"][0]["steps"].append(

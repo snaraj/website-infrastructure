@@ -233,8 +233,9 @@ repository gate step successful except the one PR-only history scan, which must
 be exactly skipped. Missing, duplicate, foreign, failed, cancelled, or newly
 skipped jobs/steps emit no attestation. The same bounded read-only job waits up
 to five minutes for exactly one `CodeQL` push run at the same main SHA, then
-requires its sole `analyze (python, none)` job and checkout, initialization, and
-analysis steps to succeed. PR CodeQL is never reused as evidence for a
+requires exactly `analyze (python, none)` and `analyze (go, autobuild)`, with
+each job's checkout, initialization, and analysis steps succeeding. PR CodeQL
+is never reused as evidence for a
 squash/rebase-created main SHA. Its run-bound value receipt is required
 alongside the settings receipt; neither read token crosses into the publisher.
 

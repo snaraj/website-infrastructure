@@ -6,8 +6,12 @@ import base64
 import copy
 import importlib.util
 import json
+import os
+import signal
 import stat
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -955,6 +959,82 @@ class PlatformBootstrapContractTests(unittest.TestCase):
                 "kustomization.kustomize.toolkit.fluxcd.io"
             ),
         )
+
+    def test_failure_containment_ignores_repeated_and_mixed_signals(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        handler = next(
+            line for line in text.splitlines() if line.startswith("on_failure()")
+        )
+        harness = "\n".join((
+            "#!/usr/bin/env bash",
+            "set -Eeuo pipefail",
+            'work="$STATE/work"',
+            'mkdir "$work"',
+            'quarantine_helm_bindings() { touch "$STATE/helm-started"; '
+            'while [[ ! -e "$STATE/release" ]]; do :; done; '
+            'touch "$STATE/helm-done"; }',
+            'quarantine_authority() { touch "$STATE/authority-done"; }',
+            'contain() { touch "$STATE/contain-done"; }',
+            handler,
+            "mutations_armed=true",
+            "trap on_failure ERR INT TERM HUP",
+            'touch "$STATE/armed"',
+            "while :; do :; done",
+            "",
+        ))
+
+        def wait_for(path, process):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if path.exists():
+                    return
+                if process.poll() is not None:
+                    self.fail(f"containment exited before {path.name}")
+                time.sleep(0.01)
+            self.fail(f"timed out waiting for {path.name}")
+
+        cases = (
+            (signal.SIGHUP, signal.SIGHUP),
+            (signal.SIGINT, signal.SIGINT),
+            (signal.SIGTERM, signal.SIGTERM),
+            (signal.SIGTERM, signal.SIGINT, signal.SIGHUP),
+        )
+        for sequence in cases:
+            with self.subTest(signals=sequence), tempfile.TemporaryDirectory(
+                prefix="platform-bootstrap-signals."
+            ) as directory:
+                state = Path(directory)
+                script = state / "harness.sh"
+                script.write_text(harness, encoding="utf-8")
+                environment = os.environ.copy()
+                environment["STATE"] = str(state)
+                process = subprocess.Popen(
+                    ["bash", str(script)],
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    wait_for(state / "armed", process)
+                    os.kill(process.pid, sequence[0])
+                    wait_for(state / "helm-started", process)
+                    for item in sequence[1:]:
+                        os.kill(process.pid, item)
+                    (state / "release").touch()
+                    stdout, stderr = process.communicate(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+                # Bash exposes a zero status to a signal trap here; the
+                # production handler deliberately normalizes that to one.
+                self.assertEqual(process.returncode, 1, stderr)
+                self.assertEqual(stdout, "")
+                self.assertNotIn("RECOVERY_REQUIRED", stderr)
+                for marker in ("helm-done", "authority-done", "contain-done"):
+                    self.assertTrue((state / marker).is_file(), marker)
+                self.assertFalse((state / "work").exists())
 
     def test_selector_execution_must_be_terminal_and_exactly_owned_before_restore(self):
         module = self.module

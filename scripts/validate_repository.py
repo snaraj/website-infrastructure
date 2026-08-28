@@ -509,7 +509,7 @@ def _path_snapshot(path, root):
             metadata.st_dev,
             metadata.st_ino,
             metadata.st_mode,
-            metadata.st_nlink,
+            metadata.st_nlink if final else None,
             metadata.st_size if final else None,
             metadata.st_mtime_ns if final else None,
         ))
