@@ -266,7 +266,9 @@ spec:
             dockerfile.index("RUN --network=none CGO_ENABLED=0"),
         )
         self.assertIn(
-            "docker build --network=none --target build \\\n"
+            'selector_rootfs="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"\n'
+            "            docker build --network=none \\\n"
+            '            --output "type=local,dest=${selector_rootfs}" \\\n'
             "            --file cmd/platform-release-selector/Dockerfile .",
             workflow,
         )
@@ -278,10 +280,18 @@ spec:
             "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
         )
         self.assertIn(
-            "COPY --from=trusted-root --chmod=0444 /trusted_root.json "
-            "/usr/local/share/sigstore/trusted_root.json",
+            "chmod 0555 /trusted-root/usr /trusted-root/usr/local \\\n"
+            "      /trusted-root/usr/local/share /trusted-root/usr/local/share/sigstore",
             dockerfile,
         )
+        self.assertIn("COPY --from=trusted-root /trusted-root/ /", dockerfile)
+        for expected in (
+            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share"',
+            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share/sigstore"',
+            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share/sigstore/trusted_root.json"',
+            "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
+        ):
+            self.assertIn(expected, workflow)
 
     def test_zero_asset_v0140_exception_is_one_exact_migration_edge(self):
         publisher = (ROOT / "scripts/ci/publish-platform-release.sh").read_text()
@@ -334,7 +344,7 @@ spec:
         ignore = "--ignorefile policies/platform-selector-trivy-ignore.yaml"
         self.assertEqual(workflow.count(ignore), 1)
         selector_scan = workflow.split(
-            "- name: Sign and attest the first selector digest", 1
+            "- name: Sign and attest the changed selector digest", 1
         )[1].split("- name: Bind the selector digest used by release identity", 1)[0]
         self.assertIn("--image-src remote --platform linux/arm64", selector_scan)
         self.assertIn("--ignore-unfixed=false", selector_scan)

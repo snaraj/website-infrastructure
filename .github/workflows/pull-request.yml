@@ -185,8 +185,15 @@ jobs:
                cmd/platform-release-selector internal/releaseselector go.mod; then
             printf 'Selector build inputs unchanged; skipping duplicate container build.\n'
           else
-            docker build --network=none --target build \
+            selector_rootfs="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"
+            docker build --network=none \
+            --output "type=local,dest=${selector_rootfs}" \
             --file cmd/platform-release-selector/Dockerfile .
+            test "$(stat --format='%a' "${selector_rootfs}/usr/local/share")" = 555
+            test "$(stat --format='%a' "${selector_rootfs}/usr/local/share/sigstore")" = 555
+            test "$(stat --format='%a' "${selector_rootfs}/usr/local/share/sigstore/trusted_root.json")" = 444
+            test "$(sha256sum "${selector_rootfs}/usr/local/share/sigstore/trusted_root.json" | cut -d ' ' -f 1)" = \
+              6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66
           fi
       - name: Enforce the self-hosted coverage contract
         # Zero-third-party coverage: the one hash-pinned wheel is installed

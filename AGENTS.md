@@ -172,6 +172,13 @@ and dependency-governed Draft capacity is recorded durably in
   by line range — a delivery-lane change may correct what the model
   asserts about reviewed state, never what the custody surface above
   permits or requires.
+- `cmd/platform-release-selector/**` and `internal/releaseselector/**` —
+  PLATFORM (owner authorization 2026-08-28 for issue #242). These are the
+  bootstrap-owned credentialless selector and its immutable image inputs.
+  Delivery-owned CI may materialize and validate the final image, but a
+  selector behavior or packaging change remains an authority-boundary change:
+  it requires independent security review and the owner-attended live digest
+  rotation tracked by issue #222; it never grants selector self-update.
 - `policies/conftest/**` and `policies/release-conftest/**` — DELIVERY.
   The enumeration is exact, not shorthand for `policies/**`: these subtrees are the
   executable expression of the gates this lane already owns. Every other

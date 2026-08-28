@@ -4425,6 +4425,8 @@ class WorkflowStructureTests(unittest.TestCase):
             "SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector",
             "Install checksum-verified release tools",
             "Select the immutable selector image lineage",
+            'git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" --',
+            "cmd/platform-release-selector internal/releaseselector go.mod",
             '[ "${BASE_SHA}" = 6d85c2b01dd4bd66add4192372b26bcdf1b0a951 ]',
             '[ "${BASE_TAG}" = v0.1.42 ]',
             '[ "${TAG}" = v0.1.43 ]',
@@ -4758,8 +4760,8 @@ class WorkflowStructureTests(unittest.TestCase):
             < publish_job.index("Select the immutable selector image lineage")
         ):
             raise ValueError("Cosign must be installed before receipt consumption")
-        if publish_job.count("state=reuse") != 3 or publish_job.count("state=build") != 1:
-            raise ValueError("selector reuse and reviewed first-build branches drifted")
+        if publish_job.count("state=reuse") != 3 or publish_job.count("state=build") != 2:
+            raise ValueError("selector reuse and reviewed changed-build branches drifted")
         for repeated in (
             "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
             "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
@@ -4767,15 +4769,28 @@ class WorkflowStructureTests(unittest.TestCase):
             if publish_job.count(repeated) != 2:
                 raise ValueError(f"selector and publisher must both receive {repeated}")
         selector_start = publish_job.index("Select the immutable selector image lineage")
-        selector_end = publish_job.index("Set up Buildx for the first selector image")
+        selector_end = publish_job.index("Set up Buildx for a changed selector image")
         selector = publish_job[selector_start:selector_end]
         legacy_start = selector.index(
             'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then'
         )
         current_identity_path = selector[:legacy_start]
-        legacy_path = selector[legacy_start:].split("\n          else\n", 1)[1]
+        ordinary_path, legacy_path = selector[legacy_start:].split(
+            "\n          else\n", 1
+        )
         if ".body" in current_identity_path:
             raise ValueError("current selector reuse must not trust Release Markdown")
+        if (
+            'git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" --'
+            not in ordinary_path
+            or "cmd/platform-release-selector internal/releaseselector go.mod"
+            not in ordinary_path
+            or 'git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" --'
+            in current_identity_path + legacy_path
+        ):
+            raise ValueError(
+                "only an ordinary release may rebuild changed selector inputs"
+            )
         if '"${predecessor_identity}" 1' in legacy_path or "download_asset" in legacy_path:
             raise ValueError("zero-asset v0.1.40 path must not download an identity asset")
         if "--require-ready" in legacy_path or "0000000000000000000000000000000000000000" in legacy_path:
