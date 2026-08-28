@@ -22,6 +22,9 @@ SEMVER = ">=0.1.9 <1.0.0"
 RELEASE_ANNOTATION = "platform.snaraj.dev/chart-release"
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VOLATILE_ANNOTATIONS = {"kubectl.kubernetes.io/last-applied-configuration"}
+FLUX_VOLATILE_ANNOTATIONS = VOLATILE_ANNOTATIONS | {
+    "reconcile.fluxcd.io/requestedAt",
+}
 
 CONSUMER_GVRS = {
     "kustomizations": "kustomize.toolkit.fluxcd.io/v1/kustomizations",
@@ -199,7 +202,11 @@ def expected_site_chain() -> dict[str, dict]:
     return result
 
 
-def _normalized_metadata(metadata: object) -> dict:
+def _normalized_metadata(
+    metadata: object,
+    *,
+    volatile_annotations: set[str] = VOLATILE_ANNOTATIONS,
+) -> dict:
     metadata = _mapping(metadata, "metadata")
     allowed = {
         "annotations", "creationTimestamp", "deletionGracePeriodSeconds",
@@ -214,10 +221,16 @@ def _normalized_metadata(metadata: object) -> dict:
     if metadata.get("finalizers") not in (None, []):
         raise ClosureError("object has a foreign finalizer")
     result = {key: copy.deepcopy(metadata[key]) for key in ("name", "namespace", "labels") if key in metadata}
+    raw_annotations = _mapping(metadata.get("annotations", {}), "annotations")
+    if any(
+        key in raw_annotations and not isinstance(raw_annotations[key], str)
+        for key in volatile_annotations
+    ):
+        raise ClosureError("volatile annotation value is malformed")
     annotations = {
         key: value
-        for key, value in _mapping(metadata.get("annotations", {}), "annotations").items()
-        if key not in VOLATILE_ANNOTATIONS
+        for key, value in raw_annotations.items()
+        if key not in volatile_annotations
     }
     if annotations:
         result["annotations"] = annotations
@@ -389,7 +402,10 @@ def _normalize_oci(value: dict) -> dict:
     result = {
         "apiVersion": value.get("apiVersion"),
         "kind": value.get("kind"),
-        "metadata": _normalized_metadata({**metadata, "finalizers": []}),
+        "metadata": _normalized_metadata(
+            {**metadata, "finalizers": []},
+            volatile_annotations=FLUX_VOLATILE_ANNOTATIONS,
+        ),
         "spec": spec,
     }
     return result
@@ -486,7 +502,15 @@ def _normalized_child(value: dict, kind: str) -> dict:
     )
     if finalizers not in ([], allowed_finalizers):
         raise ClosureError("site child has a foreign finalizer")
-    closed_metadata = _normalized_metadata({**metadata, "finalizers": []})
+    volatile_annotations = (
+        FLUX_VOLATILE_ANNOTATIONS
+        if kind in {"OCIRepository", "HelmRelease", "Kustomization"}
+        else VOLATILE_ANNOTATIONS
+    )
+    closed_metadata = _normalized_metadata(
+        {**metadata, "finalizers": []},
+        volatile_annotations=volatile_annotations,
+    )
     spec = copy.deepcopy(_mapping(value.get("spec"), "site child spec"))
     if kind == "OCIRepository" and spec.get("provider") == "generic":
         spec.pop("provider")
