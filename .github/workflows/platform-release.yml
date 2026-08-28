@@ -454,7 +454,7 @@ jobs:
             --cache-dir "${RUNNER_TEMP}/trivy-selector-cache" \
             "${SELECTOR_IMAGE}@${DIGEST}"
           docker buildx imagetools inspect "${SELECTOR_IMAGE}@${DIGEST}" \
-            --format '{{ json (index .Provenance "linux/arm64").SLSA }}' \
+            --format '{{ json .Provenance.SLSA }}' \
             > "${predicate}"
           jq -e --arg source "${SOURCE_SHA}" --arg source_uri "${source_uri}" '
             .buildDefinition as $definition |

@@ -205,9 +205,9 @@ for filename, kind in (
 oci_chart_sources = {
     ("naranjo-online", "naranjo-online-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
-        "tag": "0.1.50",
-        "digest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
-        "artifact_digest": "sha256:4d1215d746c601d8ad1ed97a4a6d8b7785489dc4c39f3d5f264ebeeead053dd1",
+        "tag": "0.1.51",
+        "digest": "sha256:5b549c54131ba4e307ba1d26294d2e2c62e62ed5ada5f760be7b1751e2bcf92a",
+        "artifact_digest": "sha256:864234f71f0e681dcdf820a8ef723b3aabcc747a9d7922892324ec0dcaf62850",
         "subject": (
             r"^https://github\.com/snaraj/naranjo\.online/\.github/workflows/"
             r"release-publisher\.yml@refs/heads/main$"

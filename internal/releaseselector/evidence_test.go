@@ -91,14 +91,14 @@ func validEvidence() Evidence {
 			},
 			NaranjoOnline: SiteEvidence{
 				Chart: ChartEvidence{
-					LayerDigest:    "sha256:4d1215d746c601d8ad1ed97a4a6d8b7785489dc4c39f3d5f264ebeeead053dd1",
-					ManifestDigest: "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+					LayerDigest:    "sha256:864234f71f0e681dcdf820a8ef723b3aabcc747a9d7922892324ec0dcaf62850",
+					ManifestDigest: "sha256:5b549c54131ba4e307ba1d26294d2e2c62e62ed5ada5f760be7b1751e2bcf92a",
 					Repository:     "ghcr.io/snaraj/charts/naranjo-online",
-					Version:        "0.1.50",
+					Version:        "0.1.51",
 				},
 				Workload: WorkloadEvidence{
-					Arm64Digest: "sha256:ce24ca15fce26bc46361c23d5691620967dc39aaf13ba99d0dfe17053ebf2392",
-					Image:       "ghcr.io/snaraj/naranjo-online:v0.1.50@sha256:89a9e34730d32ee68338da93c8d146b315441e454aae55a70db349396295b41f",
+					Arm64Digest: "sha256:68813991c59e8259d89e1734f0515e99cf7cf841ab288e14f8d24991bac65160",
+					Image:       "ghcr.io/snaraj/naranjo-online:v0.1.51@sha256:989e1ca35f8c1bc88341acb24ff58fa94df039a78dde210ea0b8f3c9a873f676",
 				},
 			},
 		},

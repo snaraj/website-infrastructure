@@ -91,8 +91,27 @@ SUSPENDABLE = {
     "naranjo-kustomization",
     "lidersea-kustomization",
 }
+MIGRATABLE_ROLE_COMPONENTS = {
+    "parent-impersonation-role",
+    "naranjo-site-role",
+    "lidersea-site-role",
+}
+PREEXISTING_PARENT_COMPONENTS = {
+    "parent-impersonation-role",
+    "parent-impersonation-rolebinding",
+    "naranjo-site-serviceaccount",
+    "naranjo-site-role",
+    "naranjo-site-rolebinding",
+    "lidersea-site-serviceaccount",
+    "lidersea-site-role",
+    "lidersea-site-rolebinding",
+}
 IDENTITY_SCHEMA = "https://snaraj.dev/schemas/platform-release-identity/v1"
 SELECTOR_USERNAME = "system:serviceaccount:flux-system:platform-release-selector"
+FLUX_RECONCILE_ANNOTATION = "reconcile.fluxcd.io/requestedAt"
+KUBECTL_LAST_APPLIED_ANNOTATION = (
+    "kubectl.kubernetes.io/last-applied-configuration"
+)
 SELECTOR_ANNOTATION_PREFIX = "release-selector.platform.snaraj.dev/"
 ANNOTATIONS = (
     "schema",
@@ -709,6 +728,49 @@ def desired(
     raise SystemExit("unknown bootstrap component")
 
 
+def legacy_role(component: str) -> dict[str, object]:
+    """Return the one exact pre-#189 Role shape eligible for narrowing."""
+    if component == "parent-impersonation-role":
+        return {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "Role",
+            "metadata": metadata("flux-controller-impersonation"),
+            "rules": [{
+                "apiGroups": [""],
+                "resourceNames": [
+                    "root-reconciler",
+                    "platform-prerequisites-reconciler",
+                    "admission-reconciler",
+                    "platform-services-reconciler",
+                    "naranjo-online-reconciler",
+                    "lidersea-com-reconciler",
+                ],
+                "resources": ["serviceaccounts"],
+                "verbs": ["impersonate"],
+            }],
+        }
+    if component in {"naranjo-site-role", "lidersea-site-role"}:
+        site = "naranjo-online" if component.startswith("naranjo") else "lidersea-com"
+        return {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "Role",
+            "metadata": {"name": "flux-release-reconciler", "namespace": site},
+            "rules": [
+                {
+                    "apiGroups": ["source.toolkit.fluxcd.io"],
+                    "resources": ["ocirepositories"],
+                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+                },
+                {
+                    "apiGroups": ["helm.toolkit.fluxcd.io"],
+                    "resources": ["helmreleases"],
+                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+                },
+            ],
+        }
+    raise SystemExit("Role is not an eligible bootstrap predecessor")
+
+
 def strip_default(mapping: dict[str, object], key: str, value: object) -> None:
     if key in mapping and mapping[key] == value:
         del mapping[key]
@@ -738,9 +800,35 @@ def normalized(value: dict[str, object], component: str) -> dict[str, object]:
         "ownerReferences", "resourceVersion", "selfLink", "uid",
     ):
         metadata_value.pop(key, None)
+    annotations = metadata_value.get("annotations", {})
+    if not isinstance(annotations, dict):
+        raise SystemExit("live object annotations are malformed")
+    volatile_annotations: set[str] = set()
+    if component in PREEXISTING_PARENT_COMPONENTS:
+        volatile_annotations.add(KUBECTL_LAST_APPLIED_ANNOTATION)
+    if component in {
+        "source",
+        "naranjo-kustomization",
+        "lidersea-kustomization",
+    }:
+        volatile_annotations.add(FLUX_RECONCILE_ANNOTATION)
+    for annotation in volatile_annotations:
+        if annotation in annotations and not isinstance(annotations[annotation], str):
+            raise SystemExit("live volatile annotation is malformed")
+        annotations.pop(annotation, None)
     for key in ("annotations", "labels"):
         if metadata_value.get(key) == {}:
             metadata_value.pop(key)
+    if component == "selector-admission-policy":
+        constraints = result.get("spec", {}).get("matchConstraints", {})
+        if isinstance(constraints, dict):
+            strip_default(constraints, "namespaceSelector", {})
+            strip_default(constraints, "objectSelector", {})
+    if component == "selector-admission-binding":
+        resources = result.get("spec", {}).get("matchResources", {})
+        if isinstance(resources, dict):
+            strip_default(resources, "namespaceSelector", {})
+            strip_default(resources, "objectSelector", {})
     if component == "selector-rolebinding":
         subjects = result.get("subjects")
         if subjects is None:
@@ -750,7 +838,9 @@ def normalized(value: dict[str, object], component: str) -> dict[str, object]:
     if component == "selector-cronjob":
         spec = result["spec"]
         assert isinstance(spec, dict)
-        job = spec["jobTemplate"]["spec"]
+        job_template = spec["jobTemplate"]
+        strip_default(job_template, "metadata", {})
+        job = job_template["spec"]
         for key, default in (
             ("completionMode", "NonIndexed"), ("completions", 1),
             ("manualSelector", False), ("parallelism", 1), ("suspend", False),
@@ -758,6 +848,8 @@ def normalized(value: dict[str, object], component: str) -> dict[str, object]:
         ):
             strip_default(job, key, default)
         pod = job["template"]["spec"]
+        if pod.get("serviceAccount") == pod.get("serviceAccountName"):
+            pod.pop("serviceAccount", None)
         for key, default in (
             ("dnsPolicy", "ClusterFirst"), ("schedulerName", "default-scheduler"),
             ("terminationGracePeriodSeconds", 30),
@@ -1145,8 +1237,69 @@ def replacement(component: str, live: dict[str, object], expected: dict[str, obj
     result = copy.deepcopy(expected)
     result["metadata"]["resourceVersion"] = resource_version
     result["metadata"]["uid"] = uid
+    live_annotations = metadata_value.get("annotations", {})
+    if (
+        isinstance(live_annotations, dict)
+        and FLUX_RECONCILE_ANNOTATION in live_annotations
+    ):
+        result["metadata"].setdefault("annotations", {})[
+            FLUX_RECONCILE_ANNOTATION
+        ] = live_annotations[FLUX_RECONCILE_ANNOTATION]
     result["spec"]["suspend"] = suspend
     return result
+
+
+def role_migration_request(
+    component: str,
+    live: dict[str, object],
+    expected: dict[str, object],
+) -> dict[str, object]:
+    if component not in MIGRATABLE_ROLE_COMPONENTS:
+        raise SystemExit("Role is not eligible for bootstrap migration")
+    if normalized(live, component) != legacy_role(component):
+        raise SystemExit("live Role is not the exact legacy predecessor")
+    metadata_value = live.get("metadata")
+    assert isinstance(metadata_value, dict)
+    resource_version = metadata_value.get("resourceVersion")
+    uid = metadata_value.get("uid")
+    if not all(isinstance(value, str) and value for value in (resource_version, uid)):
+        raise SystemExit("Role migration requires live UID and resourceVersion")
+    result = copy.deepcopy(expected)
+    result["metadata"]["resourceVersion"] = resource_version
+    result["metadata"]["uid"] = uid
+    live_annotations = metadata_value.get("annotations", {})
+    if (
+        isinstance(live_annotations, dict)
+        and KUBECTL_LAST_APPLIED_ANNOTATION in live_annotations
+    ):
+        result["metadata"].setdefault("annotations", {})[
+            KUBECTL_LAST_APPLIED_ANNOTATION
+        ] = live_annotations[KUBECTL_LAST_APPLIED_ANNOTATION]
+    return result
+
+
+def validate_role_migration_result(
+    component: str,
+    before: dict[str, object],
+    after: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    role_migration_request(component, before, expected)
+    if normalized(after, component) != expected:
+        raise SystemExit("migrated Role is not the exact narrowed target")
+    before_metadata = before.get("metadata")
+    after_metadata = after.get("metadata")
+    assert isinstance(before_metadata, dict) and isinstance(after_metadata, dict)
+    before_uid, after_uid = before_metadata.get("uid"), after_metadata.get("uid")
+    before_rv = before_metadata.get("resourceVersion")
+    after_rv = after_metadata.get("resourceVersion")
+    if not isinstance(before_uid, str) or before_uid != after_uid:
+        raise SystemExit("Role UID changed during migration")
+    if (
+        not all(isinstance(value, str) and value for value in (before_rv, after_rv))
+        or before_rv == after_rv
+    ):
+        raise SystemExit("Role resourceVersion did not advance during migration")
 
 
 def rolebinding_state(
@@ -1347,6 +1500,7 @@ def main() -> None:
         choices=(
             "inventory", "preflight", "api-endpoints", "attestation", "remote",
             "render", "check", "replace", "ready", "check-rolebinding-quarantine",
+            "role-migration-request", "role-migration-result",
             "quarantine-rolebinding", "restore-rolebinding", "selector-quiescence",
             "consumers", "site-chain",
             "helm-binding-check", "helm-binding-transition", "helm-binding-result",
@@ -1605,10 +1759,26 @@ def main() -> None:
     if arguments.command == "render":
         print(json.dumps(expected, sort_keys=True, separators=(",", ":")))
         return
+    if arguments.command == "role-migration-result":
+        if arguments.before is None or arguments.after is None:
+            raise SystemExit("Role migration result requires before and after JSON")
+        validate_role_migration_result(
+            arguments.component,
+            load(arguments.before),
+            load(arguments.after),
+            expected,
+        )
+        return
     if arguments.live is None:
         raise SystemExit("live JSON is required")
     live = load(arguments.live)
-    if arguments.command == "check":
+    if arguments.command == "role-migration-request":
+        print(json.dumps(
+            role_migration_request(arguments.component, live, expected),
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+    elif arguments.command == "check":
         check(arguments.component, live, expected, arguments.suspend)
     elif arguments.command == "replace":
         if arguments.component not in SUSPENDABLE or arguments.suspend == "any":

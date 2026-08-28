@@ -40,7 +40,7 @@ def target_oci(site="naranjo-online"):
         "metadata": {
             "name": site + "-chart",
             "namespace": site,
-            "annotations": {closure.RELEASE_ANNOTATION: "0.1.50"},
+            "annotations": {closure.RELEASE_ANNOTATION: "0.1.51"},
         },
         "spec": {
             "interval": "10m0s",
@@ -289,6 +289,25 @@ class OciMigrationTests(unittest.TestCase):
         self.assertEqual(patch[3]["path"], "/metadata")
         self.assertEqual(patch[-1]["path"], "/metadata/annotations")
 
+    def test_requested_at_is_preserved_by_the_exact_oci_cas(self):
+        target = target_oci(); old = old_oci(target)
+        old["metadata"]["annotations"]["reconcile.fluxcd.io/requestedAt"] = (
+            "2026-08-28T00:00:00Z"
+        )
+        patch = closure.oci_migration_patch(old, target)
+        self.assertEqual(
+            patch[3]["value"]["reconcile.fluxcd.io/requestedAt"],
+            "2026-08-28T00:00:00Z",
+        )
+        after = copy.deepcopy(target)
+        after["metadata"]["annotations"]["reconcile.fluxcd.io/requestedAt"] = (
+            "2026-08-28T00:00:00Z"
+        )
+        after["metadata"].update(
+            uid="oci-uid", resourceVersion="21", finalizers=["finalizers.fluxcd.io"]
+        )
+        closure.validate_oci_result(old, after, target)
+
 
 class ParentInventoryTests(unittest.TestCase):
     def good(self, site="naranjo-online"):
@@ -329,6 +348,43 @@ class ChildClosureTests(unittest.TestCase):
 
     def test_exact_three_specs_accept_only_server_metadata(self):
         closure.validate_site_children(self.site, self.live_children(), self.oci)
+
+    def test_flux_request_annotation_is_operational_metadata(self):
+        values = self.live_children()
+        for key in ("oci", "helmrelease"):
+            values[key]["metadata"]["annotations"][
+                "reconcile.fluxcd.io/requestedAt"
+            ] = "2026-08-28T00:00:00Z"
+        closure.validate_site_children(self.site, values, self.oci)
+
+    def test_similar_annotations_and_non_boolean_suspend_remain_foreign(self):
+        cases = []
+        lookalike = self.live_children()
+        lookalike["helmrelease"]["metadata"]["annotations"][
+            "reconcile.fluxcd.io/requestedAt-lookalike"
+        ] = "2026-08-28T00:00:00Z"
+        cases.append(lookalike)
+        malformed = self.live_children()
+        malformed["helmrelease"]["metadata"]["annotations"][
+            "reconcile.fluxcd.io/requestedAt"
+        ] = {"not": "a string"}
+        cases.append(malformed)
+        non_flux = self.live_children()
+        non_flux["networkpolicy"]["metadata"]["annotations"][
+            "reconcile.fluxcd.io/requestedAt"
+        ] = "2026-08-28T00:00:00Z"
+        cases.append(non_flux)
+        string_false = self.live_children()
+        string_false["helmrelease"]["spec"]["suspend"] = "false"
+        cases.append(string_false)
+        absent_false = self.live_children()
+        absent_false["helmrelease"]["spec"].pop("suspend")
+        cases.append(absent_false)
+        for value in cases:
+            with self.subTest(case=cases.index(value)), self.assertRaises(
+                closure.ClosureError
+            ):
+                closure.validate_site_children(self.site, value, self.oci)
 
     def test_foreign_retained_fields_and_extra_objects_fail(self):
         cases = []

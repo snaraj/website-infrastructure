@@ -15,7 +15,7 @@ RUN --network=none CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
 
 FROM build AS trusted-root
 COPY cmd/platform-release-selector/trusted_root.json /trusted_root.json
-RUN printf '%s  %s\n' \
+RUN --network=none printf '%s  %s\n' \
     '6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66' \
     '/trusted_root.json' | sha256sum -c -
 

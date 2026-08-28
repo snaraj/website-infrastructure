@@ -253,6 +253,14 @@ spec:
             "ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32",
         )
         self.assertIn("RUN --network=none go test ./...\n", dockerfile)
+        self.assertTrue(
+            all(
+                line.startswith("RUN --network=none ")
+                for line in dockerfile.splitlines()
+                if line.startswith("RUN ")
+            ),
+            "every selector build command must be network-isolated",
+        )
         self.assertLess(
             dockerfile.index("RUN --network=none go test ./...\n"),
             dockerfile.index("RUN --network=none CGO_ENABLED=0"),

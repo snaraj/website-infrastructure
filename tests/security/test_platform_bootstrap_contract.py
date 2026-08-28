@@ -129,6 +129,13 @@ class PlatformBootstrapContractTests(unittest.TestCase):
         self.assertLess(quiescence, admission_policy)
         self.assertLess(admission_policy, admission_binding)
         self.assertLess(admission_binding, selector_serviceaccount)
+        for migration in (
+            "migrate_role parent-impersonation-role flux-controller-impersonation flux-system",
+            "migrate_role naranjo-site-role flux-release-reconciler naranjo-online",
+            "migrate_role lidersea-site-role flux-release-reconciler lidersea-com",
+        ):
+            self.assertIn(migration, text)
+            self.assertLess(text.index(migration), text.index('source_live="$work/source.live.json"'))
         resume = text.rsplit("\ncontain\n", 1)[1]
         target_ready = (
             'wait_ready source gitrepository.source.toolkit.fluxcd.io '
@@ -752,8 +759,15 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             "uid": "uid-fixture-kustomization",
         })
         live["spec"]["force"] = False
+        live["metadata"]["annotations"] = {
+            "reconcile.fluxcd.io/requestedAt": "2026-08-28T00:00:00Z",
+        }
         live["status"] = {"observedGeneration": 4}
         module.check("naranjo-kustomization", live, expected, "any")
+        module.check("naranjo-kustomization", live, expected, "true")
+        self.assert_denied(
+            module.check, "naranjo-kustomization", live, expected, "false"
+        )
         replacement = module.replacement(
             "naranjo-kustomization", live, expected, False
         )
@@ -765,6 +779,9 @@ class PlatformBootstrapContractTests(unittest.TestCase):
         clean["metadata"].pop("uid")
         wanted = copy.deepcopy(expected)
         wanted["spec"]["suspend"] = False
+        wanted["metadata"]["annotations"] = copy.deepcopy(
+            live["metadata"]["annotations"]
+        )
         self.assertEqual(clean, wanted)
         for mutation in (
             lambda value: value["spec"].update(path="./kubernetes"),
@@ -772,6 +789,14 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             lambda value: value["spec"].update(force=True),
             lambda value: value["spec"].pop("force"),
             lambda value: value["metadata"].update(ownerReferences=[{"uid": "foreign"}]),
+            lambda value: value["metadata"]["annotations"].update(
+                {"reconcile.fluxcd.io/requestedAt-lookalike": "now"}
+            ),
+            lambda value: value["metadata"]["annotations"].update(
+                {"reconcile.fluxcd.io/requestedAt": {"not": "a string"}}
+            ),
+            lambda value: value["spec"].pop("suspend"),
+            lambda value: value["spec"].update(suspend="false"),
         ):
             hostile = copy.deepcopy(live)
             mutation(hostile)
@@ -779,6 +804,157 @@ class PlatformBootstrapContractTests(unittest.TestCase):
                 module.replacement,
                 "naranjo-kustomization", hostile, expected, False,
             )
+
+    def test_only_exact_live_api_defaults_are_normalized(self):
+        module = self.module
+        expected = module.desired("selector-role", DIGEST, CIDRS)
+        hostile = copy.deepcopy(expected)
+        hostile["metadata"]["annotations"] = {
+            "reconcile.fluxcd.io/requestedAt": "2026-08-28T00:00:00Z",
+        }
+        self.assert_denied(
+            module.check, "selector-role", hostile, expected, "any"
+        )
+
+        for component, container in (
+            ("selector-admission-policy", "matchConstraints"),
+            ("selector-admission-binding", "matchResources"),
+        ):
+            with self.subTest(component=component):
+                expected = module.desired(component, DIGEST, CIDRS)
+                live = copy.deepcopy(expected)
+                live["spec"][container].update(
+                    namespaceSelector={}, objectSelector={}
+                )
+                module.check(component, live, expected, "any")
+                for field in ("namespaceSelector", "objectSelector"):
+                    hostile = copy.deepcopy(live)
+                    hostile["spec"][container][field] = {
+                        "matchLabels": {"foreign": "true"}
+                    }
+                    self.assert_denied(
+                        module.check, component, hostile, expected, "any"
+                    )
+
+        expected = module.desired(
+            "selector-cronjob", DIGEST, CIDRS, build_sha=TARGET_SHA
+        )
+        live = copy.deepcopy(expected)
+        live["spec"]["jobTemplate"]["metadata"] = {}
+        pod = live["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        pod["serviceAccount"] = pod["serviceAccountName"]
+        module.check("selector-cronjob", live, expected, "true")
+        nonempty_metadata = copy.deepcopy(live)
+        nonempty_metadata["spec"]["jobTemplate"]["metadata"] = {
+            "labels": {"foreign": "true"}
+        }
+        self.assert_denied(
+            module.check,
+            "selector-cronjob", nonempty_metadata, expected, "true",
+        )
+        foreign_alias = copy.deepcopy(live)
+        foreign_alias["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+            "serviceAccount"
+        ] = "default"
+        self.assert_denied(
+            module.check, "selector-cronjob", foreign_alias, expected, "true"
+        )
+
+    def test_last_applied_is_volatile_only_on_preexisting_parent_chain(self):
+        module = self.module
+        annotation = "kubectl.kubernetes.io/last-applied-configuration"
+        for component in sorted(module.PREEXISTING_PARENT_COMPONENTS):
+            with self.subTest(component=component):
+                expected = module.desired(component, DIGEST, CIDRS)
+                live = copy.deepcopy(expected)
+                live["metadata"]["annotations"] = {annotation: "public"}
+                module.check(component, live, expected, "any")
+                malformed = copy.deepcopy(live)
+                malformed["metadata"]["annotations"][annotation] = {
+                    "not": "a string"
+                }
+                self.assert_denied(
+                    module.check, component, malformed, expected, "any"
+                )
+
+        selector = module.desired("selector-role", DIGEST, CIDRS)
+        selector["metadata"]["annotations"] = {annotation: "public"}
+        self.assert_denied(
+            module.check,
+            "selector-role", selector,
+            module.desired("selector-role", DIGEST, CIDRS), "any",
+        )
+
+    def test_role_migration_accepts_only_three_exact_uid_bound_predecessors(self):
+        module = self.module
+        for component in sorted(module.MIGRATABLE_ROLE_COMPONENTS):
+            with self.subTest(component=component):
+                expected = module.desired(component, DIGEST, CIDRS)
+                before = copy.deepcopy(module.legacy_role(component))
+                before["metadata"].update({
+                    "annotations": {
+                        "kubectl.kubernetes.io/last-applied-configuration": "public",
+                    },
+                    "resourceVersion": "100",
+                    "uid": component + "-uid",
+                })
+                request = module.role_migration_request(component, before, expected)
+                self.assertEqual(request["rules"], expected["rules"])
+                self.assertEqual(request["metadata"]["resourceVersion"], "100")
+                self.assertEqual(request["metadata"]["uid"], component + "-uid")
+                self.assertEqual(
+                    request["metadata"]["annotations"],
+                    before["metadata"]["annotations"],
+                )
+                after = copy.deepcopy(request)
+                after["metadata"]["resourceVersion"] = "101"
+                module.validate_role_migration_result(
+                    component, before, after, expected
+                )
+                module.check(component, after, expected, "any")
+
+                partial = copy.deepcopy(before)
+                partial["rules"][0]["verbs"] = ["get"]
+                self.assert_denied(
+                    module.role_migration_request, component, partial, expected
+                )
+                foreign = copy.deepcopy(before)
+                foreign["metadata"]["annotations"]["foreign.example/owner"] = "x"
+                self.assert_denied(
+                    module.role_migration_request, component, foreign, expected
+                )
+                replaced = copy.deepcopy(after)
+                replaced["metadata"]["uid"] = "replacement"
+                self.assert_denied(
+                    module.validate_role_migration_result,
+                    component, before, replaced, expected,
+                )
+                same_rv = copy.deepcopy(after)
+                same_rv["metadata"]["resourceVersion"] = "100"
+                self.assert_denied(
+                    module.validate_role_migration_result,
+                    component, before, same_rv, expected,
+                )
+
+    def test_role_migration_is_independently_resumable_from_mixed_state(self):
+        module = self.module
+        components = sorted(module.MIGRATABLE_ROLE_COMPONENTS)
+        for target_index in range(len(components) + 1):
+            for index, component in enumerate(components):
+                expected = module.desired(component, DIGEST, CIDRS)
+                live = copy.deepcopy(
+                    expected if index < target_index else module.legacy_role(component)
+                )
+                live["metadata"].update(
+                    resourceVersion=str(100 + index), uid=component + "-uid"
+                )
+                if index < target_index:
+                    module.check(component, live, expected, "any")
+                else:
+                    request = module.role_migration_request(
+                        component, live, expected
+                    )
+                    self.assertEqual(request["rules"], expected["rules"])
 
     def test_site_impersonation_prerequisites_are_exact_and_namespaced(self):
         module = self.module
@@ -953,7 +1129,10 @@ class PlatformBootstrapContractTests(unittest.TestCase):
         )
         self.assertLess(text.index("wait_quiescent"), text.rindex("\nrestore_authority\n"))
         self.assertLess(
-            text.index("ensure naranjo-site-role role.rbac.authorization.k8s.io"),
+            text.index(
+                "migrate_role naranjo-site-role flux-release-reconciler "
+                "naranjo-online"
+            ),
             text.index(
                 "ensure naranjo-kustomization "
                 "kustomization.kustomize.toolkit.fluxcd.io"
@@ -1156,7 +1335,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             **annotations,
             "selector-build-sha": TARGET_SHA,
             "naranjo-chart-digest": "sha256:" + "6" * 64,
-            "naranjo-chart-version": "0.1.50",
+            "naranjo-chart-version": "0.1.51",
             "lidersea-chart-digest": "sha256:" + "7" * 64,
             "lidersea-chart-version": "0.1.37",
         }
