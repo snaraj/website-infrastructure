@@ -25,7 +25,7 @@ PREDECESSOR = ROOT / "scripts/ci/validate_platform_predecessor.py"
 DIGEST = "sha256:" + "1" * 64
 CIDRS = ["192.168.50.10/32"]
 TARGET_SHA = "2" * 40
-TARGET_TAG = "v0.1.41"
+TARGET_TAG = "v0.1.42"
 
 
 def load_validator():
@@ -564,6 +564,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
     def test_native_admission_denies_hostile_json_patch_fixtures(self):
         module = self.module
         prefix = module.SELECTOR_ANNOTATION_PREFIX
+        next_tag = "v0.1.43"
         old = {
             "apiVersion": "source.toolkit.fluxcd.io/v1",
             "kind": "GitRepository",
@@ -571,7 +572,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
                 "annotations": {
                     prefix + "schema": module.IDENTITY_SCHEMA,
                     prefix + "release-id": "123",
-                    prefix + "release-tag": "v0.1.40",
+                    prefix + "release-tag": TARGET_TAG,
                     prefix + "release-target-sha": "1" * 40,
                     prefix + "tag-object-sha": "2" * 40,
                     prefix + "main-ci": "10/1",
@@ -592,7 +593,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             "spec": {
                 "ignore": "closed-ignore",
                 "interval": "1m0s",
-                "ref": {"tag": "v0.1.40"},
+                "ref": {"tag": TARGET_TAG},
                 "sparseCheckout": [
                     "kubernetes/websites/naranjo-online",
                     "kubernetes/websites/lidersea-com",
@@ -603,13 +604,13 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             "status": {"observedGeneration": 1},
         }
         allowed = copy.deepcopy(old)
-        allowed["spec"]["ref"]["tag"] = TARGET_TAG
+        allowed["spec"]["ref"]["tag"] = next_tag
         allowed["metadata"]["generation"] = 2
         allowed["metadata"]["managedFields"] = [{"manager": "platform-release-selector"}]
         allowed["metadata"]["annotations"].update({
             prefix + "schema": module.IDENTITY_SCHEMA,
             prefix + "release-id": "124",
-            prefix + "release-tag": TARGET_TAG,
+            prefix + "release-tag": next_tag,
             prefix + "release-target-sha": TARGET_SHA,
             prefix + "tag-object-sha": "4" * 40,
             prefix + "main-ci": "12/1",
@@ -1335,7 +1336,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             **annotations,
             "selector-build-sha": TARGET_SHA,
             "naranjo-chart-digest": "sha256:" + "6" * 64,
-            "naranjo-chart-version": "0.1.51",
+            "naranjo-chart-version": "0.1.53",
             "lidersea-chart-digest": "sha256:" + "7" * 64,
             "lidersea-chart-version": "0.1.37",
         }
@@ -1380,7 +1381,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
     def test_verified_attestation_must_bind_digest_and_source(self):
         module = self.module
         statement = {
-            "_type": "https://in-toto.io/Statement/v1",
+            "_type": "https://in-toto.io/Statement/v0.1",
             "predicateType": "https://slsa.dev/provenance/v1",
             "subject": [{"name": "selector", "digest": {"sha256": DIGEST.removeprefix("sha256:")}}],
             "predicate": {
@@ -1413,7 +1414,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             module.validate_attestations(path, DIGEST, TARGET_SHA)
             mutations = {
                 "statement type": lambda value: value.update(
-                    _type="https://in-toto.io/Statement/v0.1"
+                    _type="https://in-toto.io/Statement/v1"
                 ),
                 "predicate type": lambda value: value.update(
                     predicateType="https://example.invalid"

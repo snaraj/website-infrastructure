@@ -274,7 +274,11 @@ SHA. It has `contents: write`, no environment, no App variable, no App secret,
 and no App token. The settings shell rejects `GH_TOKEN`; the publisher rejects
 `IMMUTABLE_SETTINGS_TOKEN`, the Actions-read token, and the predecessor
 contents-read token. It rebinds the release window once, then requires the exact
-predecessor tag and immutable Release again at every preflight before mutation.
+predecessor tag and immutable Release again at every preflight before mutation,
+apart from the exact burned `v0.1.41` to `v0.1.42` edge. On that edge the
+annotated predecessor tag remains exact while the predecessor Release must be
+absent; the write job may retire only the exact known mutable zero-asset draft
+before creating the fully canonical successor.
 Never combine the jobs,
 export either read token as a job output, or pass any read credential to the
 publication transaction.
@@ -336,6 +340,14 @@ the historical workflow-bearing target would require Workflows write, an
 authority unavailable to `GITHUB_TOKEN`. A disposable-repository canary must
 still prove this exact existing-tag path before Ready; documentation is not a
 substitute for observed API behavior.
+
+The failed `v0.1.41` publication is not repaired in place. Its annotated tag is
+immutable and remains a burned ledger boundary. The only successor exception
+accepts an absent `v0.1.41` Release on the exact `v0.1.41` to `v0.1.42` edge,
+deletes only the exact authenticated mutable draft allocated by the failed run,
+and proves the tag unchanged and the draft absent. `v0.1.42` then follows the
+normal full two-asset immutable publication path; no later release inherits the
+exception.
 
 PR jobs remain read-only with checkout credential persistence disabled. Neither
 release job receives Cloudflare, cluster, deployment, package, OIDC, or

@@ -37,6 +37,8 @@ have_cached_window=false
 cached_tag_snapshot=''
 cached_intent=''
 cached_status=1
+burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'
+burned_tag='v0.1.41'
 
 get_json() {
   local url="$1" output="$2"
@@ -172,6 +174,7 @@ for _attempt in {1..30}; do
   base_sha="$(jq -er '.base_sha' <<<"${intent}")"
   base_tag="$(jq -er '.base_tag' <<<"${intent}")"
   source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+  target_tag="$(jq -er '.tag' <<<"${intent}")"
   test "${source_sha}" = "${SOURCE_SHA}"
   test "${base_sha}" != "${SOURCE_SHA}"
   test -n "${base_tag}"
@@ -181,7 +184,13 @@ for _attempt in {1..30}; do
   message="Platform release ${base_tag} from ${base_sha}"
   classify_predecessor_tag \
     "${base_sha}" "${base_tag}" "${message}" "${tagger_date}"
-  if classify_predecessor_release exact "${base_tag}" "${base_sha}"; then
+  if [ "${base_sha}" = "${burned_source_sha}" ] && \
+     [ "${base_tag}" = "${burned_tag}" ] && [ "${target_tag}" = v0.1.42 ]; then
+    # v0.1.41 is an immutable annotated tag but never became a Release.  It is
+    # the sole pre-runtime burned publication attempt; it is never selected as a
+    # runtime source.  v0.1.42 must still satisfy the full current contract.
+    classify_predecessor_release absent "${base_tag}" "${base_sha}"
+  elif classify_predecessor_release exact "${base_tag}" "${base_sha}"; then
     :
   elif classify_predecessor_release absent "${base_tag}" "${base_sha}"; then
     # Only clean absence is contention.

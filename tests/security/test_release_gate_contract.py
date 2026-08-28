@@ -55,9 +55,9 @@ OCI_CHART_SOURCES = {
     ("naranjo-online", "naranjo-online-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
         "subject": chart_subject("naranjo.online"),
-        "tag": "0.1.51",
-        "digest": "sha256:5b549c54131ba4e307ba1d26294d2e2c62e62ed5ada5f760be7b1751e2bcf92a",
-        "artifact_digest": "sha256:864234f71f0e681dcdf820a8ef723b3aabcc747a9d7922892324ec0dcaf62850",
+        "tag": "0.1.53",
+        "digest": "sha256:c8add2688d4fe03a1a72096755d447100b9a06e3b4053595606753147f34a3cd",
+        "artifact_digest": "sha256:323e22b1e73db281877fa2ed521d8c9bf7953732b05fa3e2eb07c996dacc5303",
     },
     ("lidersea-com", "lidersea-com-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
@@ -1131,7 +1131,7 @@ class ReleaseGateContractTests(unittest.TestCase):
     def test_chart_artifact_revision_and_layer_digest_are_distinct_and_exact(self):
         mutations = {
             "tag-qualified revision": lambda artifact: artifact.update(
-                {"revision": "0.1.51@" + OCI_CHART_SOURCES[("naranjo-online", "naranjo-online-chart")]["digest"]}
+                {"revision": "0.1.53@" + OCI_CHART_SOURCES[("naranjo-online", "naranjo-online-chart")]["digest"]}
             ),
             "stored layer used as revision": lambda artifact: artifact.update(
                 {"revision": artifact["digest"]}

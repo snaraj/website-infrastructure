@@ -112,7 +112,7 @@ class PlatformReleaseSelectorContractTests(unittest.TestCase):
     def test_direct_source_topology_is_tagged_narrow_and_non_pruning(self):
         source_path, sync = rendered_sync_template()
         self.assertFalse(source_path.with_suffix("").exists())
-        self.assertIn("  ref:\n    tag: v0.1.41\n", sync)
+        self.assertIn("  ref:\n    tag: v0.1.42\n", sync)
         self.assertNotIn("branch: main", sync)
         documents = sync.rstrip("\n").split("\n---\n")
         self.assertEqual(

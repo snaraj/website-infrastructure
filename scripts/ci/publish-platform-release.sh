@@ -46,6 +46,8 @@ draft_marker="${RUNNER_TEMP}/platform-release-draft-marker.json"
 draft_request="${RUNNER_TEMP}/platform-release-draft-request.json"
 body_patch="${RUNNER_TEMP}/platform-release-body-patch.json"
 publish_patch="${RUNNER_TEMP}/platform-release-publish-patch.json"
+release_pages_json="${RUNNER_TEMP}/platform-release-pages.json"
+burned_notes="${RUNNER_TEMP}/platform-burned-release-notes.md"
 legacy_main_run_json="${RUNNER_TEMP}/platform-legacy-main-run.json"
 legacy_platform_run_json="${RUNNER_TEMP}/platform-legacy-platform-run.json"
 legacy_main_runs_json="${RUNNER_TEMP}/platform-legacy-main-runs.json"
@@ -55,6 +57,12 @@ tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
 recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'
 recovery_tag='v0.1.0'
+burned_base_sha='3f25c3dc9912a53702926d4abac55435ad02c1b0'
+burned_base_tag='v0.1.40'
+burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'
+burned_tag='v0.1.41'
+burned_draft_id='378293955'
+burned_draft_tag='untagged-a4e9ac48228029344306'
 identity_asset_name='platform-release-identity.v1.json'
 identity_bundle_name='platform-release-identity.v1.json.sigstore.json'
 identity_subject='https://github.com/snaraj/website-infrastructure/.github/workflows/platform-release.yml@refs/heads/main'
@@ -220,6 +228,48 @@ write_current_notes() {
     --base-sha "${BASE_SHA}" --base-tag "${BASE_TAG}" > "${notes}"
 }
 
+write_current_draft_marker() {
+  printf '{"schema":"https://snaraj.dev/schemas/platform-release-draft/v1","source_sha":"%s","tag":"%s"}\n' \
+    "${SOURCE_SHA}" "${TAG}" > "${draft_marker}"
+}
+
+write_burned_notes() {
+  python3 -I -B "${contract}" release-notes \
+    --repository . --head "${burned_source_sha}" --tag "${burned_tag}" \
+    --base-sha "${burned_base_sha}" --base-tag "${burned_base_tag}" \
+    > "${burned_notes}"
+}
+
+list_release_pages() {
+  run_write_gh api --paginate --slurp \
+    --header 'Accept: application/vnd.github+json' \
+    --header "X-GitHub-Api-Version: ${api_version}" \
+    "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+    > "${release_pages_json}"
+}
+
+classify_current_draft() {
+  local required="$1"
+  write_current_draft_marker
+  write_current_notes
+  list_release_pages
+  python3 -I -B "${contract}" release-draft-state \
+    --releases-json "${release_pages_json}" --tag "${TAG}" \
+    --source-sha "${SOURCE_SHA}" --title "Platform ${TAG}" \
+    --body "${draft_marker}" --body "${notes}" --require "${required}"
+}
+
+classify_burned_draft() {
+  local required="$1"
+  write_burned_notes
+  list_release_pages
+  python3 -I -B "${contract}" release-draft-state \
+    --releases-json "${release_pages_json}" --tag "${burned_tag}" \
+    --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
+    --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
+    --expected-server-tag "${burned_draft_tag}" --require "${required}"
+}
+
 classify_release() {
   local required="$1" tag="$2" source_sha="$3" status
   local -a record_args=()
@@ -269,6 +319,16 @@ classify_predecessor_release() {
   local predecessor_build_sha predecessor_selector_digest
   status="$(get_json "${write_token}" \
     "${api}/releases/tags/${BASE_TAG}" "${release_json}")"
+  if [ "${BASE_SHA}" = "${burned_source_sha}" ] && \
+     [ "${BASE_TAG}" = "${burned_tag}" ] && [ "${TAG}" = v0.1.42 ]; then
+    test "${status}" = 404
+    if classify_burned_draft exact >/dev/null 2>&1; then
+      :
+    else
+      classify_burned_draft absent >/dev/null
+    fi
+    return
+  fi
   test "${status}" = 200
   tag_object="$(jq -er '.object.sha' "${ref_json}")"
   if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then
@@ -342,6 +402,7 @@ preflight_publication_state() {
   local predecessor_tagger_date predecessor_message
   local recovery_tagger_date recovery_message recovery_release_state
   local current_tagger_date current_message current_tag_state current_release_state
+  local current_draft_state
 
   predecessor_tagger_date="$(git show -s --format=%cI "${BASE_SHA}")"
   predecessor_message="Platform release ${BASE_TAG} from ${BASE_SHA}"
@@ -388,7 +449,21 @@ preflight_publication_state() {
     classify_current_release absent >/dev/null
     current_release_state=absent
   fi
+  if classify_current_draft exact >/dev/null 2>&1; then
+    current_draft_state=exact
+  else
+    classify_current_draft absent >/dev/null
+    current_draft_state=absent
+  fi
   if [ "${current_tag_state}" = absent ]; then
+    test "${current_release_state}" = absent
+    test "${current_draft_state}" = absent
+  fi
+  if [ "${current_release_state}" = exact ]; then
+    test "${current_draft_state}" = absent
+  fi
+  if [ "${current_draft_state}" = exact ]; then
+    test "${current_tag_state}" = exact
     test "${current_release_state}" = absent
   fi
 
@@ -409,6 +484,65 @@ preflight_publication_state() {
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null
   classify_current_release "${current_release_state}" >/dev/null
+  classify_current_draft "${current_draft_state}" >/dev/null
+}
+
+retire_burned_partial_draft() {
+  local release_id status removed attempt tagger_date message
+  if [ "${BASE_SHA}" != "${burned_source_sha}" ] || \
+     [ "${BASE_TAG}" != "${burned_tag}" ] || [ "${TAG}" != v0.1.42 ]; then
+    return
+  fi
+  tagger_date="$(git show -s --format=%cI "${burned_source_sha}")"
+  message="Platform release ${burned_tag} from ${burned_source_sha}"
+  classify_tag exact \
+    "${burned_source_sha}" "${burned_tag}" "${message}" \
+    "${tagger_date}" >/dev/null
+  if release_id="$(classify_burned_draft exact 2>/dev/null)"; then
+    test "${release_id}" = "${burned_draft_id}"
+    status="$(get_json "${write_token}" \
+      "${api}/releases/${release_id}" "${release_json}")"
+    test "${status}" = 200
+    write_burned_notes
+    python3 -I -B "${contract}" release-draft-record \
+      --release-json "${release_json}" --tag "${burned_tag}" \
+      --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
+      --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
+      --expected-server-tag "${burned_draft_tag}" >/dev/null
+    test "$(classify_burned_draft exact)" = "${release_id}"
+    classify_tag exact \
+      "${burned_source_sha}" "${burned_tag}" "${message}" \
+      "${tagger_date}" >/dev/null
+    if ! run_write_gh api --method DELETE \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null; then
+      printf 'draft Release delete did not succeed; checking the exact postcondition\n' >&2
+    fi
+    removed=false
+    for attempt in 1 2 3 4 5; do
+      status="$(get_json "${write_token}" \
+        "${api}/releases/${release_id}" "${release_json}")"
+      if [ "${status}" = 404 ] && classify_burned_draft absent >/dev/null; then
+        removed=true
+        break
+      fi
+      test "${status}" = 200
+      python3 -I -B "${contract}" release-draft-record \
+        --release-json "${release_json}" --tag "${burned_tag}" \
+        --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
+        --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
+        --expected-server-tag "${burned_draft_tag}" >/dev/null
+      sleep "${attempt}"
+    done
+    test "${removed}" = true
+  else
+    classify_burned_draft absent >/dev/null
+  fi
+  classify_tag exact \
+    "${burned_source_sha}" "${burned_tag}" "${message}" \
+    "${tagger_date}" >/dev/null
+  classify_predecessor_release >/dev/null
 }
 
 complete_recovery_release() {
@@ -511,6 +645,8 @@ publish_current_release() {
   fi
   classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
+  write_current_draft_marker
+  write_current_notes
 
   if classify_current_release exact >/dev/null 2>&1; then
     printf 'verified complete existing GitHub Release %s\n' "${TAG}"
@@ -523,32 +659,35 @@ publish_current_release() {
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
     classify_current_release absent >/dev/null
 
-    # The Release ID is part of the canonical identity asset. Allocate a draft,
-    # bind that ID into the asset, upload exactly once, re-download and validate
-    # the byte/digest/metadata tuple, and only then publish the immutable Release.
-    # A pre-existing or interrupted draft is a partial state and is rejected on
-    # rerun; this transaction never guesses which partial object to recover.
-    printf '{"schema":"https://snaraj.dev/schemas/platform-release-draft/v1","source_sha":"%s","tag":"%s"}\n' \
-      "${SOURCE_SHA}" "${TAG}" > "${draft_marker}"
-    jq -n --arg tag "${TAG}" --arg target "${SOURCE_SHA}" \
-      --arg name "Platform ${TAG}" --rawfile body "${draft_marker}" \
-      '{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}' \
-      > "${draft_request}"
-    release_id="$(run_write_gh api --method POST \
-      --header 'Accept: application/vnd.github+json' \
-      --header "X-GitHub-Api-Version: ${api_version}" \
-      "repos/${GITHUB_REPOSITORY}/releases" \
-      --input "${draft_request}" --jq '.id')"
+    # Reuse only one exact zero-asset draft for this source. GitHub may expose
+    # its mutable tag as `untagged-<20 hex>` until the final publish PATCH.
+    if release_id="$(classify_current_draft exact 2>/dev/null)"; then
+      printf 'resuming exact zero-asset draft Release %s\n' "${release_id}"
+    else
+      classify_current_draft absent >/dev/null
+      jq -n --arg tag "${TAG}" --arg target "${SOURCE_SHA}" \
+        --arg name "Platform ${TAG}" --rawfile body "${draft_marker}" \
+        '{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}' \
+        > "${draft_request}"
+      release_id="$(run_write_gh api --method POST \
+        --header 'Accept: application/vnd.github+json' \
+        --header "X-GitHub-Api-Version: ${api_version}" \
+        "repos/${GITHUB_REPOSITORY}/releases" \
+        --input "${draft_request}" --jq '.id')"
+    fi
     [[ "${release_id}" =~ ^[1-9][0-9]*$ ]]
     test "$(get_json "${write_token}" "${api}/releases/${release_id}" \
       "${release_json}")" = 200
-    python3 -I -B "${contract}" release-draft-record \
-      --release-json "${release_json}" --tag "${TAG}" \
+    test "$(python3 -I -B "${contract}" release-draft-state \
+      --releases-json "${release_json}" --tag "${TAG}" \
       --source-sha "${SOURCE_SHA}" --title "Platform ${TAG}" \
-      --body "${draft_marker}" >/dev/null
+      --body "${draft_marker}" --body "${notes}" \
+      --expected-release-id "${release_id}" --require exact)" = "${release_id}"
 
-    write_current_notes
-    jq -n --rawfile body "${notes}" '{body:$body}' > "${body_patch}"
+    jq -n --arg tag "${TAG}" --arg target "${SOURCE_SHA}" \
+      --arg name "Platform ${TAG}" --rawfile body "${notes}" \
+      '{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}' \
+      > "${body_patch}"
     run_write_gh api --method PATCH \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -560,6 +699,7 @@ publish_current_release() {
       --release-json "${release_json}" --tag "${TAG}" \
       --source-sha "${SOURCE_SHA}" --title "Platform ${TAG}" \
       --body "${notes}" >/dev/null
+    test "$(classify_current_draft exact)" = "${release_id}"
 
     tag_object="$(jq -er '.object.sha' "${ref_json}")"
     write_current_identity "${release_id}" "${tag_object}"
@@ -584,7 +724,10 @@ publish_current_release() {
       --source-tree-sha "${tree_sha}" \
       --selector-build-sha "${SELECTOR_BUILD_SHA}" >/dev/null
 
-    printf '{"draft":false}\n' > "${publish_patch}"
+    jq -n --arg tag "${TAG}" --arg target "${SOURCE_SHA}" \
+      --arg name "Platform ${TAG}" --rawfile body "${notes}" \
+      '{body:$body,draft:false,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}' \
+      > "${publish_patch}"
     run_write_gh api --method PATCH \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -614,6 +757,7 @@ test "${TAG}" != "${BASE_TAG}"
 # boundary reaches the same derivation through the complete-state preflight.
 preflight_publication_state
 complete_recovery_release
+retire_burned_partial_draft
 publish_current_release
 
 unset write_token

@@ -13,7 +13,9 @@ main publisher: it binds the exact workflow-run identity and final SHA,
 accepts either one squash commit or one merge-free multi-commit rebase range
 that adds exactly one immutable `changelog.d/` fragment while leaving frozen
 aggregate release files untouched, derives the next patch from the contiguous
-annotated-tag ledger anchored at `v0.1.9`, returns a distinct pending state for
+annotated-tag ledger anchored at `v0.1.9`, preserves the exact burned `v0.1.41`
+tag while admitting only its one `v0.1.42` missing-Release successor edge,
+returns a distinct pending state for
 later rapid merges, requires exactly one fragment across every adjacent ledger
 edge, renders fragment-hash-bound notes, verifies the annotated tag, the sole
 `v0.1.40` zero-asset bridge, and subsequent immutable two-identity-asset
@@ -33,15 +35,19 @@ read credential crosses into the publisher.
 is the bounded GET-only ordering step: before the Administration-read token is
 minted, it waits for the derived predecessor's exact annotated tag and exact
 immutable Release, consuming the canonical identity JSON and Sigstore bundle
-after the sole `v0.1.40` zero-asset bridge, and emits only a source-bound attestation. Clean
+after the sole `v0.1.40` zero-asset bridge; only the exact burned
+`v0.1.41` to `v0.1.42` edge admits an absent predecessor Release. It emits only
+a source-bound attestation. Clean
 absence retries; foreign, mutable, or partial state fails immediately.
 [`ci/publish-platform-release.sh`](./ci/publish-platform-release.sh) is the
 directly executable, transaction-tested tag/Release implementation used by the
 success-only write job. It completes the frozen v0.1.0 Release only after the
 owner has prepared its exact annotated tag, then converges the current release
 and both create races only onto exact REST records after re-deriving notes from
-the checked-out source, tag ledger, and fragment. It also revalidates the exact
-predecessor tag and Release before every mutation boundary.
+the checked-out source, tag ledger, and fragment. Its one incident recovery
+deletes only the exact mutable zero-asset `v0.1.41` draft while preserving the
+annotated tag, then publishes a complete `v0.1.42`; all other predecessor tags
+and Releases are revalidated before every mutation boundary.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
 validates the portable exact-PR-head adversarial-review receipt and distinct
 bounded Main Worker Ready-receipt shapes and rejects issue resources, while

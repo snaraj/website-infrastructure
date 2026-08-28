@@ -87,6 +87,18 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "identity-run-records",
         "identity-release-state",
         '--http-status "${status}" --require "${required}"',
+        "burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'",
+        "burned_tag='v0.1.41'",
+        "burned_draft_id='378293955'",
+        "burned_draft_tag='untagged-a4e9ac48228029344306'",
+        "run_write_gh api --paginate --slurp",
+        'repos/${GITHUB_REPOSITORY}/releases?per_page=100',
+        "release-draft-state",
+        '--expected-release-id "${burned_draft_id}"',
+        '--expected-server-tag "${burned_draft_tag}"',
+        'run_write_gh api --method DELETE',
+        'repos/${GITHUB_REPOSITORY}/releases/${release_id}',
+        "retire_burned_partial_draft",
         'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
         'test "${BASE_TAG}" = v0.1.40',
         'test "${TAG}" = v0.1.41',
@@ -121,7 +133,7 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         'cmp -s "${identity_asset}" "${identity_download}"',
         'cmp -s "${identity_bundle}" "${bundle_download}"',
         "staged-identity-release-record",
-        "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+        "'{body:$body,draft:false,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'",
         '--input "${publish_patch}"',
     )
     for token in required:
@@ -139,6 +151,8 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "settings_token",
         "--require-ready",
         "0000000000000000000000000000000000000000",
+        "git tag -d",
+        "refs/tags/${burned_tag}",
     )
     for token in forbidden:
         if token in transaction:
@@ -157,7 +171,8 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         raise ValueError("current release-notes command drifted or gained a stray shell command")
 
     exact_counts = {
-        "release-draft-record": 2,
+        "release-draft-record": 3,
+        "release-draft-state": 3,
         "staged-identity-release-record": 1,
         "identity-release-state": 1,
         'upload_identity_asset "${release_id}"': 2,
@@ -165,6 +180,9 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "cosign sign-blob": 1,
         "cosign verify-blob": 1,
         'run_write_gh release create "${recovery_tag}"': 1,
+        "'{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'": 2,
+        "'{body:$body,draft:false,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'": 1,
+        "tag_name:$tag,target_commitish:$target": 3,
     }
     for token, expected in exact_counts.items():
         actual = transaction.count(token)
@@ -210,11 +228,14 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
     current_start = transaction.index("publish_current_release() {")
     current = transaction[current_start:]
     ordered = (
+        "write_current_draft_marker",
+        "write_current_notes",
         "${draft_request}",
         'release_id="$(run_write_gh api --method POST',
-        "release-draft-record",
-        "write_current_notes",
+        "release-draft-state",
         "${body_patch}",
+        "release-draft-record",
+        'test "$(classify_current_draft exact)"',
         "write_current_identity",
         "cosign sign-blob --yes",
         'verify_identity_signature "${identity_asset}" "${identity_bundle}"',
@@ -233,8 +254,12 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
     if current.rindex("classify_current_release exact") < positions[-1]:
         raise ValueError("immutable publication lacks a terminal exact-state observation")
 
-    if transaction.count("v0.1.40") != 3 or transaction.count("v0.1.41") != 3:
-        raise ValueError("the sole v0.1.40 to v0.1.41 legacy exception drifted")
+    expected_incident_versions = {"v0.1.40": 4, "v0.1.41": 4, "v0.1.42": 2}
+    for version, expected in expected_incident_versions.items():
+        if transaction.count(version) != expected:
+            raise ValueError(
+                f"the reviewed release incident literal drifted: {version}"
+            )
     allowed_versions = {
         MODULE.RECOVERY_TAG,
         MODULE.RECOVERY_TAG.removeprefix("v"),
@@ -242,6 +267,8 @@ def validate_single_asset_publication_transaction(transaction: str) -> None:
         "0.1.40",
         "v0.1.41",
         "0.1.41",
+        "v0.1.42",
+        "0.1.42",
     }
     foreign_versions = set(re.findall(VERSION_LITERAL, transaction)) - allowed_versions
     if foreign_versions:
@@ -1504,6 +1531,88 @@ class ImmutableMetadataTests(unittest.TestCase):
             "assets": [],
         }
 
+    def draft_release(self) -> dict[str, object]:
+        release = self.release()
+        release.update(
+            {
+                "id": 378293955,
+                "tag_name": "untagged-a4e9ac48228029344306",
+                "draft": True,
+                "immutable": False,
+            }
+        )
+        return release
+
+    def test_draft_inventory_is_exact_bounded_and_completed_replay_safe(self):
+        draft = self.draft_release()
+        arguments = {
+            "tag": self.TAG,
+            "source_sha": self.SOURCE,
+            "title": self.TITLE,
+            "bodies": (self.BODY,),
+        }
+        self.assertEqual(
+            MODULE.classify_draft_release_state([], **arguments),
+            ("absent", None),
+        )
+        self.assertEqual(
+            MODULE.classify_draft_release_state([[draft]], **arguments),
+            ("exact", draft["id"]),
+        )
+
+        # A completed exact Release is intentionally outside the mutable-draft
+        # inventory so a fully successful workflow can replay idempotently.
+        published = self.release()
+        published["id"] = 378293956
+        self.assertEqual(
+            MODULE.classify_draft_release_state([[published]], **arguments),
+            ("absent", None),
+        )
+        # A concurrent mutable draft is still detected beside that completed
+        # record, allowing the caller to reject the impossible dual state.
+        self.assertEqual(
+            MODULE.classify_draft_release_state(
+                [[published, draft]], **arguments
+            ),
+            ("exact", draft["id"]),
+        )
+
+        for key, value in (
+            ("tag_name", "untagged-not-hex"),
+            ("target_commitish", "b" * 40),
+            ("name", "foreign"),
+            ("body", "foreign"),
+            ("draft", None),
+            ("draft", False),
+            ("prerelease", True),
+            ("immutable", True),
+            ("author", {"login": "repository-owner", "id": 1}),
+            ("assets", [{"name": "foreign.bin"}]),
+        ):
+            changed = copy.deepcopy(draft)
+            changed[key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(
+                MODULE.ContractError
+            ):
+                MODULE.classify_draft_release_state([[changed]], **arguments)
+
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.classify_draft_release_state([[draft, copy.deepcopy(draft)]], **arguments)
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.classify_draft_release_state(
+                [[draft]],
+                **arguments,
+                expected_release_id=draft["id"],
+                expected_server_tag="untagged-bbbbbbbbbbbbbbbbbbbb",
+            )
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.classify_draft_release_state(
+                [[draft]],
+                **arguments,
+                expected_release_id=1,
+                expected_server_tag="untagged-a4e9ac48228029344306",
+            )
+
     def test_annotated_tag_type_target_message_and_tagger_are_exact(self):
         ref, tag = exact_tag_records(self.TAG, self.SOURCE, self.MESSAGE, self.DATE)
         MODULE.validate_tag_record(
@@ -2649,7 +2758,8 @@ class PublicationTransactionShellTests(unittest.TestCase):
             'cmp -s "${identity_asset}" "${identity_download}"',
             'cmp -s "${identity_bundle}" "${bundle_download}"',
             "staged-identity-release-record",
-            "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+            "'{body:$body,draft:false,name:$name,prerelease:false,"
+            "tag_name:$tag,target_commitish:$target}'",
             '--input "${publish_patch}"',
         )
         for token in mutation_tokens:
@@ -2812,7 +2922,7 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 script.replace(PUBLISHER_TAG_GUARD, "false", 1)
             )
 
-    def test_only_frozen_recovery_and_v0140_v0141_exception_are_literal(self):
+    def test_only_frozen_recovery_and_reviewed_incident_edges_are_literal(self):
         script = self.script()
         validate_single_asset_publication_transaction(script)
         allowed = {
@@ -2822,10 +2932,13 @@ class PublicationTransactionShellTests(unittest.TestCase):
             "0.1.40",
             "v0.1.41",
             "0.1.41",
+            "v0.1.42",
+            "0.1.42",
         }
         self.assertEqual(set(re.findall(VERSION_LITERAL, script)) - allowed, set())
-        self.assertEqual(script.count("v0.1.40"), 3)
-        self.assertEqual(script.count("v0.1.41"), 3)
+        self.assertEqual(script.count("v0.1.40"), 4)
+        self.assertEqual(script.count("v0.1.41"), 4)
+        self.assertEqual(script.count("v0.1.42"), 2)
         for foreign in ("v0.1.31", "v0.1.34", "v9.9.9"):
             with self.subTest(foreign=foreign), self.assertRaises(ValueError):
                 validate_single_asset_publication_transaction(
@@ -2867,8 +2980,8 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 1,
             ),
             script.replace(
-                "printf '{\"draft\":false}\\n'",
-                "printf '{\"draft\":true}\\n'",
+                "body:$body,draft:false,name:$name,prerelease:false",
+                "body:$body,draft:true,name:$name,prerelease:false",
                 1,
             ),
         )
@@ -2886,7 +2999,7 @@ class PublicationTransactionShellTests(unittest.TestCase):
                 "'{body:$body,draft:true,name:$name,prerelease:false,"
                 "tag_name:$tag,target_commitish:$target}'"
             ),
-            1,
+            2,
         )
         for token in (
             '--target "${recovery_source_sha}"',
@@ -2913,6 +3026,9 @@ class PredecessorWaitShellTests(unittest.TestCase):
     def execute(
         self,
         *,
+        base_tag: str | None = None,
+        base_source: str | None = None,
+        target_tag: str = "v0.1.41",
         release_state: str = "complete",
         pending_attempts: int = 0,
         gh_token: str | None = None,
@@ -2929,24 +3045,26 @@ class PredecessorWaitShellTests(unittest.TestCase):
             "partial",
         }:
             raise AssertionError("predecessor Release fixture state is not closed")
+        base_tag = base_tag or self.BASE_TAG
+        base_source = base_source or self.BASE_SOURCE
         with tempfile.TemporaryDirectory(
             dir=ROOT, prefix=".platform-predecessor-shell-"
         ) as temporary:
             runner = Path(temporary)
             ref, tag = exact_tag_records(
-                self.BASE_TAG,
-                self.BASE_SOURCE,
-                f"Platform release {self.BASE_TAG} from {self.BASE_SOURCE}",
+                base_tag,
+                base_source,
+                f"Platform release {base_tag} from {base_source}",
                 self.DATE,
             )
             ref["object"]["sha"] = "e" * 40
             tag["sha"] = "e" * 40
             release = {
-                "tag_name": self.BASE_TAG,
-                "target_commitish": self.BASE_SOURCE,
-                "name": f"Platform {self.BASE_TAG}",
+                "tag_name": base_tag,
+                "target_commitish": base_source,
+                "name": f"Platform {base_tag}",
                 "body": PublicationTransactionShellTests.legacy_notes(
-                    self.BASE_TAG, self.BASE_SOURCE
+                    base_tag, base_source
                 ),
                 "draft": False,
                 "prerelease": False,
@@ -2993,8 +3111,8 @@ python3() {
     printf '%s' "${count}" > "${MOCK_WINDOW_COUNT}"
     printf 'WINDOW\n' >> "${MOCK_CALLS}"
     if [ "${count}" -le "${MOCK_PENDING_ATTEMPTS}" ]; then return 3; fi
-    printf '{"base_sha":"%s","base_tag":"%s","source_sha":"%s"}\n' \
-      "${BASE_SHA}" "${BASE_TAG}" "${SOURCE_SHA}"
+    printf '{"base_sha":"%s","base_tag":"%s","source_sha":"%s","tag":"%s"}\n' \
+      "${BASE_SHA}" "${BASE_TAG}" "${SOURCE_SHA}" "${TARGET_TAG}"
     return 0
   fi
   if [ "${4-}" = release-notes ]; then
@@ -3111,7 +3229,7 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
                     "MOCK_WINDOW_STATUS": str(window_status),
                     "MOCK_TAG_SNAPSHOT_CHANGES": str(tag_snapshot_changes).lower(),
                     "MOCK_BASE_NOTES": PublicationTransactionShellTests.legacy_notes(
-                        self.BASE_TAG, self.BASE_SOURCE
+                        base_tag, base_source
                     ),
                     "MOCK_READ_TOKEN": "read-token",
                     "MOCK_RECORDS": f"{relative}/records",
@@ -3119,8 +3237,9 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
                     "MOCK_SCRIPT": f"{relative}/wait.sh",
                     "CONTENTS_READ_TOKEN": "read-token",
                     "SOURCE_SHA": self.SOURCE,
-                    "BASE_SHA": self.BASE_SOURCE,
-                    "BASE_TAG": self.BASE_TAG,
+                    "BASE_SHA": base_source,
+                    "BASE_TAG": base_tag,
+                    "TARGET_TAG": target_tag,
                     "GITHUB_API_URL": "https://api.github.test",
                     "GITHUB_REPOSITORY": "owner/platform",
                     "GITHUB_OUTPUT": f"{relative}/output",
@@ -3183,6 +3302,31 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
             raced_output, f"attestation=PASS:owner/platform:{self.SOURCE}\n"
         )
         self.assertEqual(raced_calls.count("/releases/tags/"), 3)
+
+    def test_only_burned_v0141_to_v0142_accepts_a_missing_release(self):
+        completed, output, calls = self.execute(
+            base_tag=MODULE.BURNED_PARTIAL_TAG,
+            base_source=MODULE.BURNED_PARTIAL_SOURCE_SHA,
+            target_tag="v0.1.42",
+            release_state="missing",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(output, f"attestation=PASS:owner/platform:{self.SOURCE}\n")
+        self.assertEqual(calls.count("/releases/tags/"), 1)
+        self.assertNotIn("SLEEP", calls)
+
+        for near_target in ("v0.1.41", "v0.1.43"):
+            with self.subTest(target=near_target):
+                denied, denied_output, denied_calls = self.execute(
+                    base_tag=MODULE.BURNED_PARTIAL_TAG,
+                    base_source=MODULE.BURNED_PARTIAL_SOURCE_SHA,
+                    target_tag=near_target,
+                    release_state="missing",
+                )
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertEqual(denied_output, "")
+                self.assertIn("bounded wait", denied.stderr)
+                self.assertIn("SLEEP 10\n", denied_calls)
 
     def test_future_predecessors_consume_the_two_asset_identity_receipt(self):
         script = self.script()
@@ -4239,6 +4383,10 @@ class WorkflowStructureTests(unittest.TestCase):
             "SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector",
             "Install checksum-verified release tools",
             "Select the immutable selector image lineage",
+            '[ "${BASE_SHA}" = 77f32682b45f7bed845b245e6477c11539b67bcd ]',
+            '[ "${BASE_TAG}" = v0.1.41 ]',
+            '[ "${TAG}" = v0.1.42 ]',
+            'test "${predecessor_status}" = 404',
             'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
             "platform-release-identity.v1.json.sigstore.json",
             "cosign verify-blob",
@@ -4385,6 +4533,10 @@ class WorkflowStructureTests(unittest.TestCase):
             'test "${status}" -eq 3 || exit "${status}"',
             'python3 -I -B "${contract}" release-notes',
             "classify_predecessor_tag",
+            '[ "${base_sha}" = "${burned_source_sha}" ]',
+            '[ "${base_tag}" = "${burned_tag}" ]',
+            '[ "${target_tag}" = v0.1.42 ]',
+            'classify_predecessor_release absent "${base_tag}" "${base_sha}"',
             "classify_predecessor_release exact",
             "classify_predecessor_release absent",
             '--source-sha "${source_sha}" \\\n'
@@ -4423,11 +4575,22 @@ class WorkflowStructureTests(unittest.TestCase):
             raise ValueError("predecessor waiter may export only one sanitized attestation")
         if predecessor_wait.count("classify_predecessor_tag") != 2:
             raise ValueError("predecessor tag classifier must be defined and invoked once")
+        if predecessor_wait.count(
+            'classify_predecessor_release absent "${base_tag}" "${base_sha}"'
+        ) != 2:
+            raise ValueError(
+                "predecessor absence must remain exact in the incident and normal paths"
+            )
         if predecessor_wait.count("unset read_token") != 2:
             raise ValueError("predecessor read token must be cleared on both exits")
-        if predecessor_wait.index("classify_predecessor_release exact") > predecessor_wait.index(
-            "classify_predecessor_release absent"
-        ):
+        normal_exact = predecessor_wait.index(
+            'elif classify_predecessor_release exact "${base_tag}" "${base_sha}"'
+        )
+        normal_absent = predecessor_wait.index(
+            'elif classify_predecessor_release absent "${base_tag}" "${base_sha}"',
+            normal_exact,
+        )
+        if normal_exact > normal_absent:
             raise ValueError("predecessor exact state must be attempted before clean absence")
 
         for required in (
@@ -4474,9 +4637,10 @@ class WorkflowStructureTests(unittest.TestCase):
             raise ValueError("App settings authority must not enter the write transaction")
         if transaction.count('--target "') != 1:
             raise ValueError("only the frozen recovery Release may use direct --target")
-        if transaction.count("for attempt in 1 2 3 4 5") != 3:
+        if transaction.count("for attempt in 1 2 3 4 5") != 4:
             raise ValueError(
-                "recovery Release, current tag, and immutable Release need bounded retries"
+                "draft retirement, recovery Release, current tag, and immutable "
+                "Release need bounded retries"
             )
         if transaction.count("preflight_publication_state") != 6:
             raise ValueError(
@@ -4485,6 +4649,7 @@ class WorkflowStructureTests(unittest.TestCase):
         if (
             "preflight_publication_state\n"
             "complete_recovery_release\n"
+            "retire_burned_partial_draft\n"
             "publish_current_release"
         ) not in transaction:
             raise ValueError("all remote states must close before publication phases")
@@ -4550,8 +4715,8 @@ class WorkflowStructureTests(unittest.TestCase):
             < publish_job.index("Select the immutable selector image lineage")
         ):
             raise ValueError("Cosign must be installed before receipt consumption")
-        if publish_job.count("state=reuse") != 2 or publish_job.count("state=build") != 1:
-            raise ValueError("selector reuse and sole first-build branches drifted")
+        if publish_job.count("state=reuse") != 2 or publish_job.count("state=build") != 2:
+            raise ValueError("selector reuse and reviewed first-build branches drifted")
         for repeated in (
             "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
             "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
@@ -4829,7 +4994,8 @@ class WorkflowStructureTests(unittest.TestCase):
             'cmp -s "${identity_asset}" "${identity_download}"',
             'cmp -s "${identity_bundle}" "${bundle_download}"',
             "staged-identity-release-record",
-            "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+            "'{body:$body,draft:false,name:$name,prerelease:false,"
+            "tag_name:$tag,target_commitish:$target}'",
             '--input "${publish_patch}"',
             "preflight_publication_state",
             "for attempt in 1 2 3 4 5",

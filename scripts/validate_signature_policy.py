@@ -52,8 +52,8 @@ CHART_REPOSITORIES = {
 # and the exact-site keyless signature before changing either value.
 CHART_RELEASES = {
     "naranjo-online": {
-        "tag": "0.1.51",
-        "digest": "sha256:5b549c54131ba4e307ba1d26294d2e2c62e62ed5ada5f760be7b1751e2bcf92a",
+        "tag": "0.1.53",
+        "digest": "sha256:c8add2688d4fe03a1a72096755d447100b9a06e3b4053595606753147f34a3cd",
     },
     "lidersea-com": {
         "tag": "0.1.37",
@@ -89,12 +89,12 @@ metadata:
   namespace: flux-system
   annotations:
     # STOP: this is a non-applicable review template. The owner-attended #189
-    # bootstrap renders all canonical identity values from the signed v0.1.41
+    # bootstrap renders all canonical identity values from the signed v0.1.42
     # Release and creates these objects directly. Kustomize never consumes this
     # file, and the schema-invalid scalars below prevent accidental kubectl use.
     release-selector.platform.snaraj.dev/schema: BOOTSTRAP_RENDERS_CANONICAL_IDENTITY
     release-selector.platform.snaraj.dev/release-id: "0"
-    release-selector.platform.snaraj.dev/release-tag: v0.1.41
+    release-selector.platform.snaraj.dev/release-tag: v0.1.42
     release-selector.platform.snaraj.dev/release-target-sha: "0000000000000000000000000000000000000000"
     release-selector.platform.snaraj.dev/tag-object-sha: "0000000000000000000000000000000000000000"
     release-selector.platform.snaraj.dev/main-ci: "0/0"
@@ -116,7 +116,7 @@ spec:
     !/kubernetes/websites/lidersea-com/**
   interval: 1m0s
   ref:
-    tag: v0.1.41
+    tag: v0.1.42
   sparseCheckout: BOOTSTRAP_RENDERS_EXACT_TWO_PATHS
   timeout: 60s
   url: https://github.com/snaraj/website-infrastructure.git

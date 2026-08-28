@@ -21,6 +21,7 @@ SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 TAG_RE = re.compile(
     r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 )
+SERVER_DRAFT_TAG_RE = re.compile(r"^untagged-[0-9a-f]{20}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FRAGMENT_PATH_RE = re.compile(
     r"^changelog\.d/([1-9][0-9]*)-[a-z0-9]+(?:-[a-z0-9]+)*\.md$"
@@ -114,6 +115,14 @@ CODEQL_EXACT_STEPS = {
 RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
 RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
 RECOVERY_TAG = "v0.1.0"
+# v0.1.41 failed before publication after GitHub allocated a mutable draft and
+# rewrote its tag_name to a server-private `untagged-*` value.  The annotated
+# public tag is never moved or selected by Flux.  The sole exact draft is
+# retired before v0.1.42 becomes the first complete canonical-asset Release.
+BURNED_PARTIAL_TAG = "v0.1.41"
+BURNED_PARTIAL_SOURCE_SHA = "77f32682b45f7bed845b245e6477c11539b67bcd"
+BURNED_PARTIAL_DRAFT_ID = 378293955
+BURNED_PARTIAL_DRAFT_TAG = "untagged-a4e9ac48228029344306"
 # Issue #164 moves the publisher from commit-authored VERSION boundaries to an
 # immutable tag ledger.  Historical source releases before this exact boundary
 # contain two intentionally absent tags, so the new contiguous state machine
@@ -1983,15 +1992,27 @@ def validate_draft_release_record(
     source_sha: str,
     title: str,
     body: str,
+    expected_release_id: int | None = None,
+    expected_server_tag: str | None = None,
 ) -> None:
     """Validate the sole short-lived self-ID draft before publication."""
     source_sha = require_sha(source_sha, "draft Release target SHA")
     release_id = release_record.get("id")
     if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
         raise ContractError("draft Release ID is invalid")
+    if expected_release_id is not None and release_id != expected_release_id:
+        raise ContractError("draft Release ID is not the expected incident object")
+    draft_tag = release_record.get("tag_name")
+    if expected_server_tag is not None:
+        if draft_tag != expected_server_tag:
+            raise ContractError("draft Release server tag is not the expected incident object")
+    elif draft_tag != tag and (
+        not isinstance(draft_tag, str)
+        or SERVER_DRAFT_TAG_RE.fullmatch(draft_tag) is None
+    ):
+        raise ContractError("draft Release server tag is foreign")
     if (
-        release_record.get("tag_name") != tag
-        or release_record.get("name") != title
+        release_record.get("name") != title
         or release_record.get("target_commitish") != source_sha
     ):
         raise ContractError("draft Release identity is not exact")
@@ -2006,6 +2027,96 @@ def validate_draft_release_record(
         raise ContractError("draft Release author is not the GitHub Actions bot")
     if release_record.get("assets") != []:
         raise ContractError("draft Release asset inventory must be exactly empty")
+
+
+def classify_draft_release_state(
+    release_pages: object,
+    *,
+    tag: str,
+    source_sha: str,
+    title: str,
+    bodies: tuple[str, ...],
+    expected_release_id: int | None = None,
+    expected_server_tag: str | None = None,
+) -> tuple[str, int | None]:
+    """Classify one relevant mutable draft from authenticated Release pages."""
+    source_sha = require_sha(source_sha, "draft Release target SHA")
+    if not bodies or any(not isinstance(body, str) for body in bodies):
+        raise ContractError("draft Release expected bodies are invalid")
+    if isinstance(release_pages, Mapping):
+        records = [release_pages]
+    elif not isinstance(release_pages, list):
+        raise ContractError("draft Release page inventory is invalid")
+    elif not release_pages:
+        records = []
+    elif all(isinstance(page, list) for page in release_pages):
+        records = [record for page in release_pages for record in page]
+    elif all(isinstance(record, Mapping) for record in release_pages):
+        records = list(release_pages)
+    else:
+        raise ContractError("draft Release page inventory is malformed")
+    if len(records) > MAX_TAG_LEDGER_ENTRIES:
+        raise ContractError("draft Release inventory exceeds the review bound")
+    candidates: list[Mapping[str, object]] = []
+    for index, value in enumerate(records):
+        record = _object(value, f"draft Release inventory item {index}")
+        # Any record sharing one incident anchor is relevant. A draft that is
+        # concurrently published or otherwise changes lifecycle must fail the
+        # exact-draft validator instead of disappearing from this inventory.
+        relevant = (
+            record.get("tag_name") == tag
+            or record.get("target_commitish") == source_sha
+            or record.get("name") == title
+            or record.get("body") in bodies
+            or (
+                expected_release_id is not None
+                and record.get("id") == expected_release_id
+            )
+            or (
+                expected_server_tag is not None
+                and record.get("tag_name") == expected_server_tag
+            )
+        )
+        if not relevant:
+            continue
+        # A completed exact Release is not a mutable-draft candidate. Keep
+        # every near miss (including draft=null/omitted, prerelease, mutable,
+        # foreign-author, or identity drift) in the candidate set so the
+        # exact draft validator fails closed. This preserves completed-run
+        # replay while still detecting a concurrent true draft.
+        author = record.get("author")
+        exact_published = (
+            record.get("tag_name") == tag
+            and record.get("target_commitish") == source_sha
+            and record.get("name") == title
+            and record.get("body") in bodies
+            and record.get("draft") is False
+            and record.get("prerelease") is False
+            and record.get("immutable") is True
+            and isinstance(author, Mapping)
+            and author.get("login") == "github-actions[bot]"
+            and author.get("id") == 41898282
+        )
+        if not exact_published:
+            candidates.append(record)
+    if not candidates:
+        return "absent", None
+    if len(candidates) != 1:
+        raise ContractError("draft Release inventory is ambiguous or conflicting")
+    candidate = candidates[0]
+    body = candidate.get("body")
+    if not isinstance(body, str) or body not in bodies:
+        raise ContractError("draft Release body is not one reviewed state")
+    validate_draft_release_record(
+        candidate,
+        tag=tag,
+        source_sha=source_sha,
+        title=title,
+        body=body,
+        expected_release_id=expected_release_id,
+        expected_server_tag=expected_server_tag,
+    )
+    return "exact", candidate["id"]
 
 
 def _canonical_release_identity(payload: bytes) -> Mapping[str, object]:
@@ -2173,12 +2284,9 @@ def _validate_identity_asset_metadata(
             f"{release_record.get('tag_name')}/{name}"
         )
         browser_download_url = asset.get("browser_download_url")
-        staged_download_url_ok = (
-            isinstance(browser_download_url, str)
-            and browser_download_url.startswith(
-                "https://github.com/snaraj/website-infrastructure/releases/download/"
-            )
-            and browser_download_url.endswith(f"/{name}")
+        staged_download_url = (
+            "https://github.com/snaraj/website-infrastructure/releases/download/"
+            f"{release_record.get('tag_name')}/{name}"
         )
         if (
             asset.get("name") != name
@@ -2188,7 +2296,7 @@ def _validate_identity_asset_metadata(
             or asset.get("size") != len(asset_payload)
             or asset.get("digest") != asset_digest
             or asset.get("url") != expected_api_url
-            or (staged and not staged_download_url_ok)
+            or (staged and browser_download_url != staged_download_url)
             or (not staged and browser_download_url != final_download_url)
         ):
             raise ContractError("platform release identity asset metadata is foreign")
@@ -2307,9 +2415,17 @@ def selector_image_from_release(
         or release != expected_release
     ):
         raise ContractError("selector predecessor release evidence is foreign")
+    release_tag = release_record.get("tag_name")
+    staged_release_tag = (
+        staged
+        and isinstance(release_tag, str)
+        and SERVER_DRAFT_TAG_RE.fullmatch(release_tag) is not None
+    )
     if (
-        release_record.get("tag_name") != expected_tag
-        or release_record.get("name") != f"Platform {expected_tag}"
+        release_tag != expected_tag
+        and not staged_release_tag
+    ) or (
+        release_record.get("name") != f"Platform {expected_tag}"
         or release_record.get("target_commitish") != expected_sha
         or release_record.get("draft") is not staged
         or release_record.get("prerelease") is not False
@@ -2790,6 +2906,21 @@ def _parser() -> argparse.ArgumentParser:
     release_draft_record.add_argument("--source-sha", required=True)
     release_draft_record.add_argument("--title", required=True)
     release_draft_record.add_argument("--body", type=Path, required=True)
+    release_draft_record.add_argument("--expected-release-id", type=int)
+    release_draft_record.add_argument("--expected-server-tag")
+    release_draft_state = commands.add_parser("release-draft-state")
+    release_draft_state.add_argument("--releases-json", type=Path, required=True)
+    release_draft_state.add_argument("--tag", required=True)
+    release_draft_state.add_argument("--source-sha", required=True)
+    release_draft_state.add_argument("--title", required=True)
+    release_draft_state.add_argument(
+        "--body", type=Path, required=True, action="append"
+    )
+    release_draft_state.add_argument("--expected-release-id", type=int)
+    release_draft_state.add_argument("--expected-server-tag")
+    release_draft_state.add_argument(
+        "--require", choices=("absent", "exact"), required=True
+    )
     identity_release_record = commands.add_parser("identity-release-record")
     identity_release_record.add_argument("--release-json", type=Path, required=True)
     identity_release_record.add_argument("--identity", type=Path, required=True)
@@ -3011,8 +3142,22 @@ def main(argv: list[str] | None = None) -> int:
                 source_sha=args.source_sha,
                 title=args.title,
                 body=args.body.read_text(encoding="utf-8"),
+                expected_release_id=args.expected_release_id,
+                expected_server_tag=args.expected_server_tag,
             )
             print("exact")
+        elif args.command == "release-draft-state":
+            state, release_id = classify_draft_release_state(
+                json.loads(args.releases_json.read_text(encoding="utf-8")),
+                tag=args.tag,
+                source_sha=args.source_sha,
+                title=args.title,
+                bodies=tuple(path.read_text(encoding="utf-8") for path in args.body),
+                expected_release_id=args.expected_release_id,
+                expected_server_tag=args.expected_server_tag,
+            )
+            require_publication_state(state, args.require)
+            print(release_id if state == "exact" else state)
         elif args.command in {
             "identity-release-record",
             "staged-identity-release-record",

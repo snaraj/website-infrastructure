@@ -317,14 +317,23 @@ jobs:
             exit 0
           fi
           test "${status}" = 404
-          curl --fail-with-body --silent --show-error --location \
+          predecessor_status="$(curl --silent --show-error --location \
             --proto '=https' --tlsv1.2 --output "${predecessor}" \
+            --write-out '%{http_code}' \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             --header "Authorization: Bearer ${GH_TOKEN}" \
-            "${api}/releases/tags/${BASE_TAG}"
+            "${api}/releases/tags/${BASE_TAG}")"
           predecessor_tag_object="$(fetch_tag "${BASE_TAG}" "${BASE_SHA}" \
             "${predecessor_ref}" "${predecessor_tag}")"
+          if [ "${BASE_SHA}" = 77f32682b45f7bed845b245e6477c11539b67bcd ] && \
+             [ "${BASE_TAG}" = v0.1.41 ] && [ "${TAG}" = v0.1.42 ]; then
+            test "${predecessor_status}" = 404
+            printf 'state=build\ndigest=\nbuild_sha=%s\n' \
+              "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          test "${predecessor_status}" = 200
           if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then
             predecessor_tree="$(git rev-parse "${BASE_SHA}^{tree}")"
             download_asset "${predecessor}" "${identity_name}" \
