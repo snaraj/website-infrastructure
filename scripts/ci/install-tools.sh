@@ -174,6 +174,16 @@ fetch \
   "${hadolint_file}"
 install -m 0755 "${hadolint_file}" "${install_root}/hadolint"
 
+# The release publisher signs its selector image and canonical identity asset.
+# Ubuntu runner images do not promise Cosign, so those release-critical calls
+# must use the same checksum-pinned ephemeral tool boundary as every validator.
+cosign_file="${download_root}/cosign"
+fetch \
+  'https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64' \
+  '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71' \
+  "${cosign_file}"
+install -m 0755 "${cosign_file}" "${install_root}/cosign"
+
 # GitHub Actions receives the external path through its command file; local
 # callers get an explicit instruction instead of this script mutating their
 # parent shell.
