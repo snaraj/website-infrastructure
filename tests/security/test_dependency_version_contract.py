@@ -95,6 +95,10 @@ class DependencyVersionContractTests(unittest.TestCase):
             + " AS build",
             selector,
         )
+        self.assertIn(
+            "FROM " + self.versions["PLATFORM_SELECTOR_COSIGN_IMAGE"] + " AS cosign",
+            selector,
+        )
         self.assertIn("FROM " + self.versions["WEBSITE_RUNTIME"], selector)
 
     def test_cloudflare_manifest_and_lock_match_versions_registry(self):

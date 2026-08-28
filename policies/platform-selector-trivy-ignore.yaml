@@ -1,0 +1,14 @@
+{
+  "vulnerabilities": [
+    {"id":"CVE-2026-33818","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Upstream Cosign is not yet rebuilt with fixed Go; bounded selector impact is fail-closed availability and issue 222 owns rotation."},
+    {"id":"CVE-2026-39821","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Selector uses fixed GitHub and GHCR origins; issue 222 owns rotation to the first fixed upstream image."},
+    {"id":"CVE-2026-46600","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Upstream Cosign is not yet rebuilt with fixed Go; bounded selector impact is fail-closed availability and issue 222 owns rotation."},
+    {"id":"CVE-2026-56853","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Cosign is only an outbound client in the selector and never serves unencrypted HTTP2; issue 222 owns rotation."},
+    {"id":"CVE-2026-56858","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Cosign does not render HTML in the selector; issue 222 owns rotation to the first fixed upstream image."},
+    {"id":"CVE-2026-56859","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Selector input and resource bounds limit exposure to fail-closed availability; issue 222 owns rotation."},
+    {"id":"CVE-2026-56860","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Selector URLs use fixed GitHub and GHCR origins rather than attacker-controlled paths; issue 222 owns rotation."},
+    {"id":"CVE-2026-56862","purls":["pkg:golang/stdlib@v1.26.5"],"expired_at":"2026-09-15T00:00:00Z","statement":"Cosign is an outbound client with bounded execution; selector containment limits impact to fail-closed availability and issue 222 owns rotation."},
+    {"id":"CVE-2026-56864","purls":["pkg:golang/golang.org/x/mod@v0.38.0"],"expired_at":"2026-09-15T00:00:00Z","statement":"Cosign does not download Go modules at runtime; upstream source and image signatures were verified and issue 222 owns rotation."},
+    {"id":"CVE-2026-56865","purls":["pkg:golang/golang.org/x/mod@v0.38.0"],"expired_at":"2026-09-15T00:00:00Z","statement":"Cosign does not download Go modules at runtime; upstream source and image signatures were verified and issue 222 owns rotation."}
+  ]
+}

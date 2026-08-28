@@ -6,6 +6,7 @@ import contextlib
 import concurrent.futures
 import copy
 import datetime as dt
+import hashlib
 import importlib.util
 import inspect
 import io
@@ -3604,6 +3605,185 @@ class GitTransitionTests(unittest.TestCase):
                 with self.assertRaises(MODULE.ContractError):
                     MODULE.validate_transition(root, base, head, first_parent=True)
 
+    def test_one_still_unpublished_fragment_can_be_edited_in_place(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            base = self.add_fragment(
+                root, 189, "platform-gitops-activation", "Initial recovery text."
+            )
+            fragment = root / "changelog.d" / "189-platform-gitops-activation.md"
+            fragment.write_text(
+                "### Security\n\n- Corrected recovery text.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            head = self.commit(root, "correct unpublished fragment")
+
+            with mock.patch.object(MODULE, "TAG_LEDGER_FLOOR_SHA", floor):
+                intent = MODULE.validate_transition(
+                    root, base, head, first_parent=True
+                )
+            self.assertEqual(intent.source_sha, head)
+            self.assertEqual(
+                intent.fragment_path,
+                "changelog.d/189-platform-gitops-activation.md",
+            )
+            self.assertEqual(
+                intent.fragment_sha256,
+                hashlib.sha256(fragment.read_bytes()).hexdigest(),
+            )
+
+    def test_unpublished_fragment_edit_rejects_release_surface_substitutions(self):
+        for operation in (
+            "wrong-path",
+            "delete",
+            "generated",
+            "second-at-head",
+            "second-at-base",
+        ):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                floor = self.initialize(root)
+                base = self.add_fragment(root, 189, "pending", "Pending release.")
+                pending = root / "changelog.d" / "189-pending.md"
+                if operation == "wrong-path":
+                    pending.rename(root / "changelog.d" / "190-replacement.md")
+                elif operation == "delete":
+                    pending.unlink()
+                elif operation == "generated":
+                    pending.write_text(
+                        "### Security\n\n- Edited pending release.\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    with (root / "VERSION").open("a", encoding="utf-8") as handle:
+                        handle.write("generated edit\n")
+                elif operation == "second-at-head":
+                    pending.write_text(
+                        "### Security\n\n- Edited pending release.\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    (root / "changelog.d" / "190-second.md").write_text(
+                        "### Fixed\n\n- Second release.\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                else:
+                    self.add_fragment(root, 190, "second", "Second pending release.")
+                    base = self.git(root, "rev-parse", "HEAD")
+                    pending.write_text(
+                        "### Security\n\n- Edited pending release.\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                head = self.commit(root, f"hostile unpublished edit {operation}")
+                with mock.patch.object(
+                    MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+                ), self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
+    def test_unpublished_fragment_edit_rejects_tagged_history_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            released = self.add_fragment(root, 188, "released", "Released text.")
+            release_tag = MODULE.next_version(
+                MODULE.Version.parse(MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v"))
+            ).tag
+            self.tag(root, release_tag, released)
+            base = self.add_fragment(root, 189, "pending", "Pending text.")
+            (root / "changelog.d" / "188-released.md").write_text(
+                "### Security\n\n- Mutated released text.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (root / "changelog.d" / "189-pending.md").write_text(
+                "### Security\n\n- Edited pending text.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            head = self.commit(root, "mutate tagged history")
+            with mock.patch.object(
+                MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+            ), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, base, head, first_parent=True)
+
+    def test_unpublished_fragment_edit_rejects_moved_nonlinear_and_tagged_ranges(self):
+        floor_version = MODULE.Version.parse(
+            MODULE.TAG_LEDGER_FLOOR_TAG.removeprefix("v")
+        )
+        with self.subTest(case="latest-tag-not-ancestor"), tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            self.git(root, "checkout", "-q", "-b", "published", floor)
+            published = self.add_fragment(root, 188, "published", "Published text.")
+            self.tag(root, MODULE.next_version(floor_version).tag, published)
+            self.git(root, "checkout", "-q", "main")
+            base = self.add_fragment(root, 189, "pending", "Pending text.")
+            (root / "changelog.d" / "189-pending.md").write_text(
+                "### Security\n\n- Edited pending text.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            head = self.commit(root, "edit on moved base")
+            with mock.patch.object(
+                MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+            ), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, base, head, first_parent=True)
+
+        with self.subTest(case="nonlinear"), tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            base = self.add_fragment(root, 189, "pending", "Pending text.")
+            self.git(root, "checkout", "-q", "-b", "side", base)
+            self.commit(root, "side content")
+            self.git(root, "checkout", "-q", "main")
+            (root / "changelog.d" / "189-pending.md").write_text(
+                "### Security\n\n- Edited pending text.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.commit(root, "edit before merge")
+            self.git(
+                root,
+                "-c",
+                "user.name=Release Test",
+                "-c",
+                "user.email=release@example.invalid",
+                "merge",
+                "--no-ff",
+                "side",
+                "-m",
+                "merge side",
+            )
+            head = self.git(root, "rev-parse", "HEAD")
+            with mock.patch.object(
+                MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+            ), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, base, head, first_parent=True)
+
+        for endpoint in ("base", "head"):
+            with self.subTest(endpoint=endpoint), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                floor = self.initialize(root)
+                base = self.add_fragment(root, 189, "pending", "Pending text.")
+                if endpoint == "base":
+                    self.git(root, "tag", "recovery-base", base)
+                (root / "changelog.d" / "189-pending.md").write_text(
+                    "### Security\n\n- Edited pending text.\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                head = self.commit(root, f"edit with tagged {endpoint}")
+                if endpoint == "head":
+                    self.git(root, "tag", "recovery-head", head)
+                with mock.patch.object(
+                    MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+                ), self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_transition(root, base, head, first_parent=True)
+
     def test_fragment_tree_entry_must_be_a_regular_non_executable_blob(self):
         payload = b"### Security\n\n- Exact tree entry.\n"
         for mode in ("120000", "100755"):
@@ -4065,6 +4245,7 @@ class WorkflowStructureTests(unittest.TestCase):
             '"digest": {"sha1": $source}',
             ".runDetails.metadata.buildkit_completeness.resolvedDependencies == true",
             ".runDetails.metadata.buildkit_hermetic == true",
+            "trivy image --image-src remote --platform linux/arm64",
             'identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/platform-release.yml@refs/heads/main"',
             "issuer='https://token.actions.githubusercontent.com'",
             'cosign verify --certificate-identity "${identity}"',

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
-FROM ghcr.io/sigstore/cosign/cosign:v3.1.3@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8 AS cosign
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.5-trixie@sha256:87ffdb09b6a2e29ff910748b745395e8a0299aa80b7c0551cdca9b55e3fd2b3e AS build
+FROM ghcr.io/sigstore/cosign/cosign:58aae9e112fa1de80594eed34667e920ac4d4a3b@sha256:5221922dc57a6717b0aa700692bd22ffb10e7e94d1d991958c6f9ae460b262e5 AS cosign
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.0-trixie@sha256:ae28539d2ef595b9a2930dd7f031d9592376829dc0eae7cb869559f7d5812c3a AS build
 
 ARG TARGETARCH
 ARG TARGETOS

@@ -444,8 +444,13 @@ jobs:
           issuer='https://token.actions.githubusercontent.com'
           predicate="${RUNNER_TEMP}/selector-provenance.json"
           source_uri="https://github.com/snaraj/website-infrastructure.git#${SOURCE_SHA}"
-          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+          # The selector is intentionally ARM64-only. Scan the canonical remote
+          # digest as ARM64 instead of letting an AMD64 runner select its host
+          # platform and reject the single-platform manifest.
+          trivy image --image-src remote --platform linux/arm64 \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
             --ignore-unfixed=false --timeout 10m \
+            --ignorefile policies/platform-selector-trivy-ignore.yaml \
             --cache-dir "${RUNNER_TEMP}/trivy-selector-cache" \
             "${SELECTOR_IMAGE}@${DIGEST}"
           docker buildx imagetools inspect "${SELECTOR_IMAGE}@${DIGEST}" \
