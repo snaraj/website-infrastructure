@@ -4258,6 +4258,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "push-by-digest=true",
             "provenance: mode=max,version=v1",
             "sbom: true",
+            "--format '{{ json .Provenance.SLSA }}'",
             '$definition.externalParameters.configSource == {',
             '"digest": {"sha1": $source}',
             ".runDetails.metadata.buildkit_completeness.resolvedDependencies == true",
@@ -4538,6 +4539,8 @@ class WorkflowStructureTests(unittest.TestCase):
         for required in selector_required:
             if required not in publish_job:
                 raise ValueError(f"selector workflow lost exact guard: {required}")
+        if "index .Provenance" in publish_job:
+            raise ValueError("single-platform selector provenance must not use map indexing")
         if publish_job.count(
             "if: steps.selector-image-state.outputs.state == 'build'"
         ) != 4:

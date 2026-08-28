@@ -8,3 +8,4 @@
 - Remove the unused standalone `release-record` CLI entry point while retaining the internal release validator used by fail-closed state classification.
 - Scan the selector's canonical remote digest as ARM64, build its binary with Go 1.27.0, and consume a verified immutable upstream Cosign commit image; expire exact package-and-binary-path-bound exceptions for the remaining upstream-only findings on 2026-09-15.
 - Permit one failed, still-untagged release fragment to be repaired in place while keeping every tagged fragment immutable, so publication recovery does not create artificial platform versions.
+- Read the selector's SLSA predicate from Buildx's single-platform provenance object and network-isolate every build command so the existing hermeticity gate observes its documented evidence.
