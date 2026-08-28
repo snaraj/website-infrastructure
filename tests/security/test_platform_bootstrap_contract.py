@@ -807,6 +807,15 @@ class PlatformBootstrapContractTests(unittest.TestCase):
 
     def test_only_exact_live_api_defaults_are_normalized(self):
         module = self.module
+        expected = module.desired("selector-role", DIGEST, CIDRS)
+        hostile = copy.deepcopy(expected)
+        hostile["metadata"]["annotations"] = {
+            "reconcile.fluxcd.io/requestedAt": "2026-08-28T00:00:00Z",
+        }
+        self.assert_denied(
+            module.check, "selector-role", hostile, expected, "any"
+        )
+
         for component, container in (
             ("selector-admission-policy", "matchConstraints"),
             ("selector-admission-binding", "matchResources"),
