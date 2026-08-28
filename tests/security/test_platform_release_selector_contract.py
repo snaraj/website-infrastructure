@@ -286,15 +286,10 @@ spec:
             dockerfile,
         )
         self.assertIn("COPY --from=trusted-root /trusted-root/ /", dockerfile)
-        for expected in (
-            '"usr/local/share": 0o555',
-            '"usr/local/share/sigstore": 0o555',
-            '"usr/local/share/sigstore/trusted_root.json": 0o444',
-            "member.mode & 0o7777 != expected_mode",
-            "archive.extractfile(root)",
-            "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
-        ):
-            self.assertIn(expected, workflow)
+        self.assertIn(
+            'python3 -I -B scripts/ci/validate_selector_rootfs.py "${selector_tar}"',
+            workflow,
+        )
 
     def test_zero_asset_v0140_exception_is_one_exact_migration_edge(self):
         publisher = (ROOT / "scripts/ci/publish-platform-release.sh").read_text()
