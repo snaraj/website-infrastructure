@@ -37,8 +37,8 @@ have_cached_window=false
 cached_tag_snapshot=''
 cached_intent=''
 cached_status=1
-burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'
-burned_tag='v0.1.41'
+burned_source_sha='6d85c2b01dd4bd66add4192372b26bcdf1b0a951'
+burned_tag='v0.1.42'
 
 get_json() {
   local url="$1" output="$2"
@@ -185,10 +185,10 @@ for _attempt in {1..30}; do
   classify_predecessor_tag \
     "${base_sha}" "${base_tag}" "${message}" "${tagger_date}"
   if [ "${base_sha}" = "${burned_source_sha}" ] && \
-     [ "${base_tag}" = "${burned_tag}" ] && [ "${target_tag}" = v0.1.42 ]; then
-    # v0.1.41 is an immutable annotated tag but never became a Release.  It is
-    # the sole pre-runtime burned publication attempt; it is never selected as a
-    # runtime source.  v0.1.42 must still satisfy the full current contract.
+     [ "${base_tag}" = "${burned_tag}" ] && [ "${target_tag}" = v0.1.43 ]; then
+    # v0.1.42 is an immutable annotated tag whose signed draft never became a
+    # Release. It is the sole active burned publication edge and is never
+    # selected as a runtime source. v0.1.43 must satisfy the full contract.
     classify_predecessor_release absent "${base_tag}" "${base_sha}"
   elif classify_predecessor_release exact "${base_tag}" "${base_sha}"; then
     :

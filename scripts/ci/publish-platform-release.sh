@@ -57,12 +57,15 @@ tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
 recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'
 recovery_tag='v0.1.0'
-burned_base_sha='3f25c3dc9912a53702926d4abac55435ad02c1b0'
-burned_base_tag='v0.1.40'
-burned_source_sha='77f32682b45f7bed845b245e6477c11539b67bcd'
-burned_tag='v0.1.41'
-burned_draft_id='378293955'
-burned_draft_tag='untagged-a4e9ac48228029344306'
+burned_base_sha='77f32682b45f7bed845b245e6477c11539b67bcd'
+burned_base_tag='v0.1.41'
+burned_source_sha='6d85c2b01dd4bd66add4192372b26bcdf1b0a951'
+burned_tag='v0.1.42'
+burned_draft_id='378336604'
+burned_main_run_id='33152936164'
+burned_platform_run_id='33153400419'
+burned_run_attempt='1'
+burned_selector_digest='sha256:c9f8d59013bc5ca9431e3ccd22227e4e05920746829318cacf1ccb70b17d2e61'
 identity_asset_name='platform-release-identity.v1.json'
 identity_bundle_name='platform-release-identity.v1.json.sigstore.json'
 identity_subject='https://github.com/snaraj/website-infrastructure/.github/workflows/platform-release.yml@refs/heads/main'
@@ -267,7 +270,30 @@ classify_burned_draft() {
     --releases-json "${release_pages_json}" --tag "${burned_tag}" \
     --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
     --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
-    --expected-server-tag "${burned_draft_tag}" --require "${required}"
+    --expected-asset-count 2 --require "${required}"
+}
+
+validate_burned_partial() {
+  local status digest
+  status="$(get_json "${write_token}" \
+    "${api}/releases/${burned_draft_id}" "${release_json}")"
+  test "${status}" = 200
+  write_burned_notes
+  download_identity_pair "${release_json}"
+  test "$(get_public_json \
+    "${api}/actions/runs/${burned_main_run_id}/attempts/${burned_run_attempt}" \
+    "${legacy_main_run_json}")" = 200
+  test "$(get_public_json \
+    "${api}/actions/runs/${burned_platform_run_id}/attempts/${burned_run_attempt}" \
+    "${legacy_platform_run_json}")" = 200
+  digest="$(python3 -I -B "${contract}" burned-partial-release-record \
+    --release-json "${release_json}" --identity "${identity_download}" \
+    --bundle "${bundle_download}" --body "${burned_notes}" \
+    --main-run-json "${legacy_main_run_json}" \
+    --platform-run-json "${legacy_platform_run_json}")"
+  test "${digest}" = "${burned_selector_digest}"
+  test "${digest}" = "${SELECTOR_IMAGE_DIGEST}"
+  test "${SELECTOR_BUILD_SHA}" = "${burned_source_sha}"
 }
 
 classify_release() {
@@ -320,7 +346,7 @@ classify_predecessor_release() {
   status="$(get_json "${write_token}" \
     "${api}/releases/tags/${BASE_TAG}" "${release_json}")"
   if [ "${BASE_SHA}" = "${burned_source_sha}" ] && \
-     [ "${BASE_TAG}" = "${burned_tag}" ] && [ "${TAG}" = v0.1.42 ]; then
+     [ "${BASE_TAG}" = "${burned_tag}" ] && [ "${TAG}" = v0.1.43 ]; then
     test "${status}" = 404
     if classify_burned_draft exact >/dev/null 2>&1; then
       :
@@ -490,7 +516,7 @@ preflight_publication_state() {
 retire_burned_partial_draft() {
   local release_id status removed attempt tagger_date message
   if [ "${BASE_SHA}" != "${burned_source_sha}" ] || \
-     [ "${BASE_TAG}" != "${burned_tag}" ] || [ "${TAG}" != v0.1.42 ]; then
+     [ "${BASE_TAG}" != "${burned_tag}" ] || [ "${TAG}" != v0.1.43 ]; then
     return
   fi
   tagger_date="$(git show -s --format=%cI "${burned_source_sha}")"
@@ -500,15 +526,7 @@ retire_burned_partial_draft() {
     "${tagger_date}" >/dev/null
   if release_id="$(classify_burned_draft exact 2>/dev/null)"; then
     test "${release_id}" = "${burned_draft_id}"
-    status="$(get_json "${write_token}" \
-      "${api}/releases/${release_id}" "${release_json}")"
-    test "${status}" = 200
-    write_burned_notes
-    python3 -I -B "${contract}" release-draft-record \
-      --release-json "${release_json}" --tag "${burned_tag}" \
-      --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
-      --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
-      --expected-server-tag "${burned_draft_tag}" >/dev/null
+    validate_burned_partial
     test "$(classify_burned_draft exact)" = "${release_id}"
     classify_tag exact \
       "${burned_source_sha}" "${burned_tag}" "${message}" \
@@ -528,11 +546,7 @@ retire_burned_partial_draft() {
         break
       fi
       test "${status}" = 200
-      python3 -I -B "${contract}" release-draft-record \
-        --release-json "${release_json}" --tag "${burned_tag}" \
-        --source-sha "${burned_source_sha}" --title "Platform ${burned_tag}" \
-        --body "${burned_notes}" --expected-release-id "${burned_draft_id}" \
-        --expected-server-tag "${burned_draft_tag}" >/dev/null
+      validate_burned_partial
       sleep "${attempt}"
     done
     test "${removed}" = true

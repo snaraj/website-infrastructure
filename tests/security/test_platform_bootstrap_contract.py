@@ -25,7 +25,7 @@ PREDECESSOR = ROOT / "scripts/ci/validate_platform_predecessor.py"
 DIGEST = "sha256:" + "1" * 64
 CIDRS = ["192.168.50.10/32"]
 TARGET_SHA = "2" * 40
-TARGET_TAG = "v0.1.42"
+TARGET_TAG = "v0.1.43"
 
 
 def load_validator():
@@ -564,7 +564,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
     def test_native_admission_denies_hostile_json_patch_fixtures(self):
         module = self.module
         prefix = module.SELECTOR_ANNOTATION_PREFIX
-        next_tag = "v0.1.43"
+        next_tag = "v0.1.44"
         old = {
             "apiVersion": "source.toolkit.fluxcd.io/v1",
             "kind": "GitRepository",

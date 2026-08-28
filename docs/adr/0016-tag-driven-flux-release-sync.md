@@ -41,11 +41,12 @@ The Release contains exactly two security assets:
 `platform-release-identity.v1.json` and
 `platform-release-identity.v1.json.sigstore.json`. Release prose is not a
 security input. Moved, partial, skipped, reused, conflicting, or arbitrary tags
-are rejected. The exact annotated `v0.1.41` tag is a documented burned pre-Flux
-publication attempt: it remains immutable, has no Release, is never selected,
-and permits only the exact `v0.1.42` successor to cross that missing-Release
-edge after the known mutable draft is retired. `v0.1.42` and every later
-selected version must carry the complete two-asset immutable Release identity.
+are rejected. The exact annotated `v0.1.41` and `v0.1.42` tags are documented
+burned pre-Flux publication attempts: they remain immutable, have no Release,
+and are never selected. Only the exact `v0.1.43` successor may cross the
+`v0.1.42` missing-Release edge after the known signed mutable draft is validated
+and retired. `v0.1.43` and every later selected version must carry the complete
+two-asset immutable Release identity.
 A release or rendered manifest by itself is not convergence.
 
 ### 2. The cluster reads public Git without credentials
