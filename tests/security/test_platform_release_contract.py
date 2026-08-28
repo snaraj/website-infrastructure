@@ -1602,6 +1602,13 @@ class ImmutableMetadataTests(unittest.TestCase):
             MODULE.classify_draft_release_state(
                 [[draft]],
                 **arguments,
+                expected_release_id=draft["id"],
+                expected_server_tag="untagged-bbbbbbbbbbbbbbbbbbbb",
+            )
+        with self.assertRaises(MODULE.ContractError):
+            MODULE.classify_draft_release_state(
+                [[draft]],
+                **arguments,
                 expected_release_id=1,
                 expected_server_tag="untagged-a4e9ac48228029344306",
             )
