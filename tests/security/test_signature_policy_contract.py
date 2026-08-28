@@ -18,14 +18,14 @@ REPOSITORY_MODULE = load_script(
 )
 ACQUISITION_EXTRAS = {
     "naranjo-online": {
-        "chartConfigDigest": "sha256:7bad4e2b48fcc166e50a6900804bfa512d21339b3d444e6938697b634f6cba4d",
-        "chartLayerDigest": "sha256:df748d25b8a4f69491f8ccce4b3d8c2b915cb41b525b5d0d80c94c780fbdf09e",
-        "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.50@sha256:89a9e34730d32ee68338da93c8d146b315441e454aae55a70db349396295b41f",
-        "arm64Digest": "sha256:3b648da2b4b6c1df1232344ca16746ddb907cfcbf9b8da04da60b1253ceee361",
+        "chartConfigDigest": "sha256:7495efbacf3d6362e9bd594acb9c7175271e1c7c6a67a6d74fbac7768735a2a3",
+        "chartLayerDigest": "sha256:864234f71f0e681dcdf820a8ef723b3aabcc747a9d7922892324ec0dcaf62850",
+        "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.51@sha256:989e1ca35f8c1bc88341acb24ff58fa94df039a78dde210ea0b8f3c9a873f676",
+        "arm64Digest": "sha256:68813991c59e8259d89e1734f0515e99cf7cf841ab288e14f8d24991bac65160",
         "matchingChartLayerCount": 1,
         "release": {
-            "assetDigest": "sha256:ed502e1a2e84eb98d71cc0a4b74a76d0274d974d89dd106e297a4a16f8ed44ef",
-            "sourceSha": "56bd0dd03f29e2300cf3553f1d4ae04a5989b127",
+            "assetDigest": "sha256:fb772ee1773f6986fbab4625838a5097d379399fff1d565007733bfb3b301827",
+            "sourceSha": "a6405b9381fd2f24ccd267aa90ff41d037f39778",
         },
     },
     "lidersea-com": {
@@ -166,7 +166,7 @@ class ChartSourceContractTests(unittest.TestCase):
             ),
             "ambiguous tag plus digest": canonical.replace(
                 "  ref:\n",
-                "  ref:\n    tag: 0.1.50\n",
+                "  ref:\n    tag: 0.1.51\n",
             ),
             "registry path swapped": canonical.replace(
                 "oci://ghcr.io/snaraj/charts/naranjo-online",
@@ -231,8 +231,8 @@ class ChartSourceContractTests(unittest.TestCase):
     def test_reviewed_tag_digest_pairs_are_exact_and_mutations_fail(self):
         expected = {
             "naranjo-online": (
-                "0.1.50",
-                "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+                "0.1.51",
+                "sha256:5b549c54131ba4e307ba1d26294d2e2c62e62ed5ada5f760be7b1751e2bcf92a",
             ),
             "lidersea-com": (
                 "0.1.37",

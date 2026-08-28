@@ -1156,7 +1156,7 @@ class PlatformBootstrapContractTests(unittest.TestCase):
             **annotations,
             "selector-build-sha": TARGET_SHA,
             "naranjo-chart-digest": "sha256:" + "6" * 64,
-            "naranjo-chart-version": "0.1.50",
+            "naranjo-chart-version": "0.1.51",
             "lidersea-chart-digest": "sha256:" + "7" * 64,
             "lidersea-chart-version": "0.1.37",
         }

@@ -40,7 +40,7 @@ def target_oci(site="naranjo-online"):
         "metadata": {
             "name": site + "-chart",
             "namespace": site,
-            "annotations": {closure.RELEASE_ANNOTATION: "0.1.50"},
+            "annotations": {closure.RELEASE_ANNOTATION: "0.1.51"},
         },
         "spec": {
             "interval": "10m0s",
