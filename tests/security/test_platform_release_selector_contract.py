@@ -266,9 +266,10 @@ spec:
             dockerfile.index("RUN --network=none CGO_ENABLED=0"),
         )
         self.assertIn(
-            'selector_rootfs="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"\n'
+            'selector_export="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"\n'
+            '            selector_tar="${selector_export}/rootfs.tar"\n'
             "            docker build --network=none \\\n"
-            '            --output "type=local,dest=${selector_rootfs}" \\\n'
+            '            --output "type=tar,dest=${selector_tar}" \\\n'
             "            --file cmd/platform-release-selector/Dockerfile .",
             workflow,
         )
@@ -286,9 +287,11 @@ spec:
         )
         self.assertIn("COPY --from=trusted-root /trusted-root/ /", dockerfile)
         for expected in (
-            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share"',
-            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share/sigstore"',
-            'stat --format=\'%a\' "${selector_rootfs}/usr/local/share/sigstore/trusted_root.json"',
+            '"usr/local/share": 0o555',
+            '"usr/local/share/sigstore": 0o555',
+            '"usr/local/share/sigstore/trusted_root.json": 0o444',
+            "member.mode & 0o7777 != expected_mode",
+            "archive.extractfile(root)",
             "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
         ):
             self.assertIn(expected, workflow)
