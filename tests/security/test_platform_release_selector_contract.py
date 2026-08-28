@@ -314,9 +314,11 @@ spec:
         for entry in entries:
             with self.subTest(vulnerability=entry["id"]):
                 self.assertEqual(
-                    set(entry), {"id", "purls", "expired_at", "statement"}
+                    set(entry),
+                    {"id", "purls", "paths", "expired_at", "statement"},
                 )
                 self.assertEqual(entry["purls"], [expected[entry["id"]]])
+                self.assertEqual(entry["paths"], ["usr/local/bin/cosign"])
                 self.assertEqual(entry["expired_at"], "2026-09-15T00:00:00Z")
                 self.assertIn("issue 222", entry["statement"])
 

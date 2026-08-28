@@ -3634,6 +3634,23 @@ class GitTransitionTests(unittest.TestCase):
                 hashlib.sha256(fragment.read_bytes()).hexdigest(),
             )
 
+    def test_unpublished_fragment_recovery_rejects_unrelated_only_change(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            floor = self.initialize(root)
+            base = self.add_fragment(root, 189, "pending", "Pending release.")
+            (root / "unrelated.txt").write_text(
+                "This must not manufacture a release recovery.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            head = self.commit(root, "change unrelated content only")
+
+            with mock.patch.object(
+                MODULE, "TAG_LEDGER_FLOOR_SHA", floor
+            ), self.assertRaises(MODULE.ContractError):
+                MODULE.validate_transition(root, base, head, first_parent=True)
+
     def test_unpublished_fragment_edit_rejects_release_surface_substitutions(self):
         for operation in (
             "wrong-path",
