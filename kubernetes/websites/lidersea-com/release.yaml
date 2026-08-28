@@ -3,6 +3,8 @@ kind: HelmRelease
 metadata:
   name: lidersea-com
   namespace: lidersea-com
+  labels:
+    app.kubernetes.io/managed-by: fluxcd
   annotations:
     platform.snaraj.dev/readiness: active-via-signature-verified-chart
 spec:
