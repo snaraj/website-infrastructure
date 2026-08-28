@@ -354,8 +354,14 @@ jobs:
               identity-run-records --identity "${predecessor_identity}" \
               --main-run-json "${canonical_main_run}" \
               --platform-run-json "${canonical_platform_run}"
-            printf 'state=reuse\ndigest=%s\nbuild_sha=%s\n' \
-              "${digest}" "${selector_build_sha}" >> "${GITHUB_OUTPUT}"
+            if git diff --quiet "${BASE_SHA}" "${SOURCE_SHA}" -- \
+              cmd/platform-release-selector internal/releaseselector go.mod; then
+              printf 'state=reuse\ndigest=%s\nbuild_sha=%s\n' \
+                "${digest}" "${selector_build_sha}" >> "${GITHUB_OUTPUT}"
+            else
+              printf 'state=build\ndigest=\nbuild_sha=%s\n' \
+                "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+            fi
           else
             # v0.1.40 is the sole immutable zero-asset predecessor. Derive its
             # exact successful attempts from filtered REST listings; v0.1.41
@@ -420,17 +426,17 @@ jobs:
             printf 'state=build\ndigest=\nbuild_sha=%s\n' \
               "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
           fi
-      - name: Set up Buildx for the first selector image
+      - name: Set up Buildx for a changed selector image
         if: steps.selector-image-state.outputs.state == 'build'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Log in to GHCR for the first selector image
+      - name: Log in to GHCR for a changed selector image
         if: steps.selector-image-state.outputs.state == 'build'
         env:
           GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           printf '%s' "${GHCR_PASSWORD}" |
           docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-      - name: Build and publish the static ARM64 selector by digest
+      - name: Build and publish the changed static ARM64 selector by digest
         if: steps.selector-image-state.outputs.state == 'build'
         id: selector-build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -445,7 +451,7 @@ jobs:
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
           provenance: mode=max,version=v1
           sbom: true
-      - name: Sign and attest the first selector digest
+      - name: Sign and attest the changed selector digest
         if: steps.selector-image-state.outputs.state == 'build'
         env:
           DIGEST: ${{ steps.selector-build.outputs.digest }}

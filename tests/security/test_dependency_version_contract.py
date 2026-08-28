@@ -72,7 +72,8 @@ class DependencyVersionContractTests(unittest.TestCase):
             self.assertNotIn("npm ", workflow)
         self.assertEqual(pull_request.count("docker build"), 1)
         self.assertIn(
-            "docker build --network=none --target build \\\n"
+            "docker build --network=none \\\n"
+            '            --output "type=tar,dest=${selector_tar}" \\\n'
             "            --file cmd/platform-release-selector/Dockerfile .",
             pull_request,
         )

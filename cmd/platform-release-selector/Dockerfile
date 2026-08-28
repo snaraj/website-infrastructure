@@ -17,11 +17,16 @@ FROM build AS trusted-root
 COPY cmd/platform-release-selector/trusted_root.json /trusted_root.json
 RUN --network=none printf '%s  %s\n' \
     '6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66' \
-    '/trusted_root.json' | sha256sum -c -
+    '/trusted_root.json' | sha256sum -c - && \
+    install -d /trusted-root/usr/local/share/sigstore && \
+    chmod 0555 /trusted-root/usr /trusted-root/usr/local \
+      /trusted-root/usr/local/share /trusted-root/usr/local/share/sigstore && \
+    install -m 0444 /trusted_root.json \
+      /trusted-root/usr/local/share/sigstore/trusted_root.json
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 COPY --from=build --chown=65532:65532 /out/platform-release-selector /platform-release-selector
 COPY --from=cosign --chmod=0555 /ko-app/cosign /usr/local/bin/cosign
-COPY --from=trusted-root --chmod=0444 /trusted_root.json /usr/local/share/sigstore/trusted_root.json
+COPY --from=trusted-root /trusted-root/ /
 USER 65532:65532
 ENTRYPOINT ["/platform-release-selector"]

@@ -266,7 +266,10 @@ spec:
             dockerfile.index("RUN --network=none CGO_ENABLED=0"),
         )
         self.assertIn(
-            "docker build --network=none --target build \\\n"
+            'selector_export="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"\n'
+            '            selector_tar="${selector_export}/rootfs.tar"\n'
+            "            docker build --network=none \\\n"
+            '            --output "type=tar,dest=${selector_tar}" \\\n'
             "            --file cmd/platform-release-selector/Dockerfile .",
             workflow,
         )
@@ -278,9 +281,14 @@ spec:
             "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b66",
         )
         self.assertIn(
-            "COPY --from=trusted-root --chmod=0444 /trusted_root.json "
-            "/usr/local/share/sigstore/trusted_root.json",
+            "chmod 0555 /trusted-root/usr /trusted-root/usr/local \\\n"
+            "      /trusted-root/usr/local/share /trusted-root/usr/local/share/sigstore",
             dockerfile,
+        )
+        self.assertIn("COPY --from=trusted-root /trusted-root/ /", dockerfile)
+        self.assertIn(
+            'python3 -I -B scripts/ci/validate_selector_rootfs.py "${selector_tar}"',
+            workflow,
         )
 
     def test_zero_asset_v0140_exception_is_one_exact_migration_edge(self):
@@ -334,7 +342,7 @@ spec:
         ignore = "--ignorefile policies/platform-selector-trivy-ignore.yaml"
         self.assertEqual(workflow.count(ignore), 1)
         selector_scan = workflow.split(
-            "- name: Sign and attest the first selector digest", 1
+            "- name: Sign and attest the changed selector digest", 1
         )[1].split("- name: Bind the selector digest used by release identity", 1)[0]
         self.assertIn("--image-src remote --platform linux/arm64", selector_scan)
         self.assertIn("--ignore-unfixed=false", selector_scan)

@@ -185,8 +185,12 @@ jobs:
                cmd/platform-release-selector internal/releaseselector go.mod; then
             printf 'Selector build inputs unchanged; skipping duplicate container build.\n'
           else
-            docker build --network=none --target build \
+            selector_export="$(mktemp -d "${RUNNER_TEMP}/selector-rootfs.XXXXXX")"
+            selector_tar="${selector_export}/rootfs.tar"
+            docker build --network=none \
+            --output "type=tar,dest=${selector_tar}" \
             --file cmd/platform-release-selector/Dockerfile .
+            python3 -I -B scripts/ci/validate_selector_rootfs.py "${selector_tar}"
           fi
       - name: Enforce the self-hosted coverage contract
         # Zero-third-party coverage: the one hash-pinned wheel is installed

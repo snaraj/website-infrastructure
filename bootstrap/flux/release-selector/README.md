@@ -97,9 +97,13 @@ equal the current ready `kubernetes.default` EndpointSlice backends. Calico
 enforces workload egress after Service DNAT, so the selector policy names those
 backends on TCP 6443 even though the Pod calls the Kubernetes Service on 443.
 
-The selector remains bootstrap-owned and never self-updates. Trusted-root or
-selector-digest rotation is an explicit owner-attended migration tracked by
-issue #222: quarantine the RoleBinding, suspend the CronJob, wait for zero
-selector Jobs and Pods, replace the exact CronJob, re-prove admission, RBAC and
-NetworkPolicy state, restore the RoleBinding, and observe the next scheduled
-run. Evidence-to-image digest equality is never relaxed during rotation.
+The selector remains bootstrap-owned and never self-updates. A protected-main
+release that changes selector build inputs publishes a newly signed digest in
+its canonical identity, but the live CronJob remains on its old digest until an
+explicit owner-attended migration tracked by issue #222: quarantine the
+RoleBinding, suspend the CronJob, wait for zero selector Jobs and Pods, replace
+the exact CronJob, re-prove admission, RBAC and NetworkPolicy state, restore the
+RoleBinding, and observe the next scheduled run. Evidence-to-image digest
+equality is never relaxed during rotation. Changed-scope CI materializes the
+actual final image root filesystem and rejects a trusted-root file whose parent
+directories are not traversable by the non-root runtime.
