@@ -1,146 +1,71 @@
-# Phase C — Kubernetes adversarial validation (static-first)
+# Phase C — Kubernetes adversarial validation
 
-Maps the handoff's seven adversarial areas to their positive AND negative
-executable tests, with the proof level labeled honestly: **static** (parses
-or renders the artifact), **policy** (admission/policy engine evaluates
-rendered or fixture objects), **behavioral** (a real control plane proves
-the runtime effect — Phase G only, owner-authorized). A parser-only check
-is never presented as a behavioral proof. New in this phase: the
-no-security-toggle detector (closes PLAT-GAP-001).
+## Evidence split
 
-## 1. Kubeadm and host contract — proof level: static
+Repository rendering proves desired-state syntax and static policy behavior. It
+does not prove a cluster applied the objects, a controller converged them, or a
+runtime request was denied. Kyverno is retired and absent; no admission credit
+is taken. Runtime claims require separately dated live evidence.
 
-Positive: `validate_kubeadm_config.py` accepts only the canonical config
-(version pins, cgroup driver, sysctls/modules, encryption-provider order,
-SAN set, audit-policy wiring, anonymous-auth off, authorization modes);
-`validate_encryption_config.py` + `generate_encryption_config.py` (CSPRNG,
-0600, no-display); `validate_host_prerequisites_plan.py`;
-`validate_pi_network.py`; `validate_cni_manifest.py`.
-Negative: 45+ rejection tests across their five suites (wrong skew, swap,
-weak provider order, guessed inputs, SAN drift, token retention).
-Bootstrap-token hygiene: `--skip-token-print` pinned by two suites and
-allowlisted in the toggle detector as security-positive.
-Residual → G: none statically reachable; live init evidence is Codex-lane.
+## Static controls
 
-## 2. API server and admission — proof level: static + policy
+`scripts/render-manifests.sh` builds every retained Helm/Kustomize root,
+validates schemas, runs Conftest, executes the complete allow/deny fixture
+corpus, and applies the stricter release-state policy for the selected
+transition mode. `scripts/validate_repository.py kubernetes activation`
+independently checks exact inventories, Flux source/sync shape, immutable chart
+digests, cosign publisher identity, default deny, and least-privilege RBAC.
+Bootstrap-token hygiene remains explicit: `--skip-token-print` pinned by two suites
+and allowlisted in the security-toggle detector as a security-positive flag.
 
-Positive: encryption-at-rest config validated; admission chain rendered and
-schema-checked; Kyverno policies render from the canonical template
-(`policies/kyverno`, regenerated never hand-edited).
-Negative: conftest deny rules on rendered admission objects; kyverno test
-deny matrix; `expect_release_rejection` proves the release policy REJECTS
-the inert scaffold (admission not enforced yet is itself asserted).
-Residual → G: webhook failure-policy behavior, audit-log emission, PSA
-runtime decisions need a live control plane (fixed read-only canaries).
+The hostile battery must keep these mutants red:
 
-## 2a. Storage external reachability — proof level: policy + structural
+| Mutant | Required rejection |
+| --- | --- |
+| NodePort, LoadBalancer, externalIPs, Ingress, Gateway, hostNetwork or hostPort | no direct public origin |
+| mutable or foreign workload image | approved registry and full digest required |
+| sibling-site or cross-namespace chart/source reference | exact tenant tuple required |
+| changed OIDC issuer, publisher subject, tag selector, missing verify block | exact Flux cosign source contract required |
+| prune enabled, wrong service account, aggregate dependency, or unsafe release values | fail-closed release activation |
+| network/cloud/hostPath/unknown storage, traversal, missing affinity, null structures | enumerated static-local means only |
+| wildcard RBAC, cluster-admin, foreign subject, direct tenant authority | two-stage namespace impersonation and least privilege |
 
-Positive: `fixtures/allow/storage-enumerated-local.yaml` (the enumerated
-class, a local PersistentVolume under the enumerated root pinned to NAMED
-nodes, and a claim naming the same class) passes both engines.
-Negative: 36 single-object deny fixtures, at least one per rule and
-several rules carrying more — network and block sources, cloud and unknown
-CSI drivers, hostPath, a path outside the root, a traversal that survives
-prefix matching, an unpinned local volume and an every-node one, zero and
-two sources, an unenumerated class on both the volume and the class object,
-remote parameters, a classless claim, an imported claim, a CSIDriver, a
-VolumeAttributesClass and two references to one, PersistentVolume mount
-options, structurally unusable objects, and the degenerate-shape corpus
-(null/scalar/list values under `local`, `csi`, `nodeAffinity`,
-`dataSourceRef`, `parameters`, and `spec`) that proved eight fail-open
-divergences between the two engines.
-Structural: `tests/security/test_storage_exposure_policy_contract.py`
-derives the covered kinds from the rule's own CEL expressions and pins the
-match block to them, because `kyverno test` reports an unmatched resource
-as `Pass / Excluded` and a skipped one as a PASS — a narrowed match block,
-a userInfo narrowing (`clusterRoles`/`roles`/`subjects`), or
-`spec.admission: false` each leave every behavioural row green while the
-gate covers nothing. The same battery pins the six enumerations
-byte-identical across Kyverno and Conftest, pins the non-source field list
-name-for-name, and pins `admission: true`.
-Differential: `scripts/test-storage-engine-parity.sh` runs the whole corpus
-through BOTH engines and fails on any verdict disagreement or any `skip`,
-because text lockstep is not behavioural lockstep.
-Residual → G: a manifest cannot prove what a node path is bound to
-(bind mount, network client mount, symlink); that is mount-time evidence,
-and the required host-side closure is enumerated in the
-[storage-admission runbook](../runbooks/storage-admission.md).
+Every deny fixture carries an exact expected reason, either in a sidecar or in
+per-document inline declarations. Rejection by an unrelated rule does not
+count as proof of the intended control.
 
-## 3. Workload confinement — proof level: policy
+## Runtime controls retained
 
-Positive: `fixtures/allow/hardened.yaml` + `lidersea-hardened.yaml` pass
-`require-restricted-workloads` (non-root, dropped caps, seccomp, RO root,
-resources, exact ServiceAccounts) and `require-approved-images` (digest
-pins, canonical repos).
-Negative: `fixtures/deny/insecure.yaml`, `token-bypass.yaml`, and the
-`objective2-bypasses.yaml` matrix (host ports, capability re-add, digest
-drift, cross-site image, SA token mounts) — 44 kyverno cases total.
-Residual → G: kernel-level enforcement (seccomp actually applied) is
-behavioral by nature.
+The live defence chain is protected main plus required CI, annotated immutable
+platform release, signed release identity, digest-only site artifacts, Flux OCI
+verification, two-stage namespace impersonation, namespace default deny and
+least-privilege RBAC, and bootstrap-owned ValidatingAdmissionPolicy confinement
+of release-selector fields.
 
-## 4. Network isolation — proof level: policy
+Live acceptance must demonstrate:
 
-Positive: nine closed tenant NetworkPolicy identities in rendered state;
-`require-exact-tenant-networking` passes the exact ingress/no-egress shape.
-Negative: widened-ingress, endport-widening, namespace-selector and label
-substitution denials; `disallow-public-services` denies Service/Ingress/
-Gateway exposure paths.
-Residual → G: default-deny/allow/restore packet-level canaries (both
-directions) and coexistence with the operator's private admin plane are
-behavioral; specified in the handoff's Phase G list.
+- exact `SourceVerified=True` at the selected OCI digest;
+- exact Kustomization/HelmRelease generations and revisions;
+- Deployment/Pod image references and runtime ARM64 image IDs matching the
+  acquisition receipt;
+- no NodePort/LoadBalancer/externalIPs/Ingress/Gateway;
+- exact tenant NetworkPolicy and RBAC inventories;
+- cross-tenant access denied and control-plane reachability denied; and
+- an unsafe selector/release activation refused without partial mutation.
 
-## 5. Flux and artifact trust — proof level: static + policy
+## Storage truth
 
-Positive: conftest `approved_git_source_urls`/`approved_git_source_scopes`
-pin per-source URLs, chart-rooted sparse checkout, exact ignore rules;
-signature policies pin the two protected-`main` publisher identities
-(re-pointed from the tag form 2026-08-22, ADR 0016 amendment); suspended
-sentinels assert inertness; the extracted evidence validators
-(`validate_flux_release_evidence.py`, `validate_runtime_inventory_evidence.py`)
-are executed by 27 unit tests over synthetic captured state — the successor
-live gate's logic is proven today at policy level.
-Negative: cross-site source-name substitution, wrong-identity signature
-fixtures, canonical-URL denials, unsigned-artifact rejection paths.
-Residual → G: real Rekor/registry round-trips (Phase B residual: scheduled
-Rekor spot checks).
+The sanitized live cluster currently has an older unbound hostPath PV and no
+PVC or StorageClass. That is not reviewed local-PV activation. The future
+usage-export target remains static `local`, root `/mnt/local-pie-ssd`,
+StorageClass `local-pie-ssd`, `ReadWriteOnce`, `Retain`, exact node
+affinity and local-device proof. The Naranjo Helm reconciler may own PVC
+lifecycle only, never PV, StorageClass, node, or host authority. See the
+[static storage runbook](../runbooks/storage-admission.md).
 
-## 6. Single-node resilience — proof level: deferred by honesty
+## Revisit trigger
 
-Static coverage exists only for configuration (quotas, eviction-relevant
-requests/limits, zero-capacity staging quota denials). Pressure, eviction,
-restart, reboot, certificate-expiry, and GC behavior cannot be proven from
-fixtures; MISLABELING RISK is the finding here, not a missing YAML test.
-Disposition: Phase E builds the fake-host drills; Phase G runs the fixed
-read-only live canaries. Recorded as PLAT-K8S-001 (S2, accepted interim).
-
-## 7. Tenant/workload contract — proof level: static
-
-Positive: the sanitized onboarding bundles validate against the generic
-`platform.snaraj.dev/v1alpha1` workload shape (digest, port, probes,
-route hostname, resources, replicas, storage profile, rollback digest) —
-zero PENDING fields since v0.1.6.
-Negative: bundle-contract validation rejects missing/malformed fields
-(integrator-side validator); platform-side, kyverno denies any workload
-outside the closed identity set.
-Residual: none new; contract evolution is a two-lane change by design.
-
-## New executable control: the no-security-toggle detector
-
-`scripts/validate_no_security_toggles.py` (closes **PLAT-GAP-001**, the
-Coinkite law as a machine check): sweeps every tracked file for
-skip/disable/bypass identifiers aimed at verification, signing, policy,
-scanning, gates, or admission, plus no-verify/insecure/skip CLI flags and
-`verification disabled` idioms. Occurrences are legal only through an
-exact-match allowlist where every entry carries its justification and a
-stale entry is itself an error; the detector and its test are whole-file
-exempt behind tamper-checked identity markers. Five-test contract suite
-proves detection of nine hostile idiom classes, benign-line silence, stale
--allowlist failure, and marker tampering. Wired into the terminal gate and
-`validate-security.sh`.
-
-## Phase C findings register
-
-| ID | Severity | Finding | Disposition |
-| --- | --- | --- | --- |
-| PLAT-K8S-001 | S2 | Single-node resilience has configuration-only proof; runtime behavior unproven until E/G | accepted interim; Phase E drills next |
-| PLAT-GAP-001 | S2 | (from Phase A) no automated toggle detector | **CLOSED this phase** |
+A material trust-boundary expansion, including another independent tenant or
+untrusted/third-party workload, reopens the runtime-admission decision. It
+requires a new threat model and ADR and does not authorize reinstalling
+Kyverno.

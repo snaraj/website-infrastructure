@@ -16,7 +16,6 @@ GIT_REVISION = "main@sha1:" + COMMIT
 NARANJO_IMAGE = "ghcr.io/snaraj/naranjo-online@sha256:" + "1" * 64
 LIDERSEA_IMAGE = "ghcr.io/snaraj/lidersea-com@sha256:" + "2" * 64
 CLOUDFLARED_IMAGE = "cloudflare/cloudflared:v1@sha256:" + "3" * 64
-ADMISSION_IMAGE = "reg.kyverno.io/kyverno/kyverno:v1@sha256:" + "4" * 64
 FLUX_SOURCE_IMAGE = "ghcr.io/fluxcd/source-controller:v1@sha256:" + "5" * 64
 FLUX_KUSTOMIZE_IMAGE = "ghcr.io/fluxcd/kustomize-controller:v1@sha256:" + "6" * 64
 FLUX_HELM_IMAGE = "ghcr.io/fluxcd/helm-controller:v1@sha256:" + "7" * 64
@@ -29,7 +28,6 @@ CILIUM_IMAGE = "quay.io/cilium/cilium:v1.0.0@sha256:" + "9" * 64
 KUSTOMIZATION_NAMES = (
     "flux-system",
     "platform-prerequisites",
-    "admission",
     "platform-services",
     "naranjo-online",
     "lidersea-com",
@@ -38,8 +36,8 @@ SOURCE_IDENTITIES = (
     ("flux-system", "flux-system"),
     ("cloudflare-public", "cloudflare-public-source"),
 )
-# Each site's chart is a published, cosign-verified OCI artifact selected by a
-# SemVer range; only the connector still resolves a chart from Git.
+# Each site's chart is a published, cosign-verified OCI artifact selected by
+# one immutable manifest digest; only the connector resolves a chart from Git.
 CHART_ISSUER = r"^https://token\.actions\.githubusercontent\.com$"
 
 
@@ -57,41 +55,49 @@ OCI_CHART_SOURCES = {
     ("naranjo-online", "naranjo-online-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
         "subject": chart_subject("naranjo.online"),
-        "tag": "v0.1.9",
-        "digest": "sha256:" + "a" * 64,
+        "tag": "0.1.50",
+        "digest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+        "artifact_digest": "sha256:4d1215d746c601d8ad1ed97a4a6d8b7785489dc4c39f3d5f264ebeeead053dd1",
     },
     ("lidersea-com", "lidersea-com-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
         "subject": chart_subject("lidersea.com"),
-        "tag": "v0.1.9",
-        "digest": "sha256:" + "b" * 64,
+        "tag": "0.1.37",
+        "digest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+        "artifact_digest": "sha256:1190b1297885d233a01f362467a00eb8f32c49ca5843edeb8af53d5a25f21b3b",
     },
 }
-# None marks the tag-driven chartRef releases; the connector keeps its Git
+# None marks the digest-selected chartRef releases; the connector keeps its Git
 # chart source and is therefore the only release with a HelmChart object.
 RELEASE_SOURCES = {
     ("naranjo-online", "naranjo-online"): None,
     ("lidersea-com", "lidersea-com"): None,
     ("cloudflare-public", "cloudflare-public"): "cloudflare-public-source",
 }
-POLICY_NAMES = (
-    "disallow-public-services",
-    "disallow-tenant-media-payloads",
-    "disallow-undiscovered-storage",
-    "require-approved-images",
-    "require-exact-tenant-networking",
-    "require-release-readiness",
-    "require-replicaset-admission-identity",
-    "require-restricted-workloads",
-    "require-signed-naranjo-online",
-    "require-signed-lidersea-com",
-)
-# Mirrors ``expected_network_policies`` in the validator, reconciled to a
-# read-only capture of the cluster on 2026-08-12. The two site namespaces carry
-# NO namespace-wide default-deny live (AUDIT NP7) and the cloudflare-public one
-# is named ``default-deny-all``, not what the committed prerequisites manifest
-# calls it.
+# Mirrors the validator's exact post-activation inventory. The two site
+# default-denies are platform-authored objects in their direct reconciliation
+# roots; each signed chart retains ownership of only its exact application
+# ingress/egress policy.
 NETWORK_POLICY_IDENTITIES = (
+    ("cloudflare-public", "default-deny-all"),
+    ("cloudflare-public", "cloudflared-dns"),
+    ("cloudflare-public", "cloudflared-edge"),
+    ("cloudflare-public", "cloudflared-naranjo-online"),
+    ("cloudflare-public", "cloudflared-lidersea-com"),
+    ("naranjo-online", "default-deny"),
+    ("naranjo-online", "ingress-to-naranjo-online"),
+    ("lidersea-com", "default-deny"),
+    ("lidersea-com", "ingress-to-lidersea-com"),
+)
+# Every tenant namespace must carry one exact namespace-wide deny. The older
+# cloudflare-public identity retains its observed live name; website identities
+# are the two creations expected at first direct-site activation.
+NAMESPACE_WIDE_DEFAULT_DENIES = {
+    ("cloudflare-public", "default-deny-all"),
+    ("naranjo-online", "default-deny"),
+    ("lidersea-com", "default-deny"),
+}
+OBSERVED_PRE_ACTIVATION_NETWORK_POLICIES = {
     ("cloudflare-public", "default-deny-all"),
     ("cloudflare-public", "cloudflared-dns"),
     ("cloudflare-public", "cloudflared-edge"),
@@ -99,10 +105,47 @@ NETWORK_POLICY_IDENTITIES = (
     ("cloudflare-public", "cloudflared-lidersea-com"),
     ("naranjo-online", "ingress-to-naranjo-online"),
     ("lidersea-com", "ingress-to-lidersea-com"),
-)
-# The one identity that must carry a NAMESPACE-WIDE podSelector, because a
-# default is only a default if it selects every Pod.
-NAMESPACE_WIDE_DEFAULT_DENY = ("cloudflare-public", "default-deny-all")
+}
+FIRST_ACTIVATION_NETWORK_POLICY_CREATIONS = {
+    ("naranjo-online", "default-deny"),
+    ("lidersea-com", "default-deny"),
+}
+
+
+def site_application_policy_spec(namespace):
+    spec = {
+        "podSelector": {
+            "matchLabels": {
+                "app.kubernetes.io/name": namespace,
+                "app.kubernetes.io/instance": namespace,
+            }
+        },
+        "policyTypes": ["Ingress"],
+        "ingress": [
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {
+                                "kubernetes.io/metadata.name": "cloudflare-public"
+                            }
+                        },
+                        "podSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "cloudflare-public",
+                                "app.kubernetes.io/instance": namespace + "-tunnel",
+                            }
+                        },
+                    }
+                ],
+                "ports": [{"port": 8080, "protocol": "TCP"}],
+            }
+        ],
+    }
+    if namespace == "lidersea-com":
+        spec["policyTypes"] = ["Ingress", "Egress"]
+        spec["egress"] = []
+    return spec
 
 
 def function_body(script, name, next_name):
@@ -232,7 +275,7 @@ class ReleaseGateContractTests(unittest.TestCase):
                     ),
                     "operation": "copy",
                 },
-                "ref": {"semver": ">=0.1.9 <1.0.0"},
+                "ref": {"digest": contract["digest"]},
                 "timeout": "60s",
                 "url": contract["url"],
                 "verify": {
@@ -253,16 +296,25 @@ class ReleaseGateContractTests(unittest.TestCase):
                         "namespace": namespace,
                         "name": name,
                         "generation": 2,
+                        "annotations": {
+                            "platform.snaraj.dev/chart-release": contract["tag"]
+                        },
                     },
                     "spec": spec,
                     "status": {
-                        "conditions": [ready_condition()],
+                        "conditions": [
+                            ready_condition(),
+                            {
+                                "type": "SourceVerified",
+                                "status": "True",
+                                "reason": "Succeeded",
+                                "observedGeneration": 2,
+                            },
+                        ],
                         "observedGeneration": 2,
                         "artifact": {
-                            "revision": "{}@{}".format(
-                                contract["tag"], contract["digest"]
-                            ),
-                            "digest": contract["digest"],
+                            "revision": contract["digest"],
+                            "digest": contract["artifact_digest"],
                         },
                     },
                 }
@@ -283,7 +335,7 @@ class ReleaseGateContractTests(unittest.TestCase):
         for (namespace, name), source_name in RELEASE_SOURCES.items():
             if source_name is None:
                 contract = OCI_CHART_SOURCES[(namespace, namespace + "-chart")]
-                revision = contract["tag"]
+                revision = contract["tag"] + "+" + contract["digest"][7:19]
                 release_spec = {
                     "chartRef": {
                         "kind": "OCIRepository",
@@ -292,12 +344,14 @@ class ReleaseGateContractTests(unittest.TestCase):
                     "interval": "10m0s",
                     "releaseName": name,
                     "serviceAccountName": "helm-reconciler",
+                    "values": {"deploymentReady": True},
                 }
                 release_status = {
                     "conditions": [ready_condition()],
                     "observedGeneration": 3,
                     "lastAttemptedGeneration": 3,
                     "lastAttemptedRevision": revision,
+                    "lastAttemptedRevisionDigest": contract["digest"],
                     "history": [
                         {
                             "name": name,
@@ -380,36 +434,21 @@ class ReleaseGateContractTests(unittest.TestCase):
         self._write("helmreleases.json", {"items": releases})
         self._write("helmcharts.json", {"items": charts})
 
-        live_policies = []
-        for name in POLICY_NAMES:
-            policy = {
-                "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
-                "metadata": {"name": name},
-                "spec": {
-                    "admission": True,
-                    "validationFailureAction": "Enforce",
-                    "webhookConfiguration": {"failurePolicy": "Fail"},
-                    "rules": [{"name": "exact-" + name}],
-                },
-            }
-            live_policies.append(policy)
-            self._write("desired-policy-{}.json".format(name), policy)
-        self._write("policies.json", {"items": live_policies})
-
         network_policies = []
         for namespace, name in NETWORK_POLICY_IDENTITIES:
-            selector = {"matchLabels": {"contract": name}}
-            if (namespace, name) == NAMESPACE_WIDE_DEFAULT_DENY:
-                selector = {}
+            spec = {
+                "podSelector": {"matchLabels": {"contract": name}},
+                "policyTypes": ["Ingress", "Egress"],
+            }
+            if (namespace, name) in NAMESPACE_WIDE_DEFAULT_DENIES:
+                spec["podSelector"] = {}
+            elif name == "ingress-to-" + namespace:
+                spec = site_application_policy_spec(namespace)
             policy = {
                 "apiVersion": "networking.k8s.io/v1",
                 "kind": "NetworkPolicy",
                 "metadata": {"namespace": namespace, "name": name},
-                "spec": {
-                    "podSelector": selector,
-                    "policyTypes": ["Ingress", "Egress"],
-                },
+                "spec": spec,
             }
             network_policies.append(policy)
             self._write(
@@ -436,7 +475,6 @@ class ReleaseGateContractTests(unittest.TestCase):
             "kube-public",
             "kube-system",
             "flux-system",
-            "kyverno",
             "cloudflare-public",
             "naranjo-online",
             "lidersea-com",
@@ -462,7 +500,6 @@ class ReleaseGateContractTests(unittest.TestCase):
             ("naranjo-online", "naranjo-online"): (NARANJO_IMAGE, 2),
             ("lidersea-com", "lidersea-com"): (LIDERSEA_IMAGE, 2),
             ("cloudflare-public", "cloudflared"): (CLOUDFLARED_IMAGE, 2),
-            ("kyverno", "kyverno-admission-controller"): (ADMISSION_IMAGE, 1),
             ("flux-system", "source-controller"): (FLUX_SOURCE_IMAGE, 1),
             ("flux-system", "kustomize-controller"): (FLUX_KUSTOMIZE_IMAGE, 1),
             ("flux-system", "helm-controller"): (FLUX_HELM_IMAGE, 1),
@@ -699,7 +736,6 @@ class ReleaseGateContractTests(unittest.TestCase):
             ("default", "kubernetes"),
             ("kube-system", "kube-dns"),
             ("flux-system", "source-controller"),
-            ("kyverno", "kyverno-svc"),
             ("naranjo-online", "naranjo-online"),
             ("lidersea-com", "lidersea-com"),
         )
@@ -720,42 +756,7 @@ class ReleaseGateContractTests(unittest.TestCase):
             },
         )
         self._write("mutatingwebhooks.json", {"items": []})
-        self._write(
-            "webhooks.json",
-            {
-                "items": [
-                    {
-                        "metadata": {
-                            "name": "kyverno-resource-validating-webhook-cfg"
-                        },
-                        "webhooks": [
-                            {
-                                "failurePolicy": "Fail",
-                                "clientConfig": {
-                                    "service": {
-                                        "namespace": "kyverno",
-                                        "name": "kyverno-svc",
-                                    }
-                                },
-                                "namespaceSelector": {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "kubernetes.io/metadata.name",
-                                            "operator": "In",
-                                            "values": [
-                                                "cloudflare-public",
-                                                "naranjo-online",
-                                                "lidersea-com",
-                                            ],
-                                        }
-                                    ]
-                                },
-                            }
-                        ],
-                    }
-                ]
-            },
-        )
+        self._write("webhooks.json", {"items": []})
 
     def _run_validator(self, commit=COMMIT):
         return subprocess.run(
@@ -776,7 +777,6 @@ class ReleaseGateContractTests(unittest.TestCase):
                 NARANJO_IMAGE,
                 LIDERSEA_IMAGE,
                 CLOUDFLARED_IMAGE,
-                ADMISSION_IMAGE,
                 FLUX_SOURCE_IMAGE,
                 FLUX_KUSTOMIZE_IMAGE,
                 FLUX_HELM_IMAGE,
@@ -794,6 +794,11 @@ class ReleaseGateContractTests(unittest.TestCase):
         result = self._run_validator()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def _assert_rejected_with(self, reason):
+        result = self._run_validator()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(reason, result.stderr)
+
     def _assert_global_rejected(self):
         result = self._run_global_validator()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -802,6 +807,20 @@ class ReleaseGateContractTests(unittest.TestCase):
         result = self._run_validator()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("bound to exact local HEAD", result.stdout)
+
+    def test_first_activation_creates_exactly_the_two_site_default_denies(self):
+        self.assertEqual(
+            set(NETWORK_POLICY_IDENTITIES)
+            - OBSERVED_PRE_ACTIVATION_NETWORK_POLICIES,
+            FIRST_ACTIVATION_NETWORK_POLICY_CREATIONS,
+        )
+        self.assertEqual(
+            FIRST_ACTIVATION_NETWORK_POLICY_CREATIONS,
+            {
+                ("naranjo-online", "default-deny"),
+                ("lidersea-com", "default-deny"),
+            },
+        )
 
     def test_valid_exact_global_runtime_inventory_passes(self):
         result = self._run_global_validator()
@@ -898,17 +917,30 @@ class ReleaseGateContractTests(unittest.TestCase):
                 self._write(filename, value)
                 self._assert_rejected()
 
-    def test_extra_clusterpolicy_fails_closed(self):
-        value = self._read("policies.json")
-        value["items"].append(
-            {
-                "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
-                "metadata": {"name": "rogue-mutation-policy"},
-                "spec": {"rules": []},
-            }
+    def test_live_chart_artifact_must_match_each_reviewed_digest(self):
+        for namespace, name in OCI_CHART_SOURCES:
+            with self.subTest(namespace=namespace):
+                self._write_valid_evidence()
+                value = self._read("ocirepositories.json")
+                source = next(
+                    item
+                    for item in value["items"]
+                    if item["metadata"]["namespace"] == namespace
+                    and item["metadata"]["name"] == name
+                )
+                source["status"]["artifact"]["revision"] = "sha256:" + "c" * 64
+                self._write("ocirepositories.json", value)
+                self._assert_rejected()
+
+    def test_source_verified_must_observe_the_current_generation(self):
+        value = self._read("ocirepositories.json")
+        verified = next(
+            condition
+            for condition in value["items"][0]["status"]["conditions"]
+            if condition["type"] == "SourceVerified"
         )
-        self._write("policies.json", value)
+        verified["observedGeneration"] = 1
+        self._write("ocirepositories.json", value)
         self._assert_rejected()
 
     def _repoint_network_policy(self, namespace, name, **spec_changes):
@@ -938,46 +970,72 @@ class ReleaseGateContractTests(unittest.TestCase):
     def test_scoped_default_deny_where_a_namespace_wide_one_is_required_fails_closed(self):
         """A podSelector-scoped deny is not a default-deny.
 
-        The exact live shape of AUDIT NP7: a policy that looks like a
+        The former NP7 failure shape: a policy that looks like a
         default-deny, is named like one, denies both directions — and selects
         only some Pods, so anything else scheduled into the namespace is
         unrestricted. Narrowing the surviving cloudflare-public one the same way
         must fail rather than be accepted as equivalent.
         """
 
-        self._repoint_network_policy(
-            *NAMESPACE_WIDE_DEFAULT_DENY,
-            podSelector={"matchLabels": {"app": "anything"}},
-        )
-        self._assert_rejected()
+        for identity in sorted(NAMESPACE_WIDE_DEFAULT_DENIES):
+            with self.subTest(identity=identity):
+                self._write_valid_evidence()
+                self._repoint_network_policy(
+                    *identity,
+                    podSelector={"matchLabels": {"app": "anything"}},
+                )
+                self._assert_rejected_with(
+                    "tenant namespace has no exact namespace-wide default-deny: "
+                    + identity[0]
+                )
 
     def test_ingress_only_default_deny_fails_closed(self):
         """The other half of NP7: Ingress-only leaves egress wide open."""
 
-        self._repoint_network_policy(
-            *NAMESPACE_WIDE_DEFAULT_DENY, policyTypes=["Ingress"]
-        )
-        self._assert_rejected()
+        for identity in sorted(NAMESPACE_WIDE_DEFAULT_DENIES):
+            with self.subTest(identity=identity):
+                self._write_valid_evidence()
+                self._repoint_network_policy(*identity, policyTypes=["Ingress"])
+                self._assert_rejected_with(
+                    "tenant namespace has no exact namespace-wide default-deny: "
+                    + identity[0]
+                )
 
-    def test_a_closed_divergence_makes_its_own_declaration_fail(self):
-        """The declaration is a ratchet, not a permanent exemption.
+    def test_default_deny_with_an_allow_rule_fails_closed(self):
+        for identity in sorted(NAMESPACE_WIDE_DEFAULT_DENIES):
+            with self.subTest(identity=identity):
+                self._write_valid_evidence()
+                self._repoint_network_policy(
+                    *identity,
+                    egress=[{"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}],
+                )
+                self._assert_rejected_with(
+                    "tenant namespace has no exact namespace-wide default-deny: "
+                    + identity[0]
+                )
 
-        The day a site namespace gains the namespace-wide default-deny it is
-        supposed to have, the recorded divergence becomes a lie, and a stale
-        justification has to fail exactly like a missing check — otherwise the
-        exemption outlives the gap and quietly re-permits its removal.
-
-        Widening the site's OWN policy rather than adding a second one, so the
-        inventory count is untouched and only the ratchet can object.
-        """
-
-        self._repoint_network_policy(
-            "naranjo-online",
-            "ingress-to-naranjo-online",
-            podSelector={},
-            policyTypes=["Ingress", "Egress"],
-        )
-        self._assert_rejected()
+    def test_signed_chart_application_policy_drift_fails_closed(self):
+        mutations = {
+            "naranjo-online": {
+                "policyTypes": ["Ingress", "Egress"],
+                "egress": [],
+            },
+            "lidersea-com": {"policyTypes": ["Ingress"]},
+        }
+        for namespace, spec_changes in mutations.items():
+            with self.subTest(namespace=namespace):
+                self._write_valid_evidence()
+                self._repoint_network_policy(
+                    namespace,
+                    "ingress-to-" + namespace,
+                    **spec_changes,
+                )
+                self._assert_rejected_with(
+                    "desired signed-chart application NetworkPolicy is not exact: "
+                    + namespace
+                    + "/ingress-to-"
+                    + namespace
+                )
 
     def test_missing_kustomization_observed_generation_fails_closed(self):
         value = self._read("kustomizations.json")
@@ -1070,21 +1128,23 @@ class ReleaseGateContractTests(unittest.TestCase):
                 self._write("ocirepositories.json", value)
                 self._assert_rejected()
 
-    def test_chart_artifact_without_tag_and_digest_fails_closed(self):
+    def test_chart_artifact_revision_and_layer_digest_are_distinct_and_exact(self):
         mutations = {
-            "tag only": lambda artifact: artifact.update({"revision": "v0.1.9"}),
-            "digest only": lambda artifact: artifact.update(
+            "tag-qualified revision": lambda artifact: artifact.update(
+                {"revision": "0.1.50@" + OCI_CHART_SOURCES[("naranjo-online", "naranjo-online-chart")]["digest"]}
+            ),
+            "stored layer used as revision": lambda artifact: artifact.update(
                 {"revision": artifact["digest"]}
             ),
-            "unstable tag": lambda artifact: artifact.update(
-                {"revision": "latest@" + artifact["digest"]}
+            "wrong upstream manifest": lambda artifact: artifact.update(
+                {"revision": "sha256:" + "c" * 64}
             ),
-            "digest disagrees with revision": lambda artifact: artifact.update(
-                {"revision": "v0.1.9@sha256:" + "c" * 64}
+            "wrong stored chart layer": lambda artifact: artifact.update(
+                {"digest": "sha256:" + "d" * 64}
             ),
             "all-zero digest": lambda artifact: artifact.update(
                 {
-                    "revision": "v0.1.9@sha256:" + "0" * 64,
+                    "revision": "sha256:" + "0" * 64,
                     "digest": "sha256:" + "0" * 64,
                 }
             ),
@@ -1107,9 +1167,15 @@ class ReleaseGateContractTests(unittest.TestCase):
                 {"helmChart": "naranjo-online/naranjo-online-naranjo-online"}
             ),
             "deployed version is not the resolved one": lambda item: (
-                item["status"].update({"lastAttemptedRevision": "v0.1.8"}),
-                item["status"]["history"][0].update({"chartVersion": "v0.1.8"}),
+                item["status"].update({"lastAttemptedRevision": "0.1.8+deadbeefdead"}),
+                item["status"]["history"][0].update({"chartVersion": "0.1.8+deadbeefdead"}),
             ),
+            "attempted digest changed": lambda item: item["status"].update(
+                {"lastAttemptedRevisionDigest": "sha256:" + "f" * 64}
+            ),
+            "history OCI digest changed": lambda item: item["status"][
+                "history"
+            ][0].update({"ociDigest": "sha256:" + "f" * 64}),
         }
         for label, mutate in mutations.items():
             with self.subTest(mutation=label):
@@ -1143,12 +1209,6 @@ class ReleaseGateContractTests(unittest.TestCase):
         value = self._read("kustomizations.json")
         value["items"][0]["status"]["conditions"].append(ready_condition())
         self._write("kustomizations.json", value)
-        self._assert_rejected()
-
-    def test_live_policy_spec_drift_fails_closed(self):
-        value = self._read("policies.json")
-        value["items"][0]["spec"]["rules"] = []
-        self._write("policies.json", value)
         self._assert_rejected()
 
     def test_live_network_policy_spec_drift_fails_closed(self):
@@ -1299,6 +1359,13 @@ class ReleaseGateContractTests(unittest.TestCase):
         self._write(
             "mutatingwebhooks.json",
             {"items": [{"metadata": {"name": "rogue-mutator"}}]},
+        )
+        self._assert_global_rejected()
+
+    def test_validating_webhook_fails_closed(self):
+        self._write(
+            "webhooks.json",
+            {"items": [{"metadata": {"name": "rogue-validator"}}]},
         )
         self._assert_global_rejected()
 

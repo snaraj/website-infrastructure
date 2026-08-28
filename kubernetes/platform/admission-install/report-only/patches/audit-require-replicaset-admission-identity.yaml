@@ -1,8 +1,0 @@
-# Stage 1 report-only downgrade for the admission-only ReplicaSet identity
-# policy. The name test binds the positional patch to the reviewed rule.
-- op: test
-  path: /spec/rules/0/name
-  value: require-replicaset-controller-and-live-owner-uid
-- op: replace
-  path: /spec/rules/0/validate/failureAction
-  value: Audit

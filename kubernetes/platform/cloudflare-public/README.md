@@ -21,7 +21,8 @@ site B. The structural example is excluded from reconciliation and unusable.
 
 Keep the HelmRelease suspended until:
 
-1. every configured site Service is Ready and its independent image admission passes;
+1. every configured site Service is Ready and its signed OCI chart source,
+   publisher identity, and exact digest have been verified;
 2. the per-site encrypted token Secrets exist and are included in the release Kustomization;
 3. Cloudflare Free plan/subscriptions and the exact OpenTofu plan hash pass;
 4. external recovery/origin tests are ready.

@@ -76,14 +76,15 @@ escalation trigger.
 - Escalation: advisory affecting a pinned revision → pin forward via PR.
 
 ### T4. Substituted or unsigned container image
-- Now (REQUIRED, in place): digest-only deployment; keyless signatures
-  bound to exact publisher workflow identities; admission policy refusing
-  unsigned/unmatched images; SBOM/provenance bound to verified OCI views.
+- Now (REQUIRED, in place): digest-only deployment; chart keyless signatures
+  bound to exact protected-main publisher identities; Flux refuses
+  unsigned/unmatched charts; SBOM/provenance remain bound to verified OCI
+  views and Conftest rejects mutable or foreign workload images.
 - Remaining: identity strings rotate once at cutover to the site
   repositories (single reviewed PR; exact strings already proposed).
 - Accepted risk: registry availability is external.
-- Escalation: verification failure at admission → deployment stays on the
-  recorded previous digest; no manual override path.
+- Escalation: Flux verification failure → selection stays closed; rollback
+  requires a separately reviewed exact prior digest with no fallback.
 
 ### T5. Stolen or leaked revocable credential
 - Now (REQUIRED): short-lived fine-grained tokens for agents (24h target,

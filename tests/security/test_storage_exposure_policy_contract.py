@@ -1,38 +1,9 @@
-"""Structural contract for the storage-exposure admission gate.
+"""Structural and hostile contract for the self-sufficient storage Rego gate.
 
-The behavioural fixtures under ``tests/kubernetes/`` prove what the gate does
-to storage objects it evaluates. They cannot prove that it evaluates them at
-all, and that is the failure mode that matters here.
-
-``kyverno test`` reports a resource that falls outside a rule's ``match`` block
-as ``Pass`` with reason ``Excluded``. Removing ``PersistentVolume`` from the
-storage rule's matched kinds therefore leaves the entire Kyverno suite green
-while an ``nfs`` PersistentVolume — the exact object the policy exists to
-refuse — sails through. A deny-external-reachability policy that has silently
-stopped reaching its objects is indistinguishable, in the behavioural suite,
-from one that works.
-
-So this battery checks the gate's SHAPE rather than its answers:
-
-* the kinds the Kyverno rule matches are exactly the kinds its CEL expressions
-  reason about — derived from the expressions, never restated, so narrowing
-  either half fails here;
-* the Conftest mirror keys a deny rule on every one of those kinds, so the two
-  engines cover the same surface rather than merely agreeing on the objects
-  they happen to share;
-* the enumerations themselves — classes, provisioners, CSI drivers, local
-  roots, admitted volume sources, and the PersistentVolume non-source field
-  list — are byte-identical between the two engines;
-* the enumerations cannot be widened into the very exposure the policy denies
-  (a cloud CSI driver, a local root on the control-plane filesystem, a network
-  volume source smuggled into the "not a source" list);
-* every enumerated kind has at least one deny fixture, so no kind is covered in
-  policy and unproven in fact.
-
-Everything is parsed from the committed text with the standard library only:
-this repository keeps Python dependency-free, and reading the raw text is also
-what makes the derivation honest — the test cannot accidentally agree with the
-policy by importing the same constant twice.
+The fixture runner proves the verdict of every extant file, while this battery
+prevents the corpus, exact SR-0..SR-16 rule inventory, enumerated local means,
+and the two independent Pod-volume arms from being narrowed or deleted. All
+expectations are outside literals parsed with the standard library only.
 """
 
 from __future__ import annotations
@@ -42,58 +13,33 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-KYVERNO_POLICY = REPO_ROOT / "policies" / "kyverno" / "disallow-undiscovered-storage.yaml"
 CONFTEST_POLICY = REPO_ROOT / "policies" / "conftest" / "kubernetes.rego"
 FIXTURES = REPO_ROOT / "tests" / "kubernetes" / "fixtures"
-STORAGE_RULE = "disallow-persistent-storage-resources"
-
-# The Kyverno policy is a fixed-arity object by contract: the staged install
-# transaction patches ``/spec/rules/<index>/validate/failureAction`` one index at
-# a time, deliberately not by wildcard, so a rule added or removed here silently
-# ships an ENFORCING rule during the fail-open audit stage. Changing this number
-# is legitimate only together with that patch.
-#
-# STATED AS AN ORDERED SEQUENCE, not a bare count, because a count is not an
-# identity and neither is a position. Twice in one day a change added a rule to
-# a policy this overlay addresses by index, every later rule shifted down, and
-# the merge was textually clean and semantically broken — the overlay went on
-# downgrading rules it was not written for while the displaced one kept
-# ``Enforce`` into the fail-open stage. A count catches an insertion only by
-# accident of arithmetic; the sequence below names what sits at each index, so
-# the index the overlay must move is legible in the failure message.
-#
-# DECLARED STAGE-1 DECISION, 2026-08-12: ``allow-only-own-instance-token-env``
-# is added at index 4 and the three rules after it shift down one. The stage-1
-# report-only overlay needs one more ``test``/``replace`` pair, and the three
-# existing pairs for the displaced rules need their indices moved; that overlay
-# lives in the admission-install tree, which is not in this branch's base, so
-# the change is declared here and carried on the pull request rather than made
-# silently. Adding an admission rule is an admission-semantics decision that
-# stage 1 must review, which is exactly why the overlay is not a wildcard.
-EXPECTED_RULE_SEQUENCE = (
-    "disallow-persistent-storage-resources",
-    "disallow-stateful-claim-templates",
-    "allow-only-site-scratch-volumes",
-    "allow-only-tunnel-token-volume",
-    "allow-only-own-instance-token-env",
-    "disallow-legacy-service-account-token-secrets",
-    "disallow-disk-pressure-toleration",
-    "disallow-wildcard-toleration",
-)
-EXPECTED_RULE_COUNT = len(EXPECTED_RULE_SEQUENCE)
 
 # The complete storage rule set, stated ONCE here in the test rather than read
-# out of either policy. Every other check below compares the two engines against
-# each other, and two files can be narrowed together; this literal is the outside
+# out of the policy. A policy and its fixtures can be narrowed together; this
+# literal is the outside
 # anchor that makes such a matching narrowing fail. It is also the reason nothing
 # in this battery ever SKIPs: a guard that stands down when its expectation stops
 # matching is a guard that disables itself.
 EXPECTED_RULE_IDS = frozenset("SR-{}".format(index) for index in range(17))
 
+# Exact API surface protected by the storage model. Deriving this expectation
+# from `storage_kinds` would let a kind, its rules, and its fixtures disappear
+# together without a failure.
+EXPECTED_STORAGE_KINDS = frozenset(
+    {
+        "PersistentVolume",
+        "PersistentVolumeClaim",
+        "StorageClass",
+        "CSIDriver",
+        "VolumeAttributesClass",
+    }
+)
+
 # The complete non-source field list, stated here as a LITERAL for the same
-# reason ``EXPECTED_RULE_IDS`` is. Comparing the two engines against each other
-# proves they agree; it does not prove they are right, and a name added to this
-# list in BOTH engines is the one edit that converts the subtraction from
+# reason ``EXPECTED_RULE_IDS`` is. A name added to this list is the one edit
+# that converts the subtraction from
 # fail-closed to fail-open without touching a deny rule. The blocklist-shaped
 # guard below (``NETWORK_AND_CLOUD_VOLUME_SOURCES``) only catches names upstream
 # has already invented — it is exactly the "blocklist to maintain" this design
@@ -123,10 +69,10 @@ EXPECTED_ADMITTED_POD_VOLUME_SOURCES = frozenset(
 
 # The pod-volume model has TWO arms, and each one needs its own killer. The
 # subtraction was the largest new control of the round that introduced it and it
-# shipped with none: neutering either arm left `structural OK | parity PASS |
-# fixtures PASS | kyverno 0 failed | validators PASS` while the probe the model
-# was written to deny — a fully compliant Pod in `default` mounting ``azureFile``
-# — went straight back to ADMITTED (measured, wi #96 delta review). The only
+# shipped with none: neutering either arm left the then-current gates green
+# while the probe the model was written to deny — a fully compliant Pod in
+# `default` mounting ``azureFile`` — went straight back to admitted (historical
+# wi #96 delta review). The only
 # fixture touching the arms held twenty objects under a file-level assertion,
 # which is the multi-document masking defect this branch fixed everywhere else.
 #
@@ -135,31 +81,22 @@ EXPECTED_ADMITTED_POD_VOLUME_SOURCES = frozenset(
 # outside both the fixture and the runner, so neither the fixture nor its
 # attribution can be dropped quietly.
 #
-# Two runners reach them, deliberately: ``scripts/test-policy-fixtures.sh``
-# rejects each file (which alone kills either arm, since each fixture is
-# rejected by ONE arm), and ``scripts/test-storage-engine-parity.sh`` runs them
-# as a Conftest-only corpus that additionally requires the declared message, so
-# a red names the arm. Pods are NOT a parity surface — the Kyverno half of this
-# policy is namespace-scoped by design while the Conftest mirror is repo-wide —
-# so that corpus consults one engine and says so.
+# The global fixture runner rejects each file, which alone kills either arm
+# because each fixture is rejected by exactly one arm. The declarations below
+# separately bind every fixture to the exact message its arm emits.
 POD_VOLUME_ARM_FIXTURES = {
     "pod-volume-undiscovered-source": "uses undiscovered storage source",
     "pod-volume-multiple-sources": "must declare exactly one volume source, found",
 }
 
-# The differential harness's corpus floor, held outside the harness so that
-# neither the corpus nor the floor inside the script can be trimmed quietly. A
-# harness that compares nothing is the next vacuity after a battery that compares
-# only constants.
-MINIMUM_PARITY_DENY_FIXTURES = 30
+# The storage corpus floor is held outside the fixture runner so neither the
+# corpus nor its minimum can be trimmed quietly.
+MINIMUM_STORAGE_DENY_FIXTURES = 30
 
-# Degenerate shapes that MUST stay in the corpus. Every one of these was an
-# engine divergence measured on this policy (wi #96 adversarial review): the
-# Conftest mirror admitted them while Kyverno denied them, because a nested
-# ``object.get`` on a null/scalar/list value raises a builtin type error and an
-# erroring expression is UNDEFINED — the deny rule silently does not fire. The
-# name on the left is the fixture stem; losing any of them silently retires a
-# proven regression.
+# Degenerate shapes that MUST stay in the corpus. A historical differential
+# review (wi #96) proved each could make Rego admit malformed storage because a
+# nested ``object.get`` type error made the deny rule undefined. The name on the
+# left is the fixture stem; losing any silently retires a proven regression.
 REQUIRED_DEGENERATE_FIXTURES = (
     "storage-local-source-null",
     "storage-local-source-scalar",
@@ -250,25 +187,6 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def self_test_failures_abort(text: str) -> list[str]:
-    """Return the self-test failure messages in ``text`` that do NOT abort.
-
-    A self-test is only a guard while its failure branch stops the run. Turning
-    its ``exit 1`` into a no-op leaves the message in place, the run green, and
-    every text pin around it satisfied — the same "pinned by its own source text
-    is not pinned" defect these self-tests exist to answer, one level up.
-    """
-
-    lines = text.splitlines()
-    toothless: list[str] = []
-    for index, line in enumerate(lines):
-        if "SELF-TEST FAILED" not in line:
-            continue
-        if "exit 1" not in "\n".join(lines[index : index + 6]):
-            toothless.append(line.strip())
-    return toothless
-
-
 def require(match: re.Match[str] | None, expectation: str) -> re.Match[str]:
     """Return ``match``, or fail loudly naming what was expected.
 
@@ -283,32 +201,6 @@ def require(match: re.Match[str] | None, expectation: str) -> re.Match[str]:
     if match is None:
         raise AssertionError("the policy no longer states " + expectation)
     return match
-
-
-def storage_rule_text(policy: str) -> str:
-    """Return the text of the storage rule alone.
-
-    Slicing at the next sibling ``- name:`` keeps every derivation below scoped
-    to this one rule: the same policy also carries the tenant-volume, token, and
-    toleration rules, whose kinds and fields must not leak into the storage
-    coverage set.
-    """
-
-    start = policy.index("    - name: " + STORAGE_RULE)
-    remainder = policy[start + 1 :]
-    match = re.search(r"(?m)^    - name: ", remainder)
-    end = len(policy) if match is None else start + 1 + match.start()
-    return policy[start:end]
-
-
-def cel_list_variable(rule: str, name: str) -> list[str]:
-    """Extract one CEL ``variables`` entry as a list of string literals."""
-
-    pattern = re.compile(
-        r"(?ms)^            - name: " + re.escape(name) + r"\n              expression: (.*?)(?=^            - name: |^          expressions:)"
-    )
-    match = require(pattern.search(rule), "CEL variable " + name)
-    return re.findall(r"'([^']*)'", match.group(1))
 
 
 def rego_set_literal(policy: str, name: str) -> list[str]:
@@ -329,200 +221,32 @@ def rego_set_literal(policy: str, name: str) -> list[str]:
     return re.findall(r'"([^"]*)"', match.group(1))
 
 
-class StorageRuleCoverage(unittest.TestCase):
-    """The gate must reach every storage object it claims to govern."""
-
-    def setUp(self) -> None:
-        self.policy = read(KYVERNO_POLICY)
-        self.rule = storage_rule_text(self.policy)
-        self.rego = read(CONFTEST_POLICY)
-
-    def matched_kinds(self) -> list[str]:
-        block = require(
-            re.search(r"(?ms)^      match:\n(.*?)^      validate:", self.rule),
-            "a match block on the storage rule",
-        )
-        return re.findall(r"(?m)^                - (\S+)$", block.group(1))
-
-    def reasoned_kinds(self) -> set[str]:
-        expressions = self.rule[self.rule.index("          expressions:") :]
-        return set(re.findall(r"object\.kind (?:!=|==) '([A-Za-z]+)'", expressions))
-
-    def test_match_block_covers_exactly_the_kinds_the_expressions_reason_about(self) -> None:
-        """Narrowing either half — the match list or the expressions — fails here.
-
-        This is the check the behavioural suite cannot make. With
-        ``PersistentVolume`` deleted from the match list, ``kyverno test``
-        reports every PersistentVolume fixture as ``Pass / Excluded`` and the
-        suite stays entirely green; the set comparison below goes red.
-        """
-
-        matched = self.matched_kinds()
-        self.assertEqual(
-            sorted(matched),
-            sorted(set(matched)),
-            "the storage rule lists a matched kind twice",
-        )
-        self.assertEqual(
-            set(matched),
-            self.reasoned_kinds(),
-            "the kinds the storage rule MATCHES and the kinds its CEL expressions "
-            "REASON ABOUT have diverged; one of them no longer covers what the other does",
-        )
-
-    def test_matched_kinds_are_the_storage_surface_and_nothing_else(self) -> None:
-        """A vacuity guard on the comparison above.
-
-        Both halves could be narrowed together and the equality would still
-        hold, so the storage surface itself is pinned once, here, where a
-        reviewer reads it.
-        """
-
-        self.assertEqual(
-            set(self.matched_kinds()),
-            {
-                "PersistentVolume",
-                "PersistentVolumeClaim",
-                "StorageClass",
-                "CSIDriver",
-                "VolumeAttributesClass",
-            },
-        )
-
-    def test_storage_rule_carves_out_no_exemption_from_its_own_coverage(self) -> None:
-        """The other half of the coverage question the kind list cannot answer.
-
-        Matching the right kinds still covers nothing if the rule then narrows
-        by namespace, by object name, by label selector, or by an ``exclude``
-        block — and Kyverno reports every carved-out object as ``Pass /
-        Excluded`` exactly as it does for an unmatched kind. Storage classes,
-        volumes, drivers, and attribute classes are cluster-scoped or
-        cluster-relevant, so the rule must reach every namespace and every name.
-        Whatever a future exemption is for, it stops being invisible here.
-
-        ``subjects``/``roles``/``clusterRoles`` are the userInfo half of
-        Kyverno's ``MatchResources`` and belong on this list for a sharper
-        reason: adding ``clusterRoles: [no-such-cluster-role]`` makes the rule
-        match only principals bound to a role nobody holds — i.e. nobody — and
-        the behavioural suite stays 74/74 green because ``kyverno test`` counts
-        the resulting ``Skip`` rows as PASSES, not only ``Pass``/``Excluded``.
-        Measured on this exact rule (wi #96 adversarial review, 2026-08-12).
-        """
-
-        for narrowing in (
-            "exclude:",
-            "namespaces:",
-            "namespaceSelector:",
-            "names:",
-            "selector:",
-            "annotations:",
-            "operations:",
-            "preconditions:",
-            "subjects:",
-            "roles:",
-            "clusterRoles:",
-        ):
-            with self.subTest(narrowing=narrowing):
-                self.assertNotIn(
-                    narrowing,
-                    self.rule,
-                    "the storage rule narrows its own coverage with " + narrowing,
-                )
-
-    def test_conftest_mirror_denies_on_every_matched_kind(self) -> None:
-        """Lockstep: the CI mirror must see the same surface as admission.
-
-        Kind-for-kind, not fixture-for-fixture — a kind that admission matches
-        but Conftest never keys a deny rule on would pass CI and only ever be
-        caught by a live webhook that is not installed yet.
-        """
-
-        deny_blocks = re.findall(r"(?s)deny contains msg if \{(.*?)\n\}", self.rego)
-        for kind in self.matched_kinds():
-            covering = [block for block in deny_blocks if '"' + kind + '"' in block]
-            self.assertTrue(
-                covering,
-                "the Conftest mirror has no deny rule keyed on " + kind,
-            )
-
-    def test_conftest_storage_kind_constant_matches_the_admission_match_block(self) -> None:
-        self.assertEqual(
-            sorted(rego_set_literal(self.rego, "storage_kinds")),
-            sorted(self.matched_kinds()),
-        )
-
-    def test_rule_arity_stays_bound_to_the_staged_install_patch(self) -> None:
-        rules = re.findall(r"(?m)^    - name: (\S+)$", self.policy)
-        self.assertEqual(len(rules), EXPECTED_RULE_COUNT)
-        self.assertIn(STORAGE_RULE, rules)
-
-    def test_rule_order_stays_bound_to_the_staged_install_patch(self) -> None:
-        """The overlay addresses rules by POSITION, so order is contract.
-
-        An insertion that keeps the count right by also deleting a rule, or a
-        reorder that keeps every rule present, both leave the arity check above
-        green while every ``test``/``replace`` pair in the report-only overlay
-        starts addressing a different rule than it was written for.
-        """
-
-        self.assertEqual(
-            tuple(re.findall(r"(?m)^    - name: (\S+)$", self.policy)),
-            EXPECTED_RULE_SEQUENCE,
-            "the storage policy's rule ORDER changed; every index the stage-1 "
-            "report-only overlay names has to move with it",
-        )
-
-    def test_policy_stays_fail_closed_at_the_webhook(self) -> None:
-        """Enforcement mode, failure policy, and the admission switch itself.
-
-        ``spec.admission: false`` is ONE WORD that stops every rule in this
-        policy running at admission — the policy degrades to background scanning
-        and refuses nothing — while the structural battery stayed 22/22 and
-        ``kyverno test`` stayed 74/74 green. Measured on this policy (wi #96
-        adversarial review, 2026-08-12). No behavioural suite can see it, so it
-        is pinned here beside the other two fail-closed switches.
-        """
-
-        self.assertIn("\n  admission: true\n", self.policy)
-        self.assertIn("\n  validationFailureAction: Enforce\n", self.policy)
-        self.assertIn("\n    failurePolicy: Fail\n", self.policy)
-        self.assertIn("\n        failureAction: Enforce\n", self.rule)
-
-
 class EnumerationLockstep(unittest.TestCase):
-    """The enumeration is the allowlist, and there is only one of it."""
+    """The exact Rego enumeration is the storage allowlist."""
 
     def setUp(self) -> None:
-        self.rule = storage_rule_text(read(KYVERNO_POLICY))
         self.rego = read(CONFTEST_POLICY)
 
-    def test_enumerations_are_identical_in_both_engines(self) -> None:
-        pairs = (
-            ("enumeratedStorageClasses", "enumerated_storage_classes"),
-            ("enumeratedProvisioners", "enumerated_storage_provisioners"),
-            ("enumeratedCsiDrivers", "enumerated_csi_drivers"),
-            ("enumeratedLocalRoots", "enumerated_local_volume_roots"),
-            ("enumeratedVolumeAttributesClasses", "enumerated_volume_attributes_classes"),
-            ("nonSourceFields", "persistent_volume_non_source_fields"),
-        )
-        for cel_name, rego_name in pairs:
-            with self.subTest(enumeration=cel_name):
-                self.assertEqual(
-                    sorted(cel_list_variable(self.rule, cel_name)),
-                    sorted(rego_set_literal(self.rego, rego_name)),
-                    "admission and CI disagree about " + cel_name,
-                )
-
-    def test_admitted_volume_sources_are_identical_in_both_engines(self) -> None:
-        expressions = self.rule[self.rule.index("          expressions:") :]
-        admitted = require(
-            re.search(r"field in \[([^\]]*)\]", expressions),
-            "an admitted volume-source set in its expressions",
-        )
+    def test_storage_kind_scope_remains_exact(self) -> None:
         self.assertEqual(
-            sorted(re.findall(r"'([^']*)'", admitted.group(1))),
-            sorted(rego_set_literal(self.rego, "admitted_persistent_volume_sources")),
+            set(rego_set_literal(self.rego, "storage_kinds")),
+            set(EXPECTED_STORAGE_KINDS),
+            "the storage policy kind scope changed; a removed kind loses all "
+            "of its hostile coverage with it",
         )
+
+    def test_enumerated_local_means_remain_exact(self) -> None:
+        expected = {
+            "enumerated_storage_classes": {"local-pie-ssd"},
+            "enumerated_storage_provisioners": {"kubernetes.io/no-provisioner"},
+            "enumerated_local_volume_roots": {"/mnt/local-pie-ssd"},
+            "enumerated_csi_drivers": set(),
+            "enumerated_volume_attributes_classes": set(),
+            "admitted_persistent_volume_sources": {"local", "csi"},
+        }
+        for name, values in expected.items():
+            with self.subTest(enumeration=name):
+                self.assertEqual(set(rego_set_literal(self.rego, name)), values)
 
     def test_only_node_local_volume_sources_may_be_admitted(self) -> None:
         admitted = set(rego_set_literal(self.rego, "admitted_persistent_volume_sources"))
@@ -543,10 +267,10 @@ class EnumerationLockstep(unittest.TestCase):
         The SR-1 arity rule is only a partial backstop for that edit: it holds
         when the poisoned field is the object's ONLY source, and not when a
         legitimate `local:` source sits beside it. Measured: with `quantumMesh`
-        added to the list in both engines, a PersistentVolume carrying a valid
+        added to the list, a PersistentVolume carrying a valid
         local source under the enumerated root PLUS `quantumMesh: {endpoint:
-        storage.invalid:9999}` went from denied in both engines to admitted in
-        both, with every other committed check green (wi #96 adversarial
+        storage.invalid:9999}` went from denied to admitted, with every other
+        committed check green (wi #96 adversarial
         review, 2026-08-12). So the list is pinned exactly, name for name,
         rather than merely screened against today's known network sources.
         """
@@ -652,27 +376,22 @@ class EnumerationLockstep(unittest.TestCase):
 
 
 class RuleIdentityLock(unittest.TestCase):
-    """Three-way lock: admission, CI mirror, and the fixtures that kill them.
+    """Two-way lock: the Rego rules and the fixtures that kill them.
 
     A deny fixture that merely proves "this file is rejected" cannot show WHICH
     rule rejected it, so deleting one rule can leave the suite green while
     another rule's denial covers for it. Every fixture here therefore holds one
-    object and names the rule it exists to kill, and the three sets — the rules
-    admission states, the rules the CI mirror states, and the rules the fixtures
-    claim — must be the same set, and that set must be the one named above.
+    object and names the rule it exists to kill. Both sets must equal the exact
+    outside SR-0..SR-16 inventory above.
     """
 
     def setUp(self) -> None:
-        self.rule = storage_rule_text(read(KYVERNO_POLICY))
         self.rego = read(CONFTEST_POLICY)
         self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
 
     @staticmethod
     def ids_in(text: str) -> set[str]:
         return set(re.findall(r"#\s*(SR-\d+)[.,\s]", text))
-
-    def test_admission_states_exactly_the_expected_rule_set(self) -> None:
-        self.assertEqual(self.ids_in(self.rule), set(EXPECTED_RULE_IDS))
 
     def test_the_conftest_mirror_states_exactly_the_same_rule_set(self) -> None:
         storage_section = self.rego[self.rego.index("# SR-0.") :]
@@ -696,18 +415,14 @@ class RuleIdentityLock(unittest.TestCase):
     def test_every_deny_fixture_declares_the_message_its_rule_emits(self) -> None:
         """Attribution, not just rejection.
 
-        Both fixture runners assert only that a FILE is rejected, so a rule can
+        The fixture runner asserts only that a FILE is rejected, so a rule can
         be neutralized and stay green whenever any OTHER rule also denies the
-        same object. Measured: the Rego SR-0 arm was replaced with a condition
-        that never matches, message string left byte-identical, and the
-        structural battery, the fixture runner, and the Kyverno suite all stayed
-        green — its fixture also fails SR-1 and SR-7.
+        same object. The exact message declaration below prevents one rule's
+        denial from standing in for another.
 
         Each fixture therefore declares the exact message fragment its claimed
-        rule emits, and ``scripts/test-storage-engine-parity.sh`` requires that
-        fragment in the Conftest output. This test keeps the declarations from
-        being dropped, and keeps them from degenerating into fragments so short
-        that any denial would satisfy them.
+        rule emits. This test keeps the declarations from being dropped or
+        degenerating into fragments so short that any denial would satisfy them.
         """
 
         declared: dict[str, list[str]] = {}
@@ -743,23 +458,11 @@ class RuleIdentityLock(unittest.TestCase):
                         + fragment,
                     )
 
-    def test_admission_and_the_mirror_agree_rule_for_rule(self) -> None:
-        """The lockstep the two engines must keep even if both were rewritten."""
-
-        storage_section = self.rego[self.rego.index("# SR-0.") :]
-        self.assertEqual(self.ids_in(self.rule), self.ids_in(storage_section))
-
-
 class FixtureCoverage(unittest.TestCase):
     """Every covered kind is proven, and every proof is where the runners look."""
 
     def setUp(self) -> None:
-        self.rule = storage_rule_text(read(KYVERNO_POLICY))
-        block = require(
-            re.search(r"(?ms)^      match:\n(.*?)^      validate:", self.rule),
-            "a match block on the storage rule",
-        )
-        self.matched = re.findall(r"(?m)^                - (\S+)$", block.group(1))
+        self.matched = rego_set_literal(read(CONFTEST_POLICY), "storage_kinds")
         self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
         self.allow_fixture = FIXTURES / "allow" / "storage-enumerated-local.yaml"
 
@@ -819,7 +522,7 @@ class FixtureCoverage(unittest.TestCase):
         self.assertNotIn("operator: Exists", text)
         self.assertRegex(text, r"values: \[[^\]]+\]")
 
-    def test_deny_fixtures_live_where_both_runners_scan(self) -> None:
+    def test_deny_fixtures_live_where_the_fixture_runner_scans(self) -> None:
         """``scripts/test-policy-fixtures.sh`` globs this directory, and the
         trivy misconfiguration pass excludes exactly this directory, so a
         fixture placed anywhere else is neither proven nor exempted."""
@@ -829,157 +532,27 @@ class FixtureCoverage(unittest.TestCase):
             self.assertEqual(path.parent, FIXTURES / "deny")
 
 
-class EngineParityHarnessContract(unittest.TestCase):
-    """The differential harness must exist, run, and have something to compare.
-
-    Everything else in this file compares TEXT: enumerations, rule identifiers,
-    matched kinds, comment markers. Text agreement proved the two engines said
-    the same thing and never proved they DID the same thing — and they did not,
-    on nine degenerate shapes. ``scripts/test-storage-engine-parity.sh`` closes
-    that by feeding both engines the same corpus and failing on any
-    disagreement, so this battery keeps the harness honest: a harness that is not
-    wired into the pipeline, or whose corpus has been trimmed, compares nothing
-    and reports success either way.
-    """
+class StorageCorpusContract(unittest.TestCase):
+    """Keep the hostile storage corpus above its reviewed exact floor."""
 
     def setUp(self) -> None:
-        self.harness = REPO_ROOT / "scripts" / "test-storage-engine-parity.sh"
-        self.pipeline = REPO_ROOT / "scripts" / "render-manifests.sh"
         self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
 
-    def test_the_harness_exists_and_is_executable(self) -> None:
-        self.assertTrue(self.harness.is_file(), "the storage engine-parity harness is gone")
-        self.assertTrue(self.harness.stat().st_mode & 0o111, "the harness is not executable")
-
-    def test_the_harness_runs_in_the_same_pipeline_as_the_fixture_runner(self) -> None:
-        """A gate nobody invokes is a gate that cannot fail.
-
-        ``scripts/render-manifests.sh`` is the path CI takes (Render and
-        validate Helm and Kubernetes) and the path ``make check-kubernetes``
-        takes, and it is where ``test-policy-fixtures.sh`` already runs.
-        """
-
-        pipeline = read(self.pipeline)
-        self.assertIn("test-storage-engine-parity.sh", pipeline)
-        self.assertIn("test-policy-fixtures.sh", pipeline)
-
-    def test_the_harness_feeds_both_engines_and_pins_the_expected_verdict(self) -> None:
-        harness = read(self.harness)
-        for required in ("conftest test", "kyverno apply", "'deny'", "'allow'", "skip"):
-            with self.subTest(required=required):
-                self.assertIn(required, harness)
-
-    def test_the_harness_proves_its_own_comparison_every_run(self) -> None:
-        """The mutant that survives everything else, and its answer.
-
-        Neutering the harness's verdict comparison — one `if` — left it green on
-        a corpus that contained a real engine divergence, and no other check
-        noticed, because every other guard here reads the harness's TEXT. The
-        harness therefore runs its comparison against a deliberately wrong
-        expectation on every invocation and aborts unless exactly one divergence
-        comes back, so a comparison that compares nothing fails the run rather
-        than passing it. This test keeps that self-test from being deleted; the
-        self-test keeps the comparison honest. Neither alone is sufficient, and
-        no single edit defeats both.
-        """
-
-        harness = read(self.harness)
-        self.assertIn("self_test_delta", harness, "the harness no longer proves its own comparison")
-        self.assertIn(
-            'check_object "${self_test_probe}" "${expected}"',
-            harness,
-            "the harness's self-test no longer exercises the real comparison path",
-        )
-        # The comparison is per-engine, and the self-test requires BOTH halves.
-        # A single `if conftest != expected || kyverno != expected` is satisfied
-        # by either half, so a probe that makes both true cannot tell a working
-        # comparison from one that lost a half — dropping either disjunct left
-        # the harness passing and its self-test green (measured, wi #96 delta
-        # review). Two reasons, both required, is what makes each half killable.
-        self.assertIn("self_test 'allow'", harness)
-        self.assertIn(
-            "self_test_delta != 2",
-            harness,
-            "the harness's self-test no longer requires BOTH per-engine comparisons to fire",
-        )
-        for reason in ("reason_conftest", "reason_kyverno"):
-            with self.subTest(reason=reason):
-                self.assertIn(
-                    'self_test_requires "${' + reason + '}"',
-                    harness,
-                    "the harness's self-test no longer asserts the " + reason + " half",
-                )
-
-    def test_the_harness_proves_its_own_message_attribution_every_run(self) -> None:
-        """The attribution grep needs a killer too, and had none.
-
-        ``test_the_harness_feeds_both_engines_and_pins_the_expected_verdict``
-        pins ``conftest test``, ``kyverno apply`` and the verdict literals — not
-        the ``# rego-message:`` grep. Replacing that grep with a constant that
-        never fires was invisible to every committed gate, and combined with any
-        neutered Rego arm it silently reopens the SR-0 finding this branch
-        closed. So the harness runs the attribution path against a message no
-        rule emits, on every invocation, and the grep is pinned here as well:
-        neither layer alone is sufficient and no single edit defeats both.
-        """
-
-        harness = read(self.harness)
-        self.assertIn(
-            "sed -n 's/^# rego-message: //p'",
-            harness,
-            "the harness no longer reads the message each deny fixture attributes itself to",
-        )
-        self.assertIn(
-            'grep -Fq -- "${expected_message}"',
-            harness,
-            "the harness no longer requires the claimed denial in the Conftest output",
-        )
-        self.assertIn("expected_message_override", harness)
-        self.assertIn(
-            "self_test 'deny'",
-            harness,
-            "the harness's self-test no longer exercises the attribution path",
-        )
-        self.assertIn(
-            'self_test_requires "${reason_attribution}"',
-            harness,
-            "the harness's self-test no longer asserts that attribution is what refused the probe",
-        )
-        self.assertEqual(
-            self_test_failures_abort(harness),
-            [],
-            "a self-test failure in the parity harness no longer aborts the run",
-        )
-
     def test_the_corpus_cannot_be_trimmed_below_the_floor(self) -> None:
-        """The floor lives here as well as in the harness.
-
-        A floor a script holds alone is a floor that script can lower. This is
-        the outside anchor for it, and it is also what keeps the degenerate
-        corpus from being deleted as "redundant" once the guards are in place.
-        """
-
         self.assertGreaterEqual(
             len(self.deny_fixtures),
-            MINIMUM_PARITY_DENY_FIXTURES,
-            "the storage deny corpus shrank below the differential harness floor",
-        )
-        self.assertIn(
-            "minimum_deny_objects={}".format(MINIMUM_PARITY_DENY_FIXTURES),
-            read(self.harness),
-            "the harness's own corpus floor no longer matches the one pinned here",
+            MINIMUM_STORAGE_DENY_FIXTURES,
+            "the storage deny corpus shrank below its reviewed floor",
         )
 
     def test_every_proven_degenerate_shape_is_still_in_the_corpus(self) -> None:
-        """Each of these was a measured engine divergence; none may be retired."""
-
         present = {path.stem for path in self.deny_fixtures}
         for stem in REQUIRED_DEGENERATE_FIXTURES:
             with self.subTest(fixture=stem):
                 self.assertIn(
                     stem,
                     present,
-                    stem + " proved an engine divergence and is no longer in the corpus",
+                    stem + " proved a fail-open Rego shape and is no longer in the corpus",
                 )
 
 
@@ -988,11 +561,8 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
 
     The subtraction model that replaced the ten-name pod blocklist was the
     largest new control of its round and shipped with no killer at all: either
-    arm could be neutralized with the structural battery, the parity harness, the
-    fixture runner, the Kyverno suite and the validators ALL green, and the probe
-    the model exists to deny went back to admitted. The only fixture that touched
-    the arms was a twenty-object file asserted at file level — the exact
-    multi-document masking defect this branch fixed for the storage corpus.
+    arm could be neutralized while a multi-document file was still rejected by
+    the other arm. The single-object killers below close that masking defect.
 
     This class is the outside anchor for the correction: the two fixtures, the
     message each one attributes its denial to, the one-object-per-file rule that
@@ -1002,7 +572,6 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
 
     def setUp(self) -> None:
         self.rego = read(CONFTEST_POLICY)
-        self.harness = REPO_ROOT / "scripts" / "test-storage-engine-parity.sh"
         self.runner = REPO_ROOT / "scripts" / "test-policy-fixtures.sh"
 
     def test_each_pod_volume_arm_has_a_single_object_deny_fixture(self) -> None:
@@ -1075,87 +644,6 @@ class PodVolumeArmsAreIndividuallyKillable(unittest.TestCase):
             runner,
             "the fixture runner no longer fails when a deny fixture is admitted",
         )
-
-    def test_the_pod_corpus_rides_the_self_tested_attribution_harness(self) -> None:
-        """Where the pod attribution lives, and why it lives there.
-
-        ``scripts/test-policy-fixtures.sh`` still rejects these fixtures at FILE
-        level, which alone kills either arm — but it cannot say WHICH arm, and
-        PR #91 is rewriting that runner wholesale with a stronger per-document
-        mechanism. Putting a second, weaker attribution mechanism in the same
-        file would have collided with it for no gain, so the pod corpus rides the
-        ``# rego-message:`` machinery in the parity harness instead: one code
-        path, already self-tested against a message no rule emits.
-
-        The Kyverno half is deliberately NOT consulted for Pods — the policy's
-        Pod rules are namespace-scoped by design while the Conftest mirror is
-        repo-wide, so comparing the two engines there would be a false gate. That
-        is why the corpus is declared ``conftest-only`` rather than quietly
-        excluded, and why the floor is pinned on both sides.
-        """
-
-        harness = read(self.harness)
-        self.assertIn(
-            "fixtures/deny/pod-volume-*.yaml",
-            harness,
-            "the parity harness no longer runs the pod-volume attribution corpus",
-        )
-        self.assertIn(
-            "check_object \"${fixture}\" 'deny' 'conftest-only'",
-            harness,
-            "the pod-volume corpus no longer goes through the attributed check path",
-        )
-        self.assertIn(
-            "minimum_pod_objects={}".format(len(POD_VOLUME_ARM_FIXTURES)),
-            harness,
-            "the harness's pod-corpus floor no longer matches the arms pinned here",
-        )
-        self.assertIn(
-            "checked != deny_objects + allow_objects + pod_objects",
-            harness,
-            "the harness no longer proves it reached every object it counted",
-        )
-
-
-class DocumentedCountsMatchTheArtifacts(unittest.TestCase):
-    """Counts stated in prose are claims, and claims drift.
-
-    The PR that introduced this gate stated "1 allow / 19 deny fixtures" and
-    "nineteen single-object deny fixtures, one per rule" while shipping twenty,
-    and the runbook said "All fourteen checks" above a table of fifteen. None of
-    it was load bearing, and all of it was wrong — so the numbers are derived
-    from the artifacts here instead of being trusted.
-    """
-
-    def setUp(self) -> None:
-        self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
-        self.runbook = read(REPO_ROOT / "docs" / "runbooks" / "storage-admission.md")
-        self.phase_a = read(REPO_ROOT / "docs" / "assurance" / "phase-a-invariants.md")
-        self.phase_c = read(
-            REPO_ROOT / "docs" / "assurance" / "phase-c-kubernetes-adversarial.md"
-        )
-
-    def test_the_runbook_documents_every_rule_and_no_others(self) -> None:
-        documented = set(re.findall(r"(?m)^\| (SR-\d+) \|", self.runbook))
-        self.assertEqual(
-            documented,
-            set(EXPECTED_RULE_IDS),
-            "the runbook's rule table and the rule set have diverged",
-        )
-
-    def test_the_assurance_documents_state_the_real_fixture_counts(self) -> None:
-        count = len(self.deny_fixtures)
-        self.assertIn(
-            "1 allow / {} deny fixtures".format(count),
-            self.phase_a,
-            "phase-a states a storage fixture count that no longer matches the corpus",
-        )
-        self.assertIn(
-            "{} single-object deny fixtures".format(count),
-            self.phase_c,
-            "phase-c states a storage fixture count that no longer matches the corpus",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

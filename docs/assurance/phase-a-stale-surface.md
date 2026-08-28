@@ -26,8 +26,8 @@ detections are preserved in:
   successor; tests pin the exact dies (PLAT-REL-003).
 - `kubernetes/websites/*` HelmReleases/Kustomizations stay suspended with
   sentinel values until promotion ceremonies (PLAT-REL-001).
-- Kyverno signature policies stay `Audit` until the enforce gate; the
-  zero-capacity staging policy stays active until reviewed capacity lands.
+- Historical Kyverno staging surfaces were retired by issue #195; they are no
+  longer standing desired state or a pending enforcement gate.
 - ADR bodies are dated records and are never retrained; corrections arrive
   as dated amendments only (ADRs 0010/0014 carry them).
 

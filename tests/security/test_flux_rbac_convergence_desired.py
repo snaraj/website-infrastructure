@@ -265,7 +265,7 @@ class FluxRbacConvergenceDesiredTests(unittest.TestCase):
 
     def test_extra_and_missing_objects_fail_closed(self):
         access_map = _documents_by_identity(self.access)
-        extra = access_map[("Role", "flux-system", "flux-controller-decryption")]
+        extra = access_map[("Role", "flux-system", "flux-controller-impersonation")]
 
         mutations = {}
         candidate = copy.deepcopy(self.bundle)
@@ -278,7 +278,7 @@ class FluxRbacConvergenceDesiredTests(unittest.TestCase):
 
         candidate = copy.deepcopy(self.bundle)
         candidate["namespacedObjects"].append(extra)
-        mutations["extra decryption object"] = candidate
+        mutations["extra non-transaction object"] = candidate
 
         candidate = copy.deepcopy(self.bundle)
         candidate["clusterRbacObjects"][0]["rules"][0]["verbs"].append("delete")

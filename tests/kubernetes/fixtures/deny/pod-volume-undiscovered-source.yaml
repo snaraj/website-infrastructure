@@ -12,9 +12,8 @@
 #
 # Every other field is deliberately valid and the volume declares exactly ONE
 # source, so the arity arm cannot fire and the denial is attributable to the
-# source arm alone. `scripts/test-policy-fixtures.sh` rejects the file and
-# `scripts/test-storage-engine-parity.sh` additionally requires the declared
-# message above, so neutering that arm fails this fixture by NAME rather than
+# source arm alone. `scripts/test-policy-fixtures.sh` requires the declared
+# message above, so neutering that arm fails this fixture by name rather than
 # hiding behind another rule's denial.
 apiVersion: v1
 kind: Pod

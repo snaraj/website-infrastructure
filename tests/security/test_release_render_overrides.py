@@ -7,16 +7,17 @@ Three batteries, deliberately layered:
   after the site charts moved to their own repositories the transition
   branch still demanded ``helm-<site>.yaml`` artifacts nothing produced,
   so every pull request would have gone red the moment one site left the
-  ``initial`` release state.
+  dormant staged release state.
 * ``SiteReleasePolicyTests`` executes the real release policy against
   synthetic site HelmReleases, proving each phase's denial set exactly.
-* ``PromotedRenderStateTests`` and ``RenderDeterminismModeTests`` execute
+* ``SiteRenderStateTests`` and ``RenderDeterminismModeTests`` execute
   the real ``render-manifests.sh`` and ``verify-render-determinism.sh``
   against disposable repository copies, in both the green and the red
   direction, because a string pin cannot prove a gate still fires.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -43,36 +44,20 @@ CONFTEST = shutil.which("conftest")
 PYTHON3 = shutil.which("python3")
 RENDER_TOOLCHAIN = all(
     shutil.which(tool)
-    for tool in ("helm", "kustomize", "kubeconform", "conftest", "kyverno")
+    for tool in ("helm", "kustomize", "conftest")
 )
-
-ZERO_DIGEST = "sha256:" + "0" * 64
-# A canonical but deliberately synthetic digest: this battery proves the
-# gate's shape, never a particular site's released artifact, so no real
-# promotion value is duplicated here (safety invariant 14).
-REVIEWED_DIGEST = "sha256:" + "ab" * 32
-# The tag half of the same synthetic identity. `v0.0.0` is the fail-closed
-# sentinel the release policy denies exactly as it denies the all-zero digest;
-# the reviewed value is deliberately not any site's real published release.
-ZERO_TAG = "v0.0.0"
-REVIEWED_TAG = "v9.9.9"
 
 # Loop variables the renderer expands inside an artifact path. Anything else
 # interpolated into an artifact reference fails the ratchet below rather than
 # being silently skipped.
 SITES = ("naranjo-online", "lidersea-com")
-# The two release-state values the fixtures rewrite. Matching the line shape
-# rather than one particular value is what keeps this battery independent of
-# whether a promotion has already merged into the base branch.
-READY_LINE = re.compile(r"^    deploymentReady: (?:true|false)$", re.MULTILINE)
-DIGEST_LINE = re.compile(r"^      digest: sha256:[0-9a-f]{64}$", re.MULTILINE)
-TAG_LINE = re.compile(r"^      tag: v[0-9]+\.[0-9]+\.[0-9]+$", re.MULTILINE)
+READY_LINE = re.compile(r"^    deploymentReady: true$", re.MULTILINE)
 ARTIFACT_REFERENCE = re.compile(r"\$\{ARTIFACT_ROOT\}/([A-Za-z0-9._${}-]+\.yaml)")
 INTERPOLATION = re.compile(r"\$\{[^}]*\}")
-# Two Kustomize roots are built outside the declared target list; each is
-# asserted to keep its own `kustomize build` and both follow the same
+# One Kustomize root is built outside the declared target list; it is
+# asserted to keep its own `kustomize build` and follows the same
 # path-to-artifact naming rule the declared targets use.
-EXTRA_KUSTOMIZE_ROOTS = ("kubernetes/flux-system", "policies/kyverno")
+EXTRA_KUSTOMIZE_ROOTS = ("kubernetes/flux-system",)
 
 
 def bash_array(script, name):
@@ -92,22 +77,10 @@ def site_release_document(
     site="naranjo-online",
     *,
     suspend=True,
-    ready=False,
-    digest=ZERO_DIGEST,
-    tag=ZERO_TAG,
-    omit_digest=False,
-    omit_tag=False,
-    omit_ready=False,
+    deployment_ready=True,
 ):
     """Render one site HelmRelease exactly as Kustomize emits it."""
 
-    image = "" if omit_digest else "      digest: {}\n".format(digest)
-    image += "" if omit_tag else "      tag: {}\n".format(tag)
-    readiness = (
-        ""
-        if omit_ready
-        else "    deploymentReady: {}\n".format("true" if ready else "false")
-    )
     return textwrap.dedent(
         """\
         apiVersion: helm.toolkit.fluxcd.io/v2
@@ -120,14 +93,12 @@ def site_release_document(
           serviceAccountName: helm-reconciler
           suspend: {suspend}
           values:
-        {readiness}    image:
-        {image}      repository: ghcr.io/snaraj/{site}
+            deploymentReady: {deployment_ready}
         """
     ).format(
         site=site,
         suspend="true" if suspend else "false",
-        readiness=readiness,
-        image=image,
+        deployment_ready="true" if deployment_ready else "false",
     )
 
 
@@ -337,12 +308,13 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             'validate_release_transition.py\" plan \\\n    --expect-mode "$mode_name"',
             self.script,
         )
-        self.assertIn('((${#release_plan_lines[@]} == 6))', self.script)
+        self.assertIn('((${#release_plan_lines[@]} == 7))', self.script)
         for record in (
             "mode=${mode_name}",
-            "^naranjo-online=(initial|staged|active)$",
-            "^lidersea-com=(initial|staged|active)$",
+            "^naranjo-online=(staged|active)$",
+            "^lidersea-com=(staged|active)$",
             "^cloudflare-public=(initial|staged|active)$",
+            "^platform-services-suspended=(true|false)$",
             "^any-website-active=(true|false)$",
             "^any-workload-active=(true|false)$",
         ):
@@ -361,7 +333,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             '${website}.yaml" \\\n      "$website" "${WEBSITE_PHASES[$website]}"',
             self.script,
         )
-        for phase_arm in ("    initial)\n", "    staged)\n", "    active)\n"):
+        for phase_arm in ("    staged)\n", "    active)\n"):
             with self.subTest(phase_arm=phase_arm.strip()):
                 self.assertIn(phase_arm, self.script)
         # An unclassifiable phase must stop the gate rather than fall through
@@ -372,30 +344,15 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         )
 
     def test_site_phase_proof_asserts_both_required_and_forbidden_denials(self):
-        """`initial` and `staged` both stay suspended, so presence alone is
-        not proof; the absent set is what proves a staged site's reviewed
-        digest and readiness reached the rendered artifact."""
+        """Staged sites require suspension and the exact values/source shape."""
 
         helper = self.script[self.script.index("assert_site_release_phase() {"):]
         helper = helper[: helper.index("\n}\n")]
         self.assertIn("local -a required=() forbidden=()", helper)
         for fragment in (
             'suspended="HelmRelease ${website} remains suspended"',
-            'not_ready="HelmRelease ${website} is not marked ready"',
-            'zero_digest="HelmRelease ${website} still names the all-zero image digest"',
-            'uncanonical="HelmRelease ${website} does not name a canonical image digest"',
-            # The release tag is gated exactly like the digest, so its two
-            # arms and the degenerate-shape arm belong to the same closed
-            # vocabulary: a denial outside it is invisible to the phase proof.
-            'sentinel_tag="HelmRelease ${website} still names the sentinel release tag"',
-            'uncanonical_tag="HelmRelease ${website} does not name a canonical release tag"',
-            'malformed_image="HelmRelease ${website} does not state a well-formed image mapping"',
-            'nonstring_digest="HelmRelease ${website} does not state a string image digest"',
-            'nonstring_tag="HelmRelease ${website} does not state a string release tag"',
-            # A site root renders that site's chart source as well as its
-            # release, so the vocabulary is exhaustive only if it names the
-            # chart-source denials too. A correct chart source produces
-            # neither in any phase, so both are forbidden and never required.
+            'invalid_values="HelmRelease ${website} values must contain exactly '
+            'deploymentReady: true"',
             'unverified="chart source ${website}/${website}-chart does not '
             'require cosign verification"',
             'unbound="chart source ${website}/${website}-chart does not bind '
@@ -403,20 +360,9 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, helper)
+        self.assertIn('required=("$suspended")', helper)
         self.assertIn(
-            'required=("$suspended" "$not_ready" "$zero_digest" "$sentinel_tag")',
-            helper,
-        )
-        self.assertIn(
-            'forbidden=("$uncanonical" "$uncanonical_tag" "$malformed_image" '
-            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
-            helper,
-        )
-        self.assertIn(
-            'forbidden=("$not_ready" "$zero_digest" "$uncanonical" '
-            '"$sentinel_tag" "$uncanonical_tag" "$malformed_image" '
-            '"$nonstring_digest" "$nonstring_tag" "$unverified" "$unbound")',
-            helper,
+            'forbidden=("$invalid_values" "$unverified" "$unbound")', helper
         )
         self.assertIn('for fragment in "${required[@]}"', helper)
         self.assertIn('for fragment in "${forbidden[@]}"', helper)
@@ -449,7 +395,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
                 r"(?m)^kind: ([A-Za-z]+)$", path.read_text(encoding="utf-8")
             )
         }
-        self.assertEqual(rendered_kinds, {"HelmRelease", "OCIRepository"})
+        self.assertEqual(rendered_kinds, {"HelmRelease", "NetworkPolicy", "OCIRepository"})
         # Every sprintf message a site-scoped rule can emit for those kinds.
         # A ResourceQuota rule is also site-scoped but renders from the
         # platform prerequisites root, so it can never reach this artifact.
@@ -465,7 +411,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             if match:
                 messages.add(match.group(1))
         self.assertGreaterEqual(
-            len(messages), 5, "site-scoped denial extraction found too few rules"
+            len(messages), 3, "site-scoped denial extraction found too few rules"
         )
         for message in sorted(messages):
             # Match on the literal tail after the LAST format specifier. The
@@ -499,53 +445,6 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
                     ),
                     scaffold,
                 )
-
-    def test_scaffold_accepts_the_enforcing_base_signature_policy_render(self):
-        """Report-only is an install overlay, not the desired-state base.
-
-        The base signature policies stay Enforce/Fail while reconciliation is
-        dormant. Scaffold mode must validate those rendered bytes positively;
-        expecting an Audit denial here would make the release gate demand a
-        weaker policy than the transaction source actually commits.
-        """
-
-        scaffold = self.script[self.script.index("if [[ \"$MODE\" == '--scaffold' ]]"):]
-        scaffold = scaffold[: scaffold.index("elif [[ \"$MODE\" == '--release' ]]")]
-        self.assertIn(
-            'conftest test --policy "${REPO_ROOT}/policies/release-conftest" \\\n'
-            '    "${ARTIFACT_ROOT}/policies-kyverno.yaml"',
-            scaffold,
-        )
-        self.assertNotIn(
-            "signature admission policy require-signed-naranjo-online is not enforced",
-            scaffold,
-        )
-        self.assertNotIn(
-            "signature admission policy require-signed-lidersea-com is not enforced",
-            scaffold,
-        )
-
-    def test_release_core_policy_inventory_matches_the_renderer(self):
-        """Every renderer-required core policy is release-gated by identity."""
-
-        policy = (RELEASE_POLICY / "deployment-readiness.rego").read_text(
-            encoding="utf-8"
-        )
-        match = re.search(
-            r"core_admission_policies := \{\n(?P<body>.*?)\n\}", policy, re.DOTALL
-        )
-        if match is None:
-            raise AssertionError("release core-policy inventory disappeared")
-        inventory = set(
-            re.findall(r'^\s+"([a-z0-9-]+)",?$', match.group("body"), re.MULTILINE)
-        )
-        expected = set(bash_array(self.script, "CORE_POLICY_FILES"))
-        self.assertEqual(
-            inventory,
-            expected,
-            "release Conftest and the renderer disagree on the exact core "
-            "admission-policy inventory",
-        )
 
     def test_every_release_proof_requires_its_artifact_to_exist(self):
         """A missing artifact makes Conftest exit non-zero for a reason that
@@ -621,27 +520,20 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
             "release proofs name artifacts this renderer never writes",
         )
 
-    def test_active_workload_requires_controller_admission_and_core_policies(self):
+    def test_active_workload_proof_remains_proportional(self):
         workload_gate = self.script.index(
             "if [[ \"$any_workload_active\" == 'true' ]]"
-        )
-        for artifact in (
-            "kubernetes-flux-system.yaml",
-            "kubernetes/platform/admission/kyverno/controllers.yaml",
-            '"${CORE_POLICY_FILES[@]}"',
-        ):
-            with self.subTest(artifact=artifact):
-                self.assertGreater(
-                    self.script.index(artifact, workload_gate), workload_gate
-                )
-        self.assertIn(
-            "Flux controller artifact is required whenever a workload is active",
-            self.script,
         )
         website_gate = self.script.index(
             "if [[ \"$any_website_active\" == 'true' ]]", workload_gate
         )
         workload_block = self.script[workload_gate:website_gate]
+        self.assertIn("kubernetes-flux-system.yaml", workload_block)
+        self.assertIn(
+            "Flux controller artifact is required whenever a workload is active",
+            self.script,
+        )
+        self.assertNotIn("admission_suspended", self.script)
         self.assertNotIn("policies-kyverno.yaml", workload_block)
         self.assertNotIn("kubernetes-platform-admission.yaml", workload_block)
 
@@ -649,19 +541,13 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
         active_gate = self.script.index(
             "if [[ \"$any_website_active\" == 'true' ]]", self.script.index("else\n  # Transition mode")
         )
-        for artifact in (
-            "kubernetes-platform-prerequisites.yaml",
-            "policies-kyverno.yaml",
-        ):
-            with self.subTest(artifact=artifact):
-                self.assertGreater(self.script.index(artifact, active_gate), active_gate)
-        self.assertIn(
-            "obsolete require-zero-site-capacity.yaml is active; restoration "
-            "requires a coordinated inventory, overlay, render-lock, and "
-            "validator recut",
-            self.script,
+        self.assertGreater(
+            self.script.index("kubernetes-platform-prerequisites.yaml", active_gate),
+            active_gate,
         )
-        self.assertIn("active website parent", self.script)
+        self.assertNotIn("policies-kyverno.yaml", self.script)
+        self.assertNotIn("require-zero-site-capacity.yaml", self.script)
+        self.assertIn("active website", self.script)
 
     def test_transition_cloudflare_requires_unresolved_or_release_proof(self):
         self.assertIn("if [[ \"$cloudflare_phase\" == 'initial' ]]", self.script)
@@ -681,7 +567,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
     def test_determinism_gate_renders_the_authoritative_mode(self):
         script = DETERMINISM.read_text(encoding="utf-8")
         # The defect shape: a render flag pinned to scaffold, which the
-        # renderer refuses outright once any release leaves `initial`.
+        # renderer refuses outright when its selected authoritative mode drifts.
         self.assertNotIn('render-manifests.sh" --', script)
         self.assertIn(
             'mode="$(python3 -B "${repo_root}/scripts/validate_release_transition.py" '
@@ -696,13 +582,7 @@ class ReleaseRenderOverrideTests(unittest.TestCase):
 
 @unittest.skipUnless(CONFTEST, "conftest is required")
 class SiteReleasePolicyTests(unittest.TestCase):
-    """Prove the release policy's site-HelmRelease rules, both directions.
-
-    These rules are the hermetic successor to the chart-level readiness and
-    digest denials: the site charts render in their own repositories, so the
-    HelmRelease values this repository still renders are the only reviewed
-    readiness/digest evidence the pull-request gate can prove.
-    """
+    """Prove the exact values-only site HelmRelease rule both directions."""
 
     def denials(self, **kwargs):
         with tempfile.TemporaryDirectory() as directory:
@@ -710,139 +590,114 @@ class SiteReleasePolicyTests(unittest.TestCase):
             path.write_text(site_release_document(**kwargs), encoding="utf-8")
             return release_policy_denials(path)
 
-    def test_initial_site_denies_suspension_readiness_and_the_zero_digest(self):
+    def values_denials(self, values_block, *, site="naranjo-online"):
+        document = site_release_document(site=site, suspend=False)
+        document, count = re.subn(
+            r"(?ms)^  values:\n    deploymentReady: true\n",
+            values_block,
+            document,
+        )
+        self.assertEqual(count, 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release.yaml"
+            path.write_text(document, encoding="utf-8")
+            return release_policy_denials(path)
+
+    def assert_invalid_values(self, values_block, *, site="naranjo-online"):
         self.assertEqual(
-            self.denials(),
+            self.values_denials(values_block, site=site),
             {
-                "HelmRelease naranjo-online remains suspended",
-                "HelmRelease naranjo-online is not marked ready",
-                "HelmRelease naranjo-online still names the all-zero image digest",
-                "HelmRelease naranjo-online still names the sentinel release tag",
+                "HelmRelease {} values must contain exactly "
+                "deploymentReady: true".format(site)
             },
         )
 
-    def test_staged_site_denies_only_its_remaining_suspension(self):
-        """The promoted digest and readiness must be visible in the render,
-        so the sole surviving denial is the deliberate suspension."""
-
+    def test_staged_site_denies_only_its_suspension(self):
         self.assertEqual(
-            self.denials(ready=True, digest=REVIEWED_DIGEST, tag=REVIEWED_TAG),
+            self.denials(),
             {"HelmRelease naranjo-online remains suspended"},
         )
 
-    def test_active_site_is_accepted_outright(self):
+    def test_false_readiness_is_denied_alongside_suspension(self):
         self.assertEqual(
-            self.denials(
-                suspend=False, ready=True, digest=REVIEWED_DIGEST, tag=REVIEWED_TAG
-            ),
-            set(),
+            self.denials(deployment_ready=False),
+            {
+                "HelmRelease naranjo-online remains suspended",
+                "HelmRelease naranjo-online values must contain exactly "
+                "deploymentReady: true",
+            },
         )
 
-    def test_promoted_digest_without_readiness_is_denied(self):
-        """Both an explicit `false` and an absent flag are unready: the rule's
-        default must be the closed one, or a values block that simply omits
-        readiness would render an unproven site release acceptable."""
+    def test_active_site_is_accepted_outright(self):
+        self.assertEqual(self.denials(suspend=False), set())
 
-        for label, kwargs in (
-            ("explicitly false", {"ready": False}),
-            ("absent", {"omit_ready": True}),
+    def test_false_or_absent_readiness_is_denied(self):
+        """Both explicit false and omission take the single closed arm."""
+
+        for label, values_block in (
+            ("explicitly false", "  values:\n    deploymentReady: false\n"),
+            ("absent", "  values: {}\n"),
         ):
             with self.subTest(label=label):
-                self.assertIn(
-                    "HelmRelease naranjo-online is not marked ready",
-                    self.denials(
-                        suspend=False,
-                        digest=REVIEWED_DIGEST,
-                        tag=REVIEWED_TAG,
-                        **kwargs
-                    ),
+                self.assert_invalid_values(values_block)
+
+    def test_any_image_digest_override_is_denied(self):
+        for label, digest in (
+            ("absent", None),
+            ("not a digest", "v0.1.9"),
+            ("short", "sha256:abc"),
+            ("uppercase", "sha256:" + "AB" * 32),
+            ("canonical", "sha256:" + "ab" * 32),
+        ):
+            digest_line = "" if digest is None else "      digest: {}\n".format(digest)
+            with self.subTest(label=label):
+                self.assert_invalid_values(
+                    "  values:\n"
+                    "    deploymentReady: true\n"
+                    "    image:\n"
+                    "      repository: ghcr.io/snaraj/naranjo-online\n"
+                    + digest_line
                 )
 
-    def test_ready_site_without_a_canonical_digest_is_denied(self):
-        for label, kwargs in (
-            ("absent", {"omit_digest": True}),
-            ("not a digest", {"digest": "v0.1.9"}),
-            ("short", {"digest": "sha256:abc"}),
-            ("uppercase", {"digest": "sha256:" + "AB" * 32}),
+    def test_any_image_tag_override_is_denied(self):
+        for label, tag in (
+            ("absent", None),
+            ("floating alias", "latest"),
+            ("unprefixed", "0.1.9"),
+            ("branch name", "vmain"),
+            ("partial", "v0.1"),
+            ("leading zero", "v0.01.9"),
+            ("a digest", "sha256:" + "ab" * 32),
+            ("canonical", "v9.9.9"),
         ):
+            tag_line = "" if tag is None else "      tag: {}\n".format(tag)
             with self.subTest(label=label):
-                self.assertIn(
-                    "HelmRelease naranjo-online does not name a canonical image digest",
-                    self.denials(
-                        suspend=False, ready=True, tag=REVIEWED_TAG, **kwargs
-                    ),
+                self.assert_invalid_values(
+                    "  values:\n"
+                    "    deploymentReady: true\n"
+                    "    image:\n"
+                    "      repository: ghcr.io/snaraj/naranjo-online\n"
+                    "      digest: sha256:" + ("a" * 64) + "\n"
+                    + tag_line
                 )
 
-    def test_ready_site_without_a_canonical_release_tag_is_denied(self):
-        """The tag is legibility, but a LYING tag is worse than no tag.
+    def test_a_partial_image_override_is_denied_on_either_half(self):
+        """Even former tag/digest sentinels cannot recreate an override lane."""
 
-        A reference that names a release the digest beside it never carried
-        would make `kubectl describe pod` confidently wrong, so every shape
-        that is not one exact SemVer release name is refused here — including
-        a floating alias, the bare unprefixed version, and the digest wearing
-        the tag field's clothes.
-        """
-
-        for label, kwargs in (
-            ("absent", {"omit_tag": True}),
-            ("floating alias", {"tag": "latest"}),
-            ("unprefixed", {"tag": "0.1.9"}),
-            ("branch name", {"tag": "vmain"}),
-            ("partial", {"tag": "v0.1"}),
-            ("leading zero", {"tag": "v0.01.9"}),
-            ("a digest", {"tag": "sha256:" + "ab" * 32}),
+        for label, image_block in (
+            ("tag only", "      tag: v9.9.9\n"),
+            ("digest only", "      digest: sha256:" + ("a" * 64) + "\n"),
         ):
             with self.subTest(label=label):
-                self.assertIn(
-                    "HelmRelease naranjo-online does not name a canonical release tag",
-                    self.denials(
-                        suspend=False, ready=True, digest=REVIEWED_DIGEST, **kwargs
-                    ),
-                )
-
-    def test_a_half_advanced_release_identity_is_denied_on_either_half(self):
-        """Tag and digest advance together or the release is refused.
-
-        Each subtest advances exactly ONE half of the pair; the other keeps its
-        fail-closed sentinel. Both directions must still be denied, so a
-        promotion that renamed the release without changing the bytes — or
-        changed the bytes without renaming the release — can never render as an
-        acceptable active site.
-        """
-
-        for label, kwargs, expected in (
-            (
-                "tag advanced, digest sentinel",
-                {"tag": REVIEWED_TAG},
-                "HelmRelease naranjo-online still names the all-zero image digest",
-            ),
-            (
-                "digest advanced, tag sentinel",
-                {"digest": REVIEWED_DIGEST},
-                "HelmRelease naranjo-online still names the sentinel release tag",
-            ),
-        ):
-            with self.subTest(label=label):
-                self.assertIn(
-                    expected, self.denials(suspend=False, ready=True, **kwargs)
+                self.assert_invalid_values(
+                    "  values:\n"
+                    "    deploymentReady: true\n"
+                    "    image:\n"
+                    + image_block
                 )
 
     def test_a_non_string_leaf_is_denied_not_skipped(self):
-        """The LEAF half of the same fail-open class, and the harder half.
-
-        The container shapes below (`spec`/`values`/`image`) were closed by the
-        `is_object` guards. The leaves were not, and a guarded accessor is the
-        wrong instrument for them: making `site_image_digest` UNDEFINED on a
-        non-string does not hand the denial to `not`, because in Rego
-        `not <undefined rule>` succeeds while `not <builtin>(<undefined rule>)`
-        does not — and every consumer passes the accessor to a builtin. That
-        construction silently turned six DENIED digest shapes into admitted
-        ones, which is a reversal wearing the shape of a fix.
-
-        The type check therefore lives in its own arm, over a total accessor.
-        Every shape below must produce its own denial; a corpus that stops at
-        the container levels never reaches this rule at all.
-        """
+        """Every former image leaf type remains a hostile extra value."""
 
         digest = "sha256:" + "ab" * 32
         for label, value in (
@@ -852,75 +707,27 @@ class SiteReleasePolicyTests(unittest.TestCase):
             ("list", "[]"),
             ("map", "{}"),
         ):
-            for field, expected in (
-                ("digest", "does not state a string image digest"),
-                ("tag", "does not state a string release tag"),
-            ):
+            for field in ("digest", "tag"):
                 other = (
                     "      tag: v1.2.3\n"
                     if field == "digest"
                     else "      digest: {}\n".format(digest)
                 )
-                document = textwrap.dedent(
-                    """\
-                    apiVersion: helm.toolkit.fluxcd.io/v2
-                    kind: HelmRelease
-                    metadata:
-                      name: naranjo-online
-                      namespace: naranjo-online
-                    spec:
-                      suspend: false
-                      values:
-                        deploymentReady: true
-                        image:
-                          repository: ghcr.io/snaraj/naranjo-online
-                    """
-                ) + other + "      {}: {}\n".format(field, value)
-                with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "release.yaml"
-                    path.write_text(document, encoding="utf-8")
-                    with self.subTest(field=field, shape=label):
-                        # EXACTLY the type denial, not merely "a denial fired".
-                        # Without the `is_string` precondition on the pattern
-                        # arms the same object also trips the canonical-shape
-                        # rule, because `regex.match` ERRORS on a non-string
-                        # and an errored builtin under `not` fires. That is a
-                        # superset — safe, but it means the refusal is riding
-                        # on builtin-error semantics again, which is the exact
-                        # fragility that produced this bug. Asserting the exact
-                        # set keeps the two rules' responsibilities separate
-                        # and makes the precondition load bearing.
-                        self.assertEqual(
-                            release_policy_denials(path),
-                            {"HelmRelease naranjo-online " + expected},
-                        )
+                with self.subTest(field=field, shape=label):
+                    self.assert_invalid_values(
+                        "  values:\n"
+                        "    deploymentReady: true\n"
+                        "    image:\n"
+                        "      repository: ghcr.io/snaraj/naranjo-online\n"
+                        + other
+                        + "      {}: {}\n".format(field, value)
+                    )
 
-    def test_a_well_formed_release_produces_no_leaf_type_denial(self):
-        """The true negative the arms above must not cost.
-
-        A type arm that fires on a correct release would be worse than the
-        fail-open it replaced, so the accepted shape is asserted explicitly
-        rather than assumed from the other rows being green.
-        """
-
-        self.assertEqual(
-            self.denials(
-                suspend=False,
-                ready=True,
-                digest=REVIEWED_DIGEST,
-                tag=REVIEWED_TAG,
-            ),
-            set(),
-        )
+    def test_the_exact_values_only_release_has_no_shape_denial(self):
+        self.assertEqual(self.denials(suspend=False), set())
 
     def test_a_degenerate_image_mapping_is_denied_not_skipped(self):
-        """Rego's nested object.get fails OPEN on a non-object receiver.
-
-        A null, scalar, or list `image` makes the accessor raise a builtin type
-        error; under OPA's default non-strict mode the enclosing deny body goes
-        undefined and the rule silently does not fire. Each shape below must
-        produce a denial of its own instead.
-        """
+        """Null, scalar, list, and malformed mappings all fail closed."""
 
         for label, block in (
             ("null image", "  values:\n    deploymentReady: true\n    image:\n"),
@@ -929,38 +736,19 @@ class SiteReleasePolicyTests(unittest.TestCase):
             ("null values", "  values:\n"),
             ("scalar values", "  values: nope\n"),
         ):
-            document = textwrap.dedent(
-                """\
-                apiVersion: helm.toolkit.fluxcd.io/v2
-                kind: HelmRelease
-                metadata:
-                  name: naranjo-online
-                  namespace: naranjo-online
-                spec:
-                  suspend: false
-                """
-            ) + block
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "release.yaml"
-                path.write_text(document, encoding="utf-8")
-                with self.subTest(label=label):
-                    self.assertIn(
-                        "HelmRelease naranjo-online does not state a "
-                        "well-formed image mapping",
-                        release_policy_denials(path),
-                    )
+            with self.subTest(label=label):
+                self.assert_invalid_values(block)
 
     def test_both_sites_are_covered_by_the_same_closed_rules(self):
         for site in SITES:
             with self.subTest(site=site):
-                self.assertIn(
-                    "HelmRelease {} still names the all-zero image digest".format(site),
+                self.assertEqual(
                     self.denials(site=site),
+                    {"HelmRelease {} remains suspended".format(site)},
                 )
 
     def test_the_platform_connector_release_is_untouched_by_the_site_rules(self):
-        """cloudflare-public carries a tunnel revision, not an image digest;
-        the site rules must not invent a denial for it."""
+        """The site values rule must not apply to cloudflare-public."""
 
         document = textwrap.dedent(
             """\
@@ -999,66 +787,45 @@ def disposable_checkout(destination):
     return destination
 
 
-def _rewrite_release(root, site, ready, digest, tag):
-    """Set one site's release state without assuming its current state.
+def _set_site_suspension(root, site, suspended):
+    """Normalize the values-only HelmRelease gate in a phase fixture."""
 
-    The tracked file is ``initial`` today and ``staged`` the moment that
-    site's promotion merges. A fixture keyed on the initial sentinels would
-    turn this whole battery — and therefore every pull request — red at
-    exactly that moment, which is the class of defect this module exists to
-    close. The rewrite is therefore state-independent: it matches whichever
-    value is present and asserts the *result*, never the input.
-    """
-
-    path = root / "kubernetes" / "websites" / site / "release.yaml"
-    rewritten, readiness_count = READY_LINE.subn(
-        "    deploymentReady: {}".format("true" if ready else "false"),
+    relative = Path("kubernetes/websites") / site / "release.yaml"
+    path = root / relative
+    rewritten, count = re.subn(
+        r"(?m)^  suspend: (?:true|false)$",
+        "  suspend: {}".format("true" if suspended else "false"),
         path.read_text(encoding="utf-8"),
     )
-    rewritten, digest_count = DIGEST_LINE.subn(
-        "      digest: {}".format(digest), rewritten
-    )
-    # The release identity is one three-field state, so a fixture that moved
-    # readiness and the digest without the tag would synthesise exactly the
-    # half-advanced combination the classifier refuses.
-    rewritten, tag_count = TAG_LINE.subn("      tag: {}".format(tag), rewritten)
-    if (readiness_count, digest_count, tag_count) != (1, 1, 1):
+    if count != 1:
         raise AssertionError(
-            "release fixture for {} exposed {} readiness, {} digest and {} tag "
-            "line(s); expected exactly one of each".format(
-                site, readiness_count, digest_count, tag_count
+            "site fixture exposed {} suspension lines: {}".format(
+                count, relative
             )
         )
-    expected_readiness = "    deploymentReady: {}\n".format(
-        "true" if ready else "false"
-    )
-    if (
-        expected_readiness not in rewritten
-        or digest not in rewritten
-        or "      tag: {}\n".format(tag) not in rewritten
-    ):
-        raise AssertionError("release rewrite for {} did not take effect".format(site))
     path.write_text(rewritten, encoding="utf-8")
 
 
-def promote(root, site=SITES[0], digest=REVIEWED_DIGEST, tag=REVIEWED_TAG):
-    """Leave one site in the ``staged`` phase, whatever it started in."""
-
-    _rewrite_release(root, site, True, digest, tag)
-
-
-def demote(root, sites=SITES):
-    """Leave every named site in the ``initial`` phase.
-
-    Every state-dependent test calls this first, so the battery's verdict is
-    the same before and after any promotion merges into the base branch.
-    """
+def stage_sites(root, sites=SITES):
+    """Suspend every named values-only release under its direct reconciler."""
 
     for site in sites:
-        _rewrite_release(root, site, False, ZERO_DIGEST, ZERO_TAG)
+        _set_site_suspension(root, site, True)
 
 
 def render(root, mode):
+    # These tests exercise the renderer's release-policy and artifact-flow
+    # behavior. Supply a no-network schema collaborator so an empty local
+    # kubeconform cache cannot stop the test before the targeted hostile
+    # mutation reaches Conftest. The real kubeconform invocation/tool contract
+    # is covered independently by the renderer and CI contract suites.
+    tool_root = root / ".test-bin"
+    tool_root.mkdir(exist_ok=True)
+    kubeconform = tool_root / "kubeconform"
+    kubeconform.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    kubeconform.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = str(tool_root) + os.pathsep + environment.get("PATH", "")
     return subprocess.run(
         [
             required_tool(BASH, "bash is required"),
@@ -1068,6 +835,7 @@ def render(root, mode):
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
 
 
@@ -1093,13 +861,12 @@ def selected_mode(root):
 @unittest.skipUnless(
     RENDER_TOOLCHAIN and BASH and PYTHON3, "the pinned render toolchain is required"
 )
-class PromotedRenderStateTests(unittest.TestCase):
+class SiteRenderStateTests(unittest.TestCase):
     """Execute the real renderer across the release states CI selects.
 
-    ``initial`` state selects ``scaffold`` and ``staged`` selects
-    ``transition``; before this battery existed the second was unreachable
-    in this repository, so a merged promotion would have turned every later
-    pull request red.
+    Direct site Kustomizations always select both website paths, so staged and
+    active values-only HelmReleases both select ``transition``. Neither state
+    introduces an admission or aggregate reconciliation prerequisite.
     """
 
     def checkout(self):
@@ -1107,81 +874,20 @@ class PromotedRenderStateTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return disposable_checkout(Path(directory.name) / "repository")
 
-    def test_initial_state_still_renders_in_scaffold_mode(self):
+    def test_staged_state_renders_in_direct_transition_mode(self):
         root = self.checkout()
-        demote(root)
-        self.assertEqual(selected_mode(root), "scaffold")
-        completed = render(root, "scaffold")
+        stage_sites(root)
+        self.assertEqual(selected_mode(root), "transition")
+        completed = render(root, "transition")
         self.assertEqual(
             completed.returncode, 0, completed.stdout + completed.stderr
         )
         self.assertIn("static artifact(s) passed", completed.stdout)
 
-    def test_scaffold_render_that_downgrades_a_signature_policy_fails_closed(self):
-        """A post-validation render mutation cannot bypass the release gate.
-
-        The signature-policy Kustomization itself has an exact source-inventory
-        guard. Mutating that input would be refused before rendering and could
-        make this test pass for the wrong reason. Instead the disposable
-        renderer corrupts only its already source-validated artifact, after the
-        general Conftest pass and immediately before scaffold release proof.
-        The exact release-policy denial below is therefore the only satisfying
-        result.
-        """
-
+    def test_active_site_renders_and_passes_in_transition_mode(self):
         root = self.checkout()
-        demote(root)
-        script = root / "scripts" / "render-manifests.sh"
-        source = script.read_text(encoding="utf-8")
-        marker = (
-            "if [[ \"$MODE\" == '--scaffold' ]]; then\n"
-            "  # These are negative controls, not readiness evidence. They "
-            "prove the checked-in\n"
-        )
-        self.assertEqual(source.count(marker), 1)
-        mutation = textwrap.dedent(
-            """\
-            mutated="${ARTIFACT_ROOT}/policies-kyverno.yaml.mutated"
-            awk '
-              $0 == "  name: require-signed-naranjo-online" { target = 1 }
-              target && !changed && $0 == "  validationFailureAction: Enforce" {
-                sub(/Enforce$/, "Audit")
-                changed = 1
-              }
-              { print }
-              END { if (changed != 1) exit 1 }
-            ' "${ARTIFACT_ROOT}/policies-kyverno.yaml" >"$mutated"
-            mv -- "$mutated" "${ARTIFACT_ROOT}/policies-kyverno.yaml"
-            """
-        )
-        script.write_text(
-            source.replace(marker, mutation + marker, 1), encoding="utf-8"
-        )
-        self.assertEqual(
-            (root / "policies" / "kyverno" / "kustomization.yaml").read_text(
-                encoding="utf-8"
-            ),
-            (REPO_ROOT / "policies" / "kyverno" / "kustomization.yaml").read_text(
-                encoding="utf-8"
-            ),
-            "the mutation must not trip the earlier source-inventory guard",
-        )
-        self.assertEqual(selected_mode(root), "scaffold")
-        completed = render(root, "scaffold")
-        self.assertNotEqual(
-            completed.returncode,
-            0,
-            "a rendered Audit signature policy bypassed the scaffold gate",
-        )
-        self.assertIn(
-            "signature admission policy require-signed-naranjo-online is not enforced",
-            completed.stdout + completed.stderr,
-        )
-
-    def test_promoted_state_renders_and_passes_in_transition_mode(self):
-        root = self.checkout()
-        demote(root)
-        promote(root)
+        stage_sites(root)
+        _set_site_suspension(root, SITES[0], False)
         self.assertEqual(selected_mode(root), "transition")
         completed = render(root, "transition")
         self.assertEqual(
@@ -1191,15 +897,15 @@ class PromotedRenderStateTests(unittest.TestCase):
         rendered = (
             root / ".artifacts" / "rendered" / "kubernetes-websites-naranjo-online.yaml"
         ).read_text(encoding="utf-8")
-        self.assertIn(REVIEWED_DIGEST, rendered)
+        self.assertIn("    deploymentReady: true\n", rendered)
+        self.assertNotIn("    image:\n", rendered)
 
-    def test_promoted_state_whose_render_drops_the_promotion_fails_closed(self):
-        """The exact property the retired chart render used to prove: source
-        that claims promotion but renders the inert sentinel is denied."""
+    def test_active_render_that_adds_an_image_override_fails_closed(self):
+        """Kustomize cannot reintroduce image identity below the chart source."""
 
         root = self.checkout()
-        demote(root)
-        promote(root)
+        stage_sites(root)
+        _set_site_suspension(root, SITES[0], False)
         kustomization = (
             root / "kubernetes" / "websites" / "naranjo-online" / "kustomization.yaml"
         )
@@ -1212,24 +918,27 @@ class PromotedRenderStateTests(unittest.TestCase):
                       kind: HelmRelease
                       name: naranjo-online
                     patch: |-
-                      - op: replace
-                        path: /spec/values/image/digest
-                        value: {}
+                      - op: add
+                        path: /spec/values/image
+                        value:
+                          repository: ghcr.io/snaraj/naranjo-online
+                          tag: v9.9.9
+                          digest: sha256:{digest}
                 """
-            ).format(ZERO_DIGEST),
+            ).format(digest="a" * 64),
             encoding="utf-8",
         )
         self.assertEqual(selected_mode(root), "transition")
         completed = render(root, "transition")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
-            "staged website naranjo-online still denies: HelmRelease "
-            "naranjo-online still names the all-zero image digest",
-            completed.stderr,
+            "HelmRelease naranjo-online values must contain exactly "
+            "deploymentReady: true",
+            completed.stdout + completed.stderr,
         )
 
     def test_a_render_that_strips_chart_signature_verification_fails_closed(self):
-        """The chart-source counterpart of the promotion-drop case above.
+        """The chart-source counterpart of the image-override case above.
 
         ``validate_signature_policy.py chart-source`` compares the committed
         ``source.yaml`` byte-for-byte, but it reads the FILE. A Kustomize patch
@@ -1240,7 +949,7 @@ class PromotedRenderStateTests(unittest.TestCase):
         """
 
         root = self.checkout()
-        demote(root)
+        stage_sites(root)
         kustomization = (
             root / "kubernetes" / "websites" / "naranjo-online" / "kustomization.yaml"
         )
@@ -1280,8 +989,8 @@ class PromotedRenderStateTests(unittest.TestCase):
         )
         self.assertEqual(source_gate.returncode, 0, source_gate.stderr)
 
-        self.assertEqual(selected_mode(root), "scaffold")
-        completed = render(root, "scaffold")
+        self.assertEqual(selected_mode(root), "transition")
+        completed = render(root, "transition")
         self.assertNotEqual(
             completed.returncode,
             0,
@@ -1298,8 +1007,8 @@ class PromotedRenderStateTests(unittest.TestCase):
         artifact is not produced — and require an honest refusal."""
 
         root = self.checkout()
-        demote(root)
-        promote(root)
+        stage_sites(root)
+        _set_site_suspension(root, SITES[0], False)
         script = root / "scripts" / "render-manifests.sh"
         script.write_text(
             script.read_text(encoding="utf-8").replace(
@@ -1417,25 +1126,21 @@ class RenderDeterminismModeTests(unittest.TestCase):
 
 
 class ReleaseStateFixtureTests(unittest.TestCase):
-    """Keep the rewrite targets honest against the tracked release file.
+    """Keep the tracked site release values closed to readiness only."""
 
-    Deliberately not an assertion about which phase the tracked file is in:
-    it is `initial` today and `staged` once that site's promotion merges, and
-    a battery that pinned either one would go red on the other. What must
-    hold in both states is that the two values the fixtures rewrite are
-    present, exactly once each, in the shape the rewrite matches.
-    """
-
-    def test_the_tracked_site_release_exposes_both_rewrite_targets(self):
+    def test_the_tracked_site_release_has_one_exact_value_and_no_image(self):
         for site in SITES:
             with self.subTest(site=site):
                 text = (
                     REPO_ROOT / "kubernetes" / "websites" / site / "release.yaml"
                 ).read_text(encoding="utf-8")
                 self.assertRegex(text, READY_LINE)
-                self.assertRegex(text, DIGEST_LINE)
                 self.assertEqual(len(READY_LINE.findall(text)), 1)
-                self.assertEqual(len(DIGEST_LINE.findall(text)), 1)
+                self.assertEqual(
+                    text.split("  values:\n", 1)[1],
+                    "    deploymentReady: true\n",
+                )
+                self.assertNotIn("    image:\n", text)
 
 
 if __name__ == "__main__":

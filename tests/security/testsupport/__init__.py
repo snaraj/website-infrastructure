@@ -4,18 +4,18 @@ WHAT THIS IS
 ------------
 
 Three small, dependency-free models used by ``tests/security`` to exercise the
-tag-driven release flow of ADR 0016 without touching anything live:
+digest-selected release flow of ADR 0016 without touching anything live:
 
 * :mod:`tests.security.testsupport.oci_registry` — a real HTTP server on loopback that
-  speaks the slice of the OCI Distribution API this platform depends on (tag
-  listing, manifest resolution by tag or digest, and cosign signature presence
+  speaks the slice of the OCI Distribution API this platform depends on
+  (manifest resolution by exact digest and cosign signature presence
   with its certificate identity), plus a ``urllib`` client that speaks to it.
 * :mod:`tests.security.testsupport.kubernetes_api` — a typed in-memory Kubernetes API
   with the three object kinds this flow touches (``OCIRepository``,
   ``HelmRelease``, ``Deployment``), modelling apply/patch, generation bumps on
   spec change, and status subresource transitions.
 * :mod:`tests.security.testsupport.flux_sync` — the release-sync state machine itself,
-  written against those two clients: published version → SemVer resolution →
+  written against those two clients: pinned digest → exact fetch →
   signature-verification decision → digest-bound upgrade → rollout health →
   rollback.
 
@@ -28,7 +28,7 @@ cryptographically verified by anything. A battery built on this module proves
 two things and claims nothing more:
 
 1. the *contract* — the sequence of decisions and denials the platform expects
-   from a tag-driven, signature-verified release flow — is internally coherent
+   from a digest-selected, signature-verified release flow — is internally coherent
    and fails closed on every hostile input the batteries enumerate; and
 2. the *committed manifests* express exactly that contract, because the
    batteries build their fixtures from the same reviewed field values the

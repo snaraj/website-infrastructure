@@ -5,20 +5,19 @@
 # is the reason that refusal exists rather than a normalisation to `[]`, which
 # would skip the same walk.
 #
-# ENGINE ASYMMETRY, stated rather than papered over: Kyverno's CEL `.all()`
-# iterates a map's KEYS and reports this shape as a pass, so it is asserted in
-# Conftest only. That is the safe way round, and the reason is VERIFIED against
-# the cluster rather than asserted — a server dry-run of exactly this shape in
-# an application namespace is refused before admission is ever consulted:
+# HISTORICAL ENGINE NOTE: the retired CEL mirror iterated a map's keys and
+# reported this shape as a pass. The retained control is therefore asserted in
+# Conftest, and a server dry-run of exactly this shape in an application
+# namespace was also observed to fail decoding before policy evaluation:
 #
 #   Error from server (BadRequest): Pod in version "v1" cannot be handled as a
 #   Pod: json: cannot unmarshal object into Go struct field
 #   Container.spec.containers.env of type []v1.EnvVar
 #
-# while the byte-identical Pod with a LIST-shaped env decodes and reaches
-# admission. So the only engine that can ever see this shape is the static gate
-# on the rendered desired state, which is exactly where it is refused. The
-# sibling string-shaped `env` errors in CEL and IS refused by both engines.
+# while the byte-identical Pod with a LIST-shaped env decodes normally. The
+# retained static gate on rendered desired state is therefore the control that
+# evaluates and refuses this shape. The sibling string-shaped `env` remains a
+# separate static-policy hostile case.
 #
 # ONE document per file, deliberately: the fixture runner asserts only that a
 # FILE is rejected, so pairing arms in one file would keep the file "rejected"

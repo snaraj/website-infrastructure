@@ -168,7 +168,7 @@ run_live_probes() {
     assert_origin_ports_closed "$HOME_PUBLIC_IPV6" HOME_PUBLIC_IPV6
   fi
   printf 'PASS live exposure gate: two exact tenants, unexpected-host denial, origin hiding, and tested TCP closure\n'
-  printf 'NOTE this remains one point-in-time external observation; release-gate.sh also requires live cluster readiness/admission evidence\n'
+  printf 'NOTE this remains one point-in-time external observation; the pending successor live gate must also prove runtime convergence and readiness\n'
 }
 
 case "${1:---check}" in

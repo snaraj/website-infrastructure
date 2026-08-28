@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - controllers
   - access.yaml
-  - gotk-sync.yaml

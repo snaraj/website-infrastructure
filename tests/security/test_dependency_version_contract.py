@@ -57,8 +57,8 @@ class DependencyVersionContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertRegex(self.versions[key], r"@sha256:[0-9a-f]{64}$")
 
-    def test_site_toolchain_lanes_left_with_the_site_repositories(self):
-        """Platform CI no longer builds site containers or frontends."""
+    def test_site_toolchains_stay_external_and_selector_build_is_exact(self):
+        """Platform CI builds only its selector, never either site frontend."""
 
         pull_request = (
             REPO_ROOT / ".github" / "workflows" / "pull-request.yml"
@@ -70,7 +70,32 @@ class DependencyVersionContractTests(unittest.TestCase):
             self.assertNotIn("node-version:", workflow)
             self.assertNotIn("go-version:", workflow)
             self.assertNotIn("npm ", workflow)
-            self.assertNotIn("docker build", workflow)
+        self.assertEqual(pull_request.count("docker build"), 1)
+        self.assertIn(
+            "docker build --network=none --target build \\\n"
+            "            --file cmd/platform-release-selector/Dockerfile .",
+            pull_request,
+        )
+        self.assertIn(
+            'git diff --quiet "${selector_base}" "${selector_head}" --',
+            pull_request,
+        )
+        self.assertIn(
+            "Selector build inputs unchanged; skipping duplicate container build.",
+            pull_request,
+        )
+        self.assertEqual(pull_request.count("-m unittest discover"), 1)
+        self.assertNotIn("docker build", codeql)
+        selector = (
+            REPO_ROOT / "cmd" / "platform-release-selector" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "FROM --platform=$BUILDPLATFORM "
+            + self.versions["WEBSITE_GO_BUILDER"]
+            + " AS build",
+            selector,
+        )
+        self.assertIn("FROM " + self.versions["WEBSITE_RUNTIME"], selector)
 
     def test_cloudflare_manifest_and_lock_match_versions_registry(self):
         """Every isolated phase must keep manifest and lock pins atomic."""

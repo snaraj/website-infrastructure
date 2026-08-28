@@ -51,6 +51,204 @@ PUBLISHER_TAG_GUARD = (
 VERSION_LITERAL = r"v?[0-9]+\.[0-9]+\.[0-9]+"
 
 
+def validate_single_asset_publication_transaction(transaction: str) -> None:
+    """Reject any publisher shape outside the signed two-asset transaction."""
+
+    required = (
+        ': "${MAIN_RUN_ID:?MAIN_RUN_ID is required}"',
+        ': "${MAIN_RUN_ATTEMPT:?MAIN_RUN_ATTEMPT is required}"',
+        ': "${SELECTOR_IMAGE_DIGEST:?SELECTOR_IMAGE_DIGEST is required}"',
+        'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
+        'test -z "${ACTIONS_READ_TOKEN-}"',
+        'test -z "${CONTENTS_READ_TOKEN-}"',
+        'test -z "${GITHUB_TOKEN-}"',
+        'test -z "${GH_ENTERPRISE_TOKEN-}"',
+        'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
+        'write_token="${GH_TOKEN}"',
+        "unset GH_TOKEN",
+        'GH_TOKEN="${write_token}" gh "$@"',
+        PUBLISHER_TAG_GUARD,
+        "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
+        "recovery_tag='v0.1.0'",
+        '-f object="${SOURCE_SHA}" -f type=commit',
+        'tagger[name]=${tagger_name}',
+        'tagger[email]=${tagger_email}',
+        'tagger[date]=${tagger_date}',
+        'run_write_gh release create "${recovery_tag}" --verify-tag',
+        '--target "${recovery_source_sha}"',
+        "identity_asset_name='platform-release-identity.v1.json'",
+        "identity_bundle_name='platform-release-identity.v1.json.sigstore.json'",
+        '(.assets | length == $count)',
+        '(([.assets[].name] | sort) == ($expected | sort))',
+        'selector-image-from-release --release-json "${release_json}"',
+        '--identity "${identity_download}" --bundle "${bundle_download}"',
+        '--source-tree-sha "${tree_sha}"',
+        "identity-run-records",
+        "identity-release-state",
+        '--http-status "${status}" --require "${required}"',
+        'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+        'test "${BASE_TAG}" = v0.1.40',
+        'test "${TAG}" = v0.1.41',
+        '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+        '--repository .',
+        '--release-json "${release_json}"',
+        '--main-runs-json "${legacy_main_runs_json}"',
+        '--platform-runs-json "${legacy_platform_runs_json}"',
+        '--emit > "${legacy_predecessor_json}"',
+        'actions/runs/${legacy_main_run_id}/attempts/${legacy_main_run_attempt}',
+        'actions/runs/${legacy_platform_run_id}/attempts/${legacy_platform_run_attempt}',
+        '--main-run-json "${legacy_main_run_json}"',
+        '--platform-run-json "${legacy_platform_run_json}"',
+        "'{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'",
+        '--input "${draft_request}" --jq \'.id\')"',
+        "release-draft-record",
+        '--release-id "${release_id}"',
+        '--main-run-id "${main_run_id}"',
+        '--main-run-attempt "${main_run_attempt}"',
+        '--platform-run-id "${platform_run_id}"',
+        '--platform-run-attempt "${platform_run_attempt}"',
+        '--selector-image-digest "${selector_digest}"',
+        'cosign sign-blob --yes',
+        '--bundle "${identity_bundle}" "${identity_asset}"',
+        'verify_identity_signature "${identity_asset}" "${identity_bundle}"',
+        "--header 'Content-Type: application/json'",
+        '--data-binary "@${path}"',
+        'upload_identity_asset "${release_id}" "${identity_asset_name}"',
+        'upload_identity_asset "${release_id}" "${identity_bundle_name}"',
+        'test "${status}" = 201',
+        'download_identity_pair "${release_json}"',
+        'cmp -s "${identity_asset}" "${identity_download}"',
+        'cmp -s "${identity_bundle}" "${bundle_download}"',
+        "staged-identity-release-record",
+        "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+        '--input "${publish_patch}"',
+    )
+    for token in required:
+        if token not in transaction:
+            raise ValueError(f"signed identity transaction lost exact guard: {token}")
+
+    forbidden = (
+        'run_write_gh release create "${TAG}"',
+        '--target "${SOURCE_SHA}"',
+        "selector-seed",
+        "validate_selector_seed",
+        "releasecutover",
+        "release-cutover",
+        "cutover-image",
+        "settings_token",
+        "--require-ready",
+        "0000000000000000000000000000000000000000",
+    )
+    for token in forbidden:
+        if token in transaction:
+            raise ValueError(f"signed identity transaction retained retired path: {token}")
+
+    notes_start = transaction.index("write_current_notes() {")
+    notes_end = transaction.index("\n}\n", notes_start) + 3
+    expected_notes = (
+        "write_current_notes() {\n"
+        "  python3 -I -B \"${contract}\" release-notes \\\n"
+        "    --repository . --head \"${SOURCE_SHA}\" --tag \"${TAG}\" \\\n"
+        "    --base-sha \"${BASE_SHA}\" --base-tag \"${BASE_TAG}\" > \"${notes}\"\n"
+        "}\n"
+    )
+    if transaction[notes_start:notes_end] != expected_notes:
+        raise ValueError("current release-notes command drifted or gained a stray shell command")
+
+    exact_counts = {
+        "release-draft-record": 2,
+        "staged-identity-release-record": 1,
+        "identity-release-state": 1,
+        'upload_identity_asset "${release_id}"': 2,
+        "validate_platform_predecessor.py": 2,
+        "cosign sign-blob": 1,
+        "cosign verify-blob": 1,
+        'run_write_gh release create "${recovery_tag}"': 1,
+    }
+    for token, expected in exact_counts.items():
+        actual = transaction.count(token)
+        if actual != expected:
+            raise ValueError(
+                f"signed identity transaction count drifted for {token}: {actual} != {expected}"
+            )
+
+    classifier_start = transaction.index("classify_current_release() {")
+    classifier_end = transaction.index("classify_predecessor_release() {")
+    current_classifier = transaction[classifier_start:classifier_end]
+    if "--body" in current_classifier or '"${contract}" release-state' in current_classifier:
+        raise ValueError("immutable current release must not trust Markdown body")
+    for token in (
+        "download_identity_pair",
+        "selector-image-from-release",
+        '--bundle "${bundle_download}"',
+        '--source-tree-sha "${tree_sha}"',
+        "identity-release-state",
+    ):
+        if token not in current_classifier:
+            raise ValueError(f"current classifier lost identity input: {token}")
+
+    legacy_edge = 'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then'
+    legacy_start = transaction.index(legacy_edge)
+    legacy_end = transaction.index("\n  fi", legacy_start)
+    legacy = transaction[legacy_start:legacy_end]
+    for token in (
+        '--repository .',
+        '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+        '--release-json "${release_json}"',
+        '--main-runs-json "${legacy_main_runs_json}"',
+        '--platform-runs-json "${legacy_platform_runs_json}"',
+        '--emit > "${legacy_predecessor_json}"',
+        '--main-run-json "${legacy_main_run_json}"',
+        '--platform-run-json "${legacy_platform_run_json}"',
+    ):
+        if token not in legacy:
+            raise ValueError(f"legacy predecessor validation lost exact input: {token}")
+    if legacy.count("validate_platform_predecessor.py") != 2:
+        raise ValueError("legacy predecessor must be validated before and after run retrieval")
+
+    current_start = transaction.index("publish_current_release() {")
+    current = transaction[current_start:]
+    ordered = (
+        "${draft_request}",
+        'release_id="$(run_write_gh api --method POST',
+        "release-draft-record",
+        "write_current_notes",
+        "${body_patch}",
+        "write_current_identity",
+        "cosign sign-blob --yes",
+        'verify_identity_signature "${identity_asset}" "${identity_bundle}"',
+        'upload_identity_asset "${release_id}" "${identity_asset_name}"',
+        'upload_identity_asset "${release_id}" "${identity_bundle_name}"',
+        "download_identity_pair",
+        'cmp -s "${identity_asset}" "${identity_download}"',
+        'cmp -s "${identity_bundle}" "${bundle_download}"',
+        "staged-identity-release-record",
+        "${publish_patch}",
+        '--input "${publish_patch}"',
+    )
+    positions = [current.index(token) for token in ordered]
+    if positions != sorted(positions) or len(set(positions)) != len(positions):
+        raise ValueError("draft, asset validation, and immutable publication order drifted")
+    if current.rindex("classify_current_release exact") < positions[-1]:
+        raise ValueError("immutable publication lacks a terminal exact-state observation")
+
+    if transaction.count("v0.1.40") != 3 or transaction.count("v0.1.41") != 3:
+        raise ValueError("the sole v0.1.40 to v0.1.41 legacy exception drifted")
+    allowed_versions = {
+        MODULE.RECOVERY_TAG,
+        MODULE.RECOVERY_TAG.removeprefix("v"),
+        "v0.1.40",
+        "0.1.40",
+        "v0.1.41",
+        "0.1.41",
+    }
+    foreign_versions = set(re.findall(VERSION_LITERAL, transaction)) - allowed_versions
+    if foreign_versions:
+        raise ValueError(
+            f"publisher contains a stale version literal: {sorted(foreign_versions)}"
+        )
+
+
 def event(sha: str) -> dict[str, object]:
     return {
         "repository": {"full_name": "owner/platform"},
@@ -1610,24 +1808,6 @@ class ImmutableMetadataTests(unittest.TestCase):
             self.assertEqual(
                 invoke([*exact_tag_args, "--require", "exact"]), 0
             )
-            self.assertEqual(
-                invoke(
-                    [
-                        "release-record",
-                        "--release-json",
-                        str(release_path),
-                        "--tag",
-                        self.TAG,
-                        "--source-sha",
-                        self.SOURCE,
-                        "--title",
-                        self.TITLE,
-                        "--body",
-                        str(notes),
-                    ]
-                ),
-                0,
-            )
 
 
 class MainCIJobsReceiptTests(unittest.TestCase):
@@ -2428,803 +2608,282 @@ class PublicationTransactionShellTests(unittest.TestCase):
             "See `CHANGELOG.md` at this tag for the human-readable change record.\n"
         )
 
-    @staticmethod
-    def notes(tag: str, source: str) -> str:
-        digest = "d" * 64
-        return (
-            f"## Platform {tag}\n\n"
-            f"Immutable repository source: `{source}`\n\n"
-            "This release names platform source only. It does not deploy, promote, "
-            "mutate a cluster, edge provider, DNS, Tunnel, secret, or protected custody.\n\n"
-            "Fragment: `changelog.d/164-release-fragments.md` "
-            f"(`sha256:{digest}`)\n\n"
-            "### Changed\n\n"
-            "- Replace shared release files with one immutable fragment.\n"
-        )
-
-    def exact_records(
-        self, tag_name: str, source: str, tag_object: str
-    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-        ref, tag = exact_tag_records(
-            tag_name,
-            source,
-            f"Platform release {tag_name} from {source}",
-            self.DATE,
-        )
-        ref["object"]["sha"] = tag_object
-        tag["sha"] = tag_object
-        release = {
-            "tag_name": tag_name,
-            "target_commitish": source,
-            "name": f"Platform {tag_name}",
-            "body": (
-                self.legacy_notes(tag_name, source)
-                if tag_name in {self.RECOVERY_TAG, self.BASE_TAG}
-                else self.notes(tag_name, source)
-            ),
-            "draft": False,
-            "prerelease": False,
-            "immutable": True,
-            "author": {"login": "github-actions[bot]", "id": 41898282},
-            "assets": [],
-        }
-        return ref, tag, release
-
-    def execute(
-        self,
-        script: str,
-        *,
-        race: bool = False,
-        current_state: str = "missing",
-        immutable: bool = True,
-        drift_before_release: bool = False,
-        drift_during_release: bool = False,
-        current_release_race: bool = False,
-        settings_fail_call: int = 0,
-        settings_env: str | None = None,
-        actions_env: str | None = None,
-        contents_env: str | None = None,
-        write_env: str | None = "write-token",
-        recovery_state: str = "tag",
-        predecessor_state: str = "complete",
-        event_tag: str | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], str, dict[str, object]]:
-        with tempfile.TemporaryDirectory(
-            dir=ROOT, prefix=".platform-release-shell-"
-        ) as temporary:
-            runner = Path(temporary)
-            transaction_path = runner / "transaction.sh"
-            with transaction_path.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(script)
-            state_root = runner / "state"
-            state_root.mkdir()
-            if predecessor_state not in {
-                "missing",
-                "tag",
-                "complete",
-                "foreign-tag",
-                "foreign-release",
-                "foreign-release-target",
-                "partial-release",
-            }:
-                raise AssertionError("predecessor fixture state is not closed")
-            if predecessor_state != "missing":
-                ref, tag, release = self.exact_records(
-                    self.BASE_TAG, self.BASE_SOURCE, "e" * 40
-                )
-                if predecessor_state == "foreign-tag":
-                    tag["object"]["sha"] = "0" * 40
-                (state_root / f"ref-{self.BASE_TAG}.json").write_text(
-                    json.dumps(ref), encoding="utf-8"
-                )
-                (state_root / f"tag-{'e' * 40}.json").write_text(
-                    json.dumps(tag), encoding="utf-8"
-                )
-                if predecessor_state in {
-                    "complete",
-                    "foreign-release",
-                    "foreign-release-target",
-                    "partial-release",
-                }:
-                    if predecessor_state == "foreign-release":
-                        release["author"] = {"login": "owner", "id": 1}
-                    if predecessor_state == "foreign-release-target":
-                        release["target_commitish"] = "main"
-                    if predecessor_state == "partial-release":
-                        release["immutable"] = False
-                    (state_root / f"release-{self.BASE_TAG}.json").write_text(
-                        json.dumps(release), encoding="utf-8"
-                    )
-            if recovery_state not in {"missing", "tag", "complete", "foreign"}:
-                raise AssertionError("recovery fixture state is not closed")
-            if recovery_state != "missing":
-                ref, tag, release = self.exact_records(
-                    self.RECOVERY_TAG, self.RECOVERY_SOURCE, "b" * 40
-                )
-                if recovery_state == "foreign":
-                    tag["object"]["sha"] = "0" * 40
-                (state_root / f"ref-{self.RECOVERY_TAG}.json").write_text(
-                    json.dumps(ref), encoding="utf-8"
-                )
-                (state_root / f"tag-{'b' * 40}.json").write_text(
-                    json.dumps(tag), encoding="utf-8"
-                )
-                if recovery_state == "complete":
-                    (state_root / f"release-{self.RECOVERY_TAG}.json").write_text(
-                        json.dumps(release), encoding="utf-8"
-                    )
-            if current_state not in {
-                "missing",
-                "tag",
-                "complete",
-                "foreign-tag",
-                "release-only",
-                "foreign-release",
-                "foreign-release-target",
-                "partial-release",
-            }:
-                raise AssertionError("current fixture state is not closed")
-            if current_state != "missing":
-                ref, tag, release = self.exact_records(
-                    self.TAG, self.SOURCE, "c" * 40
-                )
-                if current_state == "foreign-tag":
-                    tag["object"]["sha"] = "0" * 40
-                if current_state != "release-only":
-                    (state_root / f"ref-{self.TAG}.json").write_text(
-                        json.dumps(ref), encoding="utf-8"
-                    )
-                    (state_root / f"tag-{'c' * 40}.json").write_text(
-                        json.dumps(tag), encoding="utf-8"
-                    )
-                if current_state in {
-                    "complete",
-                    "release-only",
-                    "foreign-release",
-                    "foreign-release-target",
-                    "partial-release",
-                }:
-                    if current_state == "foreign-release":
-                        release["author"] = {"login": "owner", "id": 1}
-                    if current_state == "foreign-release-target":
-                        release["target_commitish"] = "main"
-                    if current_state == "partial-release":
-                        release["immutable"] = False
-                    (state_root / f"release-{self.TAG}.json").write_text(
-                        json.dumps(release), encoding="utf-8"
-                    )
-            prelude = r'''
-python3() {
-  if [ "${4-}" = release-notes ]; then
-    local head='' tag='' base_sha='' base_tag=''
-    shift 4
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --repository) test "$2" = .; shift 2 ;;
-        --head) head="$2"; shift 2 ;;
-        --tag) tag="$2"; shift 2 ;;
-        --base-sha) base_sha="$2"; shift 2 ;;
-        --base-tag) base_tag="$2"; shift 2 ;;
-        *) return 2 ;;
-      esac
-    done
-    if [ "${head}" = "${SOURCE_SHA}" ] && \
-       [ "${tag}" = "${MOCK_CURRENT_TAG}" ]; then
-      test "${base_sha}" = "${BASE_SHA}"
-      test "${base_tag}" = "${BASE_TAG}"
-      printf '%s' "${MOCK_CURRENT_NOTES}"
-      return 0
-    fi
-    if [ "${head}" = "${BASE_SHA}" ] && [ "${tag}" = "${BASE_TAG}" ]; then
-      test -z "${base_sha}"
-      test -z "${base_tag}"
-      printf '%s' "${MOCK_BASE_NOTES}"
-      return 0
-    fi
-    return 2
-  fi
-  "${TEST_PYTHON}" "$@"
-}
-
-git() {
-  if [ "$1" = show ]; then
-    printf '%s\n' "${MOCK_DATE}"
-  else
-    command git "$@"
-  fi
-}
-
-jq() {
-  test "$1" = -er
-  test "$2" = '.object.sha'
-  "${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["object"]["sha"])' "$3"
-}
-
-curl() {
-  local output='' url='' authorization='' token='' tag='' object_sha='' path=''
-  if [ -n "${GH_TOKEN-}" ] || [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
-     [ -n "${ACTIONS_READ_TOKEN-}" ] || [ -n "${CONTENTS_READ_TOKEN-}" ] || \
-     [ -n "${GITHUB_TOKEN-}" ] || [ -n "${GH_ENTERPRISE_TOKEN-}" ] || \
-     [ -n "${GITHUB_ENTERPRISE_TOKEN-}" ]; then
-    return 93
-  fi
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --output) output="$2"; shift 2 ;;
-      --header)
-        if [[ "$2" == Authorization:\ Bearer\ * ]]; then
-          authorization="$2"
-        fi
-        shift 2
-        ;;
-      http*) url="$1"; shift ;;
-      *) shift ;;
-    esac
-  done
-  token="${authorization#Authorization: Bearer }"
-  case "${url}" in
-    */immutable-releases)
-      if [ "${token}" != "${MOCK_SETTINGS_TOKEN}" ]; then
-        printf '{}' > "${output}"
-        printf '403'
-        return 0
-      fi
-      settings_count=0
-      if [ -f "${MOCK_SETTINGS_COUNT}" ]; then
-        settings_count="$(<"${MOCK_SETTINGS_COUNT}")"
-      fi
-      settings_count=$((settings_count + 1))
-      printf '%s' "${settings_count}" > "${MOCK_SETTINGS_COUNT}"
-      if [ "${MOCK_SETTINGS_FAIL_CALL}" -eq "${settings_count}" ]; then
-        printf '{}' > "${output}"
-        printf '403'
-        return 0
-      fi
-      printf '{"enabled":%s,"enforced_by_owner":false}' "${MOCK_IMMUTABLE}" > "${output}"
-      printf '200'
-      ;;
-    */git/ref/tags/*)
-      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
-        printf '{}' > "${output}"; printf '403'; return 0
-      fi
-      tag="${url##*/}"
-      path="${MOCK_STATE}/ref-${tag}.json"
-      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
-      else printf '{}' > "${output}"; printf '404'; fi
-      if [ "${tag}" = "${MOCK_CURRENT_TAG}" ] && \
-         [ "${MOCK_CURRENT_RELEASE_RACE}" = true ]; then
-        current_ref_reads=0
-        if [ -f "${MOCK_CURRENT_REF_READS}" ]; then
-          current_ref_reads="$(<"${MOCK_CURRENT_REF_READS}")"
-        fi
-        current_ref_reads=$((current_ref_reads + 1))
-        printf '%s' "${current_ref_reads}" > "${MOCK_CURRENT_REF_READS}"
-        if [ "${current_ref_reads}" -eq 3 ]; then
-          printf '{"tag_name":"%s"}' "${tag}" > \
-            "${MOCK_STATE}/release-${tag}.json"
-        fi
-      fi
-      ;;
-    */git/tags/*)
-      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
-        printf '{}' > "${output}"; printf '403'; return 0
-      fi
-      object_sha="${url##*/}"
-      path="${MOCK_STATE}/tag-${object_sha}.json"
-      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
-      else printf '{}' > "${output}"; printf '404'; fi
-      ;;
-    */releases/tags/*)
-      if [ "${token}" != "${MOCK_WRITE_TOKEN}" ]; then
-        printf '{}' > "${output}"; printf '403'; return 0
-      fi
-      tag="${url##*/}"
-      path="${MOCK_STATE}/release-${tag}.json"
-      if [ -f "${path}" ]; then cp "${path}" "${output}"; printf '200';
-      else
-        if [ "${MOCK_DRIFT_BEFORE_RELEASE}" = true ] && [ ! -f "${MOCK_DRIFT_MARKER}" ]; then
-          object_sha="$("${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "${MOCK_STATE}/ref-${tag}.json")"
-          "${TEST_PYTHON}" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p,encoding="utf-8")); v["object"]["sha"]="0"*40; json.dump(v,open(p,"w",encoding="utf-8")); open(sys.argv[2],"w").close()' \
-            "${MOCK_STATE}/tag-${object_sha}.json" "${MOCK_DRIFT_MARKER}"
-        fi
-        printf '{}' > "${output}"; printf '404'
-      fi
-      ;;
-    *) return 2 ;;
-  esac
-}
-
-gh() {
-  if [ "${GH_TOKEN}" != "${MOCK_WRITE_TOKEN}" ] || \
-    [ -n "${IMMUTABLE_SETTINGS_TOKEN-}" ] || \
-    [ -n "${ACTIONS_READ_TOKEN-}" ] || [ -n "${CONTENTS_READ_TOKEN-}" ] || \
-    [ -n "${GITHUB_TOKEN-}" ] || [ -n "${GH_ENTERPRISE_TOKEN-}" ] || \
-    [ -n "${GITHUB_ENTERPRISE_TOKEN-}" ]; then
-    return 91
-  fi
-  printf 'CALL\n' >> "${MOCK_CALLS}"
-  printf '<%s>\n' "$@" >> "${MOCK_CALLS}"
-  if [ "$1" = api ]; then
-    local endpoint='' arg tag='' message='' object='' type='' tag_object=''
-    local tagger_name='' tagger_email='' tagger_date='' ref='' sha=''
-    for arg in "$@"; do
-      case "${arg}" in
-        repos/*) endpoint="${arg}" ;;
-        tag=*) tag="${arg#*=}" ;;
-        message=*) message="${arg#*=}" ;;
-        object=*) object="${arg#*=}" ;;
-        type=*) type="${arg#*=}" ;;
-        tagger\[name\]=*) tagger_name="${arg#*=}" ;;
-        tagger\[email\]=*) tagger_email="${arg#*=}" ;;
-        tagger\[date\]=*) tagger_date="${arg#*=}" ;;
-        ref=*) ref="${arg#*=}" ;;
-        sha=*) sha="${arg#*=}" ;;
-      esac
-    done
-    case "${endpoint}" in
-      */git/tags)
-        if [ -z "${tag}" ] || [ -z "${message}" ] || [ -z "${object}" ] || \
-          [ "${type}" != commit ] || [ -z "${tagger_name}" ] || \
-          [ -z "${tagger_email}" ] || [ -z "${tagger_date}" ]; then
-          return 2
-        fi
-        tag_object="$("${TEST_PYTHON}" -c 'import hashlib,sys; print(hashlib.sha1(sys.argv[1].encode()).hexdigest())' "${tag}")"
-        "${TEST_PYTHON}" -c 'import json,sys; json.dump({"sha":sys.argv[2],"tag":sys.argv[3],"message":sys.argv[4],"object":{"type":"commit","sha":sys.argv[5]},"tagger":{"name":sys.argv[6],"email":sys.argv[7],"date":sys.argv[8]}},open(sys.argv[1],"w",encoding="utf-8"))' \
-          "${MOCK_STATE}/tag-${tag_object}.json" "${tag_object}" "${tag}" "${message}" "${object}" \
-          "${tagger_name}" "${tagger_email}" "${tagger_date}"
-        printf '%s\n' "${tag_object}"
-        ;;
-      */git/refs)
-        if [[ "${ref}" != refs/tags/* ]] || \
-          [ ! -f "${MOCK_STATE}/tag-${sha}.json" ]; then
-          return 2
-        fi
-        "${TEST_PYTHON}" -c 'import json,sys; json.dump({"ref":sys.argv[2],"object":{"type":"tag","sha":sys.argv[3]}},open(sys.argv[1],"w",encoding="utf-8"))' \
-          "${MOCK_STATE}/ref-${ref#refs/tags/}.json" "${ref}" "${sha}"
-        if [ "${MOCK_RACE}" = true ]; then return 1; fi
-        ;;
-      *) return 2 ;;
-    esac
-    return 0
-  fi
-  if [ "$1" = release ] && [ "$2" = create ]; then
-    local release_tag="$3" tag_verified='' target='' draft=false prerelease=false title='' notes='' object_sha=''
-    shift 3
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --verify-tag) tag_verified=true; shift ;;
-        --target) target="$2"; shift 2 ;;
-        --draft) draft=true; shift ;;
-        --prerelease) prerelease=true; shift ;;
-        --title) title="$2"; shift 2 ;;
-        --notes-file) notes="$2"; shift 2 ;;
-        *) return 2 ;;
-      esac
-    done
-    if [ "${tag_verified}" != true ] || [ -z "${target}" ] || \
-      [ -z "${title}" ] || [ ! -f "${notes}" ]; then
-      return 2
-    fi
-    "${TEST_PYTHON}" -c 'import json,sys; json.dump({"tag_name":sys.argv[2],"target_commitish":sys.argv[3],"name":sys.argv[4],"body":open(sys.argv[5],encoding="utf-8").read(),"draft":sys.argv[6]=="true","prerelease":sys.argv[7]=="true","immutable":sys.argv[8]=="true","author":{"login":"github-actions[bot]","id":41898282},"assets":[]},open(sys.argv[1],"w",encoding="utf-8"))' \
-      "${MOCK_STATE}/release-${release_tag}.json" "${release_tag}" "${target}" "${title}" "${notes}" "${draft}" "${prerelease}" "${MOCK_IMMUTABLE}"
-    if [ "${MOCK_DRIFT_DURING_RELEASE}" = true ]; then
-      object_sha="$("${TEST_PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' "${MOCK_STATE}/ref-${release_tag}.json")"
-      "${TEST_PYTHON}" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p,encoding="utf-8")); v["object"]["sha"]="0"*40; json.dump(v,open(p,"w",encoding="utf-8"))' \
-        "${MOCK_STATE}/tag-${object_sha}.json"
-    fi
-    if [ "${MOCK_RACE}" = true ]; then return 1; fi
-    return 0
-  fi
-  return 2
-}
-
-sleep() { :; }
-'''
-            harness_path = runner / "harness.sh"
-            with harness_path.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(prelude + '\nsource "${MOCK_SCRIPT}"\n')
-            relative = runner.relative_to(ROOT).as_posix()
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "TEST_PYTHON": self.bash_path(sys.executable),
-                    "MOCK_DATE": self.DATE,
-                    "MOCK_IMMUTABLE": "true" if immutable else "false",
-                    "MOCK_RACE": "true" if race else "false",
-                    "MOCK_DRIFT_BEFORE_RELEASE": "true" if drift_before_release else "false",
-                    "MOCK_DRIFT_DURING_RELEASE": "true" if drift_during_release else "false",
-                    "MOCK_CURRENT_RELEASE_RACE": "true" if current_release_race else "false",
-                    "MOCK_CURRENT_TAG": self.TAG,
-                    "MOCK_CURRENT_NOTES": self.notes(self.TAG, self.SOURCE),
-                    "MOCK_BASE_NOTES": self.legacy_notes(
-                        self.BASE_TAG, self.BASE_SOURCE
-                    ),
-                    "MOCK_CURRENT_REF_READS": f"{relative}/current-ref-reads",
-                    "MOCK_DRIFT_MARKER": f"{relative}/drift.marker",
-                    "MOCK_SETTINGS_FAIL_CALL": str(settings_fail_call),
-                    "MOCK_SETTINGS_COUNT": f"{relative}/settings-count",
-                    "MOCK_SETTINGS_TOKEN": "settings-token",
-                    "MOCK_WRITE_TOKEN": "write-token",
-                    "MOCK_STATE": f"{relative}/state",
-                    "MOCK_CALLS": f"{relative}/calls.log",
-                    "MOCK_SCRIPT": f"{relative}/transaction.sh",
-                    "SOURCE_SHA": self.SOURCE,
-                    "TAG": event_tag if event_tag is not None else self.TAG,
-                    "BASE_SHA": self.BASE_SOURCE,
-                    "BASE_TAG": self.BASE_TAG,
-                    "GITHUB_API_URL": "https://api.github.test",
-                    "GITHUB_REPOSITORY": "owner/platform",
-                    "RUNNER_TEMP": relative,
-                }
-            )
-            if settings_env is None:
-                environment.pop("IMMUTABLE_SETTINGS_TOKEN", None)
-            else:
-                environment["IMMUTABLE_SETTINGS_TOKEN"] = settings_env
-            if actions_env is None:
-                environment.pop("ACTIONS_READ_TOKEN", None)
-            else:
-                environment["ACTIONS_READ_TOKEN"] = actions_env
-            if contents_env is None:
-                environment.pop("CONTENTS_READ_TOKEN", None)
-            else:
-                environment["CONTENTS_READ_TOKEN"] = contents_env
-            if write_env is None:
-                environment.pop("GH_TOKEN", None)
-            else:
-                environment["GH_TOKEN"] = write_env
-            for name in (
-                "GITHUB_TOKEN",
-                "GH_ENTERPRISE_TOKEN",
-                "GITHUB_ENTERPRISE_TOKEN",
-            ):
-                environment.pop(name, None)
-            completed = subprocess.run(
-                [
-                    self.bash_executable(),
-                    self.bash_path(harness_path),
-                ],
-                cwd=ROOT,
-                env=environment,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                timeout=30,
-            )
-            calls = (
-                (runner / "calls.log").read_text(encoding="utf-8")
-                if (runner / "calls.log").exists()
-                else ""
-            )
-            state: dict[str, object] = {}
-            for ref_path in state_root.glob("ref-*.json"):
-                ref = json.loads(ref_path.read_text(encoding="utf-8"))
-                tag_ref = ref["ref"]
-                tag_name = tag_ref[len("refs/tags/") :]
-                object_sha = ref["object"]["sha"]
-                record: dict[str, object] = {"ref": ref}
-                tag_path = state_root / f"tag-{object_sha}.json"
-                release_path = state_root / f"release-{tag_name}.json"
-                if tag_path.exists():
-                    record["tag"] = json.loads(tag_path.read_text(encoding="utf-8"))
-                if release_path.exists():
-                    record["release"] = json.loads(
-                        release_path.read_text(encoding="utf-8")
-                    )
-                state[tag_name] = record
-            return completed, calls, state
-
-    def test_actual_absent_existing_and_both_concurrent_winner_paths(self):
+    def test_draft_upload_redownload_validate_then_publish_is_exact(self):
         script = self.script()
-        for race in (False, True):
-            with self.subTest(race=race):
-                completed, calls, state = self.execute(script, race=race)
-                self.assertEqual(
-                    completed.returncode, 0, completed.stdout + completed.stderr
-                )
-                self.assertIn(f"<object={self.SOURCE}>", calls)
-                self.assertIn(f"<{self.TAG}>", calls)
-                self.assertIn("<--verify-tag>", calls)
-                self.assertIn("<--target>", calls)
-                self.assertNotIn("<--draft>", calls)
-                self.assertNotIn("<--prerelease>", calls)
-                self.assertEqual(
-                    state[self.TAG]["tag"]["object"]["sha"], self.SOURCE
-                )
-                self.assertEqual(state[self.TAG]["release"]["draft"], False)
-                self.assertEqual(state[self.TAG]["release"]["prerelease"], False)
-                self.assertEqual(state[self.TAG]["release"]["immutable"], True)
-                self.assertEqual(
-                    state[self.TAG]["release"]["target_commitish"], self.SOURCE
-                )
-                self.assertEqual(
-                    state[self.RECOVERY_TAG]["release"]["author"]["login"],
-                    "github-actions[bot]",
-                )
-                self.assertEqual(
-                    state[self.RECOVERY_TAG]["release"]["target_commitish"],
-                    self.RECOVERY_SOURCE,
-                )
-                self.assertLess(
-                    calls.index(f"<{self.RECOVERY_TAG}>"),
-                    calls.index(f"<object={self.SOURCE}>")
-                )
-                if race:
-                    self.assertIn("exact concurrent winner", completed.stderr)
+        validate_single_asset_publication_transaction(script)
 
-        existing, calls, _state = self.execute(
-            script, current_state="complete", recovery_state="complete"
+        mutation_tokens = (
+            "identity_asset_name='platform-release-identity.v1.json'",
+            "identity_bundle_name='platform-release-identity.v1.json.sigstore.json'",
+            '(.assets | length == $count)',
+            '(([.assets[].name] | sort) == ($expected | sort))',
+            "'{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'",
+            '--input "${draft_request}" --jq \'.id\')"',
+            "release-draft-record",
+            '--release-id "${release_id}"',
+            "cosign sign-blob --yes",
+            'verify_identity_signature "${identity_asset}" "${identity_bundle}"',
+            '--data-binary "@${path}"',
+            'upload_identity_asset "${release_id}" "${identity_asset_name}"',
+            'upload_identity_asset "${release_id}" "${identity_bundle_name}"',
+            'test "${status}" = 201',
+            'cmp -s "${identity_asset}" "${identity_download}"',
+            'cmp -s "${identity_bundle}" "${bundle_download}"',
+            "staged-identity-release-record",
+            "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+            '--input "${publish_patch}"',
         )
-        self.assertEqual(existing.returncode, 0, existing.stdout + existing.stderr)
-        self.assertEqual(calls, "")
-        self.assertIn("verified existing", existing.stdout)
-        self.assertIn("verified complete existing", existing.stdout)
+        for token in mutation_tokens:
+            with self.subTest(deleted=token), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script.replace(token, "")
+                )
 
-        resumable, calls, state = self.execute(
-            script, current_state="tag", recovery_state="complete"
-        )
-        self.assertEqual(resumable.returncode, 0, resumable.stdout + resumable.stderr)
-        self.assertNotIn(f"<object={self.SOURCE}>", calls)
-        self.assertEqual(calls.count("CALL\n"), 1)
-        self.assertIn(f"<{self.TAG}>", calls)
-        self.assertEqual(state[self.TAG]["release"]["immutable"], True)
-        self.assertEqual(
-            state[self.TAG]["release"]["target_commitish"], self.SOURCE
-        )
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script
+                + '\nupload_identity_asset "${release_id}" '
+                '"${identity_asset_name}" "${identity_asset}"\n'
+            )
 
     def test_app_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
-        completed, calls, state = self.execute(
-            script, settings_env="settings-token"
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, "")
-        self.assertNotIn(self.TAG, state)
-        self.assertNotIn("release", state[self.RECOVERY_TAG])
         guard = 'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"'
         self.assertIn(guard, script)
-        deleted_guard, mutant_calls, _state = self.execute(
-            script.replace(guard, ":", 1), settings_env="settings-token"
-        )
-        self.assertNotEqual(deleted_guard.returncode, 0)
-        self.assertEqual(mutant_calls, "")
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script.replace(guard, ":", 1)
+            )
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script + "\nsettings_token=crossed\n"
+            )
 
     def test_actions_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
-        completed, calls, state = self.execute(
-            script, actions_env="actions-token"
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, "")
-        self.assertNotIn(self.TAG, state)
-        self.assertNotIn("release", state[self.RECOVERY_TAG])
         guard = 'test -z "${ACTIONS_READ_TOKEN-}"'
         self.assertIn(guard, script)
-        deleted_guard, mutant_calls, _state = self.execute(
-            script.replace(guard, ":", 1), actions_env="actions-token"
-        )
-        self.assertNotEqual(deleted_guard.returncode, 0)
-        self.assertEqual(mutant_calls, "")
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script.replace(guard, ":", 1)
+            )
 
     def test_contents_token_crossover_denies_before_any_publication_call(self):
         script = self.script()
-        completed, calls, state = self.execute(
-            script, contents_env="contents-token"
-        )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, "")
-        self.assertNotIn(self.TAG, state)
-        self.assertNotIn("release", state[self.RECOVERY_TAG])
         guard = 'test -z "${CONTENTS_READ_TOKEN-}"'
         self.assertIn(guard, script)
-        deleted_guard, mutant_calls, _state = self.execute(
-            script.replace(guard, ":", 1), contents_env="contents-token"
-        )
-        self.assertNotEqual(deleted_guard.returncode, 0)
-        self.assertEqual(mutant_calls, "")
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script.replace(guard, ":", 1)
+            )
 
     def test_missing_or_foreign_recovery_tag_denies_before_every_write(self):
         script = self.script()
-        for recovery_state in ("missing", "foreign"):
-            with self.subTest(recovery_state=recovery_state):
-                completed, calls, state = self.execute(
-                    script, recovery_state=recovery_state
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(calls, "")
-                self.assertNotIn(self.TAG, state)
-
-    def test_incomplete_or_foreign_predecessor_denies_before_every_write(self):
-        script = self.script()
-        for predecessor_state in (
-            "missing",
-            "tag",
-            "foreign-tag",
-            "foreign-release",
-            "foreign-release-target",
-            "partial-release",
-        ):
-            with self.subTest(predecessor_state=predecessor_state):
-                completed, calls, state = self.execute(
-                    script,
-                    predecessor_state=predecessor_state,
-                    recovery_state="complete",
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(calls, "")
-                self.assertNotIn(self.TAG, state)
-
-        predecessor_guard = (
-            'write_predecessor_notes\n'
-            '  classify_tag exact \\\n'
-            '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
-            '    "${predecessor_tagger_date}" >/dev/null\n'
-            '  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null'
+        validate_single_asset_publication_transaction(script)
+        recovery_start = script.index("complete_recovery_release() {")
+        current_start = script.index("publish_current_release() {")
+        recovery = script[recovery_start:current_start]
+        self.assertNotIn("classify_tag absent", recovery)
+        self.assertNotIn("run_write_gh api", recovery)
+        self.assertLess(
+            recovery.index("classify_tag exact"),
+            recovery.index('run_write_gh release create "${recovery_tag}"'),
         )
-        self.assertEqual(script.count(predecessor_guard), 2)
-
-    def test_foreign_partial_current_states_and_races_deny_before_every_write(self):
-        script = self.script()
-        for current_state in (
-            "foreign-tag",
-            "release-only",
-            "foreign-release",
-            "foreign-release-target",
-            "partial-release",
+        for token in (
+            "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
+            "recovery_tag='v0.1.0'",
+            'run_write_gh release create "${recovery_tag}" --verify-tag',
+            '--target "${recovery_source_sha}"',
         ):
-            with self.subTest(current_state=current_state):
-                completed, calls, state = self.execute(
-                    script, current_state=current_state
+            with self.subTest(deleted=token), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script.replace(token, "", 1)
                 )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(calls, "")
-                self.assertNotIn("release", state[self.RECOVERY_TAG])
 
-        race_cases = (
-            {"current_state": "tag", "drift_before_release": True},
-            {"current_state": "missing", "current_release_race": True},
-        )
-        for race_case in race_cases:
-            with self.subTest(race_case=race_case):
-                completed, calls, _state = self.execute(
-                    script, recovery_state="complete", **race_case
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(calls, "")
-
-    def test_event_tag_that_is_not_tag_ledger_derived_is_refused(self):
-        version = MODULE.Version.parse(self.TAG.removeprefix("v"))
-        # An event tag ahead of the ledger, the stranded era constant, and a
-        # plainly foreign tag all make release-notes fail before any write.
-        for event_tag in (MODULE.next_version(version).tag, "v0.1.1", "v9.9.9"):
-            with self.subTest(event_tag=event_tag):
-                self.assertNotEqual(event_tag, self.TAG)
-                completed, calls, state = self.execute(
-                    self.script(), event_tag=event_tag
-                )
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertEqual(calls, "")
-                self.assertNotIn(event_tag, state)
-
-    def test_publisher_rederives_tag_notes_and_pins_no_current_version_literal(self):
+    def test_v0140_predecessor_exception_is_exact_and_fail_closed(self):
         script = self.script()
-        # Run 32174376337 (the #123 merge, TAG=v0.1.2) died on this guard:
-        # `current_tag='v0.1.1'`, written for the #122 recovery era, made the
-        # publisher structurally unable to publish any later patch, and no gate
-        # bound that constant to VERSION — so the first post-era advance
-        # stranded publication in silence. The recovery pins stay frozen
-        # because they name immutable history; nothing else may name a version.
+        validate_single_asset_publication_transaction(script)
+        legacy_start = script.index(
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then'
+        )
+        legacy_end = script.index("\n  fi\n}", legacy_start)
+        legacy = script[legacy_start:legacy_end]
+        zero_asset = legacy.split("\n  else\n", 1)[1]
+        self.assertNotIn("0" * 40, legacy)
+        self.assertNotIn('--identity "${identity_download}"', zero_asset)
+        self.assertNotIn("download_identity_asset", zero_asset)
+        self.assertIn('--repository .', zero_asset)
+        self.assertIn('--base-tag "${BASE_TAG}" --target-tag "${TAG}"', zero_asset)
+        self.assertIn('--release-json "${release_json}"', zero_asset)
+        self.assertIn('--main-runs-json "${legacy_main_runs_json}"', zero_asset)
+        self.assertIn('--platform-runs-json "${legacy_platform_runs_json}"', zero_asset)
+        self.assertIn("actions/workflows/pull-request.yml/runs?", zero_asset)
+        self.assertIn("actions/workflows/platform-release.yml/runs?", zero_asset)
+        self.assertIn('--emit > "${legacy_predecessor_json}"', zero_asset)
+        self.assertIn(
+            "actions/runs/${legacy_main_run_id}/attempts/${legacy_main_run_attempt}",
+            legacy,
+        )
+        self.assertIn(
+            "actions/runs/${legacy_platform_run_id}/attempts/${legacy_platform_run_attempt}",
+            legacy,
+        )
+        self.assertIn('--main-run-json "${legacy_main_run_json}"', legacy)
+        self.assertIn('--platform-run-json "${legacy_platform_run_json}"', legacy)
+
+        mutation_tokens = (
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+            'test "${BASE_TAG}" = v0.1.40',
+            'test "${TAG}" = v0.1.41',
+            '--repository .',
+            '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+            '--release-json "${release_json}"',
+            '--main-runs-json "${legacy_main_runs_json}"',
+            '--platform-runs-json "${legacy_platform_runs_json}"',
+            '--emit > "${legacy_predecessor_json}"',
+            "actions/runs/${legacy_main_run_id}/attempts/${legacy_main_run_attempt}",
+            "actions/runs/${legacy_platform_run_id}/attempts/${legacy_platform_run_attempt}",
+            '--main-run-json "${legacy_main_run_json}"',
+            '--platform-run-json "${legacy_platform_run_json}"',
+        )
+        for token in mutation_tokens:
+            with self.subTest(deleted=token), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script.replace(token, "")
+                )
+
+    def test_current_release_uses_identity_asset_and_never_markdown_body(self):
+        script = self.script()
+        validate_single_asset_publication_transaction(script)
+        start = script.index("classify_current_release() {")
+        end = script.index("classify_predecessor_release() {")
+        classifier = script[start:end]
+        self.assertNotIn("--body", classifier)
+        self.assertNotIn('"${contract}" release-state', classifier)
+        self.assertIn("download_identity_pair", classifier)
+        self.assertIn("selector-image-from-release", classifier)
+        self.assertIn("identity-release-state", classifier)
+        self.assertIn('--identity "${identity_download}"', classifier)
+        self.assertIn('--bundle "${bundle_download}"', classifier)
+        self.assertIn('--source-tree-sha "${tree_sha}"', classifier)
+
+        classifier_mutants = (
+            classifier.replace("download_identity_pair", ":", 1),
+            classifier.replace("selector-image-from-release", "release-state", 1),
+            classifier.replace("identity-release-state", "release-state", 1),
+            classifier.replace(
+                '--http-status "${status}" --require "${required}"',
+                '--http-status "${status}" --require "${required}" --body "${notes}"',
+                1,
+            ),
+        )
+        for index, mutant_classifier in enumerate(classifier_mutants):
+            mutant = script[:start] + mutant_classifier + script[end:]
+            with self.subTest(mutant=index), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(mutant)
+
+    def test_event_tag_and_notes_are_rederived_from_checked_out_ledger(self):
+        script = self.script()
+        validate_single_asset_publication_transaction(script)
         self.assertIn(PUBLISHER_TAG_GUARD, script)
         self.assertNotIn("current_tag=", script)
         self.assertNotIn("< VERSION", script)
-        self.assertIn(f"recovery_tag='{self.RECOVERY_TAG}'", script)
-        self.assertIn(f"recovery_source_sha='{self.RECOVERY_SOURCE}'", script)
-        stale_pins = set(re.findall(VERSION_LITERAL, script)) - {
+        with self.assertRaises(ValueError):
+            validate_single_asset_publication_transaction(
+                script.replace(PUBLISHER_TAG_GUARD, "false", 1)
+            )
+
+    def test_only_frozen_recovery_and_v0140_v0141_exception_are_literal(self):
+        script = self.script()
+        validate_single_asset_publication_transaction(script)
+        allowed = {
             self.RECOVERY_TAG,
             self.RECOVERY_TAG.removeprefix("v"),
+            "v0.1.40",
+            "0.1.40",
+            "v0.1.41",
+            "0.1.41",
         }
-        self.assertEqual(stale_pins, set())
-
-        # Executable proof, not merely textual: deleting the checked-out
-        # source/tag/fragment re-derivation stops before any REST write.
-        stranded = script.replace(
-            PUBLISHER_TAG_GUARD, "false", 1
-        )
-        self.assertNotIn(PUBLISHER_TAG_GUARD, stranded)
-        completed, calls, state = self.execute(stranded, recovery_state="complete")
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, "")
-        self.assertNotIn(self.TAG, state)
-        self.assertEqual(completed.stdout + completed.stderr, "")
+        self.assertEqual(set(re.findall(VERSION_LITERAL, script)) - allowed, set())
+        self.assertEqual(script.count("v0.1.40"), 3)
+        self.assertEqual(script.count("v0.1.41"), 3)
+        for foreign in ("v0.1.31", "v0.1.34", "v9.9.9"):
+            with self.subTest(foreign=foreign), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script + f"\nforeign_tag='{foreign}'\n"
+                )
 
     def test_write_credential_is_process_scoped_and_fails_closed(self):
         script = self.script()
-        for write_env in (None, "settings-token"):
-            completed, calls, _state = self.execute(
-                script, write_env=write_env
-            )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertEqual(calls, "")
         for required in (
             'write_token="${GH_TOKEN}"',
             "unset GH_TOKEN",
             'GH_TOKEN="${write_token}" gh "$@"',
         ):
             self.assertIn(required, script)
+            with self.subTest(deleted=required), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script.replace(required, "", 1)
+                )
         self.assertNotIn("settings_token", script)
 
-    def test_current_source_creation_and_publication_mutants_are_killed(self):
+    def test_current_tag_and_draft_release_binding_mutants_are_killed(self):
         script = self.script()
-        source = '-f object="${SOURCE_SHA}" -f type=commit \\\n'
-        release = 'run_write_gh release create "${TAG}" --verify-tag \\\n'
-        verify = '"${TAG}" --verify-tag \\\n'
-        markers = (source, release, verify)
-        for marker in markers:
-            self.assertIn(marker, script)
-        mutants = (
+        validate_single_asset_publication_transaction(script)
+        mutations = (
             script.replace(
-                source,
-                '-f object="0000000000000000000000000000000000000000" -f type=commit \\\n',
+                '-f object="${SOURCE_SHA}" -f type=commit',
+                '-f object="' + "0" * 40 + '" -f type=commit',
                 1,
             ),
-            script.replace(source, "", 1),
-            script.replace("-f type=commit", "-f type=tree", 1),
+            script.replace('-f type=commit', '-f type=tree', 1),
             script.replace(
-                release,
-                'run_write_gh release create "${TAG}" --verify-tag --draft \\\n',
+                "draft:true,name:$name,prerelease:false",
+                "draft:false,name:$name,prerelease:false",
                 1,
             ),
             script.replace(
-                release,
-                'run_write_gh release create "${TAG}" --verify-tag --prerelease \\\n',
+                "tag_name:$tag,target_commitish:$target",
+                "tag_name:$tag,target_commitish:\"main\"",
                 1,
             ),
-            script.replace(verify, '"${TAG}" \\\n', 1),
+            script.replace(
+                "printf '{\"draft\":false}\\n'",
+                "printf '{\"draft\":true}\\n'",
+                1,
+            ),
         )
-        for index, mutant in enumerate(mutants):
-            with self.subTest(transaction_mutant=index):
-                completed, _calls, _state = self.execute(
-                    mutant, recovery_state="complete"
-                )
-                self.assertNotEqual(
-                    completed.returncode, 0, completed.stdout + completed.stderr
-                )
+        for index, mutant in enumerate(mutations):
+            with self.subTest(mutant=index), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(mutant)
 
-    def test_current_and_recovery_release_targets_are_load_bearing(self):
+    def test_recovery_uses_verify_target_and_current_uses_draft_target_commitish(self):
         script = self.script()
-        current_target = '--target "${SOURCE_SHA}"'
-        recovery_target = '--target "${recovery_source_sha}"'
-        for target in (current_target, recovery_target):
-            self.assertEqual(script.count(target), 1)
-        mutants = (
-            (script.replace(current_target, "", 1), "complete"),
-            (
-                script.replace(current_target, recovery_target, 1),
-                "complete",
+        validate_single_asset_publication_transaction(script)
+        self.assertEqual(script.count('--target "${recovery_source_sha}"'), 1)
+        self.assertNotIn('--target "${SOURCE_SHA}"', script)
+        self.assertEqual(
+            script.count(
+                "'{body:$body,draft:true,name:$name,prerelease:false,"
+                "tag_name:$tag,target_commitish:$target}'"
             ),
-            (script.replace(recovery_target, "", 1), "tag"),
-            (
-                script.replace(recovery_target, current_target, 1),
-                "tag",
-            ),
+            1,
         )
-        for index, (mutant, recovery_state) in enumerate(mutants):
-            with self.subTest(target_mutant=index):
-                completed, _calls, _state = self.execute(
-                    mutant, recovery_state=recovery_state
-                )
-                self.assertNotEqual(
-                    completed.returncode, 0, completed.stdout + completed.stderr
+        for token in (
+            '--target "${recovery_source_sha}"',
+            "tag_name:$tag,target_commitish:$target",
+        ):
+            with self.subTest(deleted=token), self.assertRaises(ValueError):
+                validate_single_asset_publication_transaction(
+                    script.replace(token, "", 1)
                 )
 
 
 class PredecessorWaitShellTests(unittest.TestCase):
     SOURCE = "a" * 40
-    BASE_TAG = MODULE.TAG_LEDGER_FLOOR_TAG
-    BASE_SOURCE = MODULE.TAG_LEDGER_FLOOR_SHA
-    DATE = "2026-08-13T15:21:32Z"
+    BASE_TAG = "v0.1.40"
+    BASE_SOURCE = "3f25c3dc9912a53702926d4abac55435ad02c1b0"
+    DATE = "2026-08-27T14:59:58-07:00"
 
     @staticmethod
     def script() -> str:
@@ -3505,6 +3164,20 @@ sleep() { printf 'SLEEP %s\n' "$1" >> "${MOCK_CALLS}"; }
             raced_output, f"attestation=PASS:owner/platform:{self.SOURCE}\n"
         )
         self.assertEqual(raced_calls.count("/releases/tags/"), 3)
+
+    def test_future_predecessors_consume_the_two_asset_identity_receipt(self):
+        script = self.script()
+        for required in (
+            "platform-release-identity.v1.json",
+            "platform-release-identity.v1.json.sigstore.json",
+            "Accept: application/octet-stream",
+            'if [ "${tag}" = v0.1.40 ]; then',
+            'identity-release-state \\\n',
+            '--selector-build-sha "${selector_build_sha}"',
+            '--tag-object-sha "${tag_object_sha}"',
+            '--source-tree-sha "${source_tree_sha}"',
+        ):
+            self.assertIn(required, script)
 
     def test_unchanged_tag_snapshot_caches_the_validated_release_window(self):
         completed, output, calls = self.execute(release_state="missing")
@@ -4347,6 +4020,40 @@ class WorkflowStructureTests(unittest.TestCase):
             "base_tag=\"$(jq -er '.base_tag'",
             "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
             "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
+            "permissions:\n      contents: write\n      id-token: write\n      packages: write",
+            "SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector",
+            "Install checksum-verified release tools",
+            "Select the immutable selector image lineage",
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+            "platform-release-identity.v1.json.sigstore.json",
+            "cosign verify-blob",
+            "identity-run-records",
+            '--source-tree-sha "${tree_sha}"',
+            '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+            '--emit > "${legacy_predecessor}"',
+            "actions/runs/${legacy_main_id}/attempts/${legacy_main_attempt}",
+            "actions/runs/${legacy_platform_id}/attempts/${legacy_platform_attempt}",
+            "state=reuse",
+            "state=build",
+            "if: steps.selector-image-state.outputs.state == 'build'",
+            "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0",
+            "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0",
+            "context: https://github.com/snaraj/website-infrastructure.git#${{ steps.release.outputs.source_sha }}",
+            "platforms: linux/arm64",
+            "push-by-digest=true",
+            "provenance: mode=max,version=v1",
+            "sbom: true",
+            '$definition.externalParameters.configSource == {',
+            '"digest": {"sha1": $source}',
+            ".runDetails.metadata.buildkit_completeness.resolvedDependencies == true",
+            ".runDetails.metadata.buildkit_hermetic == true",
+            'identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/platform-release.yml@refs/heads/main"',
+            "issuer='https://token.actions.githubusercontent.com'",
+            'cosign verify --certificate-identity "${identity}"',
+            "cosign verify-attestation --type slsaprovenance1",
+            "MAIN_RUN_ID: ${{ github.event.workflow_run.id }}",
+            "MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}",
+            "SELECTOR_IMAGE_DIGEST: ${{ steps.selector-image.outputs.digest }}",
             "bash scripts/ci/publish-platform-release.sh",
         ):
             if required not in publish_job:
@@ -4471,6 +4178,14 @@ class WorkflowStructureTests(unittest.TestCase):
         ):
             if required not in predecessor_wait:
                 raise ValueError(f"predecessor waiter lost exact guard: {required}")
+        for token, expected in (
+            ("--request GET", 2),
+            ('"Authorization: Bearer ${read_token}"', 2),
+        ):
+            if predecessor_wait.count(token) != expected:
+                raise ValueError(
+                    f"predecessor waiter read path count drifted: {token}"
+                )
         for forbidden in (
             "--request POST",
             "--request PUT",
@@ -4537,125 +4252,118 @@ class WorkflowStructureTests(unittest.TestCase):
             if forbidden in settings_verifier:
                 raise ValueError(f"settings verifier gained mutation surface: {forbidden}")
 
-        for required in (
-            "tag-state",
-            ': "${BASE_SHA:?BASE_SHA is required}"',
-            ': "${BASE_TAG:?BASE_TAG is required}"',
-            'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
-            'test -z "${ACTIONS_READ_TOKEN-}"',
-            'test -z "${CONTENTS_READ_TOKEN-}"',
-            'test -z "${GITHUB_TOKEN-}"',
-            'test -z "${GH_ENTERPRISE_TOKEN-}"',
-            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
-            'write_token="${GH_TOKEN}"',
-            "unset GH_TOKEN",
-            'GH_TOKEN="${write_token}" gh "$@"',
-            "recovery-release",
-            "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
-            "recovery_tag='v0.1.0'",
-            PUBLISHER_TAG_GUARD,
-            "write_predecessor_notes",
-            '--head "${BASE_SHA}" --tag "${BASE_TAG}"',
-            '"${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}"',
-            'classify_release exact "${BASE_TAG}" "${BASE_SHA}"',
-            'test "${SOURCE_SHA}" != "${BASE_SHA}"',
-            'test "${TAG}" != "${BASE_TAG}"',
-            'tagger[name]=${tagger_name}',
-            'tagger[email]=${tagger_email}',
-            'tagger[date]=${tagger_date}',
-            "release-state",
-            '--source-sha "${source_sha}" \\\n'
-            '    --title "Platform ${tag}" --body "${notes}"',
-            '"${api}/releases/tags/${tag}"',
-            "preflight_publication_state",
-            'classify_tag "${current_tag_state}"',
-            'classify_release "${current_release_state}"',
-            'test "${current_release_state}" = absent',
-            "for attempt in 1 2 3 4 5",
-            'test "${tag_race_verified}" = true',
-            'test "${release_race_verified}" = true',
-            'run_write_gh release create "${recovery_tag}" --verify-tag',
-            '--target "${recovery_source_sha}"',
-            'run_write_gh release create "${TAG}" --verify-tag',
-            '--target "${SOURCE_SHA}"',
-        ):
-            if required not in transaction:
-                raise ValueError(f"platform transaction lost exact wiring: {required}")
-        # The two recovery pins are legitimately frozen history; any OTHER
-        # version literal is a current-version constant that goes stale at the
-        # next patch and silently strands publication, as `current_tag='v0.1.1'`
-        # did for v0.1.2. Only the derivation above may name the current tag.
-        # The pattern accepts the un-prefixed form too — see VERSION_LITERAL —
-        # because the prefix lives at the use site in the very idiom this
-        # publisher uses, so keying on it alone would leave the defect reachable.
-        stale_pins = set(re.findall(VERSION_LITERAL, transaction)) - {
-            MODULE.RECOVERY_TAG,
-            MODULE.RECOVERY_TAG.removeprefix("v"),
-        }
-        if stale_pins:
-            raise ValueError(
-                f"platform transaction pins a current-version tag literal: {sorted(stale_pins)}"
-            )
+        validate_single_asset_publication_transaction(transaction)
         if "settings_token" in transaction or "/immutable-releases" in transaction:
             raise ValueError("App settings authority must not enter the write transaction")
-        if transaction.count("--target") != 2:
-            raise ValueError("both GitHub Releases must carry one exact commit target")
+        if transaction.count('--target "') != 1:
+            raise ValueError("only the frozen recovery Release may use direct --target")
         if transaction.count("for attempt in 1 2 3 4 5") != 3:
-            raise ValueError("recovery Release, current tag, and current Release need bounded retries")
+            raise ValueError(
+                "recovery Release, current tag, and immutable Release need bounded retries"
+            )
         if transaction.count("preflight_publication_state") != 6:
-            raise ValueError("all six states need an initial preflight and four mutation-boundary rechecks")
+            raise ValueError(
+                "all remote states need an initial preflight and mutation-boundary rechecks"
+            )
         if (
             "preflight_publication_state\n"
             "complete_recovery_release\n"
             "publish_current_release"
         ) not in transaction:
-            raise ValueError("all six states must be classified before either publication phase")
+            raise ValueError("all remote states must close before publication phases")
         if transaction.count('test "${tag_race_verified}" = true') != 1:
-            raise ValueError("current tag race must have one terminal exact-state assertion")
+            raise ValueError("current tag race lacks one terminal exact assertion")
         if transaction.count('test "${release_race_verified}" = true') != 2:
-            raise ValueError("both Release races must have terminal exact-state assertions")
-        if transaction.count("classify_tag exact") < 9:
-            raise ValueError("predecessor/recovery/current tag checks must be exact")
-        if transaction.count("classify_release exact") < 8:
-            raise ValueError("predecessor/recovery/current Release paths must reach exact REST state")
-        if transaction.count("write_predecessor_notes") != 3:
-            raise ValueError("predecessor notes must be defined and rebound twice")
+            raise ValueError("both Release races lack terminal exact assertions")
 
-        preflight_start = transaction.index("preflight_publication_state() {")
-        recovery_start = transaction.index("complete_recovery_release() {")
-        initial_preflight = transaction[preflight_start:recovery_start]
-        predecessor_guard = (
-            'classify_tag exact \\\n'
-            '    "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \\\n'
-            '    "${predecessor_tagger_date}" >/dev/null\n'
-            '  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null'
+        selector_required = (
+            "permissions:\n      contents: write\n      id-token: write\n      packages: write",
+            "SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector",
+            "Install checksum-verified release tools",
+            "Select the immutable selector image lineage",
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+            "platform-release-identity.v1.json.sigstore.json",
+            "cosign verify-blob",
+            "identity-run-records",
+            '--source-tree-sha "${tree_sha}"',
+            "validate_platform_predecessor.py",
+            "actions/workflows/pull-request.yml/runs?branch=main&event=push&head_sha=${BASE_SHA}&status=success&per_page=100",
+            "actions/workflows/platform-release.yml/runs?branch=main&event=workflow_run&head_sha=${BASE_SHA}&status=success&per_page=100",
+            '--repository .',
+            '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+            '--main-runs-json "${legacy_main_runs}"',
+            '--platform-runs-json "${legacy_platform_runs}"',
+            '--emit > "${legacy_predecessor}"',
+            "actions/runs/${legacy_main_id}/attempts/${legacy_main_attempt}",
+            "actions/runs/${legacy_platform_id}/attempts/${legacy_platform_attempt}",
+            "state=reuse",
+            "state=build",
+            "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0",
+            "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0",
+            "context: https://github.com/snaraj/website-infrastructure.git#${{ steps.release.outputs.source_sha }}",
+            "platforms: linux/arm64",
+            "push-by-digest=true",
+            "provenance: mode=max,version=v1",
+            "sbom: true",
+            '$definition.externalParameters.configSource == {',
+            '"digest": {"sha1": $source}',
+            ".runDetails.metadata.buildkit_completeness.resolvedDependencies == true",
+            ".runDetails.metadata.buildkit_hermetic == true",
+            'cosign sign --yes "${SELECTOR_IMAGE}@${DIGEST}"',
+            "cosign attest --yes",
+            'identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/platform-release.yml@refs/heads/main"',
+            "issuer='https://token.actions.githubusercontent.com'",
+            'cosign verify --certificate-identity "${identity}"',
+            "cosign verify-attestation --type slsaprovenance1",
+            'MAIN_RUN_ID: ${{ github.event.workflow_run.id }}',
+            'MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}',
+            'SELECTOR_IMAGE_DIGEST: ${{ steps.selector-image.outputs.digest }}',
         )
-        if initial_preflight.count(predecessor_guard) != 2:
-            raise ValueError("both predecessor preflight observations must be exact")
-        if initial_preflight.count(
-            'classify_tag exact \\\n    "${recovery_source_sha}"'
-        ) != 2 or 'classify_tag absent \\\n    "${recovery_source_sha}"' in initial_preflight:
-            raise ValueError("both recovery-tag preflight observations must require exact state")
-        current_start = transaction.index("publish_current_release() {")
-        recovery = transaction[recovery_start:current_start]
-        recovery_write = 'run_write_gh release create "${recovery_tag}" --verify-tag'
-        if "classify_tag absent" in recovery or "run_write_gh api" in recovery:
-            raise ValueError("recovery path must never create or accept an absent v0.1.0 tag")
-        if recovery.index("classify_tag exact") > recovery.index(recovery_write):
-            raise ValueError("exact owner-prepared recovery tag must precede every write")
-        if recovery.index("classify_release absent") > recovery.index(recovery_write):
-            raise ValueError("recovery Release absence must precede its create")
-
-        current = transaction[current_start:]
-        for required in (
-            "classify_tag absent",
-            "run_write_gh api --method POST",
-            '-f object="${SOURCE_SHA}" -f type=commit',
-            'run_write_gh release create "${TAG}" --verify-tag',
-            '--target "${SOURCE_SHA}"',
+        for required in selector_required:
+            if required not in publish_job:
+                raise ValueError(f"selector workflow lost exact guard: {required}")
+        if publish_job.count(
+            "if: steps.selector-image-state.outputs.state == 'build'"
+        ) != 4:
+            raise ValueError("all four selector-build steps must be build-only")
+        if not (
+            publish_job.index("Install checksum-verified release tools")
+            < publish_job.index("Select the immutable selector image lineage")
         ):
-            if required not in current:
-                raise ValueError(f"current Release transaction lost exact create guard: {required}")
+            raise ValueError("Cosign must be installed before receipt consumption")
+        if publish_job.count("state=reuse") != 2 or publish_job.count("state=build") != 1:
+            raise ValueError("selector reuse and sole first-build branches drifted")
+        for repeated in (
+            "BASE_SHA: ${{ steps.release.outputs.base_sha }}",
+            "BASE_TAG: ${{ steps.release.outputs.base_tag }}",
+        ):
+            if publish_job.count(repeated) != 2:
+                raise ValueError(f"selector and publisher must both receive {repeated}")
+        selector_start = publish_job.index("Select the immutable selector image lineage")
+        selector_end = publish_job.index("Set up Buildx for the first selector image")
+        selector = publish_job[selector_start:selector_end]
+        legacy_start = selector.index(
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then'
+        )
+        current_identity_path = selector[:legacy_start]
+        legacy_path = selector[legacy_start:].split("\n          else\n", 1)[1]
+        if ".body" in current_identity_path:
+            raise ValueError("current selector reuse must not trust Release Markdown")
+        if '"${predecessor_identity}" 1' in legacy_path or "download_asset" in legacy_path:
+            raise ValueError("zero-asset v0.1.40 path must not download an identity asset")
+        if "--require-ready" in legacy_path or "0000000000000000000000000000000000000000" in legacy_path:
+            raise ValueError("legacy exception retained a static predecessor seed")
+        if legacy_path.count('--header "Authorization: Bearer ${GH_TOKEN}"') != 4:
+            raise ValueError("all four legacy immutable checks must use job authentication")
+        for retired in (
+            "selector-seed",
+            "validate_selector_seed",
+            "releasecutover",
+            "release-cutover",
+            "cutover-image",
+        ):
+            if retired in workflow + transaction:
+                raise ValueError(f"retired selector path remains wired: {retired}")
         for forbidden in (
             'git rev-list -n 1 "${TAG}"',
             "publication-state",
@@ -4850,53 +4558,96 @@ class WorkflowStructureTests(unittest.TestCase):
                 )
 
         transaction_deletions = (
-            "tag-state",
-            ': "${BASE_SHA:?BASE_SHA is required}"',
-            ': "${BASE_TAG:?BASE_TAG is required}"',
+            ': "${MAIN_RUN_ID:?MAIN_RUN_ID is required}"',
+            ': "${MAIN_RUN_ATTEMPT:?MAIN_RUN_ATTEMPT is required}"',
+            ': "${SELECTOR_IMAGE_DIGEST:?SELECTOR_IMAGE_DIGEST is required}"',
             'test -z "${IMMUTABLE_SETTINGS_TOKEN-}"',
             'test -z "${ACTIONS_READ_TOKEN-}"',
             'test -z "${CONTENTS_READ_TOKEN-}"',
-            'test -z "${GITHUB_TOKEN-}"',
-            'test -z "${GH_ENTERPRISE_TOKEN-}"',
-            'test -z "${GITHUB_ENTERPRISE_TOKEN-}"',
             'write_token="${GH_TOKEN}"',
             "unset GH_TOKEN",
             'GH_TOKEN="${write_token}" gh "$@"',
-            "recovery-release",
+            PUBLISHER_TAG_GUARD,
             "recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'",
             "recovery_tag='v0.1.0'",
-            PUBLISHER_TAG_GUARD,
-            "write_predecessor_notes() {",
-            'classify_release exact "${BASE_TAG}" "${BASE_SHA}"',
-            'test "${SOURCE_SHA}" != "${BASE_SHA}"',
-            'test "${TAG}" != "${BASE_TAG}"',
-            'tagger[name]=${tagger_name}',
-            'tagger[email]=${tagger_email}',
-            'tagger[date]=${tagger_date}',
-            "release-state",
-            '--source-sha "${source_sha}" \\\n'
-            '    --title "Platform ${tag}" --body "${notes}"',
-            '"${api}/releases/tags/${tag}"',
+            '-f object="${SOURCE_SHA}" -f type=commit',
+            'run_write_gh release create "${recovery_tag}" --verify-tag',
+            '--target "${recovery_source_sha}"',
+            "identity_asset_name='platform-release-identity.v1.json'",
+            "identity_bundle_name='platform-release-identity.v1.json.sigstore.json'",
+            '(.assets | length == $count)',
+            '(([.assets[].name] | sort) == ($expected | sort))',
+            'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+            'test "${BASE_TAG}" = v0.1.40',
+            'test "${TAG}" = v0.1.41',
+            '--repository .',
+            '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+            '--release-json "${release_json}"',
+            '--main-runs-json "${legacy_main_runs_json}"',
+            '--platform-runs-json "${legacy_platform_runs_json}"',
+            '--emit > "${legacy_predecessor_json}"',
+            "actions/runs/${legacy_main_run_id}/attempts/${legacy_main_run_attempt}",
+            "actions/runs/${legacy_platform_run_id}/attempts/${legacy_platform_run_attempt}",
+            '--main-run-json "${legacy_main_run_json}"',
+            '--platform-run-json "${legacy_platform_run_json}"',
+            "'{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}'",
+            '--input "${draft_request}" --jq \'.id\')"',
+            "release-draft-record",
+            '--release-id "${release_id}"',
+            '--main-run-id "${main_run_id}"',
+            '--main-run-attempt "${main_run_attempt}"',
+            '--platform-run-id "${platform_run_id}"',
+            '--platform-run-attempt "${platform_run_attempt}"',
+            '--selector-image-digest "${selector_digest}"',
+            'cosign sign-blob --yes',
+            '--bundle "${identity_bundle}" "${identity_asset}"',
+            'verify_identity_signature "${identity_asset}" "${identity_bundle}"',
+            '--data-binary "@${path}"',
+            'upload_identity_asset "${release_id}" "${identity_asset_name}"',
+            'upload_identity_asset "${release_id}" "${identity_bundle_name}"',
+            'test "${status}" = 201',
+            'download_identity_pair "${release_json}"',
+            'cmp -s "${identity_asset}" "${identity_download}"',
+            'cmp -s "${identity_bundle}" "${bundle_download}"',
+            "staged-identity-release-record",
+            "printf '{\"draft\":false}\\n' > \"${publish_patch}\"",
+            '--input "${publish_patch}"',
             "preflight_publication_state",
-            'classify_tag "${current_tag_state}"',
-            'classify_release "${current_release_state}"',
-            'test "${current_release_state}" = absent',
             "for attempt in 1 2 3 4 5",
             'test "${tag_race_verified}" = true',
             'test "${release_race_verified}" = true',
-            'run_write_gh release create "${recovery_tag}" --verify-tag',
-            '--target "${recovery_source_sha}"',
-            'run_write_gh release create "${TAG}" --verify-tag',
-            '--target "${SOURCE_SHA}"',
         )
         for token in transaction_deletions:
+            if token in {
+                '--repository .',
+                '--base-tag "${BASE_TAG}" --target-tag "${TAG}"',
+                '--release-json "${release_json}"',
+                '--main-runs-json "${legacy_main_runs_json}"',
+                '--platform-runs-json "${legacy_platform_runs_json}"',
+            }:
+                edge = 'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then'
+                start = transaction.index(edge)
+                end = transaction.index("\n  fi", start)
+                changed_transaction = (
+                    transaction[:start]
+                    + transaction[start:end].replace(token, "")
+                    + transaction[end:]
+                )
+            elif token in {
+                '--main-run-json "${legacy_main_run_json}"',
+                '--platform-run-json "${legacy_platform_run_json}"',
+            }:
+                before, after = transaction.rsplit(token, 1)
+                changed_transaction = before + after
+            else:
+                changed_transaction = transaction.replace(token, "", 1)
             with self.subTest(transaction_deletion=token), self.assertRaises(ValueError):
                 self.require_exact_wiring(
                     workflow,
                     jobs_verifier,
                     predecessor_wait,
                     settings_verifier,
-                    transaction.replace(token, "", 1),
+                    changed_transaction,
                 )
 
         workflow_mutants = (
@@ -4947,6 +4698,16 @@ class WorkflowStructureTests(unittest.TestCase):
                 "bash scripts/ci/verify-platform-release-settings.sh",
                 1,
             ),
+            workflow.replace(
+                'current_identity="${RUNNER_TEMP}/current-platform-release-identity.json"',
+                '.body\n          current_identity="${RUNNER_TEMP}/current-platform-release-identity.json"',
+                1,
+            ),
+            workflow.replace(
+                "Authorization: Bearer ${GH_TOKEN}",
+                "Authorization: crossed",
+            ),
+            workflow + "\nselector-seed=retired\n",
         )
         for index, mutant in enumerate(workflow_mutants):
             with self.subTest(workflow_mutant=index), self.assertRaises(ValueError):
@@ -4958,24 +4719,12 @@ class WorkflowStructureTests(unittest.TestCase):
                     transaction,
                 )
 
-        # The un-prefixed mutant below pins whatever version this source
-        # currently declares, so it can never age into a literal the gate would
-        # flag for the wrong reason. A value equal to the recovery pin WOULD be
-        # subtracted as frozen history and let the mutant survive; VERSION only
-        # advances past 0.1.0, so assert that distinction instead of assuming it.
-        current_version = MODULE.Version.parse(
-            (ROOT / "VERSION").read_text(encoding="utf-8")
-        )
-        self.assertNotEqual(
-            str(current_version), MODULE.RECOVERY_TAG.removeprefix("v")
-        )
         transaction_mutants = (
             transaction.replace(
                 'GH_TOKEN="${write_token}" gh "$@"',
                 'GH_TOKEN="${settings_token}" gh "$@"',
                 1,
             ),
-            transaction.replace("classify_tag exact \\", "classify_tag absent \\", 1),
             transaction.replace(
                 'run_write_gh release create "${recovery_tag}" --verify-tag',
                 'gh release create "${recovery_tag}" --verify-tag',
@@ -4987,40 +4736,27 @@ class WorkflowStructureTests(unittest.TestCase):
                 1,
             ),
             transaction.replace(
-                '--target "${SOURCE_SHA}"',
-                '--target "${recovery_source_sha}"',
+                "draft:true,name:$name,prerelease:false",
+                "draft:false,name:$name,prerelease:false",
                 1,
-            ),
-            # Both mutants name the version this source currently declares, so
-            # they are the hardest case: a literal that is correct TODAY still
-            # strands the very next patch, and the gate must refuse it in both
-            # the inline shape and the named-constant shape the era used.
-            transaction.replace(
-                PUBLISHER_TAG_GUARD, 'test "${TAG}" = "v0.1.3"', 1
             ),
             transaction.replace(
-                "recovery_tag='v0.1.0'",
-                "recovery_tag='v0.1.0'\ncurrent_tag='v0.1.3'",
+                '(.assets | length == $count)',
+                '(.assets | length > 0)',
                 1,
             ),
-            # The shape a `v`-anchored gate cannot see, and the reason the
-            # pattern is un-anchored: the constant omits the prefix and the `v`
-            # is added at the USE site — exactly how the real derivation
-            # composes its tag — beneath a derivation left fully intact, so no
-            # structural wiring is lost and no other arm has anything to catch.
-            # It names the version this source declares right now, which is what
-            # also hides it from the executable transaction tests: the publisher
-            # is correct today and strands the very next patch in silence. Only
-            # the un-prefixed arm of the stale-pin gate kills this one.
             transaction.replace(
-                "recovery_tag='v0.1.0'",
-                f"recovery_tag='v0.1.0'\nfrozen_version='{current_version}'",
-                1,
-            ).replace(
-                PUBLISHER_TAG_GUARD,
-                PUBLISHER_TAG_GUARD + '\ntest "${TAG}" = "v${frozen_version}"',
+                'if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then',
+                'if [ "${BASE_TAG}" != v0.1.31 ] || [ "${TAG}" != v0.1.41 ]; then',
                 1,
             ),
+            transaction.replace("identity-release-state", "release-state", 1),
+            transaction + '\nupload_identity_asset "${release_id}" "${identity_asset_name}"\n',
+            transaction.replace(
+                PUBLISHER_TAG_GUARD, 'test "${TAG}" = "v0.1.29"', 1
+            ),
+            transaction + '\nrun_write_gh release create "${TAG}" --verify-tag\n',
+            transaction + "\nreleasecutover=retired\n",
         )
         for index, mutant in enumerate(transaction_mutants):
             with self.subTest(transaction_mutant=index), self.assertRaises(ValueError):

@@ -13,17 +13,6 @@ from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ZERO_DIGEST = "sha256:" + ("0" * 64)
-DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
-# The human half of the release identity (ADR 0016: the version tag IS the
-# release). It travels WITH the digest, never instead of it: the digest stays
-# the only thing that resolves, and the two are written together by one
-# promotion transaction that has proved the registry maps this exact tag to
-# this exact digest. ``v0.0.0`` is the tag's fail-closed sentinel, the exact
-# counterpart of the all-zero digest, so the classifier below reads one
-# three-field state rather than a pair plus an unchecked decoration.
-ZERO_TAG = "v0.0.0"
-RELEASE_TAG_RE = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 KEY_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 # Canonical manifests contain relative chart/reconciliation paths beginning
 # with ``./``.  Keep the scalar grammar deliberately narrow, but permit that
@@ -42,11 +31,16 @@ MAX_RELEASE_YAML_BYTES = 65536
 RELEASE_CONTRACTS = {
     "naranjo-online": {
         "release": "kubernetes/websites/naranjo-online/release.yaml",
-        "parent": "kubernetes/reconciliation/naranjo-online.yaml",
+        # The direct parent is bootstrap-owned and deliberately absent from
+        # the applicable repository manifests. Its exact live spec is proved
+        # by validate_platform_bootstrap.py, not inferred from a YAML template.
+        "parent": None,
+        "bootstrap_parent": True,
+        "parent_name": "naranjo-online-reconciler",
         "namespace": "naranjo-online",
         "repository": "ghcr.io/snaraj/naranjo-online",
-        "readiness": "suspended-until-lock-build-signature-and-digest",
-        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        "readiness": "active-via-signature-verified-chart",
+        # Site charts arrive as signed OCI artifacts selected by exact digest,
         # so this identity has no in-repository chart path and no Git chart
         # source; ``chart_ref`` is the OCIRepository beside its release.
         "chart": None,
@@ -54,19 +48,16 @@ RELEASE_CONTRACTS = {
         "chart_ref": "naranjo-online-chart",
         "parent_path": "./kubernetes/websites/naranjo-online",
         "parent_service_account": "naranjo-online-reconciler",
-        "parent_dependencies": (
-            "platform-prerequisites",
-            "admission",
-            "platform-services",
-        ),
     },
     "lidersea-com": {
         "release": "kubernetes/websites/lidersea-com/release.yaml",
-        "parent": "kubernetes/reconciliation/lidersea-com.yaml",
+        "parent": None,
+        "bootstrap_parent": True,
+        "parent_name": "lidersea-com-reconciler",
         "namespace": "lidersea-com",
         "repository": "ghcr.io/snaraj/lidersea-com",
-        "readiness": "suspended-until-capacity-lock-build-signature-and-digest",
-        # Site charts arrive as signed OCI artifacts selected by SemVer range,
+        "readiness": "active-via-signature-verified-chart",
+        # Site charts arrive as signed OCI artifacts selected by exact digest,
         # so this identity has no in-repository chart path and no Git chart
         # source; ``chart_ref`` is the OCIRepository beside its release.
         "chart": None,
@@ -74,15 +65,12 @@ RELEASE_CONTRACTS = {
         "chart_ref": "lidersea-com-chart",
         "parent_path": "./kubernetes/websites/lidersea-com",
         "parent_service_account": "lidersea-com-reconciler",
-        "parent_dependencies": (
-            "platform-prerequisites",
-            "admission",
-            "platform-services",
-        ),
     },
     "cloudflare-public": {
         "release": "kubernetes/platform/cloudflare-public/release/release.yaml",
-        "parent": "kubernetes/reconciliation/platform-services.yaml",
+        "parent": None,
+        "bootstrap_parent": False,
+        "parent_name": None,
         "namespace": "cloudflare-public",
         "repository": None,
         "readiness": "suspended-until-sops-token-and-cloudflare-plan",
@@ -94,10 +82,6 @@ RELEASE_CONTRACTS = {
         "chart_ref": None,
         "parent_path": "./kubernetes/platform/cloudflare-public/release",
         "parent_service_account": "platform-services-reconciler",
-        "parent_dependencies": (
-            "platform-prerequisites",
-            "admission",
-        ),
     },
 }
 
@@ -128,7 +112,7 @@ def load_simple_mapping_file(path: Path) -> dict[tuple[str, ...], str | None]:
     return _parse_simple_mapping(lines, 0, len(lines), 0)
 
 
-def _read_canonical_text(path: Path) -> str:
+def _read_canonical_text(path: Path, *, allow_documents: bool = False) -> str:
     """Read one small canonical UTF-8 YAML file without newline normalization."""
 
     def identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
@@ -206,7 +190,10 @@ def _read_canonical_text(path: Path) -> str:
     ):
         raise CanonicalYamlError("release YAML must use LF as its only control separator")
     for line in text.split("\n"):
-        if re.fullmatch(r"[ ]*(?:---|[.][.][.])(?:[ ]+#.*)?", line):
+        if (
+            not allow_documents
+            and re.fullmatch(r"[ ]*(?:---|[.][.][.])(?:[ ]+#.*)?", line)
+        ):
             raise CanonicalYamlError("release YAML document markers are forbidden")
     return text
 
@@ -475,20 +462,10 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
             "  values:",
         ]
     )
-    if contract["repository"] is not None:
-        common.extend(
-            [
-                re.compile(r"    deploymentReady: (?:true|false)\Z"),
-                "    image:",
-                "      repository: {}".format(contract["repository"]),
-                # Ordered exactly: tag then digest, the same order the
-                # reference renders them in. The allowlist is exhaustive, so a
-                # release that omits either line, states them twice, or swaps
-                # in a floating alias is rejected before any value is read.
-                re.compile(r"      tag: " + RELEASE_TAG_RE.pattern),
-                re.compile(r"      digest: sha256:[0-9a-f]{64}\Z"),
-            ]
-        )
+    if contract["chart_ref"] is not None:
+        # The verified exact-site chart is the sole image-identity carrier.
+        # The exhaustive allowlist rejects every extra platform value.
+        common.append("    deploymentReady: true")
     else:
         common.append("    connectors:")
         for site in PUBLIC_CONNECTOR_SITES:
@@ -507,7 +484,7 @@ def _parent_shape(name: str) -> list[str | re.Pattern[str]]:
     """Return the complete per-identity parent Kustomization allowlist."""
 
     contract = RELEASE_CONTRACTS[name]
-    parent_name = Path(str(contract["parent"])).stem
+    parent_name = str(contract["parent_name"])
     expected: list[str | re.Pattern[str]] = [
         "apiVersion: kustomize.toolkit.fluxcd.io/v1",
         "kind: Kustomization",
@@ -516,33 +493,21 @@ def _parent_shape(name: str) -> list[str | re.Pattern[str]]:
         "  namespace: flux-system",
         "spec:",
     ]
-    if name == "cloudflare-public":
-        expected.extend(
-            [
-                "  decryption:",
-                "    provider: sops",
-                "    secretRef:",
-                "      name: sops-age",
-            ]
-        )
-    expected.append("  dependsOn:")
-    expected.extend(
-        "    - name: {}".format(dependency)
-        for dependency in contract["parent_dependencies"]
-    )
     expected.extend(
         [
+            "  deletionPolicy: Orphan",
+            "  force: false",
             "  interval: 10m0s",
             "  path: {}".format(contract["parent_path"]),
-            "  prune: true",
+            "  prune: false",
             "  retryInterval: 1m0s",
             "  serviceAccountName: {}".format(contract["parent_service_account"]),
             "  sourceRef:",
             "    kind: GitRepository",
             "    name: flux-system",
-            re.compile(r"  suspend: (?:true|false)\Z"),
+            "  suspend: false",
             "  timeout: 5m0s",
-            "  wait: false",
+            "  wait: true",
         ]
     )
     return expected
@@ -576,17 +541,11 @@ def load_helm_release(name: str, root: Path = ROOT) -> HelmReleaseState:
             rendered_lines.append("")
     values_text = "\n".join(rendered_lines).rstrip("\n") + "\n"
 
-    expected_repository = contract["repository"]
-    if expected_repository is not None:
-        if values.get(("image", "repository")) != expected_repository:
-            raise CanonicalYamlError("release image repository is not the closed identity")
-        digest = values.get(("image", "digest"))
-        if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
-            raise CanonicalYamlError("release image digest is not canonical")
-        tag = values.get(("image", "tag"))
-        if not isinstance(tag, str) or not RELEASE_TAG_RE.fullmatch(tag):
-            raise CanonicalYamlError("release image tag is not canonical")
-        _bool_scalar(str(values.get(("deploymentReady",), "")))
+    if contract["chart_ref"] is not None:
+        if values != {("deploymentReady",): "true"}:
+            raise CanonicalYamlError(
+                "site release values must contain exactly deploymentReady: true"
+            )
     else:
         # Every connector carries its own canonical revision; a missing or
         # malformed revision on EITHER connector fails closed.
@@ -604,53 +563,50 @@ def load_parent_suspension(name: str, root: Path = ROOT) -> bool:
     """Validate the site's closed parent Kustomization and return suspension."""
 
     contract = RELEASE_CONTRACTS[name]
-    text = _read_canonical_text(root / str(contract["parent"]))
+    if any((root / "kubernetes/reconciliation").glob("*.yaml")):
+        raise CanonicalYamlError("retired aggregate reconciliation is present")
+    if contract["parent"] is None:
+        # Website parents are permanent bootstrap-owned runtime objects. The
+        # repository transition gate validates only the site desired state;
+        # live parent exactness belongs to the release-selector bootstrap and
+        # convergence witness. Cloudflare has no such parent and remains inert.
+        return not bool(contract.get("bootstrap_parent"))
+    combined = _read_canonical_text(
+        root / str(contract["parent"]), allow_documents=True
+    )
+    documents = combined.removesuffix("\n").split("\n---\n")
+    expected_name = str(contract["parent_name"])
+    matches = [
+        document + "\n"
+        for document in documents
+        if "  name: {}\n".format(expected_name) in document + "\n"
+    ]
+    if len(matches) != 1:
+        raise CanonicalYamlError("direct parent identity is absent or duplicated")
+    text = matches[0]
     _require_exact_significant_lines(text, _parent_shape(name))
     if canonical_scalar(text, ("apiVersion",)) != "kustomize.toolkit.fluxcd.io/v1":
         raise CanonicalYamlError("parent apiVersion is unsupported")
     if canonical_scalar(text, ("kind",)) != "Kustomization":
         raise CanonicalYamlError("parent kind is unsupported")
-    parent_name = Path(str(contract["parent"])).stem
-    if canonical_scalar(text, ("metadata", "name")) != parent_name:
+    if canonical_scalar(text, ("metadata", "name")) != expected_name:
         raise CanonicalYamlError("parent name does not match its closed identity")
-    return _bool_scalar(canonical_scalar(text, ("spec", "suspend")))
+    return False
 
 
-def site_phase(
-    name: str,
-    root: Path = ROOT,
-    expected_digest: str | None = None,
-    expected_tag: str | None = None,
-) -> str:
-    """Return initial/promoted only when both reconciliation layers are suspended.
+def site_phase(name: str, root: Path = ROOT) -> str:
+    """Return the safe staged/active phase of one values-only site release.
 
-    The phase is read from THREE fields, not two. Readiness and the digest were
-    always the pair; the release tag joins them because it is now part of what
-    the workload reference states, and a tag that advanced while the digest did
-    not (or the reverse) would put a release name on bytes that never carried
-    it. Every half-advanced combination lands in the same fail-closed refusal
-    the mixed readiness/digest state already produced.
+    Chart release identity is deliberately absent here: the sibling
+    OCIRepository owns its exact audit annotation and immutable digest, while
+    this parser closes HelmRelease values to the sole activation scalar.
     """
 
     release = load_helm_release(name, root)
-    if not release.suspended or not load_parent_suspension(name, root):
-        raise CanonicalYamlError("both reconciliation layers must be suspended")
-    readiness = _bool_scalar(str(release.values[("deploymentReady",)]))
-    digest = str(release.values[("image", "digest")])
-    tag = str(release.values[("image", "tag")])
-    if expected_digest is not None:
-        if not DIGEST_RE.fullmatch(expected_digest) or digest != expected_digest:
-            raise CanonicalYamlError("release digest does not match the expected digest")
-    if expected_tag is not None:
-        if not RELEASE_TAG_RE.fullmatch(expected_tag) or tag != expected_tag:
-            raise CanonicalYamlError("release tag does not match the expected tag")
-    if not readiness and digest == ZERO_DIGEST and tag == ZERO_TAG:
-        return "initial"
-    if readiness and digest != ZERO_DIGEST and tag != ZERO_TAG:
-        return "promoted"
-    raise CanonicalYamlError(
-        "release readiness, tag and digest form an unsafe mixed state"
-    )
+    parent_suspended = load_parent_suspension(name, root)
+    if not release.suspended and parent_suspended:
+        raise CanonicalYamlError("active website release requires an active parent")
+    return "staged" if release.suspended else "active"
 
 
 def all_helm_releases_suspended(root: Path = ROOT) -> bool:
@@ -669,14 +625,6 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         choices=("naranjo-online", "lidersea-com"),
     )
-    phase.add_argument(
-        "--expect-digest",
-        help="require the exact authoritative image digest while reading the phase",
-    )
-    phase.add_argument(
-        "--expect-tag",
-        help="require the exact authoritative release tag while reading the phase",
-    )
     suspended = subparsers.add_parser("all-helm-suspended")
     suspended.set_defaults(command="all-helm-suspended")
     emit = subparsers.add_parser("emit-values")
@@ -686,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = args.root.resolve()
         if args.command == "site-phase":
-            print(site_phase(args.site, root, args.expect_digest, args.expect_tag))
+            print(site_phase(args.site, root))
         elif args.command == "all-helm-suspended":
             if not all_helm_releases_suspended(root):
                 return 1

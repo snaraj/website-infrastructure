@@ -35,11 +35,20 @@ repository now:
    Bucket, GitRepository, and OCIRepository read-only; Helm watches HelmChart
    and OCIRepository. Neither role can read Secrets at cluster scope;
 5. adds the namespaced authority the controllers still need — leader election,
-   controller-owned ConfigMaps, an exact `get` of the named SOPS age key, and one name-restricted
-   impersonation Role per namespace holding reconciler accounts
-   (`kubernetes/flux-system/access.yaml`);
-6. corrects both site release reconcilers from `gitrepositories` to
-   `ocirepositories`, the kind their own source objects declare.
+   controller-owned ConfigMaps, and exactly three name-restricted impersonation
+   Roles: one for the two direct site reconcilers and one per site for
+   `helm-reconciler` (`kubernetes/flux-system/access.yaml`);
+6. narrows each direct site reconciler to its exact OCIRepository, HelmRelease,
+   and site-owned `default-deny` NetworkPolicy. Kubernetes cannot name-restrict
+   `list` or `create`; every `get`/`update`/`patch` is name-restricted, and
+   `prune:false` leaves `delete` absent.
+
+The initial Flux loop is now exactly one tag-selected anonymous GitRepository
+plus two direct, `prune:false`, `deletionPolicy: Orphan` site Kustomizations.
+Sparse checkout and ignore rules expose only the two website roots. There is no
+aggregate/root, prerequisites, platform-services, admission, or Cloudflare
+Kustomization. Bootstrap applies namespaces and `access.yaml` outside Flux
+self-reconciliation; the direct site identities cannot mutate either.
 
 Kustomize and Helm optional ConfigMap/Secret event watchers are disabled with
 the exact `--feature-gates=DisableConfigWatchers=true` argument. Kubernetes
@@ -119,30 +128,29 @@ The replacement proof is deliberately redundant:
   the same-named ClusterRole;
 - the exact cross-controller write matrix, including status and finalizer
   subresources, is denied while owned positive controls remain allowed; and
-- the install root alone authorizes all 24 primary/secondary list/watch probes before
-  `access.yaml` can be reconciled.
+- the install root alone authorizes all 24 primary/secondary list/watch probes
+  before bootstrap applies `access.yaml`.
+
+The steady-state inventory is pinned, not bounded by a floor: `access.yaml`
+contains 24 objects (eight ServiceAccounts, eight Roles, eight RoleBindings),
+the effective RBAC contains 34 objects after the unchanged install-root split,
+and the model expands them to exactly 282 granted request atoms. The direct
+graph derives 109 applied requirements and 205 controller requirements. The
+remaining declared slack is exactly 25 atoms: nine ExternalArtifact grants,
+12 LeaseLock verb surplus grants, and four preserved HelmChart handoff writes.
 
 The fast validator, RBAC model, bootstrap live-state mirror, and Conftest rules
 all enforce these properties. Conftest is additive defence in depth over the
 rendered output; it does not replace the independent structural, behavioral,
 or live comparison gates.
 
-### The declared gaps, and what they block
+### No declared authorization gaps
 
-The proof tolerates exactly two remaining gaps, both declared in
-`DECLARED_INSUFFICIENCIES` and both tied by test to the `admission`
-Kustomization staying suspended.
-
-**1. The Kyverno staging stop.** The `admission` reconciler is namespaced on
-purpose, so it can own the inert controller shell but cannot create the
-ClusterPolicies or the `ValidatingWebhookConfiguration` its own path declares.
-This is the stop already recorded in `access.yaml`.
-
-**2. Admission readiness read-back.** The `admission` Kustomization uses
-`wait: true`, so its impersonated reconciler must walk the Deployment down to
-its ReplicaSets and Pods. It still has no `get`/`list`/`watch` for those objects
-in `kyverno`; that is an independent unsuspend blocker even after the
-cluster-scoped policy authority above is resolved.
+The proof now tolerates no deliberately under-authorized reconciliation path:
+`DECLARED_INSUFFICIENCIES` is empty. Issue #195 retired the absent Kyverno
+controller, its reconciler identity, and its policy/webhook desired state
+instead of preserving a dormant unsuspend path. Adding a new reconciled object
+without sufficient authority therefore fails the exact derivation outright.
 
 Issue #186 closes the corresponding HelmRelease gap. Each tenant
 `helm-reconciler` now has exactly `get`/`list`/`watch` for core Pods and apps
@@ -378,13 +386,9 @@ not infer the remaining rows. This mixed phase prediction also prevents a
 constant-output tool from masquerading as migration evidence.
 
     # must be yes
-    auth can-i impersonate serviceaccounts/root-reconciler -n flux-system \
-      --as=system:serviceaccount:flux-system:kustomize-controller
     auth can-i impersonate serviceaccounts/helm-reconciler -n naranjo-online \
       --as=system:serviceaccount:flux-system:helm-controller
     auth can-i impersonate serviceaccounts/helm-reconciler -n lidersea-com \
-      --as=system:serviceaccount:flux-system:helm-controller
-    auth can-i impersonate serviceaccounts/helm-reconciler -n cloudflare-public \
       --as=system:serviceaccount:flux-system:helm-controller
     auth can-i list kustomizations.kustomize.toolkit.fluxcd.io -n flux-system \
       --as=system:serviceaccount:flux-system:kustomize-controller
@@ -413,11 +417,13 @@ constant-output tool from masquerading as migration evidence.
       --as=system:serviceaccount:flux-system:kustomize-controller
     auth can-i watch ocirepositories.source.toolkit.fluxcd.io -A \
       --as=system:serviceaccount:flux-system:kustomize-controller
-    auth can-i get secret/sops-age -n flux-system \
-      --as=system:serviceaccount:flux-system:kustomize-controller
     auth can-i create ocirepositories.source.toolkit.fluxcd.io -n naranjo-online \
       --as=system:serviceaccount:flux-system:naranjo-online-reconciler
     auth can-i create ocirepositories.source.toolkit.fluxcd.io -n lidersea-com \
+      --as=system:serviceaccount:flux-system:lidersea-com-reconciler
+    auth can-i create networkpolicies.networking.k8s.io -n naranjo-online \
+      --as=system:serviceaccount:flux-system:naranjo-online-reconciler
+    auth can-i create networkpolicies.networking.k8s.io -n lidersea-com \
       --as=system:serviceaccount:flux-system:lidersea-com-reconciler
     # The source read every reconciliation begins with. It happens under the
     # CONTROLLER's identity, before impersonation is configured, so it is asked
@@ -456,28 +462,6 @@ constant-output tool from masquerading as migration evidence.
       --as=system:serviceaccount:lidersea-com:helm-reconciler
     auth can-i watch replicasets.apps -n lidersea-com \
       --as=system:serviceaccount:lidersea-com:helm-reconciler
-    auth can-i get pods -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i list pods -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i watch pods -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i get replicasets.apps -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i list replicasets.apps -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i watch replicasets.apps -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-
-    # DECLARED GAPS — these answer `no` today, and that is recorded rather than
-    # fixed (see "The declared gaps" above). Run them so the answer is observed
-    # rather than assumed, and do NOT unsuspend the objects that need them until
-    # the reviewed decision is made.
-    auth can-i list pods -n kyverno \
-      --as=system:serviceaccount:flux-system:admission-reconciler
-    auth can-i list replicasets.apps -n kyverno \
-      --as=system:serviceaccount:flux-system:admission-reconciler
-
     # must be no
     auth can-i create deployments -n kube-system \
       --as=system:serviceaccount:flux-system:kustomize-controller
@@ -510,18 +494,10 @@ constant-output tool from masquerading as migration evidence.
       --as=system:serviceaccount:lidersea-com:helm-reconciler
     auth can-i delete replicasets.apps -n lidersea-com \
       --as=system:serviceaccount:lidersea-com:helm-reconciler
-    auth can-i get pods -n cloudflare-public \
-      --as=system:serviceaccount:lidersea-com:helm-reconciler
-    auth can-i list replicasets.apps -n cloudflare-public \
-      --as=system:serviceaccount:lidersea-com:helm-reconciler
-    auth can-i update pods -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
-    auth can-i delete replicasets.apps -n cloudflare-public \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
     auth can-i get pods -n naranjo-online \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
+      --as=system:serviceaccount:lidersea-com:helm-reconciler
     auth can-i list replicasets.apps -n naranjo-online \
-      --as=system:serviceaccount:cloudflare-public:helm-reconciler
+      --as=system:serviceaccount:lidersea-com:helm-reconciler
     auth can-i impersonate serviceaccounts/root-reconciler -n flux-system \
       --as=system:serviceaccount:flux-system:helm-controller
     auth can-i '*' '*' -A \
@@ -630,7 +606,7 @@ the controller install and cannot reach readiness.
 
 That transaction boundary is why the six live in
 `kubernetes/flux-system/controllers/per-controller-rbac.yaml`, a resource of
-the controller install root, and never in later-reconciled `access.yaml`.
+the controller install root, and never in bootstrap-applied `access.yaml`.
 
 For **kustomize-controller and helm-controller** the loss is masked: they still
 hold `cluster-admin` through `cluster-reconciler-flux-system` until step 5.
@@ -966,9 +942,9 @@ This apply remains gated until ALL of the following hold:
   permitted within the transaction;
 - the authorization applies to the exact merged commit and reviewed plan.
 
-The paused route/reboot/admission-controller security queue is outside this
-reduced RBAC scope and is not a hidden prerequisite. Kyverno remains absent, so
-repository policy is CI defence in depth rather than a live admission claim.
+The paused route/reboot security queue is outside this reduced RBAC scope and
+is not a hidden prerequisite. Kyverno is retired; retained Conftest policy is
+CI defence in depth rather than a live admission claim.
 
 Unsuspending any Flux object is a further, separate decision that this
 narrowing is a precondition for — not a consequence of.

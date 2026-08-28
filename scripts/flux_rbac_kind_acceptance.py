@@ -3103,7 +3103,7 @@ class AcceptanceHarness:
 
     def install_stock(self) -> None:
         assert self.registry_ip is not None
-        for namespace in (*TENANTS, "kyverno", "flux-rbac-acceptance"):
+        for namespace in (*TENANTS, "flux-rbac-acceptance"):
             self.apply_document(
                 {
                     "apiVersion": "v1",

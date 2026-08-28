@@ -1,8 +1,8 @@
 # proves: SR-6
 # rego-message: must pin itself to named nodes with a bounded required nodeAffinity
-# Degenerate shape, and the one divergence that failed open in the OTHER engine:
-# `required` is a STRING, which satisfied Kyverno's has() check while Rego
-# refused it. Both engines now require a bounded node selector, so neither reads
+# Degenerate shape. Historical cross-engine comparison found that `required` as
+# a STRING satisfied the retired CEL mirror's presence check while Rego refused
+# it. The retained Rego control requires a bounded node selector and never reads
 # a scalar as a node pin.
 apiVersion: v1
 kind: PersistentVolume

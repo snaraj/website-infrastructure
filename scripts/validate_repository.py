@@ -27,9 +27,6 @@ from validate_release_state import (
     CanonicalYamlError,
     PUBLIC_CONNECTOR_SITES,
     RELEASE_CONTRACTS,
-    RELEASE_TAG_RE,
-    ZERO_DIGEST,
-    ZERO_TAG,
     _parse_simple_mapping,
     canonical_scalar,
     load_helm_release,
@@ -44,22 +41,15 @@ from validate_release_transition import (
     classify as classify_release_transition,
     cloudflare_phase_contract_errors,
     contains_secret_document,
-    load_admission_suspension,
     sops_recipient_from_config,
     sops_secret_errors,
     tunnel_secret_errors,
 )
 from validate_signature_policy import (
     CHART_REPOSITORIES,
-    admission_kustomization_errors,
     chart_source_errors,
-    chart_source_semver_bounds,
     flux_sync_errors,
     flux_system_kustomization_errors,
-    reconciliation_kustomization_errors,
-    signature_policy_action,
-    signature_policy_errors,
-    signature_policy_kustomization_errors,
 )
 # dependabot_contract intentionally is not validate_-prefixed: it runs only
 # through the CHECKS registry below (issue #131), never as its own CLI
@@ -129,7 +119,8 @@ MAX_PUBLIC_REPOSITORY_BYTES = 16 * 1024 * 1024
 # files cannot bypass the per-file media boundary.
 MAX_ASSET_TREE_BYTES = 2 * 1024 * 1024
 # Kubernetes data objects are configuration, not a byte store. This repository
-# ceiling sits far below the API limit and is backed by admission controls.
+# ceiling sits far below the API limit and is backed by the retained static
+# policy controls.
 MAX_KUBERNETES_DATA_OBJECT_BYTES = 128 * 1024
 MEDIA_MAGIC_PREFIXES = (
     b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"OggS",
@@ -175,7 +166,8 @@ APPROVED_SOPS_SECRET_PATHS = {
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 # One closed tuple drives every site-specific release check so adding a site
-# cannot silently leave image publication, admission, or activation asymmetric.
+# cannot silently leave signed chart publication, selection, or activation
+# asymmetric.
 # The third element is the publisher workflow inside each STANDALONE site
 # repository, dispatched from that repository's protected `main` branch; it
 # feeds the pinned signature identities.
@@ -202,7 +194,7 @@ REVIEWED_SITE_CAPACITY_HARD = {
 # every ServiceAccount, Role, RoleBinding, rule, and subject in access.yaml.
 # Update it only after reviewing that complete authorization file.
 FLUX_ACCESS_CONTRACT_SHA256 = (
-    "31bc94ab7d1ef20041c65939c59ea0f412260d48867a42b3cc2908ec8829e621"
+    "9c755188823d4037211be496086376a11241c85f31829628dd6bacb77f513d27"
 )
 
 # The same coupling for the six cluster-scoped per-controller objects, which
@@ -707,6 +699,67 @@ def active_kustomization_resource(text, name):
     ) is not None
 
 
+def site_default_deny_contract_errors(root):
+    """Pin default-deny ownership to the exact direct-site topology."""
+
+    errors = []
+
+    def exact_default_deny(path, namespace):
+        if not path.is_file():
+            return False
+        documents = [
+            document for document in re.split(r"(?m)^---\s*$", read(path))
+            if document.strip()
+        ]
+        return len(documents) == 1 and bool(
+            re.search(r"(?m)^apiVersion:\s*networking[.]k8s[.]io/v1\s*$", documents[0])
+            and re.search(r"(?m)^kind:\s*NetworkPolicy\s*$", documents[0])
+            and re.search(r"(?m)^\s*name:\s*default-deny\s*$", documents[0])
+            and re.search(
+                r"(?m)^\s*namespace:\s*{}\s*$".format(re.escape(namespace)),
+                documents[0],
+            )
+            and re.search(r"(?m)^\s*podSelector:\s*{}\s*$", documents[0])
+            and re.search(
+                r"(?ms)^\s*policyTypes:\s*\n\s*-\s*Ingress\s*\n\s*-\s*Egress\s*$",
+                documents[0],
+            )
+        )
+
+    prerequisites = root / "kubernetes/platform/prerequisites"
+    if not exact_default_deny(
+        prerequisites / "network-policies.yaml", "cloudflare-public"
+    ):
+        errors.append(
+            "platform prerequisites must retain exactly the cloudflare-public default-deny"
+        )
+    prerequisite_index = prerequisites / "kustomization.yaml"
+    prerequisite_resources = re.findall(
+        r"(?m)^\s*-\s+([A-Za-z0-9_.-]+)\s*$",
+        read(prerequisite_index) if prerequisite_index.is_file() else "",
+    )
+    if set(prerequisite_resources) != {"network-policies.yaml", "resource-controls.yaml"} \
+            or len(prerequisite_resources) != 2:
+        errors.append("platform prerequisites Kustomization inventory is not exact")
+
+    for namespace in ("naranjo-online", "lidersea-com"):
+        site_root = root / "kubernetes/websites" / namespace
+        if not exact_default_deny(site_root / "default-deny.yaml", namespace):
+            errors.append("exact site-owned ingress+egress default-deny missing for " + namespace)
+        site_index = site_root / "kustomization.yaml"
+        site_resources = re.findall(
+            r"(?m)^\s*-\s+([A-Za-z0-9_.-]+)\s*$",
+            read(site_index) if site_index.is_file() else "",
+        )
+        if set(site_resources) != {"default-deny.yaml", "source.yaml", "release.yaml"} \
+                or len(site_resources) != 3:
+            errors.append(
+                "direct site Kustomization inventory must be default-deny, source, release: "
+                + namespace
+            )
+    return errors
+
+
 def flux_access_contract_errors(text, expected=None, label="Flux access authorization"):
     """Require review of every byte in an accepted Flux authorization file.
 
@@ -1016,16 +1069,26 @@ def check_media(root):
     sourceignore = root / ".sourceignore"
     source_required = (
         "/*",
+        "!/.sourceignore",
         "!/kubernetes/",
-        "!/policies/kyverno/",
+        "/kubernetes/*",
+        "!/kubernetes/websites/",
+        "/kubernetes/websites/*",
+        "!/kubernetes/websites/naranjo-online/",
+        "!/kubernetes/websites/naranjo-online/**",
+        "!/kubernetes/websites/lidersea-com/",
+        "!/kubernetes/websites/lidersea-com/**",
     )
     if not sourceignore.is_file():
         errors.append("Flux source artifact boundary is missing: .sourceignore")
     else:
         source_text = read(sourceignore)
-        for fragment in source_required:
-            if fragment not in source_text:
-                errors.append("Flux source artifact allowlist is missing: " + fragment)
+        source_lines = tuple(
+            line.strip() for line in source_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        if source_lines != source_required:
+            errors.append("Flux source artifact allowlist is not the exact two-site boundary")
 
     for path in live_kubernetes_files(root):
         text = read(path)
@@ -1312,11 +1375,10 @@ def flux_egress_contract_errors(root):
             errors.append("Flux API-path canary must not enter a host namespace")
 
     # The egress overlay is deliberately NOT a resource of
-    # kubernetes/flux-system: that root also carries gotk-sync.yaml, whose
-    # Kustomization is unsuspended, so applying it would start live
-    # reconciliation. Rendering the overlay as its own target is what keeps it
-    # schema- and policy-checked without making the dangerous root the only
-    # path to it.
+    # kubernetes/flux-system remains an owner-attended installation root. The
+    # bootstrap-owned sync objects live only in a deliberately non-applicable
+    # review template; rendering the egress overlay separately still keeps the
+    # controller-install boundary explicit.
     renderer = root / "scripts/render-manifests.sh"
     if not renderer.is_file():
         errors.append("canonical renderer is missing")
@@ -1587,15 +1649,16 @@ FLUX_EXECUTION_API_GROUPS = (
     "helm.toolkit.fluxcd.io",
 )
 
-# Controller-identity Roles that carry the authority the deleted cluster-admin
-# binding used to supply. Absence of any one of them is a reconciliation that
-# cannot start, so they are required by name rather than inferred.
+# Controller and impersonated identities that carry the exact direct-site
+# reconciliation graph. Absence of any one is a reconciliation that cannot
+# start; an extra one is unrelated path authority.
 FLUX_CONTROLLER_ROLE_NAMESPACES = {
     "flux-controller-runtime": ("flux-system",),
-    "flux-controller-decryption": ("flux-system",),
     "flux-controller-impersonation": (
-        "flux-system", "cloudflare-public", "naranjo-online", "lidersea-com",
+        "flux-system", "naranjo-online", "lidersea-com",
     ),
+    "flux-release-reconciler": ("naranjo-online", "lidersea-com"),
+    "helm-reconciler": ("naranjo-online", "lidersea-com"),
 }
 
 RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
@@ -1832,33 +1895,181 @@ def flux_rbac_contract_errors(root):
     if not access_path.is_file():
         return errors
     documents = _yaml_documents(read(access_path))
+    expected_identities = {
+        ("ServiceAccount", "flux-system", "default"),
+        ("ServiceAccount", "cloudflare-public", "default"),
+        ("ServiceAccount", "naranjo-online", "default"),
+        ("ServiceAccount", "lidersea-com", "default"),
+        ("Role", "flux-system", "flux-controller-runtime"),
+        ("RoleBinding", "flux-system", "flux-controller-runtime"),
+        ("Role", "flux-system", "flux-controller-impersonation"),
+        ("RoleBinding", "flux-system", "flux-controller-impersonation"),
+    }
+    for site in ("naranjo-online", "lidersea-com"):
+        expected_identities.update({
+            ("Role", site, "flux-controller-impersonation"),
+            ("RoleBinding", site, "flux-controller-impersonation"),
+            ("ServiceAccount", "flux-system", site + "-reconciler"),
+            ("Role", site, "flux-release-reconciler"),
+            ("RoleBinding", site, site + "-reconciler"),
+            ("ServiceAccount", site, "helm-reconciler"),
+            ("Role", site, "helm-reconciler"),
+            ("RoleBinding", site, "helm-reconciler"),
+        })
+
+    def expected_rule(groups, resources, verbs, names=()):
+        fields = {"apiGroups", "resources", "verbs"}
+        if names:
+            fields.add("resourceNames")
+        return (
+            tuple(sorted(groups)), tuple(sorted(resources)), tuple(sorted(names)),
+            tuple(sorted(verbs)), tuple(sorted(fields)),
+        )
+
+    def actual_rule(block):
+        return (
+            tuple(sorted(_rbac_rule_list(block, "apiGroups"))),
+            tuple(sorted(_rbac_rule_list(block, "resources"))),
+            tuple(sorted(_rbac_rule_list(block, "resourceNames"))),
+            tuple(sorted(_rbac_rule_list(block, "verbs"))),
+            tuple(sorted(_rbac_rule_fields(block))),
+        )
+
+    full = ("get", "list", "watch", "create", "update", "patch", "delete")
+    readback = ("get", "list", "watch")
+    expected_role_rules = {
+        ("flux-system", "flux-controller-runtime"): (
+            expected_rule(("coordination.k8s.io",), ("leases",), full),
+            expected_rule(("",), ("configmaps",), full),
+            expected_rule(("",), ("configmaps/status",), ("get", "update", "patch")),
+        ),
+        ("flux-system", "flux-controller-impersonation"): (
+            expected_rule(
+                ("",), ("serviceaccounts",), ("impersonate",),
+                ("naranjo-online-reconciler", "lidersea-com-reconciler"),
+            ),
+        ),
+    }
+    for site in ("naranjo-online", "lidersea-com"):
+        expected_role_rules[(site, "flux-controller-impersonation")] = (
+            expected_rule(
+                ("",), ("serviceaccounts",), ("impersonate",),
+                ("helm-reconciler",),
+            ),
+        )
+        expected_role_rules[(site, "flux-release-reconciler")] = (
+            expected_rule(("source.toolkit.fluxcd.io",), ("ocirepositories",), ("list",)),
+            expected_rule(("source.toolkit.fluxcd.io",), ("ocirepositories",), ("create",)),
+            expected_rule(
+                ("source.toolkit.fluxcd.io",), ("ocirepositories",),
+                ("get", "update", "patch"), (site + "-chart",),
+            ),
+            expected_rule(("helm.toolkit.fluxcd.io",), ("helmreleases",), ("list",)),
+            expected_rule(("helm.toolkit.fluxcd.io",), ("helmreleases",), ("create",)),
+            expected_rule(
+                ("helm.toolkit.fluxcd.io",), ("helmreleases",),
+                ("get", "update", "patch"), (site,),
+            ),
+            expected_rule(("networking.k8s.io",), ("networkpolicies",), ("list",)),
+            expected_rule(("networking.k8s.io",), ("networkpolicies",), ("create",)),
+            expected_rule(
+                ("networking.k8s.io",), ("networkpolicies",),
+                ("get", "update", "patch"), ("default-deny",),
+            ),
+        )
+        helm_rules = [
+            expected_rule(
+                ("",),
+                ("configmaps", "secrets", "services", "serviceaccounts"),
+                full,
+            ),
+            expected_rule(("",), ("pods",), readback),
+            expected_rule(("apps",), ("deployments",), full),
+            expected_rule(("apps",), ("replicasets",), readback),
+            expected_rule(("networking.k8s.io",), ("networkpolicies",), full),
+        ]
+        if site == "naranjo-online":
+            helm_rules.append(expected_rule(("",), ("persistentvolumeclaims",), full))
+        expected_role_rules[(site, "helm-reconciler")] = tuple(helm_rules)
+
+    expected_bindings = {
+        ("flux-system", "flux-controller-runtime"): (
+            "flux-controller-runtime",
+            tuple(("flux-system", name) for name in FLUX_CONTROLLER_ACCOUNTS),
+        ),
+        ("flux-system", "flux-controller-impersonation"): (
+            "flux-controller-impersonation", (("flux-system", "kustomize-controller"),),
+        ),
+    }
+    for site in ("naranjo-online", "lidersea-com"):
+        expected_bindings[(site, "flux-controller-impersonation")] = (
+            "flux-controller-impersonation", (("flux-system", "helm-controller"),),
+        )
+        expected_bindings[(site, site + "-reconciler")] = (
+            "flux-release-reconciler", (("flux-system", site + "-reconciler"),),
+        )
+        expected_bindings[(site, "helm-reconciler")] = (
+            "helm-reconciler", ((site, "helm-reconciler"),),
+        )
+
+    seen_identities = []
     seen_roles = set()
     exact_naranjo_pvc_rules = 0
     for document in documents:
-        if not re.search(r"(?m)^kind:\s*Role\s*$", document):
-            continue
+        kind_match = re.search(r"(?m)^kind:\s*(ServiceAccount|Role|RoleBinding)\s*$", document)
         name_match = re.search(r"(?m)^\s*name:\s*(\S+)\s*$", document)
         namespace_match = re.search(r"(?m)^\s*namespace:\s*(\S+)\s*$", document)
-        if name_match is None or namespace_match is None:
+        if kind_match is None or name_match is None or namespace_match is None:
+            errors.append("access.yaml contains an unclassifiable authorization object")
             continue
+        kind = kind_match.group(1)
         name, namespace = name_match.group(1), namespace_match.group(1)
+        seen_identities.append((kind, namespace, name))
+        if kind == "ServiceAccount":
+            if len(re.findall(r"(?m)^automountServiceAccountToken:\s*false\s*$", document)) != 1:
+                errors.append(
+                    "access.yaml ServiceAccount must disable token automount: {}/{}".format(
+                        namespace, name
+                    )
+                )
+            continue
+        if kind == "RoleBinding":
+            role_ref = re.search(
+                r"(?m)^roleRef:\s*$\n"
+                r"\s*apiGroup:\s*rbac[.]authorization[.]k8s[.]io\s*$\n"
+                r"\s*kind:\s*Role\s*$\n"
+                r"\s*name:\s*(\S+)\s*$",
+                document,
+            )
+            subjects = tuple(sorted(re.findall(
+                r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n"
+                r"\s*name:\s*(\S+)\s*$\n\s*namespace:\s*(\S+)\s*$",
+                document,
+            )))
+            # Regex captures (name, namespace); normalize to (namespace, name).
+            subjects = tuple(sorted((subject_namespace, subject_name)
+                                    for subject_name, subject_namespace in subjects))
+            expected = expected_bindings.get((namespace, name))
+            if expected is None or role_ref is None or (
+                role_ref.group(1), subjects
+            ) != (expected[0], tuple(sorted(expected[1]))):
+                errors.append(
+                    "access.yaml RoleBinding is not the exact direct-site binding: {}/{}".format(
+                        namespace, name
+                    )
+                )
+            continue
         seen_roles.add((name, namespace))
         blocks = _rbac_rule_blocks(document)
-        if name == "flux-controller-decryption" and namespace == "flux-system":
-            exact = [
-                block for block in blocks
-                if tuple(_rbac_rule_list(block, "apiGroups")) == ("",)
-                and tuple(_rbac_rule_list(block, "resources")) == ("secrets",)
-                and tuple(_rbac_rule_list(block, "resourceNames")) == ("sops-age",)
-                and tuple(_rbac_rule_list(block, "verbs")) == ("get",)
-                and _rbac_rule_fields(block)
-                == {"apiGroups", "resources", "resourceNames", "verbs"}
-            ]
-            if len(blocks) != 1 or len(exact) != 1:
-                errors.append(
-                    "flux-system/flux-controller-decryption must have exactly one "
-                    "Secret get rule restricted to resourceNames sops-age"
+        expected = expected_role_rules.get((namespace, name))
+        if expected is None or tuple(sorted(actual_rule(block) for block in blocks)) != tuple(
+            sorted(expected)
+        ):
+            errors.append(
+                "access.yaml Role rules are not the exact direct-site grant: {}/{}".format(
+                    namespace, name
                 )
+            )
         for block in blocks:
             resources = tuple(_rbac_rule_list(block, "resources"))
             if "persistentvolumeclaims" in resources:
@@ -1900,7 +2111,7 @@ def flux_rbac_contract_errors(root):
                             )
                         )
         if name == "helm-reconciler" and namespace in {
-            "cloudflare-public", "naranjo-online", "lidersea-com",
+            "naranjo-online", "lidersea-com",
         }:
             exact_rule_fields = ("apiGroups", "resources", "verbs")
             expected_readback = {
@@ -1928,6 +2139,11 @@ def flux_rbac_contract_errors(root):
         errors.append(
             "naranjo-online/helm-reconciler must carry exactly one exact PVC "
             "lifecycle rule"
+        )
+    if len(seen_identities) != len(expected_identities) or set(seen_identities) != expected_identities:
+        errors.append(
+            "access.yaml inventory must be exactly 8 ServiceAccounts, 8 Roles, "
+            "and 8 RoleBindings for the direct-site topology"
         )
     for name, namespaces in sorted(FLUX_CONTROLLER_ROLE_NAMESPACES.items()):
         for namespace in namespaces:
@@ -2135,9 +2351,6 @@ def check_kubernetes(root):
                 "namespace: cloudflare-public", "namespace: naranjo-online",
                 "namespace: lidersea-com",
             ],
-            "reconciliation/platform-services.yaml": [
-                "provider: sops", "name: sops-age",
-            ],
         }
         for name, fragments in required_fragments.items():
             path = root / "kubernetes" / name
@@ -2160,21 +2373,7 @@ def check_kubernetes(root):
                     "Flux per-controller authorization",
                 )
             )
-        default_denies = root / "kubernetes/platform/prerequisites/network-policies.yaml"
-        if not default_denies.is_file():
-            errors.append("bootstrap-owned default-deny NetworkPolicies are missing")
-        else:
-            documents = re.split(r"(?m)^---\s*$", read(default_denies))
-            for namespace in (
-                "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno",
-            ):
-                matches = [doc for doc in documents if (
-                    re.search(r"(?m)^\s*name:\s*default-deny\s*$", doc) and
-                    re.search(r"(?m)^\s*namespace:\s*{}\s*$".format(namespace), doc) and
-                    re.search(r"(?ms)^\s*policyTypes:\s*\n\s*-\s*Ingress\s*\n\s*-\s*Egress\s*$", doc)
-                )]
-                if len(matches) != 1:
-                    errors.append("exact ingress+egress default-deny missing for " + namespace)
+        errors.extend(site_default_deny_contract_errors(root))
         # The per-site ingress policies (ingress-to-<site>) ship inside
         # the standalone site charts and arrive through the remote sources;
         # the platform keeps requiring its own egress side toward each site.
@@ -2193,7 +2392,7 @@ def check_kubernetes(root):
         errors.extend(flux_egress_contract_errors(root))
         errors.extend(flux_install_ceremony_errors(root))
         errors.extend(flux_rbac_contract_errors(root))
-    errors.extend(signature_policy_source_errors(root))
+    errors.extend(signed_chart_source_errors(root))
     return errors
 
 
@@ -2273,24 +2472,14 @@ def _git_visible_cloudflare_paths(root):
 def chart_source_contract_errors(root):
     """Bind each site's published chart source to its closed identity tuple.
 
-    Two independent failures are reported separately on purpose:
-
-    * the OCIRepository body itself must equal the exact reviewed contract —
-      registry path, SemVer range, layer media type, and this site's (and only
-      this site's) keyless publisher subject and issuer;
-    * the SemVer range's exclusive upper bound must still honor the tracked
-      production-graduation gate in ``release-policy.env`` (ADR 0014). While a
-      site's gate reads ``no``, a range that could resolve major 1 or later
-      would let Flux deploy a production release the owner has not graduated,
-      so the range and the gate can never drift apart silently.
+    The OCIRepository body must equal the exact reviewed contract: immutable
+    manifest digest, audit-only release annotation, registry path, layer media
+    type, and this site's keyless publisher subject and issuer. The site
+    publisher's own release gate still governs what it may publish; Flux does
+    not select a mutable SemVer range here.
     """
 
     errors = []
-    policy = read_release_policy(root)
-    if policy is None:
-        # image_release_errors already reports the malformed policy file; here
-        # the missing gate simply means the range cannot be cleared.
-        policy = {}
     for slug in sorted(CHART_REPOSITORIES):
         source = root / "kubernetes" / "websites" / slug / "source.yaml"
         if source.is_symlink() or not source.is_file():
@@ -2303,108 +2492,21 @@ def chart_source_contract_errors(root):
             continue
         if chart_source_errors(text, slug):
             errors.append("{} chart source is non-canonical".format(slug))
-        try:
-            _, upper = chart_source_semver_bounds(slug)
-        except ValueError:
-            errors.append("{} chart SemVer range is outside the closed grammar".format(slug))
-            continue
-        gate = IMAGE_RELEASE_SITE_CONTRACTS[slug]["gate"]
-        if policy.get(gate) != "yes" and upper[0] > 1:
-            errors.append(
-                "{} chart SemVer range admits an ungraduated production major".format(
-                    slug
-                )
-            )
     return errors
 
 
-def signature_policy_source_errors(root, allowed_inventories=None):
-    """Validate policies and bind their exact inventory to classified release mode."""
+def signed_chart_source_errors(root):
+    """Validate exact Flux source, sync, and per-site chart identity contracts."""
 
     errors = []
-    if allowed_inventories is None:
-        try:
-            plan = classify_release_transition(root)
-        except (
-            CanonicalYamlError,
-            TRANSITION_RELEASE_STATE.CanonicalYamlError,
-            OSError,
-            RuntimeError,
-            UnicodeError,
-        ):
-            # Continue source diagnostics against both closed inventories, but
-            # the missing authoritative mode remains a fail-closed error.
-            errors.append("signature policy inventory mode is unavailable or unsafe")
-            allowed_inventories = ("staging", "promoted")
-        else:
-            if plan.mode == "scaffold":
-                allowed_inventories = ("staging",)
-            elif plan.any_website_active:
-                allowed_inventories = ("promoted",)
-            else:
-                # A staged transition may remove the zero-capacity sentinel in
-                # the same reviewed change that prepares website activation.
-                allowed_inventories = ("staging", "promoted")
-    policy_root = root / "policies/kyverno"
-    # Small unit fixtures without a policy tree remain composable. In the real
-    # repository, policies/gitleaks.toml is layout-required, so a missing
-    # Kyverno subtree is still an unambiguous failure here.
-    if not policy_root.exists() and not (root / "policies").exists():
-        return []
-    if policy_root.is_symlink() or not policy_root.is_dir():
-        return ["signature policy directory is missing or symbolic"]
-    index = policy_root / "kustomization.yaml"
-    if index.is_symlink() or not index.is_file():
-        return ["signature policy Kustomization is missing or symbolic"]
-    try:
-        index_text = read(index)
-    except (OSError, UnicodeError):
-        return ["signature policy Kustomization is unavailable"]
-    if signature_policy_kustomization_errors(index_text, allowed_inventories):
-        errors.append("signature policy Kustomization is non-canonical")
-    for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
-        policy_name = "require-signed-{}.yaml".format(slug)
-        policy = root / "policies/kyverno" / policy_name
-        if policy.is_symlink() or not policy.is_file():
-            errors.append("{} signature admission policy is missing".format(domain))
-            continue
-        try:
-            policy_text = read(policy)
-        except (OSError, UnicodeError):
-            errors.append("{} signature admission policy is unavailable".format(domain))
-            continue
-        if signature_policy_errors(policy_text, slug, workflow):
-            errors.append("{} signature admission policy is non-canonical".format(domain))
-        if not active_kustomization_resource(index_text, policy_name):
-            errors.append(
-                "{} signature admission policy is not active in its Kustomization".format(
-                    domain
-                )
-            )
-    admission_index = root / "kubernetes/platform/admission/kustomization.yaml"
-    if admission_index.is_symlink() or not admission_index.is_file():
-        errors.append("admission parent Kustomization is missing or symbolic")
-    else:
-        try:
-            admission_index_text = read(admission_index)
-        except (OSError, UnicodeError):
-            errors.append("admission parent Kustomization is unavailable")
-        else:
-            if admission_kustomization_errors(admission_index_text):
-                errors.append("admission parent Kustomization is non-canonical")
     authoritative_files = (
-        (
-            "kubernetes/reconciliation/kustomization.yaml",
-            reconciliation_kustomization_errors,
-            "reconciliation root Kustomization",
-        ),
         (
             "kubernetes/flux-system/kustomization.yaml",
             flux_system_kustomization_errors,
             "Flux bootstrap Kustomization",
         ),
         (
-            "kubernetes/flux-system/gotk-sync.yaml",
+            "kubernetes/flux-system/gotk-sync.yaml.in",
             flux_sync_errors,
             "Flux root synchronization",
         ),
@@ -2421,92 +2523,18 @@ def signature_policy_source_errors(root, allowed_inventories=None):
             continue
         if validator(text):
             errors.append(label + " is non-canonical")
-    try:
-        load_admission_suspension(root)
-    except (
-        CanonicalYamlError,
-        TRANSITION_RELEASE_STATE.CanonicalYamlError,
-        OSError,
-        UnicodeError,
-    ):
-        errors.append("Flux admission reconciliation is non-canonical")
-    # The image-admission policies above and the chart sources below are the
-    # two ends of one identity tuple; validating them in the same pass means a
-    # change that re-points one and forgets the other cannot pass either mode.
     errors.extend(chart_source_contract_errors(root))
     return errors
 
 
-def signature_admission_install_errors(root):
-    """Prove the signature policy is part of reconciled Kyverno desired state."""
-    errors = []
-    reconciliation_index = root / "kubernetes/reconciliation/kustomization.yaml"
-    if not reconciliation_index.is_file() or not active_kustomization_resource(
-        read(reconciliation_index), "admission.yaml"
-    ):
-        errors.append("admission reconciliation is not active from the Flux root")
+def site_release_values_errors(domain, release_state):
+    """Require the sole platform value allowed for a site chart."""
 
-    admission_reconciliation = root / "kubernetes/reconciliation/admission.yaml"
-    if admission_reconciliation.is_file():
-        admission_text = read(admission_reconciliation)
-        for fragment in [
-            "path: ./kubernetes/platform/admission",
-            "serviceAccountName: admission-reconciler",
-            "wait: true",
-        ]:
-            if fragment not in admission_text:
-                errors.append("admission reconciliation contract is missing: " + fragment)
-
-    admission_index = root / "kubernetes/platform/admission/kustomization.yaml"
-    if admission_index.is_file():
-        admission_index_text = read(admission_index)
-        for resource in ["kyverno/controllers.yaml", "../../../policies/kyverno"]:
-            if not active_kustomization_resource(admission_index_text, resource):
-                errors.append("admission desired state is missing active resource: " + resource)
-
-    kyverno_controllers = root / "kubernetes/platform/admission/kyverno/controllers.yaml"
-    if kyverno_controllers.is_file():
-        controller_text = read(kyverno_controllers)
-        for fragment in [
-            "kind: Deployment",
-            "kind: Service",
-            "kind: ValidatingWebhookConfiguration",
-            "app.kubernetes.io/part-of: kyverno",
-        ]:
-            if fragment not in controller_text:
-                errors.append("Kyverno controller desired state is missing: " + fragment)
-    return errors
-
-
-def site_release_override_errors(domain, release_state):
-    """Validate the authoritative production values of one HelmRelease."""
-
-    errors = []
-    release_digest = release_state.values.get(("image", "digest"))
-    if release_digest == ZERO_DIGEST:
-        errors.append(
-            "{} HelmRelease override must contain one nonzero image digest".format(
-                domain
-            )
-        )
-    # The release NAME is checked beside the release BYTES. A production
-    # override that advanced the digest while leaving the sentinel tag would
-    # otherwise ship a workload reference reading `repo:v0.0.0@sha256:<real>`
-    # — legible, and wrong, which is worse than illegible.
-    release_tag = release_state.values.get(("image", "tag"))
-    if release_tag == ZERO_TAG:
-        errors.append(
-            "{} HelmRelease override must contain one nonzero release tag".format(
-                domain
-            )
-        )
-    elif not isinstance(release_tag, str) or not RELEASE_TAG_RE.fullmatch(release_tag):
-        errors.append(
-            "{} HelmRelease override release tag is not canonical".format(domain)
-        )
-    if release_state.values.get(("deploymentReady",)) != "true":
-        errors.append("{} HelmRelease override is not deploymentReady".format(domain))
-    return errors
+    if release_state.values == {("deploymentReady",): "true"}:
+        return []
+    return [
+        "{} HelmRelease values must contain exactly deploymentReady=true".format(domain)
+    ]
 
 
 def _plain_yaml_scalar(value):
@@ -2639,11 +2667,6 @@ def reviewed_capacity_errors(root):
                 + namespace
             )
 
-    kyverno_index = root / "policies/kyverno/kustomization.yaml"
-    if kyverno_index.is_file() and active_kustomization_resource(
-        read(kyverno_index), "require-zero-site-capacity.yaml"
-    ):
-        errors.append("zero-site-capacity admission policy remains active")
     return errors
 
 
@@ -2655,9 +2678,6 @@ def check_release(root):
     required_generated = [
         "kubernetes/flux-system/controllers/gotk-components.yaml",
         "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
-        "kubernetes/platform/admission/kyverno/controllers.yaml",
-        "kubernetes/platform/admission/kustomization.yaml",
-        "kubernetes/reconciliation/admission.yaml",
     ] + [path.as_posix() for path in sorted(CLOUDFLARE_LOCK_FILES)]
     for name in required_generated:
         if not (root / name).is_file():
@@ -2691,7 +2711,7 @@ def check_release(root):
         except (CanonicalYamlError, OSError, UnicodeError):
             errors.append("{} release state is unavailable or non-canonical".format(domain))
             continue
-        errors.extend(site_release_override_errors(domain, release_state))
+        errors.extend(site_release_values_errors(domain, release_state))
         if release_state.suspended:
             errors.append("HelmRelease remains suspended: " + slug)
         try:
@@ -2726,21 +2746,7 @@ def check_release(root):
     if tunnel_secret.is_file() and len(configured_recipients) == 1:
         for problem in tunnel_secret_errors(read(tunnel_secret), configured_recipients[0]):
             errors.append("invalid production tunnel Secret: " + problem)
-    errors.extend(signature_policy_source_errors(root))
-    for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
-        signature_policy = root / "policies/kyverno" / (
-            "require-signed-{}.yaml".format(slug)
-        )
-        if signature_policy.is_symlink() or not signature_policy.is_file():
-            continue
-        try:
-            signature_text = read(signature_policy)
-        except (OSError, UnicodeError):
-            continue
-        if signature_policy_action(signature_text, slug, workflow) != "Enforce":
-            errors.append("{} signature admission policy is not enforced".format(domain))
-
-    errors.extend(signature_admission_install_errors(root))
+    errors.extend(signed_chart_source_errors(root))
     errors.extend(reviewed_capacity_errors(root))
     return errors
 
@@ -2792,8 +2798,8 @@ def activation_requested(root):
                 # invoke the full fail-closed release check instead of treating
                 # a parser failure as a safely suspended release.
                 return True
-        parent_path = root / str(contract["parent"])
-        if parent_path.is_file():
+        parent_relative = contract["parent"]
+        if parent_relative is not None and (root / str(parent_relative)).is_file():
             try:
                 if not load_parent_suspension(name, root):
                     return True
@@ -2804,14 +2810,6 @@ def activation_requested(root):
         read(tunnel_kustomization), "tunnel-token.sops.yaml"
     ):
         return True
-    for _, slug, _ in SITE_RELEASE_CONTRACTS:
-        signature_policy = root / "policies" / "kyverno" / (
-            "require-signed-{}.yaml".format(slug)
-        )
-        if signature_policy.is_file() and re.search(
-            r"(?m)^\s*validationFailureAction:\s*Enforce\s*$", read(signature_policy)
-        ):
-            return True
     return False
 
 
@@ -2823,7 +2821,7 @@ def _allowed_transition_release_errors(plan):
         "naranjo-online": plan.naranjo_online,
         "lidersea-com": plan.lidersea_com,
     }
-    for domain, slug, workflow in SITE_RELEASE_CONTRACTS:
+    for _, slug, _ in SITE_RELEASE_CONTRACTS:
         phase = phases[slug]
         if phase == "active":
             continue
@@ -2831,22 +2829,6 @@ def _allowed_transition_release_errors(plan):
             "HelmRelease remains suspended: " + slug,
             "parent Kustomization remains suspended: " + slug,
         })
-        # A suspended child is not yet proven inert while its outer Flux
-        # Kustomization remains active. Keep signature enforcement mandatory
-        # through the child-first rollback and parent-first resume windows.
-        if plan.website_parent_suspended(slug):
-            allowed.update({
-                "{} signature admission policy is missing".format(domain),
-                "{} signature admission policy is not enforced".format(domain),
-                "{} signature admission policy is non-canonical".format(domain),
-                "{} signature admission policy is not active in its Kustomization".format(domain),
-            })
-        if phase == "initial":
-            allowed.update({
-                "{} HelmRelease override must contain one nonzero image digest".format(domain),
-                "{} HelmRelease override is not deploymentReady".format(domain),
-            })
-
     # The flux-system API-server allow points at RFC 5737 documentation space
     # until an operator substitutes the real endpoint from private custody. The
     # SAME validator mandates that sentinel (`check_kubernetes` fails when it is
@@ -2883,12 +2865,7 @@ def _allowed_transition_release_errors(plan):
 def _transition_release_error_is_allowed(error, plan, allowed):
     if error in allowed:
         return True
-    if not plan.any_website_active and error.startswith(
-        (
-            "reviewed website capacity ",
-            "zero-site-capacity admission policy remains active",
-        )
-    ):
+    if not plan.any_website_active and error.startswith("reviewed website capacity "):
         return True
     return False
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the repository's layered security contract: structural invariants first,
-# policy controls second, and executable admission behavior when available.
+# then executable static policy controls.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -24,11 +24,3 @@ bash "${repo_root}/scripts/test-policy-fixtures.sh"
 "${python_command}" -B "${repo_root}/scripts/validate_assurance_ledger.py" "${repo_root}/docs/assurance/evidence-ledger.jsonl"
 "${python_command}" -B "${repo_root}/scripts/validate_no_security_toggles.py" "${repo_root}"
 "${python_command}" -B "${repo_root}/scripts/validate_attack_surface_manifest.py" "${repo_root}/docs/assurance/attack-surface-manifest.json"
-
-# Kyverno CLI fixtures verify runtime admission semantics beyond static YAML;
-# missing tooling is surfaced as pending so it cannot be mistaken for a pass.
-if command -v kyverno >/dev/null 2>&1 && [[ -d "${repo_root}/tests/kubernetes/kyverno" ]]; then
-  kyverno test "${repo_root}/tests/kubernetes/kyverno"
-else
-  printf 'PENDING Kyverno CLI tests: tool or fixtures unavailable.\n'
-fi

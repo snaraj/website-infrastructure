@@ -1,0 +1,141 @@
+# This bootstrap-owned template is not a directly applicable manifest. The
+# owner-attended bootstrap replaces both digest sentinels with the same
+# verified sha256 value and replaces the API endpoint sentinel with the exact
+# private endpoint set. Only the released validator renders applicable JSON;
+# this review template must never be passed to kubectl.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: platform-release-selector
+  namespace: flux-system
+spec:
+  # The bootstrap changes only this field to false after the exact predecessor
+  # source is Ready and every rendered egress rule is current. No floating-
+  # branch source ever exists.
+  suspend: true
+  schedule: "7,37 * * * *"
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: platform-release-selector
+            app.kubernetes.io/part-of: platform-release-selector
+        spec:
+          automountServiceAccountToken: true
+          enableServiceLinks: false
+          restartPolicy: Never
+          serviceAccountName: platform-release-selector
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: selector
+              image: ghcr.io/snaraj/website-infrastructure/platform-release-selector@SELECTOR_IMAGE_DIGEST
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: EXPECTED_SELECTOR_IMAGE_DIGEST
+                  value: SELECTOR_IMAGE_DIGEST
+                - name: EXPECTED_SELECTOR_BUILD_SHA
+                  value: SELECTOR_BUILD_SHA
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+                readOnlyRootFilesystem: true
+              volumeMounts:
+                - name: sigstore-scratch
+                  mountPath: /var/run/release-selector
+          volumes:
+            - name: sigstore-scratch
+              emptyDir:
+                medium: Memory
+                sizeLimit: 2Mi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-release-selector-dns
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: platform-release-selector
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-release-selector-public-https
+  namespace: flux-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: platform-release-selector
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - port: 443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-release-selector-kube-apiserver
+  namespace: flux-system
+  annotations:
+    platform.snaraj.dev/readiness: sentinel-until-private-calico-api-endpoint-set
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: platform-release-selector
+  policyTypes: [Egress]
+  egress:
+    - to:
+        # API_ENDPOINT_SET_SENTINEL: the transaction replaces this complete
+        # list; the documentation address cannot reach the protected API.
+        - ipBlock:
+            cidr: 192.0.2.0/32
+      ports:
+        - port: 6443
+          protocol: TCP

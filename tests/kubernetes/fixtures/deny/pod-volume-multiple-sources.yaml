@@ -11,9 +11,9 @@
 # Both sources here are on the admitted list on purpose, so the SOURCE arm
 # cannot fire and the denial is attributable to the arity arm alone. Neutering
 # that arm admits this object outright — the file stops being rejected at all,
-# which `scripts/test-policy-fixtures.sh` catches — and
-# `scripts/test-storage-engine-parity.sh` additionally requires the declared
-# message above, so the arm cannot be weakened behind another rule's denial.
+# which `scripts/test-policy-fixtures.sh` catches while also requiring the
+# declared message above, so the arm cannot be weakened behind another rule's
+# denial.
 apiVersion: v1
 kind: Pod
 metadata:

@@ -1,0 +1,227 @@
+{
+  "$id": "https://snaraj.dev/schemas/platform-release-identity/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "changelog": {
+      "additionalProperties": false,
+      "properties": {
+        "fragment_path": {
+          "pattern": "^changelog\\.d/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*\\.md$",
+          "type": "string"
+        },
+        "fragment_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": ["fragment_path", "fragment_sha256"],
+      "type": "object"
+    },
+    "main_ci": {
+      "additionalProperties": false,
+      "properties": {
+        "conclusion": {"const": "success"},
+        "event": {"const": "push"},
+        "head_sha": {"$ref": "#/$defs/sha"},
+        "ref": {"const": "refs/heads/main"},
+        "run_attempt": {"minimum": 1, "type": "integer"},
+        "run_id": {"minimum": 1, "type": "integer"},
+        "workflow": {"const": ".github/workflows/pull-request.yml"}
+      },
+      "required": [
+        "conclusion",
+        "event",
+        "head_sha",
+        "ref",
+        "run_attempt",
+        "run_id",
+        "workflow"
+      ],
+      "type": "object"
+    },
+    "platform_release": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {"const": "workflow_run"},
+        "head_sha": {"$ref": "#/$defs/sha"},
+        "ref": {"const": "refs/heads/main"},
+        "run_attempt": {"minimum": 1, "type": "integer"},
+        "run_id": {"minimum": 1, "type": "integer"},
+        "workflow": {"const": ".github/workflows/platform-release.yml"}
+      },
+      "required": [
+        "event",
+        "head_sha",
+        "ref",
+        "run_attempt",
+        "run_id",
+        "workflow"
+      ],
+      "type": "object"
+    },
+    "predecessor": {
+      "additionalProperties": false,
+      "properties": {
+        "peeled_commit": {"$ref": "#/$defs/sha"},
+        "tag": {"$ref": "#/$defs/tagName"}
+      },
+      "required": ["peeled_commit", "tag"],
+      "type": "object"
+    },
+    "release": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_count": {"const": 2},
+        "draft": {"const": false},
+        "id": {"minimum": 1, "type": "integer"},
+        "immutable": {"const": true},
+        "prerelease": {"const": false},
+        "tag_name": {"$ref": "#/$defs/tagName"},
+        "target_commitish": {"$ref": "#/$defs/sha"}
+      },
+      "required": [
+        "asset_count",
+        "draft",
+        "id",
+        "immutable",
+        "prerelease",
+        "tag_name",
+        "target_commitish"
+      ],
+      "type": "object"
+    },
+    "repository": {"const": "snaraj/website-infrastructure"},
+    "schema": {
+      "const": "https://snaraj.dev/schemas/platform-release-identity/v1"
+    },
+    "selector": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {"$ref": "#/$defs/digest"},
+        "image": {
+          "const": "ghcr.io/snaraj/website-infrastructure/platform-release-selector"
+        },
+        "provenance": {
+          "additionalProperties": false,
+          "properties": {
+            "attestor_identity": {"$ref": "#/$defs/workflowIdentity"},
+            "predicate_type": {"const": "https://slsa.dev/provenance/v1"},
+            "source_sha": {"$ref": "#/$defs/sha"},
+            "subject_digest": {"$ref": "#/$defs/digest"}
+          },
+          "required": ["attestor_identity", "predicate_type", "source_sha", "subject_digest"],
+          "type": "object"
+        },
+        "signature": {
+          "additionalProperties": false,
+          "properties": {
+            "certificate_identity": {"$ref": "#/$defs/workflowIdentity"},
+            "oidc_issuer": {"const": "https://token.actions.githubusercontent.com"}
+          },
+          "required": ["certificate_identity", "oidc_issuer"],
+          "type": "object"
+        }
+      },
+      "required": ["digest", "image", "provenance", "signature"],
+      "type": "object"
+    },
+    "sites": {
+      "additionalProperties": false,
+      "properties": {
+        "lidersea-com": {"$ref": "#/$defs/site"},
+        "naranjo-online": {"$ref": "#/$defs/site"}
+      },
+      "required": ["lidersea-com", "naranjo-online"],
+      "type": "object"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "merge_sha": {"$ref": "#/$defs/sha"},
+        "protected_ref": {"const": "refs/heads/main"},
+        "tree_sha": {"$ref": "#/$defs/sha"}
+      },
+      "required": ["merge_sha", "protected_ref", "tree_sha"],
+      "type": "object"
+    },
+    "tag": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/tagName"},
+        "object_sha": {"$ref": "#/$defs/sha"},
+        "object_type": {"const": "tag"},
+        "peeled_commit": {"$ref": "#/$defs/sha"}
+      },
+      "required": ["name", "object_sha", "object_type", "peeled_commit"],
+      "type": "object"
+    }
+  },
+  "required": [
+    "changelog",
+    "main_ci",
+    "platform_release",
+    "predecessor",
+    "release",
+    "repository",
+    "schema",
+    "selector",
+    "sites",
+    "source",
+    "tag"
+  ],
+  "type": "object",
+  "$defs": {
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "site": {
+      "additionalProperties": false,
+      "properties": {
+        "chart": {
+          "additionalProperties": false,
+          "properties": {
+            "layer_digest": {"$ref": "#/$defs/digest"},
+            "manifest_digest": {"$ref": "#/$defs/digest"},
+            "repository": {
+              "pattern": "^ghcr\\.io/snaraj/charts/(?:lidersea-com|naranjo-online)$",
+              "type": "string"
+            },
+            "version": {"$ref": "#/$defs/version"}
+          },
+          "required": ["layer_digest", "manifest_digest", "repository", "version"],
+          "type": "object"
+        },
+        "workload": {
+          "additionalProperties": false,
+          "properties": {
+            "arm64_digest": {"$ref": "#/$defs/digest"},
+            "image": {
+              "pattern": "^ghcr\\.io/snaraj/(?:lidersea-com|naranjo-online):v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)@sha256:[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": ["arm64_digest", "image"],
+          "type": "object"
+        }
+      },
+      "required": ["chart", "workload"],
+      "type": "object"
+    },
+    "tagName": {
+      "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "version": {
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "workflowIdentity": {
+      "const": "https://github.com/snaraj/website-infrastructure/.github/workflows/platform-release.yml@refs/heads/main"
+    }
+  }
+}

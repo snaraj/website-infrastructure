@@ -197,88 +197,46 @@ class ImageReleaseVersionTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.main(["changed", "--base", "0" * 40])
 
-    def test_adr_documents_bumps_graduation_and_digest_authority(self):
+    def test_historical_adr_and_current_rollback_contract_are_both_honest(self):
         adr = REPO_ROOT.joinpath(
             "docs/adr/0014-immutable-container-release-versioning.md"
         ).read_text(encoding="utf-8")
         runbook = REPO_ROOT.joinpath(
             "docs/runbooks/image-rollback.md"
         ).read_text(encoding="utf-8")
-        for fragment in (
+        for historical in (
             "release-policy.env",
             "1.0.0",
             "Kubernetes values remain digest-only",
+            "scripts/promote-image.sh",
         ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, adr)
-        self.assertIn(
-            "vMAJOR.MINOR.PATCH sha256:<digest>", runbook
-        )
-        # The runbook's digest-authority sentence, restated for the reference
-        # that now carries both halves. ADR 0016 made the version tag the
-        # release identity; the digest remaining the only thing that RESOLVES
-        # is the property this pin exists to hold, so it is pinned as that
-        # claim rather than as the older wording it replaced.
-        flattened = " ".join(runbook.split())
-        for fragment in (
-            "Kubernetes still resolves only the digest",
-            "cosign and admission still address only the digest",
-            "repository:vMAJOR.MINOR.PATCH@sha256:<hex>",
-            "advances the release tag and the digest TOGETHER",
-            "Never let a tag become the thing that RESOLVES",
+            with self.subTest(historical=historical):
+                self.assertIn(historical, adr)
+        for current in (
+            "scripts/promote-image.sh` is retired",
+            "exactly one `spec.ref.digest`",
+            "Do not select another available tag or digest",
+            "no image repository, tag, or digest",
         ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, flattened)
+            with self.subTest(current=current):
+                self.assertIn(current, runbook)
 
-    def test_promotion_rebinds_tag_through_candidate_only_review_patch(self):
-        promotion = (REPO_ROOT / "scripts/promote-image.sh").read_text(encoding="utf-8")
-        self.assertIn("vMAJOR.MINOR.PATCH sha256:<64 lowercase hex>", promotion)
-        self.assertIn('validate_image_release.py" validate-tag', promotion)
-        self.assertEqual(
-            promotion.count('oras resolve "${image}:${release_tag}"'), 4
+    def test_promotion_script_cannot_rebind_a_release(self):
+        promotion = (REPO_ROOT / "scripts/promote-image.sh").read_text(
+            encoding="utf-8"
         )
-        self.assertIn('[[ "${tagged_digest}" == "${digest}" ]]', promotion)
-        self.assertIn(
-            'scripts/create_release_candidate.py"',
-            promotion,
-        )
-        self.assertIn(
-            '--initial-phase "${initial_phase}"',
-            promotion,
-        )
-        self.assertIn('--tag "${release_tag}"', promotion)
-        self.assertIn("scripts/create_release_patch.py", promotion)
-        self.assertIn('git -C "${repo_root}" apply --check -- "${review_patch}"', promotion)
-        self.assertIn("The worktree is unchanged", promotion)
-        self.assertNotIn('mv -f -- "${candidate_values}" "${values}"', promotion)
-        self.assertNotIn("sed -E -i", promotion)
-        self.assertIn(
-            '--root "${candidate_root}" emit-values --release "${site}"',
-            promotion,
-        )
-        self.assertIn("[[ \"${4}\" == '--rollback' ]]", promotion)
-        self.assertIn("[[ \"${operation}\" == 'promotion' ]]", promotion)
-        self.assertIn(
-            "parent Kustomization must be explicitly suspended before a digest change",
-            promotion,
-        )
-        self.assertIn(
-            "rollback requires an already-promoted deployment readiness gate",
-            promotion,
-        )
-        self.assertNotIn("sed -E -i 's/^  suspend:", promotion)
-        self.assertIn(
-            'oras manifest fetch-config --platform "${platform}" "${reference}"',
-            promotion,
-        )
-        self.assertIn(
-            '[[ "${image_version}" == "${release_version}" ]]',
-            promotion,
-        )
-        self.assertIn("kubernetes/websites/naranjo-online/release.yaml", promotion)
-        self.assertIn("kubernetes/websites/lidersea-com/release.yaml", promotion)
-        self.assertNotIn("/VERSION", promotion)
-        self.assertNotIn("appVersion", promotion)
+        self.assertIn("promote-image: RETIRED", promotion)
+        self.assertTrue(promotion.rstrip().endswith("exit 1"))
+        for retired in (
+            "validate_image_release.py",
+            "oras resolve",
+            "create_release_candidate.py",
+            "create_release_patch.py",
+            "git -C",
+            "--rollback",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, promotion)
 
 
 if __name__ == "__main__":

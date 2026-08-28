@@ -1,0 +1,34 @@
+{
+  "chartLayerMediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+  "capturedDate": "2026-08-27",
+  "records": {
+    "lidersea-com": {
+      "arm64Digest": "sha256:c58f87669482096362f7a4db307403f1bcee9859c643a24f23d627c08a434db4",
+      "chart": {"appVersion": "0.1.37", "name": "lidersea-com", "version": "0.1.37"},
+      "chartConfigDigest": "sha256:cbcc79cb9b45df8312038bee110559cf8f79588e6cf2000c7b5a1b7972afef0c",
+      "chartLayerDigest": "sha256:56a91426551dcf1e3718b37b4919d2db940199ad50e496b6e57ba385388e058c",
+      "chartRepository": "ghcr.io/snaraj/charts/lidersea-com",
+      "chartTag": "0.1.37",
+      "manifestDigest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+      "matchingChartLayerCount": 1,
+      "release": {"assetDigest": "sha256:cc1e2086d2840dcfdca8f5024234d13a92afba0b21bf9cdfbd1389dc23dbc42e", "sourceSha": "8115ec9c277af14892b41d1f712f81fe4aab16d4"},
+      "signer": {"issuer": "https://token.actions.githubusercontent.com", "subject": "https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/heads/main"},
+      "workloadImage": "ghcr.io/snaraj/lidersea-com:v0.1.37@sha256:22673a01a892da2b644369ee3c2d0339c13ef8eddc1d3423411ce90bbe25d8b1"
+    },
+    "naranjo-online": {
+      "arm64Digest": "sha256:3b648da2b4b6c1df1232344ca16746ddb907cfcbf9b8da04da60b1253ceee361",
+      "chart": {"appVersion": "0.1.50", "name": "naranjo-online", "version": "0.1.50"},
+      "chartConfigDigest": "sha256:7bad4e2b48fcc166e50a6900804bfa512d21339b3d444e6938697b634f6cba4d",
+      "chartLayerDigest": "sha256:df748d25b8a4f69491f8ccce4b3d8c2b915cb41b525b5d0d80c94c780fbdf09e",
+      "chartRepository": "ghcr.io/snaraj/charts/naranjo-online",
+      "chartTag": "0.1.50",
+      "manifestDigest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+      "matchingChartLayerCount": 1,
+      "release": {"assetDigest": "sha256:ed502e1a2e84eb98d71cc0a4b74a76d0274d974d89dd106e297a4a16f8ed44ef", "sourceSha": "56bd0dd03f29e2300cf3553f1d4ae04a5989b127"},
+      "signer": {"issuer": "https://token.actions.githubusercontent.com", "subject": "https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main"},
+      "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.50@sha256:89a9e34730d32ee68338da93c8d146b315441e454aae55a70db349396295b41f"
+    }
+  },
+  "schema": "dev.snaraj.chart-acquisition-receipt/v2",
+  "tools": {"cosign": "3.1.3", "oras": "1.3.3"}
+}

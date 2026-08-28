@@ -69,8 +69,8 @@ Recorded here so the matrix is complete without duplicating authority.
 
 ### E4 — Calico/NetworkManager apply-verify-restore; NetworkPolicy proof failure
 
-Split: admission/policy shape is platform **contract** (conftest + kyverno
-suites, Phase C); live apply/restore and packet-direction proof are
+Split: static policy shape is a platform **contract** (Conftest hostile
+fixtures, Phase C); live apply/restore and packet-direction proof are
 integrator-lane until stable, then Phase G canaries (**live**). A failed
 NetworkPolicy proof invalidates the decision that depended on it — the
 decisions file's approved status is the gate that flips.

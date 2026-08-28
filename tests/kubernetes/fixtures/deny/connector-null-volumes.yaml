@@ -2,12 +2,10 @@
 #
 # This shape is the one cross-engine divergence a 16-shape sweep found: `null`
 # is STORED, not absent, so Rego's `object.get(spec, "volumes", [])` returns the
-# null instead of its default and every volume denial iterates nothing, while
-# CEL's `has()` is true on an explicitly-null field and `.all()` errors on it,
-# so Kyverno refuses the same object. The divergence was benign — a null mounts
-# no credential, and the chart cannot render it — but the two engines disagreeing
-# at all is the finding, so the null is now refused on both sides and this
-# fixture is what holds that closed.
+# null instead of its default and every volume denial iterates nothing.
+# Historical comparison with the retired CEL mirror exposed the divergence.
+# A null mounts no credential and the chart cannot render it, but this fixture
+# now keeps the self-sufficient Rego control fail closed.
 apiVersion: v1
 kind: Pod
 metadata:

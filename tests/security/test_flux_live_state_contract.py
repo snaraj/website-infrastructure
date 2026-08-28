@@ -74,6 +74,8 @@ class FluxLiveStateStaticContractTests(unittest.TestCase):
             'capture_live_json "${live_service_accounts}" get serviceaccounts --all-namespaces',
             'capture_live_json "${live_role_bindings}" get rolebindings --all-namespaces',
             'capture_live_json "${live_cluster_role_bindings}" get clusterrolebindings',
+            'capture_live_json "${live_git_repository}" -n flux-system get \\\n      gitrepositories',
+            'capture_live_json "${live_kustomization}" -n flux-system get \\\n      kustomizations',
             "PY_FLUX_LIVE_STATE",
             "verify_reviewed_live_state controllers || fail",
             "verify_reviewed_live_state full || fail",
@@ -377,7 +379,7 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             )
 
         namespaces = []
-        for name in ("flux-system", "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"):
+        for name in ("flux-system", "cloudflare-public", "naranjo-online", "lidersea-com"):
             if name == "flux-system":
                 # The reviewed controller overlay adds enforce/audit Pod
                 # Security to the namespace the generated export only warns
@@ -391,10 +393,6 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             else:
                 labels = {**c["PSA_LABELS"], "kubernetes.io/metadata.name": name}
                 annotations = {"kustomize.toolkit.fluxcd.io/prune": "disabled"}
-                if name == "kyverno":
-                    annotations["platform.snaraj.dev/readiness"] = (
-                        "blocked-until-reviewed-controller-digests-and-runtime-evidence"
-                    )
             namespaces.append(
                 {
                     "apiVersion": "v1",
@@ -404,34 +402,63 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
                 }
             )
 
+        selector_annotations = {
+            "release-selector.platform.snaraj.dev/schema": "legacy-bootstrap/v1",
+            "release-selector.platform.snaraj.dev/release-id": "0",
+            "release-selector.platform.snaraj.dev/release-tag": "v0.1.27",
+            "release-selector.platform.snaraj.dev/release-target-sha": "0" * 40,
+            "release-selector.platform.snaraj.dev/tag-object-sha": "0" * 40,
+            "release-selector.platform.snaraj.dev/main-ci": "0/0",
+            "release-selector.platform.snaraj.dev/platform-release": "0/0",
+            "release-selector.platform.snaraj.dev/selector-image-digest": (
+                "not-applicable-before-v0.1.28"
+            ),
+            "release-selector.platform.snaraj.dev/identity-sha256": "sha256:" + "0" * 64,
+        }
         git_repository = {
             "apiVersion": "source.toolkit.fluxcd.io/v1",
             "kind": "GitRepository",
-            "metadata": cls.metadata("flux-system", "flux-system", {}, flux_finalizer=True),
+            "metadata": cls.metadata(
+                "flux-system", "flux-system", {}, selector_annotations,
+                flux_finalizer=True,
+            ),
             "spec": {
-                "ignore": "/*\n!/kubernetes\n!/policies\n",
+                "ignore": "/*\n!/kubernetes/\n/kubernetes/*\n!/kubernetes/websites/\n"
+                "/kubernetes/websites/*\n!/kubernetes/websites/naranjo-online/\n"
+                "!/kubernetes/websites/naranjo-online/**\n"
+                "!/kubernetes/websites/lidersea-com/\n"
+                "!/kubernetes/websites/lidersea-com/**\n",
                 "interval": "1m0s",
-                "ref": {"branch": "main"},
-                "sparseCheckout": ["kubernetes", "policies"],
+                "ref": {"tag": "v0.1.27"},
+                "sparseCheckout": [
+                    "kubernetes/websites/naranjo-online",
+                    "kubernetes/websites/lidersea-com",
+                ],
                 "timeout": "60s",
                 "url": "https://github.com/snaraj/website-infrastructure.git",
             },
         }
-        kustomization = {
-            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
-            "kind": "Kustomization",
-            "metadata": cls.metadata("flux-system", "flux-system", {}, flux_finalizer=True),
-            "spec": {
-                "interval": "10m0s",
-                "path": "./kubernetes/reconciliation",
-                "prune": True,
-                "retryInterval": "1m0s",
-                "serviceAccountName": "root-reconciler",
-                "sourceRef": {"kind": "GitRepository", "name": "flux-system"},
-                "timeout": "5m0s",
-                "wait": True,
-            },
-        }
+        kustomizations = []
+        for site in ("naranjo-online", "lidersea-com"):
+            kustomizations.append({
+                "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+                "kind": "Kustomization",
+                "metadata": cls.metadata(
+                    site + "-reconciler", "flux-system", {}, flux_finalizer=True
+                ),
+                "spec": {
+                    "deletionPolicy": "Orphan",
+                    "interval": "10m0s",
+                    "path": "./kubernetes/websites/" + site,
+                    "prune": False,
+                    "retryInterval": "1m0s",
+                    "serviceAccountName": site + "-reconciler",
+                    "sourceRef": {"kind": "GitRepository", "name": "flux-system"},
+                    "suspend": False,
+                    "timeout": "5m0s",
+                    "wait": True,
+                },
+            })
         return {
             "deployments": cls.list_document(deployments),
             "service_accounts": cls.list_document(service_accounts),
@@ -440,8 +467,8 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             "cluster_roles": cls.list_document(cluster_roles),
             "cluster_role_bindings": cls.list_document(cluster_bindings),
             "namespaces": cls.list_document(namespaces),
-            "git_repository": git_repository,
-            "kustomization": kustomization,
+            "git_repository": cls.list_document([git_repository]),
+            "kustomization": cls.list_document(kustomizations),
         }
 
     def run_fixture(self, fixture, *, scope="full"):
@@ -539,25 +566,41 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             with self.subTest(mutation=len(mutations)):
                 self.assertNotEqual(self.run_fixture(fixture).returncode, 0)
 
-    def test_source_path_service_account_and_admission_metadata_drift_are_rejected(self):
+    def test_source_path_service_account_and_selector_metadata_drift_are_rejected(self):
         mutations = []
         git_secret = copy.deepcopy(self.fixture)
-        git_secret["git_repository"]["spec"]["secretRef"] = {"name": "git-credentials"}
+        git_secret["git_repository"]["items"][0]["spec"]["secretRef"] = {
+            "name": "git-credentials"
+        }
         mutations.append(git_secret)
         git_url = copy.deepcopy(self.fixture)
-        git_url["git_repository"]["spec"]["url"] = "https://example.invalid/other.git"
+        git_url["git_repository"]["items"][0]["spec"]["url"] = (
+            "https://example.invalid/other.git"
+        )
         mutations.append(git_url)
         path = copy.deepcopy(self.fixture)
-        path["kustomization"]["spec"]["path"] = "./kubernetes/other"
+        path["kustomization"]["items"][0]["spec"]["path"] = "./kubernetes/other"
         mutations.append(path)
         source_ref = copy.deepcopy(self.fixture)
-        source_ref["kustomization"]["spec"]["sourceRef"]["name"] = "other"
+        source_ref["kustomization"]["items"][0]["spec"]["sourceRef"]["name"] = "other"
         mutations.append(source_ref)
         service_account = copy.deepcopy(self.fixture)
-        service_account["kustomization"]["spec"]["serviceAccountName"] = "default"
+        service_account["kustomization"]["items"][0]["spec"]["serviceAccountName"] = "default"
         mutations.append(service_account)
+        pruning = copy.deepcopy(self.fixture)
+        pruning["kustomization"]["items"][0]["spec"]["prune"] = True
+        mutations.append(pruning)
+        aggregate = copy.deepcopy(self.fixture)
+        aggregate["kustomization"]["items"].append(
+            copy.deepcopy(aggregate["kustomization"]["items"][0])
+        )
+        aggregate["kustomization"]["items"][-1]["metadata"]["name"] = "flux-system"
+        aggregate["kustomization"]["items"][-1]["spec"]["path"] = "./kubernetes"
+        mutations.append(aggregate)
         metadata = copy.deepcopy(self.fixture)
-        metadata["git_repository"]["metadata"]["annotations"]["admission.example.invalid/mutated"] = "true"
+        metadata["git_repository"]["items"][0]["metadata"]["annotations"][
+            "admission.example.invalid/mutated"
+        ] = "true"
         mutations.append(metadata)
         for fixture in mutations:
             self.assertNotEqual(self.run_fixture(fixture).returncode, 0)
@@ -569,7 +612,7 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             item
             for item in account["service_accounts"]["items"]
             if item["metadata"].get("namespace") == "flux-system"
-            and item["metadata"]["name"] == "root-reconciler"
+            and item["metadata"]["name"] == "naranjo-online-reconciler"
         )
         target["automountServiceAccountToken"] = True
         mutations.append(account)
@@ -578,7 +621,7 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
             item
             for item in image_pull["service_accounts"]["items"]
             if item["metadata"].get("namespace") == "flux-system"
-            and item["metadata"]["name"] == "root-reconciler"
+            and item["metadata"]["name"] == "naranjo-online-reconciler"
         )
         target["imagePullSecrets"] = [{"name": "unexpected"}]
         mutations.append(image_pull)
@@ -593,7 +636,11 @@ class FluxLiveStateAdversarialTests(unittest.TestCase):
                     "kind": "ClusterRole",
                     "name": "cluster-admin",
                 },
-                "subjects": [self.contract["sa_subject"]("flux-system", "root-reconciler")],
+                "subjects": [
+                    self.contract["sa_subject"](
+                        "flux-system", "naranjo-online-reconciler"
+                    )
+                ],
             }
         )
         mutations.append(binding)

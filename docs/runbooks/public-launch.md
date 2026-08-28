@@ -11,9 +11,9 @@ Public launch is blocked until every item is evidenced:
 - public GHCR visibility for anonymous Pi pulls;
 - final chart digest, no suspended releases, real SOPS tunnel Secret;
 - restricted PSA/RBAC/default-deny negative tests and workload API denial;
-- Kyverno audit soak followed by enforced registry/digest **and verified signing
-  identity/attestation admission**; all policies are staged in `Audit` and are
-  deliberately not installed, so this remains an explicit blocker;
+- exact Conftest rejection of public Services, mutable images, cross-tenant
+  references, and overbroad RBAC; signed digest-only site artifacts verified by
+  Flux; and bootstrap-owned selector field confinement by the reviewed VAP;
 - CNI/kube-proxy discovery decision plus Pi VPN/tunnel-interface, firewall,
   route, policy, DNS, and negative recovery tests;
 - Pi stacked-etcd snapshot/off-device PKI and API-encryption recovery
@@ -22,27 +22,25 @@ Public launch is blocked until every item is evidenced:
   apply, and immediate post-audit;
 - external HTTPS/header/DNS/port/WARP/identity/tunnel-failure tests.
 
-`release-gate.sh --live` currently fails closed PENDING its post-cutover
-successor; the requirements below are the contract that successor must
-re-establish (its captured-evidence validators survive as
-`scripts/validate_flux_release_evidence.py` and
-`scripts/validate_runtime_inventory_evidence.py`). The final live result will
-be valid only for the clean local commit named by the capacity evidence. Every authoritative Flux Kustomization
-and Git source must report that exact `main@sha1:<commit>` as both observed and
-successfully applied/attempted state, and its server-normalized live `spec` must
-equal the canonical render. The global inventory is exactly six Kustomizations,
-four GitRepositories, three HelmReleases, and their three generated HelmCharts;
-Bucket, ExternalArtifact, HelmRepository, and OCIRepository inventories must be
-empty. Each HelmRelease must trace through its current Revision-strategy
-HelmChart to that same source artifact. The successor gate also must
-server-normalize every required desired Kyverno ClusterPolicy and rendered
-tenant NetworkPolicy with explicit non-persistent dry-runs, then requires every
-live policy spec to be exactly equal. Missing generations, revisions, history,
-source links, policy identities, or policy fields are a NO-GO, even when a
-controller still reports `Ready=True`.
+`release-gate.sh --live` remains fail closed PENDING; #195 does not close it.
+The protected `v0.1.40` merge/tag/Release publishes #141's terminal transaction source,
+but does not prove live execution or convergence; a separately validated #141
+terminal result remains the serialization gate. #189 must bind the immutable
+annotated platform tag and peeled commit to the Flux artifact and both site
+Kustomizations' `lastAppliedRevision` values, compare server-normalized desired
+and live specs, and prove a complete pre/post inventory with only declared
+mutations, no unexpected creates or deletes, site health, and a harmless
+follow-up convergence. Historical fixed object counts are not evidence: derive
+GitRepository, OCIRepository, Kustomization, HelmRelease, and generated-object
+expectations from the exact reviewed render. Initial site reconcilers must use
+`prune: false` and cannot depend on an absent prerequisite. The captured
+evidence validators remain in `scripts/validate_flux_release_evidence.py` and
+`scripts/validate_runtime_inventory_evidence.py`; missing generations,
+revisions, histories, source links, artifact identities, or selector fields remain
+a NO-GO even when a controller reports `Ready=True`.
 
 The same before/after capture rejects unknown Namespaces, workload controllers,
-Pods, Services, source objects, ClusterPolicies, and admission webhooks. Only the
+Pods, Services, source objects, and unexpected admission webhooks. Only the
 two reviewed kubeadm CNI controller variants may use the narrowly classified
 system privilege boundary; all other controller-owned Pods reject host
 namespaces, host paths, privilege escalation, added capabilities (apart from
@@ -54,8 +52,9 @@ the exact controller UID chain and stable replica counts.
 The public Tunnel must contain exactly the ordered `naranjo.online` and
 `lidersea.com` Service routes followed by the final 404, with one matching
 proxied automatic-TTL CNAME in each audited Free zone. One site's readiness does
-not authorize the other; both HelmReleases and the Tunnel stay suspended until
-their combined dependency and runtime admission evidence is complete.
+not authorize the other. Unsuspended desired-state bytes do not establish
+runtime readiness or activation; the Tunnel and platform-services remain
+separately blocked.
 
 Heavy-media launch is a separate blocked gate. The storage profile must remain
 disabled, no media volume may render, and `/media/...` must remain unreachable
@@ -64,6 +63,8 @@ incompatible with deliberate large-media delivery under the zero-spend policy.
 Local streaming tests, a 512 MB cacheability limit, Range support, or cache
 BYPASS are not entitlement evidence.
 
-No checklist item can be waived by site urgency. If any dependency fails, keep
-the HelmReleases suspended and accept downtime rather than origin exposure or a
-paid fallback.
+No checklist item can be waived by site urgency. If a site's own verified
+source, digest, namespace isolation, or scoped reconciliation boundary fails,
+an owner-authorized future run must suspend that site through the reviewed
+inner-then-outer rollback sequence;
+never trade origin exposure or a paid fallback for availability.

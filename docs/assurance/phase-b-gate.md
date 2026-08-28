@@ -24,15 +24,15 @@ hash-pinned coverage gate — rehearse the history gate with
 | YAML/JSON/schema validation | kubeconform `-strict` on every rendered artifact; JSON schemas in fixtures | LIVE |
 | Kubernetes OpenAPI validation (exact supported version) | kubeconform against the pinned schema set | LIVE |
 | Kustomize/Helm rendering with deterministic output hashes | `render-manifests.sh` + **`ci/verify-render-determinism.sh`** (two renders byte-identical) | LIVE (this PR) |
-| Kyverno allow **and** deny cases | `kyverno test tests/kubernetes/kyverno` (44 cases) + `test-policy-fixtures.sh` | LIVE |
-| NetworkPolicy structural tests + behavioral-proof contract | conftest rendered-object rules + kyverno exact-networking suite; behavioral canaries are Phase G by design | LIVE / phased |
+| Conftest allow **and** hostile deny cases | `test-policy-fixtures.sh` with exact expected attribution sidecars | LIVE |
+| NetworkPolicy structural tests + behavioral-proof contract | Conftest rendered-object rules; behavioral canaries are Phase G by design | LIVE / phased |
 | GitHub Actions static validation + least-privilege `permissions:` | `validate_repository.py workflows` (pins, permissions, persist-credentials) | LIVE |
 | Secret scanning with hostile fixtures proving redaction | pinned gitleaks (tree + full history at pre-push) + privacy validators + **ledger forbidden-pattern tests** (`test_assurance_ledger.py` hostile notes) | LIVE (extended) |
 | Dependency and license review | `dependency-review` job (fails on high severity); exact-MIT license law in site repos | LIVE |
 | SBOM generation | site publishers attach SBOM + provenance per release (platform consumes digests) | LIVE (site lane) |
 | OCI manifest/index inspection proving linux/arm64 children | site publisher verification lane + `verify-existing-oci-release.sh` read-only re-proof | LIVE |
-| Immutable digest/tag/repo/workflow-identity/release-subject checks | `validate_image_release.py`, `validate_signature_policy.py`, conftest signature policy, kyverno require-signed | LIVE |
-| Sigstore verification + negative tests (wrong repo/ref/issuer/subject/digest/unsigned) | signature-policy allow/deny fixtures + `verify-existing-oci-release.sh` closed identity allowlist | LIVE |
+| Immutable digest/tag/repo/workflow-identity/release-subject checks | `validate_image_release.py`, `validate_signature_policy.py`, Conftest OCI/image rules | LIVE |
+| Sigstore verification + negative tests (wrong repo/ref/issuer/subject/digest/unsigned) | chart-source hostile tests + `verify-existing-oci-release.sh` closed identity allowlist | LIVE |
 | Reproducibility evidence for rendered manifests | `ci/verify-render-determinism.sh` in the terminal gate | LIVE (this PR) |
 | Evidence-ledger validation (schema, order, unique IDs, forbidden patterns) | **`validate_assurance_ledger.py`** in the terminal gate + `validate-security.sh`; closes PLAT-GAP-002 | LIVE (this PR) |
 | Security-toggle sweep (Coinkite law, Phase C) | **`validate_no_security_toggles.py`** over the tracked tree in the terminal gate + `validate-security.sh` | LIVE |

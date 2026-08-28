@@ -4,23 +4,7 @@ import rego.v1
 
 site_namespaces := {"naranjo-online", "lidersea-com"}
 
-release_kustomizations := {"admission", "platform-services", "naranjo-online", "lidersea-com"}
-
-core_admission_policies := {
-  "require-restricted-workloads",
-  "disallow-public-services",
-  "require-approved-images",
-  "disallow-undiscovered-storage",
-  "disallow-tenant-media-payloads",
-  "require-exact-tenant-networking",
-  "require-release-readiness",
-  "require-replicaset-admission-identity",
-}
-
-signature_policies := {
-  "require-signed-naranjo-online",
-  "require-signed-lidersea-com",
-}
+release_kustomizations := {"platform-services", "naranjo-online", "lidersea-com"}
 
 valid_reviewed_capacity_quota if {
   input.metadata.name == "namespace-budget"
@@ -42,7 +26,7 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s remains suspended", [input.metadata.name])
 }
 
-# Release-mode half of the tag-driven sync contract. The scaffold renderer
+# Release-mode half of the digest-selected sync contract. The scaffold renderer
 # already denies an unverified chart source structurally; this rule makes the
 # same denial part of what a promoted or active render must survive, so a
 # release can never ship a site whose chart would be accepted unsigned.
@@ -68,113 +52,25 @@ deny contains msg if {
   msg := sprintf("Kustomization %s remains suspended", [input.metadata.name])
 }
 
-# Each site's chart renders in its own repository, so the reviewed desired
-# state this repository still owns for a site is its HelmRelease: the readiness
-# flag and image digest handed to that chart. These three rules are the
-# release-grade counterparts of the chart-level readiness/digest denials below,
-# applied to the only layer this gate can render, so a promoted site is proven
-# from the artifact that exists here instead of one that no longer does.
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  object.get(object.get(input.spec, "values", {}), "deploymentReady", false) != true
-  msg := sprintf("HelmRelease %s is not marked ready", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  site_image_digest == "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-  msg := sprintf("HelmRelease %s still names the all-zero image digest", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  is_string(site_image_digest)
-  not regex.match("^sha256:[0-9a-f]{64}$", site_image_digest)
-  msg := sprintf("HelmRelease %s does not name a canonical image digest", [input.metadata.name])
-}
-
-# The release TAG is the human half of the same identity and is gated exactly
-# like the digest: a released site must have advanced off the v0.0.0 sentinel
-# and must name one canonical SemVer release. Two arms, not one, so a sentinel
-# tag and a malformed tag are distinguishable in the denial output — the
-# renderer's closed denial vocabulary asserts each by message.
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  site_image_tag == "v0.0.0"
-  msg := sprintf("HelmRelease %s still names the sentinel release tag", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  is_string(site_image_tag)
-  not regex.match("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", site_image_tag)
-  msg := sprintf("HelmRelease %s does not name a canonical release tag", [input.metadata.name])
-}
-
-# Rego's object.get raises a builtin type error on a non-object receiver, and
-# under OPA's default non-strict mode that error makes the ENCLOSING deny body
-# undefined — the rule silently does not fire. A nested `object.get` chain is
-# therefore fail-open on a degenerate `spec`, `values`, or `image` value. Every
-# level below is guarded, and a degenerate shape is denied by its own arm
-# instead of skipped.
-site_image_mapping := image if {
-  spec := input.spec
+# The verified exact-site chart is the sole workload image-identity carrier.
+# Platform values are closed to one literal readiness scalar; missing, false,
+# malformed, image-bearing, or otherwise extra values all take this same arm.
+valid_site_release_values if {
+  spec := object.get(input, "spec", null)
   is_object(spec)
-  values := object.get(spec, "values", {})
-  is_object(values)
-  image := object.get(values, "image", {})
-  is_object(image)
+  object.get(spec, "values", null) == {"deploymentReady": true}
 }
 
 deny contains msg if {
   input.kind == "HelmRelease"
   input.metadata.namespace in site_namespaces
-  not site_image_mapping
-  msg := sprintf("HelmRelease %s does not state a well-formed image mapping", [input.metadata.name])
-}
-
-# TOTAL accessors: defined for whatever value is present, of whatever type.
-#
-# The guarded form these replace (`x := object.get(...); is_string(x)`) was a
-# REVERSAL wearing the shape of a fix. Making the accessor undefined on a
-# non-string leaf does not hand the denial to `not` — in Rego,
-# `not <undefined rule>` succeeds but `not <builtin>(<undefined rule>)` does
-# NOT, and every consumer below passes the accessor to a builtin. The guard
-# therefore silently switched six digest shapes from DENIED to admitted.
-# Verified with a four-arm minimal policy and against origin/main.
-#
-# The type check belongs in its own deny arm, on a value that is defined, so
-# a present-but-non-string leaf is refused by a rule that actually fires.
-site_image_digest := object.get(site_image_mapping, "digest", "")
-
-site_image_tag := object.get(site_image_mapping, "tag", "")
-
-# Leaf-level type arms. `is_string` is undefined (not false) on a non-string,
-# and an undefined BUILTIN EXPRESSION under `not` does fire — unlike an
-# undefined RULE passed into one. The argument here is always defined, which
-# is the whole difference.
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  not is_string(site_image_digest)
-  msg := sprintf("HelmRelease %s does not state a string image digest", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "HelmRelease"
-  input.metadata.namespace in site_namespaces
-  not is_string(site_image_tag)
-  msg := sprintf("HelmRelease %s does not state a string release tag", [input.metadata.name])
+  not valid_site_release_values
+  msg := sprintf("HelmRelease %s values must contain exactly deploymentReady: true", [input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "Deployment"
-  input.metadata.namespace in {"naranjo-online", "lidersea-com", "kyverno"}
+  input.metadata.namespace in {"naranjo-online", "lidersea-com"}
   object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/deployment-ready", "") != "true"
   msg := sprintf("Deployment %s is not marked ready", [input.metadata.name])
 }
@@ -215,25 +111,4 @@ deny contains msg if {
   input.metadata.namespace in site_namespaces
   not valid_reviewed_capacity_quota
   msg := sprintf("site capacity gate remains closed or lacks a hash-bound reviewed budget in namespace %s", [input.metadata.namespace])
-}
-
-deny contains msg if {
-  input.kind == "ClusterPolicy"
-  input.metadata.name in core_admission_policies
-  object.get(input.spec, "validationFailureAction", "Audit") != "Enforce"
-  msg := sprintf("core admission policy %s is not enforced", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "ClusterPolicy"
-  input.metadata.name in core_admission_policies
-  object.get(object.get(input.spec, "webhookConfiguration", {}), "failurePolicy", "") != "Fail"
-  msg := sprintf("core admission policy %s does not fail closed", [input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "ClusterPolicy"
-  input.metadata.name in signature_policies
-  object.get(input.spec, "validationFailureAction", "Audit") != "Enforce"
-  msg := sprintf("signature admission policy %s is not enforced", [input.metadata.name])
 }

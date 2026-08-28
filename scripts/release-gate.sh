@@ -72,7 +72,7 @@ EOF
 
 require_static_tools() {
   local tool
-  for tool in git rg helm kustomize kubeconform conftest kyverno; do
+  for tool in git rg helm kustomize kubeconform conftest; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required; this gate never installs tools"
   done
   local candidate
@@ -294,20 +294,6 @@ PY
   [[ "$CAPACITY_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'validated capacity evidence hash could not be reloaded'
 }
 
-assert_signature_policies_enforced() {
-  local name file
-  for name in require-signed-naranjo-online require-signed-lidersea-com; do
-    file="${REPO_ROOT}/policies/kyverno/${name}.yaml"
-    grep -Eq '^  validationFailureAction:[[:space:]]+Enforce$' "$file" || \
-      die "${name} remains staged Audit rather than Enforce"
-  done
-  if grep -Eq '^[[:space:]]*-[[:space:]]+require-zero-site-capacity\.yaml$' \
-    "${REPO_ROOT}/policies/kyverno/kustomization.yaml"; then
-    die 'zero-site-capacity policy remains active; reviewed capacity promotion is incomplete'
-  fi
-  log 'PASS both image-signature policies are Enforce and the zero-capacity staging policy is inactive'
-}
-
 run_static_gate() {
   local mode="$1"
   if [[ "$mode" == '--release' ]]; then
@@ -319,7 +305,6 @@ run_static_gate() {
   if [[ "$mode" == '--release' ]]; then
     assert_clean_commit
     assert_capacity_evidence
-    assert_signature_policies_enforced
   fi
 }
 

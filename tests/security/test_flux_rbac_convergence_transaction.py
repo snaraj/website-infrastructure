@@ -13,6 +13,7 @@ import importlib.util
 import inspect
 import json
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -400,7 +401,7 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             b"#!/usr/bin/python3 -IB",
         )
 
-    def test_source_manifest_is_exact_and_fresh(self):
+    def test_source_manifest_is_exact_historical_v040_bundle(self):
         expected_modes = {
             "bootstrap/flux/rbac-convergence/desired-active.json": 0o600,
             "bootstrap/flux/rbac-convergence/recovery.py": 0o600,
@@ -418,12 +419,33 @@ class PrivilegedProcessBoundaryTests(unittest.TestCase):
             {path: mode for path, (_digest, mode) in entries.items()},
             expected_modes,
         )
+        frozen_manifest = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "show",
+                "v0.1.40:bootstrap/flux/rbac-convergence/source-manifest.v1",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        self.assertEqual(SOURCE_MANIFEST_PATH.read_bytes(), frozen_manifest)
         for relative, (digest, _mode) in entries.items():
+            frozen_bytes = subprocess.run(
+                ["git", "-C", str(ROOT), "show", f"v0.1.40:{relative}"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout
             self.assertEqual(
                 digest,
-                transaction.sha256_bytes((ROOT / relative).read_bytes()),
+                transaction.sha256_bytes(frozen_bytes),
                 relative,
             )
+            if relative.startswith("bootstrap/flux/rbac-convergence/"):
+                self.assertEqual((ROOT / relative).read_bytes(), frozen_bytes, relative)
         launcher_digest = entries[
             "bootstrap/flux/rbac-convergence/transaction.py"
         ][0]

@@ -1,63 +1,48 @@
-# Image-signature admission contract
+# Signed artifact verification (Kyverno retired)
 
-The two website `ClusterPolicy` objects have one closed verification shape. An
-active release must not rely on the presence of reassuring YAML strings: both
-the source policy and the post-Kustomize object are compared with the complete
-approved contract.
+Kyverno is not installed and is no longer desired state. This repository does
+not claim image-signature admission. The live artifact boundary is the signed
+site chart selected by an exact OCI manifest digest and verified by Flux
+`OCIRepository.spec.verify`.
 
-The contract requires, independently for the image signature and SLSA
-provenance:
+For each site, one closed identity tuple binds:
 
-- the exact `ghcr.io/snaraj/<site>@sha256:*` repository/digest reference;
-- `required: true`, `verifyDigest: true`, and `mutateDigest: false`;
-- one keyless attestor with count one, the site's exact protected-main workflow
-  subject, GitHub Actions OIDC issuer, and the public Rekor URL;
-- a `SigstoreBundle` attestation with predicate type
-  `https://slsa.dev/provenance/v1`;
-- one `Equals` condition binding `buildDefinition.buildType` to the GitHub
-  Actions workflow build type.
+- its own GHCR chart repository;
+- one nonzero `sha256` OCI manifest digest;
+- the exact release-publisher workflow in that site's repository;
+- terminal `@refs/heads/main$`, protected main only;
+- GitHub Actions' exact OIDC issuer; and
+- the site's namespace and HelmRelease.
 
-The checked-in pre-production policy may use `Audit`; a production release
-requires the otherwise identical `Enforce` variant. Neither action permits a
-different rule, wildcard repository prefix, regular-expression identity,
-transparency-log bypass, skip list, extra attestor, or alternate condition.
-Kyverno documents why `required` and `verifyDigest` are admission checks and
-distinguishes signature attestors from attestation attestors in its
-[Verify Images overview](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/overview/).
-Its [Sigstore guide](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/)
-documents the GitHub workflow keyless identity, Rekor, Sigstore bundle, and SLSA
-condition structure used here.
-
-The entire reconciliation chain is part of the contract: the Flux bootstrap
-index, `gotk-sync.yaml` source/root reconciler, reconciliation index, admission
-parent, and policy index all have exact inventories. `namePrefix`, `nameSuffix`,
-patches, replacements, image rewrites, post-build substitutions, components,
-and generators are rejected. Otherwise a locally valid policy or its Flux
-parent could be renamed, removed, or weakened after its source-level check but
-before reconciliation.
+The signed chart is the sole workload-image authority. Platform values contain
+exactly `deploymentReady: true`; they cannot override image repository, tag,
+or digest. Conftest independently rejects mutable workload images, an
+unapproved registry, a sibling-site image identity, cross-namespace chart
+references, and noncanonical Flux source verification.
 
 ## Safe change procedure
 
-1. Treat the site slug, GHCR repository, workflow filename, workflow identity,
-   namespace, and policy name as one identity tuple. A rename changes all of
-   them in one reviewed patch.
-2. Update the pinned template in `scripts/validate_signature_policy.py`, both
-   source policies, and the exact rendered-object model in
-   `policies/conftest/signature-policy.rego`. Never weaken only one layer to
-   make a render pass.
-3. Add an allow control and a deny control for the proposed semantic change.
-   Extend `tests/security/test_signature_policy_contract.py` with a mutation
-   proving the former contract cannot be bypassed through comments, duplicate
-   keys, alternate nesting, or extra fields.
-4. Run:
+1. Acquire the intended chart without credentials and bind its human release
+   label to the exact OCI manifest digest.
+2. Verify its one Helm layer, chart identity, protected-main certificate
+   subject and issuer, embedded workload index image, and Linux ARM64 child.
+3. Repeat resolution after inspection and require the same digest.
+4. Update the acquisition receipt and the site's annotation/digest pair
+   atomically. Never use a bare tag or SemVer selector.
+5. Run:
 
    ```sh
-   python3 -B -m unittest tests.security.test_signature_policy_contract
-   python3 -B scripts/validate_repository.py all
-   scripts/render-manifests.sh --scaffold
+   python3 -B -m unittest \
+     tests.security.test_signature_policy_contract \
+     tests.security.test_signature_policy_cli
+   python3 -B scripts/validate_repository.py kubernetes
    ```
 
-5. Before changing `Audit` to `Enforce`, verify the exact published digest with
-   the expected keyless signature and provenance, complete an actual-cluster
-   deny/recovery soak, and use the reviewed release-transition procedure. Do
-   not edit the action as an isolated live hotfix.
+Rollback repeats the same acquisition and verification against the older exact
+digest. If those bytes or their expected signature are unavailable, rollback
+fails closed.
+
+A material trust-boundary expansion, including another independent tenant or
+untrusted/third-party workload, triggers reconsideration of runtime
+admission. That trigger requires a new threat model and ADR; it does not
+authorize reinstalling Kyverno or weakening the current Flux/Conftest controls.

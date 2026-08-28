@@ -23,8 +23,9 @@ versions/configuration; and test recovery access. Follow upstream kubeadm's
 one-minor-at-a-time order and version-skew policy. Revalidate CNI/kube-proxy
 compatibility with the actual VPN/tunnel interfaces, firewall, and
 policy-routing state before changing either dataplane component. Before
-Flux/provider/Helm/Kyverno changes, render the exact CRDs/controllers/policies
-and test deny fixtures. Before base/runtime image changes, rebuild both platforms
+Flux/provider/Helm or static policy changes, render the exact
+CRDs/controllers/manifests and test deny fixtures. Before base/runtime image
+changes, rebuild both platforms
 and repeat signature/SBOM/provenance checks.
 
 Before any future media-storage, kernel, runtime, kubelet, filesystem, or mount

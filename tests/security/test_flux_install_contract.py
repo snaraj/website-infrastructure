@@ -762,7 +762,7 @@ class InstallDocumentationTests(unittest.TestCase):
             "192.0.2.0/32",
             "kubectl delete namespace flux-system",
             "separate reviewed pull request",
-            "Kyverno is not installed",
+            "Kyverno is retired",
             "never restores `cluster-admin`",
             "fulcio.sigstore.dev",
             # The fresh-vs-existing dry-run semantics: the ns-not-found on the

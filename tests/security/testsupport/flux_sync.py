@@ -1,10 +1,10 @@
-"""The modeled tag-driven release-sync state machine of ADR 0016.
+"""The modeled digest-selected release-sync state machine of ADR 0016.
 
 One published release moves through five decisions, and every one of them can
 refuse:
 
-    published version
-      -> SemVer resolution        (in range? newer than what we run?)
+    published chart digest
+      -> immutable selection      (exact nonzero sha256 manifest?)
       -> verification decision    (signed, by this exact site's publisher?)
       -> digest-bound upgrade     (does an artifact carry a real image digest?)
       -> rollout health           (did the workload actually become ready?)
@@ -24,6 +24,7 @@ unintended cause is as much a defect as a missing one.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -38,23 +39,20 @@ from .kubernetes_api import (
 )
 from .oci_registry import ZERO_DIGEST, RegistryClient
 
-STABLE_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
-# The closed range grammar of validate_signature_policy.CHART_SEMVER_RANGES:
-# one inclusive floor and one exclusive major ceiling, nothing else.
-SEMVER_RANGE_RE = re.compile(
-    r">=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) "
-    r"<(0|[1-9][0-9]*)\.0\.0\Z"
-)
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+SITE_IMAGE_REPOSITORIES = {
+    "naranjo-online": "ghcr.io/snaraj/naranjo-online",
+    "lidersea-com": "ghcr.io/snaraj/lidersea-com",
+}
 
 
 class SourceOutcome(Enum):
     """What one chart-source reconcile decided."""
 
     SUSPENDED = "suspended"
-    RANGE_UNGRAMMATICAL = "range-ungrammatical"
-    NO_MATCHING_VERSION = "no-matching-version"
-    TAG_REUSE_REFUSED = "tag-reuse-refused"
-    DOWNGRADE_REFUSED = "downgrade-refused"
+    DIGEST_INVALID = "digest-invalid"
+    ARTIFACT_UNAVAILABLE = "artifact-unavailable"
     VERIFICATION_FAILED = "verification-failed"
     ARTIFACT_UNCHANGED = "artifact-unchanged"
     ARTIFACT_UPDATED = "artifact-updated"
@@ -67,7 +65,8 @@ class ReleaseOutcome(Enum):
     CHART_REF_INVALID = "chart-ref-invalid"
     CROSS_NAMESPACE_REFUSED = "cross-namespace-refused"
     SOURCE_NOT_READY = "source-not-ready"
-    SENTINEL_REFUSED = "sentinel-refused"
+    VALUES_REFUSED = "values-refused"
+    CHART_IDENTITY_REFUSED = "chart-identity-refused"
     UNCHANGED = "unchanged"
     UPGRADED = "upgraded"
 
@@ -90,9 +89,7 @@ class SourceResult:
 
     @property
     def revision(self) -> str | None:
-        if self.version is None or self.digest is None:
-            return None
-        return "{}@{}".format(self.version, self.digest)
+        return self.digest
 
 
 @dataclass(frozen=True)
@@ -101,50 +98,6 @@ class ReleaseResult:
     version: str | None = None
     image: str | None = None
     detail: str = ""
-
-
-def parse_range(value):
-    """Return ``(floor, ceiling)`` version tuples, or ``None`` if ungrammatical."""
-
-    if not isinstance(value, str):
-        return None
-    match = SEMVER_RANGE_RE.fullmatch(value)
-    if match is None:
-        return None
-    floor = tuple(int(part) for part in match.groups()[:3])
-    ceiling = (int(match.group(4)), 0, 0)
-    return (floor, ceiling) if floor < ceiling else None
-
-
-def parse_tag(value):
-    """Return a comparable version tuple for a stable ``vX.Y.Z`` tag."""
-
-    if not isinstance(value, str):
-        return None
-    match = STABLE_TAG_RE.fullmatch(value)
-    return tuple(int(part) for part in match.groups()) if match else None
-
-
-def resolve_range(tags, semver_range):
-    """Return the newest stable tag inside the range, or ``None``.
-
-    Non-stable tags (``latest``, ``v1.2.3-rc1``, ``sha-<commit>``, signature
-    tags) have no parse and are therefore never candidates — a mutable or
-    prerelease name cannot become the thing the cluster runs.
-    """
-
-    bounds = parse_range(semver_range)
-    if bounds is None:
-        return None
-    floor, ceiling = bounds
-    candidates = []
-    for tag in tags or ():
-        parsed = parse_tag(tag)
-        if parsed is not None and floor <= parsed < ceiling:
-            candidates.append((parsed, tag))
-    if not candidates:
-        return None
-    return max(candidates)[1]
 
 
 def identity_matches(identity, matchers):
@@ -197,71 +150,47 @@ def reconcile_source(
         return SourceResult(SourceOutcome.SUSPENDED)
 
     repository = _repository_path(spec.get("url"))
-    semver_range = spec.get("ref", {}).get("semver")
-    if repository is None or parse_range(semver_range) is None:
+    ref = spec.get("ref")
+    requested_digest = ref.get("digest") if isinstance(ref, dict) else None
+    if (
+        repository is None
+        or not isinstance(ref, dict)
+        or set(ref) != {"digest"}
+        or not isinstance(requested_digest, str)
+        or DIGEST_RE.fullmatch(requested_digest) is None
+        or requested_digest == ZERO_DIGEST
+    ):
         api.patch_status(
             OCI_REPOSITORY,
             namespace,
             name,
             {
                 "observedGeneration": source.metadata.generation,
-                "conditions": [ready_condition(False, "InvalidSelector")],
+                "conditions": [ready_condition(False, "InvalidDigest")],
             },
         )
-        return SourceResult(SourceOutcome.RANGE_UNGRAMMATICAL)
+        return SourceResult(SourceOutcome.DIGEST_INVALID)
 
-    tags = client.list_tags(repository)
-    selected = resolve_range(tags, semver_range)
     current = source.status.get("artifact", {}) or {}
-    current_version = current.get("version")
-    if selected is None:
+    manifest_digest, manifest = client.manifest(repository, requested_digest)
+    if manifest_digest != requested_digest or not isinstance(manifest, dict):
         api.patch_status(
             OCI_REPOSITORY,
             namespace,
             name,
             {
                 "observedGeneration": source.metadata.generation,
-                "conditions": [ready_condition(False, "NoMatchingVersion")],
+                "conditions": [ready_condition(False, "ArtifactUnavailable")],
             },
         )
-        return SourceResult(SourceOutcome.NO_MATCHING_VERSION)
+        return SourceResult(SourceOutcome.ARTIFACT_UNAVAILABLE)
 
-    digest, _ = client.manifest(repository, selected)
-    if digest is None:
-        api.patch_status(
-            OCI_REPOSITORY,
-            namespace,
-            name,
-            {
-                "observedGeneration": source.metadata.generation,
-                "conditions": [ready_condition(False, "ManifestUnavailable")],
-            },
-        )
-        return SourceResult(SourceOutcome.NO_MATCHING_VERSION)
+    annotations = manifest.get("annotations") or {}
+    version = annotations.get("org.opencontainers.image.version")
+    if not isinstance(version, str) or not version:
+        return SourceResult(SourceOutcome.ARTIFACT_UNAVAILABLE)
 
-    # A version already resolved must keep resolving to the same content. A
-    # changed digest under an unchanged tag is the reassignment ADR 0014 calls
-    # an incident, and the safe response is to keep running what we have.
-    if current_version == selected and current.get("digest") not in (None, digest):
-        return SourceResult(
-            SourceOutcome.TAG_REUSE_REFUSED,
-            version=current_version,
-            digest=current.get("digest"),
-            detail="published version was reassigned to different content",
-        )
-
-    if current_version is not None:
-        previous = parse_tag(current_version)
-        candidate = parse_tag(selected)
-        if previous is not None and candidate is not None and candidate < previous:
-            return SourceResult(
-                SourceOutcome.DOWNGRADE_REFUSED,
-                version=current_version,
-                digest=current.get("digest"),
-                detail="resolved version is older than the running release",
-            )
-
-    identity = client.signature_identity(repository, digest)
+    identity = client.signature_identity(repository, requested_digest)
     verify = spec.get("verify") or {}
     if verify.get("provider") != "cosign" or not identity_matches(
         identity, verify.get("matchOIDCIdentity") or []
@@ -280,12 +209,15 @@ def reconcile_source(
         )
         return SourceResult(
             SourceOutcome.VERIFICATION_FAILED,
-            version=selected,
-            digest=digest,
+            version=version,
+            digest=requested_digest,
             detail="chart signature is absent or not this publisher's identity",
         )
 
-    unchanged = current_version == selected and current.get("digest") == digest
+    unchanged = current.get("revision") == requested_digest
+    stored_digest = "sha256:" + hashlib.sha256(
+        ("stored:" + requested_digest).encode("utf-8")
+    ).hexdigest()
     api.patch_status(
         OCI_REPOSITORY,
         namespace,
@@ -293,17 +225,17 @@ def reconcile_source(
         {
             "observedGeneration": source.metadata.generation,
             "artifact": {
-                "version": selected,
-                "digest": digest,
-                "revision": "{}@{}".format(selected, digest),
+                "version": version,
+                "digest": stored_digest,
+                "revision": requested_digest,
             },
             "conditions": [ready_condition(True, "Succeeded")],
         },
     )
     return SourceResult(
         SourceOutcome.ARTIFACT_UNCHANGED if unchanged else SourceOutcome.ARTIFACT_UPDATED,
-        version=selected,
-        digest=digest,
+        version=version,
+        digest=requested_digest,
     )
 
 
@@ -323,44 +255,58 @@ def reconcile_release(
         return ReleaseResult(ReleaseOutcome.SUSPENDED)
 
     chart_ref = spec.get("chartRef") or {}
-    if chart_ref.get("kind") != OCI_REPOSITORY or not chart_ref.get("name"):
-        return ReleaseResult(ReleaseOutcome.CHART_REF_INVALID)
     if chart_ref.get("namespace", namespace) != namespace:
         return ReleaseResult(ReleaseOutcome.CROSS_NAMESPACE_REFUSED)
+    if chart_ref != {
+        "kind": OCI_REPOSITORY,
+        "name": "{}-chart".format(namespace),
+    }:
+        return ReleaseResult(ReleaseOutcome.CHART_REF_INVALID)
+    values = spec.get("values")
+    if values != {"deploymentReady": True}:
+        return ReleaseResult(
+            ReleaseOutcome.VALUES_REFUSED,
+            detail="platform values must contain exactly deploymentReady=true",
+        )
 
     try:
         source = api.get(OCI_REPOSITORY, namespace, chart_ref["name"])
     except NotFound:
         return ReleaseResult(ReleaseOutcome.SOURCE_NOT_READY, detail="no such source")
     artifact = source.status.get("artifact") or {}
-    if not source.is_ready() or not artifact.get("version"):
+    upstream_digest = artifact.get("revision")
+    if (
+        not source.is_ready()
+        or not artifact.get("version")
+        or not isinstance(upstream_digest, str)
+        or upstream_digest != (source.spec.get("ref") or {}).get("digest")
+    ):
         return ReleaseResult(ReleaseOutcome.SOURCE_NOT_READY)
 
     repository = _repository_path(source.spec.get("url"))
-    chart_manifest = client.manifest(repository, artifact["version"])[1] or {}
-    chart_image_digest = chart_manifest.get("imageDigest")
-    values = spec.get("values") or {}
-    image = values.get("image") or {}
-    # The platform override wins while it exists (ADR 0016 keeps it until the
-    # publishers embed the digest); the chart's own embedded digest is used
-    # once the override is gone. Either way an all-zeros or absent digest is
-    # the fail-closed sentinel and stops the upgrade.
-    effective_digest = image.get("digest") or chart_image_digest
-    repository_name = image.get("repository")
+    manifest_digest, chart_manifest = client.manifest(repository, upstream_digest)
+    chart_manifest = chart_manifest or {}
+    image_repository = chart_manifest.get("imageRepository")
+    image_digest = chart_manifest.get("imageDigest")
     if (
-        not repository_name
-        or effective_digest in (None, "", ZERO_DIGEST)
-        or values.get("deploymentReady") is not True
+        manifest_digest != upstream_digest
+        or image_repository != SITE_IMAGE_REPOSITORIES.get(namespace)
+        or not isinstance(image_digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest)
+        or image_digest == ZERO_DIGEST
     ):
         return ReleaseResult(
-            ReleaseOutcome.SENTINEL_REFUSED,
-            version=artifact["version"],
-            detail="release sentinel still refuses deployment",
+            ReleaseOutcome.CHART_IDENTITY_REFUSED,
+            version=artifact.get("version"),
+            detail="verified chart does not carry this site's canonical workload identity",
         )
 
-    reference = "{}@{}".format(repository_name, effective_digest)
+    reference = "{}@{}".format(image_repository, image_digest)
+    attempted_revision = "{}+{}".format(
+        artifact["version"], upstream_digest.removeprefix("sha256:")[:12]
+    )
     history = list(release.status.get("history", []))
-    if history and history[0].get("chartVersion") == artifact["version"] and history[
+    if history and history[0].get("chartVersion") == attempted_revision and history[
         0
     ].get("image") == reference:
         return ReleaseResult(
@@ -368,8 +314,9 @@ def reconcile_release(
         )
 
     entry = {
-        "chartVersion": artifact["version"],
-        "chartDigest": artifact["digest"],
+        "chartVersion": attempted_revision,
+        "chartDigest": upstream_digest,
+        "ociDigest": upstream_digest,
         "image": reference,
         "status": "deployed",
     }
@@ -380,7 +327,8 @@ def reconcile_release(
         {
             "observedGeneration": release.metadata.generation,
             "lastAttemptedGeneration": release.metadata.generation,
-            "lastAttemptedRevision": artifact["version"],
+            "lastAttemptedRevision": attempted_revision,
+            "lastAttemptedRevisionDigest": upstream_digest,
             "history": [entry] + history,
             "conditions": [ready_condition(True, "ReconciliationSucceeded")],
         },
@@ -390,7 +338,7 @@ def reconcile_release(
         "apps/v1",
         namespace,
         name,
-        {"image": reference, "chartVersion": artifact["version"]},
+        {"image": reference, "chartVersion": attempted_revision},
     )
     return ReleaseResult(
         ReleaseOutcome.UPGRADED, version=artifact["version"], image=reference
@@ -443,6 +391,7 @@ def remediate(api: MockKubernetesApi, namespace: str, name: str) -> RolloutOutco
         {
             "history": [dict(previous)] + [failed] + history[2:],
             "lastAttemptedRevision": previous["chartVersion"],
+            "lastAttemptedRevisionDigest": previous["chartDigest"],
             "conditions": [ready_condition(True, "RollbackSucceeded")],
         },
     )
