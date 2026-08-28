@@ -87,20 +87,18 @@ class TrivyScanContractTests(unittest.TestCase):
         self.assertNotIn("secrets:", text)
 
     def test_skipped_deny_directory_remains_executable_policy_input(self):
-        """Trivy excludes test intent, while both policy engines still reject it."""
+        """Trivy excludes test intent while Conftest still rejects every fixture."""
 
         conftest = REPO_ROOT.joinpath("scripts", "test-policy-fixtures.sh").read_text(
             encoding="utf-8"
         )
-        kyverno = REPO_ROOT.joinpath(
-            "tests", "kubernetes", "kyverno", "kyverno-test.yaml"
-        ).read_text(encoding="utf-8")
-        objective_two = REPO_ROOT.joinpath(
-            "tests", "kubernetes", "kyverno", "objective2", "kyverno-test.yaml"
-        ).read_text(encoding="utf-8")
         self.assertIn("tests/kubernetes/fixtures/deny/*.yaml", conftest)
-        self.assertIn("../fixtures/deny/insecure.yaml", kyverno)
-        self.assertIn("../../fixtures/deny/objective2-bypasses.yaml", objective_two)
+        self.assertIn("expected_file=", conftest)
+        self.assertTrue(
+            REPO_ROOT.joinpath(
+                "tests", "kubernetes", "fixtures", "deny", "insecure.expected"
+            ).is_file()
+        )
 
 
 if __name__ == "__main__":

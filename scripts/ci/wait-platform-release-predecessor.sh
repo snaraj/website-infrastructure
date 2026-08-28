@@ -26,7 +26,11 @@ api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
 ref_json="${RUNNER_TEMP}/platform-predecessor-ref.json"
 tag_json="${RUNNER_TEMP}/platform-predecessor-tag.json"
 release_json="${RUNNER_TEMP}/platform-predecessor-release.json"
+identity_json="${RUNNER_TEMP}/platform-predecessor-identity.json"
+bundle_json="${RUNNER_TEMP}/platform-predecessor-identity.sigstore.json"
 notes="${RUNNER_TEMP}/platform-predecessor-notes.md"
+identity_name='platform-release-identity.v1.json'
+bundle_name='platform-release-identity.v1.json.sigstore.json'
 tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
 have_cached_window=false
@@ -44,6 +48,18 @@ get_json() {
     --header "X-GitHub-Api-Version: ${api_version}" \
     --header "Authorization: Bearer ${read_token}" \
     "${url}"
+}
+
+get_asset() {
+  local asset_id="$1" output="$2"
+  curl --silent --show-error --location \
+    --proto '=https' --tlsv1.2 \
+    --request GET \
+    --output "${output}" --write-out '%{http_code}' \
+    --header 'Accept: application/octet-stream' \
+    --header "X-GitHub-Api-Version: ${api_version}" \
+    --header "Authorization: Bearer ${read_token}" \
+    "${api}/releases/assets/${asset_id}"
 }
 
 classify_predecessor_tag() {
@@ -66,17 +82,61 @@ classify_predecessor_tag() {
 
 classify_predecessor_release() {
   local required="$1" tag="$2" source_sha="$3" status
+  local identity_id bundle_id identity_status bundle_status
+  local selector_build_sha tag_object_sha source_tree_sha
   local -a record_args=()
+  rm -f "${identity_json}" "${bundle_json}"
   status="$(get_json "${api}/releases/tags/${tag}" "${release_json}")"
   if [ "${status}" = 200 ]; then
     record_args=(--release-json "${release_json}")
   fi
-  python3 -I -B "${contract}" release-state \
-    --http-status "${status}" --require "${required}" \
-    "${record_args[@]}" --tag "${tag}" \
-    --allow-grandfathered-main-target \
-    --source-sha "${source_sha}" \
+  if [ "${tag}" = v0.1.40 ]; then
+    python3 -I -B "${contract}" release-state \
+      --allow-grandfathered-main-target \
+      --http-status "${status}" --require "${required}" \
+      "${record_args[@]}" --tag "${tag}" \
+      --source-sha "${source_sha}" \
     --title "Platform ${tag}" --body "${notes}" >/dev/null
+    return
+  fi
+  if [ "${status}" != 200 ]; then
+    python3 -I -B "${contract}" identity-release-state \
+      --http-status "${status}" --require "${required}" \
+      --tag "${tag}" --source-sha "${source_sha}" >/dev/null
+    return
+  fi
+  jq -e --arg identity "${identity_name}" --arg bundle "${bundle_name}" '
+    (.assets | type == "array") and (.assets | length == 2) and
+    (([.assets[].name] | sort) == ([$identity, $bundle] | sort))
+  ' "${release_json}" >/dev/null
+  identity_id="$(jq -er --arg name "${identity_name}" '
+    [.assets[] | select(.name == $name)] | select(length == 1) |
+    .[0].id | select(type == "number" and . > 0)
+  ' "${release_json}")"
+  bundle_id="$(jq -er --arg name "${bundle_name}" '
+    [.assets[] | select(.name == $name)] | select(length == 1) |
+    .[0].id | select(type == "number" and . > 0)
+  ' "${release_json}")"
+  identity_status="$(get_asset "${identity_id}" "${identity_json}")"
+  bundle_status="$(get_asset "${bundle_id}" "${bundle_json}")"
+  test "${identity_status}" = 200
+  test "${bundle_status}" = 200
+  selector_build_sha="$(jq -er '
+    .selector.provenance.source_sha |
+    select(type == "string" and test("^[0-9a-f]{40}$"))
+  ' "${identity_json}")"
+  tag_object_sha="$(jq -er '
+    .object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))
+  ' "${ref_json}")"
+  source_tree_sha="$(git rev-parse "${source_sha}^{tree}")"
+  python3 -I -B "${contract}" identity-release-state \
+    --http-status "${status}" --require "${required}" \
+    --release-json "${release_json}" --identity "${identity_json}" \
+    --bundle "${bundle_json}" --tag "${tag}" \
+    --source-sha "${source_sha}" \
+    --selector-build-sha "${selector_build_sha}" \
+    --tag-object-sha "${tag_object_sha}" \
+    --source-tree-sha "${source_tree_sha}" >/dev/null
 }
 
 for _attempt in {1..30}; do
@@ -130,8 +190,8 @@ for _attempt in {1..30}; do
   else
     # The record may have changed from absent to exact between the closed
     # observations. Accept only that exact concurrent winner; a present
-    # foreign, mutable, partial, draft, prerelease, wrong-author,
-    # asset-bearing, or mismatched Release dies here.
+    # foreign, mutable, partial, draft, prerelease, wrong-author, or
+    # mismatched identity-bearing Release dies here.
     classify_predecessor_release exact "${base_tag}" "${base_sha}"
   fi
   printf 'attestation=PASS:%s:%s\n' \

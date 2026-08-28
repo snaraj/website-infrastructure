@@ -45,11 +45,11 @@ class CiToolPinTests(unittest.TestCase):
             "KUBECONFORM_VERSION",
             "CONFTEST_VERSION",
             "KUSTOMIZE_VERSION",
-            "KYVERNO_CLI_VERSION",
             "OPENTOFU_VERSION",
             "HELM_VERSION",
             "ORAS_VERSION",
             "HADOLINT_VERSION",
+            "COSIGN_VERSION",
             "SHELLCHECK_VERSION",
             "KUBERNETES_VERSION",
         )
@@ -70,7 +70,7 @@ class CiToolPinTests(unittest.TestCase):
         """No archive or standalone executable may be installed before hashing."""
 
         hashes = re.findall(r"(?m)^\s*'([0-9a-f]{64})'\s*\\?$", self.installer)
-        self.assertGreaterEqual(len(hashes), 13)
+        self.assertGreaterEqual(len(hashes), 12)
         self.assertEqual(len(hashes), len(set(hashes)))
         self.assertIn("sha256sum --check --status", self.installer)
         self.assertLess(
@@ -93,6 +93,13 @@ class CiToolPinTests(unittest.TestCase):
             self.installer,
         )
         self.assertNotIn("hadolint-Linux-x86_64", self.installer)
+
+        cosign = self.versions["COSIGN_VERSION"]
+        self.assertIn(
+            "sigstore/cosign/releases/download/{}/cosign-linux-amd64".format(cosign),
+            self.installer,
+        )
+        self.assertIn('${install_root}/cosign', self.installer)
 
     def test_installer_rejects_archive_path_traversal(self):
         """A valid release hash must not authorize unsafe archive member paths."""

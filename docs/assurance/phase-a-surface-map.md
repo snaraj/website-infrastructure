@@ -20,7 +20,7 @@ resources appear by type and ordinal only. Inferences are marked
 | 10 | Recovery tooling + etcd snapshots | `bootstrap/`, `docs/runbooks/*`, Phase E harnesses (planned) | designed, partially tested |
 | 11 | Flux GitOps | `kubernetes/flux-system` render, source/kustomization objects, `.sourceignore` | rendered + policy-tested, suspended |
 | 12 | Website workload contracts | `kubernetes/websites/*` (HelmRelease/OCIRepository/quotas/policies) | rendered + policy-tested, suspended |
-| 13 | Admission (Kyverno) | `policies/kyverno/*` staged Audit; enforce is a release gate | staged |
+| 13 | Runtime admission | Kyverno retired; bootstrap-owned release-selector VAP only | exact narrow control |
 | 14 | Cloudflare edge (tunnel, DNS, zones) | `infrastructure/cloudflare/phases/*` (seven plan-only OpenTofu roots) | plan-only, credential-free |
 | 15 | GitHub Actions + GHCR | `.github/workflows/*`, pinned tooling, coverage/badges lanes in site repos | live |
 | 16 | Operator recovery + runbooks | `docs/runbooks/*` | retrained 2026-08-10 |
@@ -35,9 +35,9 @@ resources appear by type and ordinal only. Inferences are marked
 | Fable GitHub identity | feature branches, PRs, releases when owner grants tags; observations channel | merge to `main`; mutate Pi platform state; Cloudflare account writes | division contract; rulesets; this program's boundaries |
 | GitHub Actions (PR) | read-only validation, no credentials persisted | reach secrets, publish, deploy | `permissions: {}` top-level + job grants; `persist-credentials: false`; tests pin both |
 | GitHub Actions (site tag publishers) | build/sign/publish that repo's image+chart, create its Release | manual dispatch, skip flags, tag reuse, cross-repo writes | publisher workflow design + site repo tests; GHCR per-package access |
-| Flux (in-cluster) | anonymous read of public repos; reconcile rendered objects | write to Git; pull unsigned images (post-enforce) | anonymous URLs (conftest-pinned); kyverno signature policies |
+| Flux (in-cluster) | anonymous read of public repos; reconcile verified exact-digest objects | write to Git; accept unsigned or mutable chart selection | anonymous URLs, exact OCI digest, `spec.verify`, scoped impersonation |
 | Cloudflare tunnel connector | outbound-only connection for the two hostnames | accept inbound origin traffic; exist before launch gates | no inbound rules; suspended HelmRelease; Phase D design |
-| kubelet/containerd/workloads | run admitted, digest-pinned, restricted pods | host access, privilege, storage, extra egress | PSA + kyverno + NetworkPolicies (PLAT-EXP-*) |
+| kubelet/containerd/workloads | run digest-pinned, restricted pods | host access, privilege, storage, extra egress | PSA + default-deny NetworkPolicies + least-privilege RBAC (PLAT-EXP-*) |
 
 ## Data-flow classes
 
@@ -86,7 +86,7 @@ flowchart LR
 - Public internet ↔ Cloudflare edge (no origin exposure; Phase D).
 - Cloudflare ↔ tunnel connector (outbound-only; identity scoping Phase D).
 - GitHub ↔ Flux (anonymous read; URL/scope pinned by conftest).
-- GHCR ↔ cluster (signature admission; digest pins).
+- GHCR ↔ cluster (Flux OCI verification; digest pins).
 - CI runner ↔ repository (secretless PRs; pinned tools).
 - Codex staged loop ↔ everything else (receipted mutations only).
 - Fable lane ↔ live host (read-only sentinel within sanctioned cadence).

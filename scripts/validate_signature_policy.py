@@ -1,30 +1,10 @@
 #!/usr/bin/env python3
-"""Validate the closed signature/identity contracts of reviewed desired state.
+"""Validate the closed Flux OCI signature and release-identity contracts.
 
-Two families live here because they answer the same question at two different
-moments of one release:
-
-* the Kyverno ``require-signed-<site>`` policies would decide, at admission
-  time, whether the *image* a Pod names was signed by that site's publisher;
-* the per-site OCIRepository chart sources decide, at reconcile time, whether
-  the *chart* Flux is about to resolve was signed by the same publisher.
-
-Only the second is a live runtime control. Kyverno is NOT installed on the
-cluster and is not authorized to be (confirmed with the platform lane
-2026-08-22; the runbook locks out both the report-only and the enforcing stage
-pending issues #100/#101/#102). The ``require-signed-*`` policies are therefore
-CI assertions and future desired state, not a second line of defence operating
-today — do not reason about them as one. They are still pinned here byte for
-byte, and still kept in step with the chart-source identity below, because CI
-evaluates them and checks their parity against the Conftest corpus: an obsolete
-identity in those files would be a false claim this repository makes about
-itself, and it would be inherited the moment an install is authorized.
-
-Both bind the identical certificate identity tuple — one site repository, one
-workflow file, the protected ``main`` branch ref only, the GitHub Actions OIDC
-issuer — so a chart and an image can never be accepted from different
-authorities, and the two site tuples can never couple (AGENTS.md safety
-invariant 14).
+Each site source binds one repository, publisher workflow, protected-main ref,
+OIDC issuer, immutable chart digest, and namespace. Whole-document comparisons
+keep the two site tuples independent and reject alternate source credentials,
+mutable selectors, or post-render transforms.
 """
 
 import argparse
@@ -36,7 +16,6 @@ from pathlib import Path
 
 
 MAX_POLICY_BYTES = 64 * 1024
-ALLOWED_ACTIONS = ("Audit", "Enforce")
 # Publisher identities live in the standalone site repositories. Each site's
 # release-publisher workflow is selected by workflow_dispatch from the
 # protected `main` branch and refuses any other event or ref in its own
@@ -60,34 +39,6 @@ SIGNATURE_REPOSITORIES = {
     "naranjo-online": "naranjo.online",
     "lidersea-com": "lidersea.com",
 }
-SIGNATURE_DESCRIPTIONS = {
-    "naranjo-online": "Verify the exact GitHub workflow signature and SLSA provenance bundle.",
-    "lidersea-com": "Verify the exact lidersea.com workflow signature and SLSA provenance bundle.",
-}
-EXPECTED_POLICY_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - require-restricted-workloads.yaml
-  - disallow-public-services.yaml
-  - require-approved-images.yaml
-  - disallow-undiscovered-storage.yaml
-  - disallow-tenant-media-payloads.yaml
-  - require-exact-tenant-networking.yaml
-  - require-release-readiness.yaml
-  - require-replicaset-admission-identity.yaml
-  - require-signed-naranjo-online.yaml
-  - require-signed-lidersea-com.yaml
-"""
-# `staging` and `promoted` remain the two closed API classifications, but #201
-# graduates both onto these same exact no-zero-policy bytes. Keeping two labels
-# bound to one value preserves fail-closed callers without admitting a third or
-# loosely matched inventory.
-EXPECTED_STAGING_POLICY_KUSTOMIZATION = EXPECTED_POLICY_KUSTOMIZATION
-EXPECTED_PROMOTED_POLICY_KUSTOMIZATION = EXPECTED_POLICY_KUSTOMIZATION
-POLICY_KUSTOMIZATION_INVENTORIES = {
-    "staging": EXPECTED_STAGING_POLICY_KUSTOMIZATION,
-    "promoted": EXPECTED_PROMOTED_POLICY_KUSTOMIZATION,
-}
 # The published chart repository each site's release publisher pushes to. It is
 # part of the site's identity tuple exactly like its image repository is; the
 # platform never renames or shares these paths.
@@ -95,16 +46,19 @@ CHART_REPOSITORIES = {
     "naranjo-online": "oci://ghcr.io/snaraj/charts/naranjo-online",
     "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
 }
-# Reviewed SemVer window per site. The LOWER bound is a ratchet: it is the
-# oldest release the cluster may resolve to, so a deleted or re-pointed newer
-# tag cannot roll a site backwards without a reviewed PR raising it. The UPPER
-# bound is the production-graduation gate of ADR 0014 expressed as a Flux
-# policy: while release-policy.env records `no` for a site, its range must
-# exclude major 1 and above, which validate_repository.py re-checks against the
-# tracked gate so the two can never disagree silently.
-CHART_SEMVER_RANGES = {
-    "naranjo-online": ">=0.1.9 <1.0.0",
-    "lidersea-com": ">=0.1.9 <1.0.0",
+# One reviewed human release label paired with the immutable OCI manifest
+# digest Flux actually consumes. The annotation is audit metadata; only the
+# digest is load-bearing. Publication must independently prove tag -> digest
+# and the exact-site keyless signature before changing either value.
+CHART_RELEASES = {
+    "naranjo-online": {
+        "tag": "0.1.50",
+        "digest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+    },
+    "lidersea-com": {
+        "tag": "0.1.37",
+        "digest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+    },
 }
 # Helm charts pushed with `helm push` carry exactly this layer media type.
 # Pinning it means a non-chart layer smuggled into the same artifact is not
@@ -118,67 +72,88 @@ CHART_OIDC_ISSUER_PATTERN = r"^https://token\.actions\.githubusercontent\.com$"
 # trusted, and the one named here is the ref the protected-branch ruleset
 # guards with no bypass actors.
 CHART_BRANCH_REF_PATTERN = r"@refs/heads/main$"
-CHART_SEMVER_RANGE_RE = re.compile(
-    r">=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) "
-    r"<(0|[1-9][0-9]*)\.0\.0\Z"
+CHART_RELEASE_TAG_RE = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z"
 )
-EXPECTED_ADMISSION_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - kyverno/controllers.yaml
-  - ../../../policies/kyverno
-"""
-EXPECTED_RECONCILIATION_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - platform-prerequisites.yaml
-  - admission.yaml
-  - platform-services.yaml
-  - naranjo-online.yaml
-  - lidersea-com.yaml
-"""
+CHART_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 EXPECTED_FLUX_SYSTEM_KUSTOMIZATION = """apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - controllers
   - access.yaml
-  - gotk-sync.yaml
 """
 EXPECTED_FLUX_SYNC = """apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
   name: flux-system
   namespace: flux-system
+  annotations:
+    # STOP: this is a non-applicable review template. The owner-attended #189
+    # bootstrap renders all canonical identity values from the signed v0.1.41
+    # Release and creates these objects directly. Kustomize never consumes this
+    # file, and the schema-invalid scalars below prevent accidental kubectl use.
+    release-selector.platform.snaraj.dev/schema: BOOTSTRAP_RENDERS_CANONICAL_IDENTITY
+    release-selector.platform.snaraj.dev/release-id: "0"
+    release-selector.platform.snaraj.dev/release-tag: v0.1.41
+    release-selector.platform.snaraj.dev/release-target-sha: "0000000000000000000000000000000000000000"
+    release-selector.platform.snaraj.dev/tag-object-sha: "0000000000000000000000000000000000000000"
+    release-selector.platform.snaraj.dev/main-ci: "0/0"
+    release-selector.platform.snaraj.dev/platform-release: "0/0"
+    release-selector.platform.snaraj.dev/selector-image-digest: BOOTSTRAP_RENDERS_SIGNED_DIGEST
+    release-selector.platform.snaraj.dev/identity-sha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
 spec:
-  # The root reconciler needs only desired-state manifests. Sparse checkout
-  # limits clone material while ignore rules independently bound the artifact.
+  # Both sparse checkout and ignore rules independently exclude bootstrap,
+  # controllers, RBAC, Cloudflare and every unrelated platform path.
   ignore: |
     /*
-    !/kubernetes
-    !/policies
+    !/kubernetes/
+    /kubernetes/*
+    !/kubernetes/websites/
+    /kubernetes/websites/*
+    !/kubernetes/websites/naranjo-online/
+    !/kubernetes/websites/naranjo-online/**
+    !/kubernetes/websites/lidersea-com/
+    !/kubernetes/websites/lidersea-com/**
   interval: 1m0s
   ref:
-    branch: main
-  sparseCheckout:
-    - kubernetes
-    - policies
+    tag: v0.1.41
+  sparseCheckout: BOOTSTRAP_RENDERS_EXACT_TWO_PATHS
   timeout: 60s
   url: https://github.com/snaraj/website-infrastructure.git
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: flux-system
+  name: naranjo-online-reconciler
   namespace: flux-system
 spec:
+  deletionPolicy: Orphan
+  force: false
   interval: 10m0s
-  path: ./kubernetes/reconciliation
-  prune: true
+  path: ./kubernetes/websites/naranjo-online
+  prune: false
   retryInterval: 1m0s
-  serviceAccountName: root-reconciler
-  sourceRef:
-    kind: GitRepository
-    name: flux-system
+  serviceAccountName: naranjo-online-reconciler
+  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE
+  suspend: false
+  timeout: 5m0s
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: lidersea-com-reconciler
+  namespace: flux-system
+spec:
+  deletionPolicy: Orphan
+  force: false
+  interval: 10m0s
+  path: ./kubernetes/websites/lidersea-com
+  prune: false
+  retryInterval: 1m0s
+  serviceAccountName: lidersea-com-reconciler
+  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE
+  suspend: false
   timeout: 5m0s
   wait: true
 """
@@ -207,90 +182,6 @@ def _canonical_text_errors(text, label):
     return errors
 
 
-def expected_policy_body(slug, workflow, action):
-    """Return the one normalized source form for a site/action pair."""
-
-    if SIGNATURE_CONTRACTS.get(slug) != workflow:
-        raise ValueError("site and workflow are not one approved signature identity")
-    if action not in ALLOWED_ACTIONS:
-        raise ValueError("signature policy action is not Audit or Enforce")
-    subject = (
-        "https://github.com/snaraj/"
-        + SIGNATURE_REPOSITORIES[slug]
-        + "/.github/workflows/"
-        + workflow
-        + "@refs/heads/main"
-    )
-    description = SIGNATURE_DESCRIPTIONS[slug]
-    return """apiVersion: kyverno.io/v1
-kind: ClusterPolicy
-metadata:
-  name: require-signed-{slug}
-  annotations:
-    policies.kyverno.io/category: Software Supply Chain Security
-    policies.kyverno.io/description: {description}
-spec:
-  admission: true
-  background: false
-  validationFailureAction: {action}
-  webhookConfiguration:
-    failurePolicy: Fail
-    timeoutSeconds: 30
-  rules:
-    - name: verify-{slug}-signature
-      match:
-        any:
-          - resources:
-              kinds: [Pod]
-              namespaces: [{slug}]
-      verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/{slug}@sha256:*"]
-          mutateDigest: false
-          required: true
-          verifyDigest: true
-          attestors:
-            - count: 1
-              entries:
-                - keyless:
-                    subject: {subject}
-                    issuer: https://token.actions.githubusercontent.com
-                    rekor:
-                      url: https://rekor.sigstore.dev
-    - name: verify-{slug}-provenance
-      match:
-        any:
-          - resources:
-              kinds: [Pod]
-              namespaces: [{slug}]
-      verifyImages:
-        - imageReferences: ["ghcr.io/snaraj/{slug}@sha256:*"]
-          type: SigstoreBundle
-          mutateDigest: false
-          required: true
-          verifyDigest: true
-          attestations:
-            - type: https://slsa.dev/provenance/v1
-              attestors:
-                - count: 1
-                  entries:
-                    - keyless:
-                        subject: {subject}
-                        issuer: https://token.actions.githubusercontent.com
-                        rekor:
-                          url: https://rekor.sigstore.dev
-              conditions:
-                - all:
-                    - key: "{{{{ buildDefinition.buildType }}}}"
-                      operator: Equals
-                      value: https://actions.github.io/buildtypes/workflow/v1
-""".format(
-        slug=slug,
-        action=action,
-        subject=subject,
-        description=description,
-    )
-
-
 def chart_source_certificate_subject(slug):
     """Return the exact cosign subject pattern for one site's chart publisher.
 
@@ -298,7 +189,7 @@ def chart_source_certificate_subject(slug):
     workflow file, so a chart signed by the sibling site, by another workflow
     in the same repository, or by a run of the right workflow at any ref other
     than protected `main` — a tag ref included — is not a match. This is the
-    same tuple ``expected_policy_body`` binds for images.
+    same exact tuple the site publisher records for the chart.
     """
 
     if slug not in SIGNATURE_CONTRACTS:
@@ -314,26 +205,27 @@ def chart_source_certificate_subject(slug):
     )
 
 
-def chart_source_semver_bounds(slug):
-    """Return (lower, upper) SemVer tuples for one site's reviewed range.
+def chart_source_release(slug):
+    """Return and validate one site's reviewed ``(tag, digest)`` pair."""
 
-    The range grammar is deliberately tiny: one inclusive lower bound and one
-    exclusive major-boundary upper bound. Anything else — an unbounded range, a
-    caret/tilde shorthand, a prerelease qualifier, a second clause — has no
-    parse here and is therefore rejected before the graduation-gate comparison
-    in ``validate_repository.py`` can be reasoned about at all.
-    """
-
-    if slug not in CHART_SEMVER_RANGES:
+    release = CHART_RELEASES.get(slug)
+    if not isinstance(release, dict):
         raise ValueError("site is outside the closed chart-source allowlist")
-    match = CHART_SEMVER_RANGE_RE.fullmatch(CHART_SEMVER_RANGES[slug])
-    if match is None:
-        raise ValueError("chart SemVer range is outside the closed grammar")
-    lower = tuple(int(part) for part in match.groups()[:3])
-    upper = (int(match.group(4)), 0, 0)
-    if lower >= upper:
-        raise ValueError("chart SemVer range is empty")
-    return lower, upper
+    tag = release.get("tag")
+    digest = release.get("digest")
+    if (
+        not isinstance(tag, str)
+        or CHART_RELEASE_TAG_RE.fullmatch(tag) is None
+        or tag == "0.0.0"
+    ):
+        raise ValueError("chart release tag is outside the closed grammar")
+    if (
+        not isinstance(digest, str)
+        or CHART_DIGEST_RE.fullmatch(digest) is None
+        or set(digest.removeprefix("sha256:")) == {"0"}
+    ):
+        raise ValueError("chart release digest is not canonical and nonzero")
+    return tag, digest
 
 
 def expected_chart_source_body(slug):
@@ -341,12 +233,12 @@ def expected_chart_source_body(slug):
 
     if slug not in CHART_REPOSITORIES:
         raise ValueError("site is outside the closed chart-source allowlist")
-    # Raise before rendering if the committed range is ungrammatical, so a
-    # malformed constant can never be baked into an "expected" document.
-    chart_source_semver_bounds(slug)
+    tag, digest = chart_source_release(slug)
     return """apiVersion: source.toolkit.fluxcd.io/v1
 kind: OCIRepository
 metadata:
+  annotations:
+    platform.snaraj.dev/chart-release: "{tag}"
   name: {slug}-chart
   namespace: {slug}
 spec:
@@ -355,7 +247,7 @@ spec:
     mediaType: {media_type}
     operation: copy
   ref:
-    semver: "{semver}"
+    digest: {digest}
   timeout: 60s
   url: {url}
   verify:
@@ -365,8 +257,9 @@ spec:
     provider: cosign
 """.format(
         slug=slug,
+        tag=tag,
+        digest=digest,
         media_type=CHART_LAYER_MEDIA_TYPE,
-        semver=CHART_SEMVER_RANGES[slug],
         url=CHART_REPOSITORIES[slug],
         issuer=CHART_OIDC_ISSUER_PATTERN,
         subject=chart_source_certificate_subject(slug),
@@ -377,9 +270,9 @@ def chart_source_errors(text, slug):
     """Reject any chart source outside one site's exact closed contract.
 
     Whole-document equality (after the leading comment block) is the point: a
-    missing ``verify`` block, a widened SemVer range, a swapped registry path,
+    missing ``verify`` block, a moved digest, a swapped registry path,
     the sibling site's subject, an added ``secretRef``/``serviceAccountName``/
-    ``proxySecretRef``, a ``ref.tag``/``ref.digest`` override, or ``insecure``
+    ``proxySecretRef``, a ``ref.tag``/``ref.semver`` override, or ``insecure``
     all change the body and are all denied by the same comparison, with no
     per-field allowlist to keep in sync.
     """
@@ -407,95 +300,6 @@ def _policy_body(text):
     while index < len(lines) and lines[index].startswith("#"):
         index += 1
     return "".join(lines[index:])
-
-
-def signature_policy_action(text, slug, workflow):
-    """Return Audit/Enforce only when the entire semantic source is canonical."""
-
-    if (
-        SIGNATURE_CONTRACTS.get(slug) != workflow
-        or _canonical_text_errors(text, "signature policy")
-    ):
-        return None
-    body = _policy_body(text)
-    for action in ALLOWED_ACTIONS:
-        if body == expected_policy_body(slug, workflow, action):
-            return action
-    return None
-
-
-def signature_policy_errors(text, slug, workflow, allowed_actions=ALLOWED_ACTIONS):
-    """Reject duplicate, reordered, extra, commented-out, or weakened semantics."""
-
-    errors = _canonical_text_errors(text, "signature policy")
-    if SIGNATURE_CONTRACTS.get(slug) != workflow:
-        errors.append("site/workflow signature identity is outside the closed allowlist")
-        return errors
-    actions = tuple(allowed_actions)
-    if not actions or any(action not in ALLOWED_ACTIONS for action in actions):
-        errors.append("signature policy action allowlist is invalid")
-        return errors
-    if errors:
-        return errors
-    body = _policy_body(text)
-    if not any(body == expected_policy_body(slug, workflow, action) for action in actions):
-        errors.append(
-            "signature policy body does not match the pinned {} contract".format(
-                "/".join(actions)
-            )
-        )
-    return errors
-
-
-def signature_policy_kustomization_errors(text, allowed_inventories):
-    """Require one explicitly allowed exact resource-only policy inventory."""
-
-    errors = _canonical_text_errors(text, "Kyverno policy Kustomization")
-    inventories = tuple(allowed_inventories)
-    if not inventories or any(
-        inventory not in POLICY_KUSTOMIZATION_INVENTORIES
-        for inventory in inventories
-    ):
-        errors.append("Kyverno policy Kustomization inventory allowlist is invalid")
-        return errors
-    if errors:
-        return errors
-    if text not in {
-        POLICY_KUSTOMIZATION_INVENTORIES[inventory]
-        for inventory in inventories
-    }:
-        errors.append(
-            "Kyverno policy Kustomization must match the exact {} resource inventory".format(
-                "/".join(inventories)
-            )
-        )
-    return errors
-
-
-def admission_kustomization_errors(text):
-    """Forbid parent transforms that could rename or weaken child policies."""
-
-    errors = _canonical_text_errors(text, "admission Kustomization")
-    if errors:
-        return errors
-    if text != EXPECTED_ADMISSION_KUSTOMIZATION:
-        errors.append(
-            "admission Kustomization must contain only the exact controller and policy resources"
-        )
-    return errors
-
-
-def reconciliation_kustomization_errors(text):
-    """Forbid root transforms that could rename the Flux admission boundary."""
-
-    errors = _canonical_text_errors(text, "reconciliation Kustomization")
-    if errors:
-        return errors
-    if text != EXPECTED_RECONCILIATION_KUSTOMIZATION:
-        errors.append(
-            "reconciliation Kustomization must match the exact Flux resource inventory"
-        )
-    return errors
 
 
 def flux_system_kustomization_errors(text):
@@ -563,28 +367,6 @@ def _read_bounded(path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    policy = subparsers.add_parser("policy")
-    policy.add_argument("--file", type=Path, required=True)
-    policy.add_argument("--site", choices=sorted(SIGNATURE_CONTRACTS), required=True)
-    policy.add_argument("--workflow", required=True)
-    policy.add_argument(
-        "--action", action="append", choices=ALLOWED_ACTIONS, dest="actions"
-    )
-    kustomization = subparsers.add_parser("kustomization")
-    kustomization.add_argument("--file", type=Path, required=True)
-    kustomization.add_argument(
-        "--inventory",
-        action="append",
-        choices=sorted(POLICY_KUSTOMIZATION_INVENTORIES),
-        required=True,
-        dest="inventories",
-    )
-    admission_kustomization = subparsers.add_parser("admission-kustomization")
-    admission_kustomization.add_argument("--file", type=Path, required=True)
-    reconciliation_kustomization = subparsers.add_parser(
-        "reconciliation-kustomization"
-    )
-    reconciliation_kustomization.add_argument("--file", type=Path, required=True)
     flux_system_kustomization = subparsers.add_parser("flux-system-kustomization")
     flux_system_kustomization.add_argument("--file", type=Path, required=True)
     flux_sync = subparsers.add_parser("flux-sync")
@@ -600,20 +382,7 @@ def main(argv=None):
     except (OSError, ValueError) as error:
         print("ERROR {}".format(error), file=sys.stderr)
         return 1
-    if args.command == "policy":
-        errors = signature_policy_errors(
-            text,
-            args.site,
-            args.workflow,
-            tuple(args.actions or ALLOWED_ACTIONS),
-        )
-    elif args.command == "kustomization":
-        errors = signature_policy_kustomization_errors(text, tuple(args.inventories))
-    elif args.command == "admission-kustomization":
-        errors = admission_kustomization_errors(text)
-    elif args.command == "reconciliation-kustomization":
-        errors = reconciliation_kustomization_errors(text)
-    elif args.command == "flux-system-kustomization":
+    if args.command == "flux-system-kustomization":
         errors = flux_system_kustomization_errors(text)
     elif args.command == "chart-source":
         errors = chart_source_errors(text, args.site)
@@ -624,13 +393,9 @@ def main(argv=None):
             print("ERROR " + error, file=sys.stderr)
         return 1
     if args.command == "chart-source":
-        # Do not claim the image-admission contract for the reconcile-time
-        # chart contract: the two bind the same identity tuple at different
-        # moments and an operator reading a transcript must be able to tell
-        # which one actually ran.
         print("PASS closed cosign-verified chart source contract")
     else:
-        print("PASS closed Kyverno image-signature policy contract")
+        print("PASS closed Flux source and reconciliation contract")
     return 0
 
 

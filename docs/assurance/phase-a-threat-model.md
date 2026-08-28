@@ -41,12 +41,10 @@ action-inventory diff check to the terminal gate.
 
 Attack: attacker publishes a rogue image/chart, reuses a version, or swaps a
 tag to point at different bytes.
-Controls: the committed chart sources and signature policies require cosign
-keyless signatures from exactly the two protected-`main` publisher identities
-(PLAT-SUP-002 — re-pointed from the tag form 2026-08-22, ADR 0016 amendment;
-note that admission is not among the LIVE controls here, because Kyverno is not
-installed and not authorized to be, so the operating check is Flux's own
-`spec.verify` at reconcile time); deployment is digest-pinned (PLAT-SUP-001);
+Controls: the committed chart sources require cosign keyless signatures from
+exactly the two protected-`main` publisher identities (PLAT-SUP-002); Flux
+`spec.verify` is the operating check at reconcile time and deployment is
+digest-pinned (PLAT-SUP-001);
 publishers refuse tag reuse, and their manual dispatch is bound by their own
 `authorize` job to a commit that already landed on protected `main` through the
 full gate, so a dispatcher cannot choose arbitrary source bytes (PLAT-REL-002);
@@ -71,7 +69,7 @@ reproducibility hash for rendered output joins the Phase B gate.
 
 Attack: a compromised site pod reaches the host, the other tenant, or the
 admin plane.
-Controls: restricted PSA + kyverno confinement (PLAT-EXP-003), default-deny
+Controls: restricted PSA + Conftest-verified workload confinement (PLAT-EXP-003), default-deny
 plus the nine closed NetworkPolicies (PLAT-EXP-002), no storage surfaces
 (PLAT-EXP-004), no host namespaces/ports, ServiceAccount token minimization.
 Residual: kernel/CNI zero-days on a single node — accepted single-node risk,

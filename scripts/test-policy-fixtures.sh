@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exercise Kubernetes admission policy with explicit positive and negative
-# controls before those rules become part of the Flux reconciliation boundary.
+# Exercise static Kubernetes policy with explicit positive and negative
+# controls before reviewed manifests become part of the Flux reconciliation
+# boundary.
 #
 # WHY A DENY FIXTURE IS ASSERTED BY REASON, NOT MERELY BY REJECTION
 #

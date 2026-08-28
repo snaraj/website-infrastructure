@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import datetime as dt
 import hashlib
 import json
@@ -34,6 +36,29 @@ EXPECTED_MAIN_RULESET = "only-me-merge"
 EXPECTED_RELEASE_TAG_RULESET = "immutable-platform-release-tags"
 EXPECTED_RELEASE_TAG_PATTERN = "refs/tags/v*.*.*"
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
+RELEASE_IDENTITY_SCHEMA = (
+    "https://snaraj.dev/schemas/platform-release-identity/v1"
+)
+RELEASE_IDENTITY_ASSET_NAME = "platform-release-identity.v1.json"
+RELEASE_IDENTITY_BUNDLE_ASSET_NAME = (
+    "platform-release-identity.v1.json.sigstore.json"
+)
+RELEASE_IDENTITY_RECEIPT_PATH = (
+    "docs/assurance/195-chart-acquisition-receipt.json"
+)
+MAX_RELEASE_IDENTITY_BYTES = 64 * 1024
+MAX_RELEASE_IDENTITY_BUNDLE_BYTES = 1024 * 1024
+PROTECTED_REF = "refs/heads/main"
+PLATFORM_WORKFLOW_PATH = ".github/workflows/platform-release.yml"
+SELECTOR_IMAGE = (
+    "ghcr.io/snaraj/website-infrastructure/platform-release-selector"
+)
+SELECTOR_CERTIFICATE_ISSUER = "https://token.actions.githubusercontent.com"
+SELECTOR_CERTIFICATE_SUBJECT = (
+    "https://github.com/snaraj/website-infrastructure/"
+    ".github/workflows/platform-release.yml@refs/heads/main"
+)
+SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1"
 REQUIRED_CHECKS = (
     "dependency-review",
     "repository-and-infrastructure",
@@ -49,7 +74,6 @@ MAIN_CI_REQUIRED_STEPS = (
     "Scan current tree for secrets",
     "Render and validate Helm and Kubernetes",
     "Prove render determinism and validate the assurance ledger",
-    "Test staged Kyverno policies",
     "Validate OpenTofu without credentials",
     "Scan dependencies and full-tree secrets",
     "Scan IaC and configuration",
@@ -65,20 +89,28 @@ MAIN_CI_EXACT_STEPS = (
 )
 CODEQL_WORKFLOW_NAME = "CodeQL"
 CODEQL_WORKFLOW_PATH = ".github/workflows/codeql.yml"
-CODEQL_JOB_NAME = "analyze (python, none)"
-CODEQL_REQUIRED_STEPS = (
-    "Check out repository",
-    "Initialize CodeQL",
-    "Analyze",
-)
-CODEQL_EXACT_STEPS = (
-    ("Set up job", "success"),
-    *((name, "success") for name in CODEQL_REQUIRED_STEPS),
-    ("Post Analyze", "success"),
-    ("Post Initialize CodeQL", "success"),
-    ("Post Check out repository", "success"),
-    ("Complete job", "success"),
-)
+CODEQL_EXACT_STEPS = {
+    "analyze (python, none)": (
+        ("Set up job", "success"),
+        ("Check out repository", "success"),
+        ("Initialize CodeQL", "success"),
+        ("Analyze", "success"),
+        ("Post Analyze", "success"),
+        ("Post Initialize CodeQL", "success"),
+        ("Post Check out repository", "success"),
+        ("Complete job", "success"),
+    ),
+    "analyze (go, autobuild)": (
+        ("Set up job", "success"),
+        ("Check out repository", "success"),
+        ("Initialize CodeQL", "success"),
+        ("Analyze", "success"),
+        ("Post Analyze", "success"),
+        ("Post Initialize CodeQL", "success"),
+        ("Post Check out repository", "success"),
+        ("Complete job", "success"),
+    ),
+}
 RECOVERY_BASE_SHA = "c63f357fbc77d55f6e60050f687cceb8723eda6c"
 RECOVERY_SOURCE_SHA = "51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e"
 RECOVERY_TAG = "v0.1.0"
@@ -602,6 +634,284 @@ def render_release_notes(
     )
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ContractError(f"JSON object contains duplicate key {key!r}")
+        record[key] = value
+    return record
+
+
+def _decode_json_object(payload: bytes, label: str) -> Mapping[str, object]:
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except ContractError:
+        raise
+    except (UnicodeDecodeError, RecursionError, ValueError) as exc:
+        raise ContractError(f"{label} is not strict UTF-8 JSON") from exc
+    return _object(decoded, label)
+
+
+def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
+    receipt = _decode_json_object(payload, "chart acquisition receipt")
+    if set(receipt) != {
+        "capturedDate",
+        "chartLayerMediaType",
+        "records",
+        "schema",
+        "tools",
+    }:
+        raise ContractError("chart acquisition receipt fields are incomplete or foreign")
+    if (
+        receipt.get("schema") != "dev.snaraj.chart-acquisition-receipt/v2"
+        or receipt.get("chartLayerMediaType")
+        != "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+    ):
+        raise ContractError("chart acquisition receipt schema is foreign")
+    captured_date = receipt.get("capturedDate")
+    try:
+        if not isinstance(captured_date, str):
+            raise ValueError
+        dt.date.fromisoformat(captured_date)
+    except ValueError as exc:
+        raise ContractError("chart acquisition receipt date is invalid") from exc
+    tools = _object(receipt.get("tools"), "chart acquisition tools")
+    if set(tools) != {"cosign", "oras"} or not all(
+        isinstance(value, str) and value for value in tools.values()
+    ):
+        raise ContractError("chart acquisition tool identity is incomplete")
+    records = _object(receipt.get("records"), "chart acquisition records")
+    expected_sites = {
+        "lidersea-com": "https://github.com/snaraj/lidersea.com/"
+        ".github/workflows/release-publisher.yml@refs/heads/main",
+        "naranjo-online": "https://github.com/snaraj/naranjo.online/"
+        ".github/workflows/release-publisher.yml@refs/heads/main",
+    }
+    if set(records) != set(expected_sites):
+        raise ContractError("chart acquisition receipt must bind exactly both sites")
+    identities: dict[str, object] = {}
+    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+    version_pattern = re.compile(
+        r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+    )
+    for slug, signer_subject in expected_sites.items():
+        record = _object(records[slug], f"{slug} acquisition record")
+        if set(record) != {
+            "arm64Digest",
+            "chart",
+            "chartConfigDigest",
+            "chartLayerDigest",
+            "chartRepository",
+            "chartTag",
+            "manifestDigest",
+            "matchingChartLayerCount",
+            "release",
+            "signer",
+            "workloadImage",
+        }:
+            raise ContractError(f"{slug} acquisition fields are incomplete or foreign")
+        chart = _object(record.get("chart"), f"{slug} chart metadata")
+        release = _object(record.get("release"), f"{slug} release metadata")
+        signer = _object(record.get("signer"), f"{slug} chart signer")
+        if (
+            set(chart) != {"appVersion", "name", "version"}
+            or set(release) != {"assetDigest", "sourceSha"}
+            or set(signer) != {"issuer", "subject"}
+        ):
+            raise ContractError(f"{slug} nested acquisition fields are foreign")
+        version = record.get("chartTag")
+        repository = f"ghcr.io/snaraj/charts/{slug}"
+        manifest_digest = record.get("manifestDigest")
+        config_digest = record.get("chartConfigDigest")
+        layer_digest = record.get("chartLayerDigest")
+        arm64_digest = record.get("arm64Digest")
+        release_asset_digest = release.get("assetDigest")
+        release_source_sha = release.get("sourceSha")
+        workload_image = record.get("workloadImage")
+        if (
+            not isinstance(version, str)
+            or version_pattern.fullmatch(version) is None
+            or chart
+            != {"appVersion": version, "name": slug, "version": version}
+            or record.get("chartRepository") != repository
+            or record.get("matchingChartLayerCount") != 1
+            or signer
+            != {
+                "issuer": SELECTOR_CERTIFICATE_ISSUER,
+                "subject": signer_subject,
+            }
+            or not isinstance(manifest_digest, str)
+            or digest_pattern.fullmatch(manifest_digest) is None
+            or not isinstance(layer_digest, str)
+            or digest_pattern.fullmatch(layer_digest) is None
+            or manifest_digest == layer_digest
+            or not isinstance(config_digest, str)
+            or digest_pattern.fullmatch(config_digest) is None
+            or config_digest in {manifest_digest, layer_digest}
+            or not isinstance(release_asset_digest, str)
+            or digest_pattern.fullmatch(release_asset_digest) is None
+            or not isinstance(release_source_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", release_source_sha) is None
+            or not isinstance(arm64_digest, str)
+            or digest_pattern.fullmatch(arm64_digest) is None
+            or not isinstance(workload_image, str)
+        ):
+            raise ContractError(f"{slug} acquisition identity is invalid")
+        image_prefix = f"ghcr.io/snaraj/{slug}:v{version}@"
+        workload_digest = workload_image.removeprefix(image_prefix)
+        if (
+            not workload_image.startswith(image_prefix)
+            or digest_pattern.fullmatch(workload_digest) is None
+            or workload_digest == arm64_digest
+        ):
+            raise ContractError(f"{slug} workload identity is invalid")
+        identities[slug] = {
+            "chart": {
+                "layer_digest": layer_digest,
+                "manifest_digest": manifest_digest,
+                "repository": repository,
+                "version": version,
+            },
+            "workload": {
+                "arm64_digest": arm64_digest,
+                "image": workload_image,
+            },
+        }
+    return identities
+
+
+def render_release_identity(
+    repository: Path,
+    head_sha: str,
+    tag: str,
+    *,
+    expected_base_sha: str,
+    expected_base_tag: str,
+    tag_object_sha: str,
+    release_id: int,
+    main_run_id: int,
+    main_run_attempt: int,
+    platform_run_id: int,
+    platform_run_attempt: int,
+    selector_image_digest: str,
+    selector_build_sha: str,
+) -> str:
+    """Render the canonical signed platform release identity payload."""
+    head_sha = _exact_commit(repository, head_sha, "release-identity head SHA")
+    tree_sha = require_sha(
+        _git(repository, "rev-parse", f"{head_sha}^{{tree}}"),
+        "release-identity source tree SHA",
+    )
+    expected_base_sha = require_sha(
+        expected_base_sha, "release-identity predecessor SHA"
+    )
+    tag_object_sha = require_sha(tag_object_sha, "annotated tag object SHA")
+    window = discover_transition_window(repository, head_sha)
+    if (
+        window.intent.tag != tag
+        or window.base_sha != expected_base_sha
+        or window.base_tag != expected_base_tag
+    ):
+        raise ContractError("release identity is not the derived exact-next edge")
+    integer_fields = {
+        "release ID": release_id,
+        "main run ID": main_run_id,
+        "main run attempt": main_run_attempt,
+        "platform run ID": platform_run_id,
+        "platform run attempt": platform_run_attempt,
+    }
+    for field, value in integer_fields.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ContractError(f"{field} must be a positive integer")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", selector_image_digest) is None:
+        raise ContractError("selector image digest must be canonical sha256")
+    selector_build_sha = require_sha(
+        selector_build_sha, "selector image build source SHA"
+    )
+    evidence = {
+        "changelog": {
+            "fragment_path": window.fragment_path,
+            "fragment_sha256": f"sha256:{window.fragment_sha256}",
+        },
+        "main_ci": {
+            "conclusion": "success",
+            "event": "push",
+            "head_sha": head_sha,
+            "ref": PROTECTED_REF,
+            "run_attempt": main_run_attempt,
+            "run_id": main_run_id,
+            "workflow": WORKFLOW_PATH,
+        },
+        # A running workflow cannot truthfully put its own future conclusion in
+        # an immutable asset. The selector later GETs this exact attempt and
+        # requires status=completed and conclusion=success.
+        "platform_release": {
+            "event": "workflow_run",
+            "head_sha": head_sha,
+            "ref": PROTECTED_REF,
+            "run_attempt": platform_run_attempt,
+            "run_id": platform_run_id,
+            "workflow": PLATFORM_WORKFLOW_PATH,
+        },
+        "predecessor": {
+            "peeled_commit": expected_base_sha,
+            "tag": expected_base_tag,
+        },
+        "release": {
+            "asset_count": 2,
+            "draft": False,
+            "id": release_id,
+            "immutable": True,
+            "prerelease": False,
+            "tag_name": tag,
+            "target_commitish": head_sha,
+        },
+        "repository": "snaraj/website-infrastructure",
+        "schema": RELEASE_IDENTITY_SCHEMA,
+        "selector": {
+            "digest": selector_image_digest,
+            "image": SELECTOR_IMAGE,
+            "provenance": {
+                "attestor_identity": SELECTOR_CERTIFICATE_SUBJECT,
+                "predicate_type": SLSA_PROVENANCE_V1,
+                "source_sha": selector_build_sha,
+                "subject_digest": selector_image_digest,
+            },
+            "signature": {
+                "certificate_identity": SELECTOR_CERTIFICATE_SUBJECT,
+                "oidc_issuer": SELECTOR_CERTIFICATE_ISSUER,
+            },
+        },
+        "sites": _site_identities_from_receipt(
+            _file_bytes(repository, head_sha, RELEASE_IDENTITY_RECEIPT_PATH)
+        ),
+        "source": {
+            "merge_sha": head_sha,
+            "protected_ref": PROTECTED_REF,
+            "tree_sha": tree_sha,
+        },
+        "tag": {
+            "name": tag,
+            "object_sha": tag_object_sha,
+            "object_type": "tag",
+            "peeled_commit": head_sha,
+        },
+    }
+    rendered = json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+    if len(rendered.encode("utf-8")) > MAX_RELEASE_IDENTITY_BYTES:
+        raise ContractError("platform release identity exceeds 64 KiB")
+    return rendered
+
+
 def validate_recovery_release(repository: Path, source_sha: str, tag: str) -> Intent:
     """Bind the sole pre-App release backlog entry to its immutable history."""
     source_sha = _exact_commit(repository, source_sha, "recovery source SHA")
@@ -879,7 +1189,7 @@ def classify_codeql_run(
 def codeql_jobs_ready(
     jobs_record: Mapping[str, object], *, run_id: int, run_attempt: int, source_sha: str
 ) -> bool:
-    """Validate the sole exact CodeQL job and ordered step inventory."""
+    """Validate both exact CodeQL jobs and their ordered step inventories."""
     source_sha = require_sha(source_sha, "CodeQL job source SHA")
     if (
         isinstance(run_id, bool)
@@ -898,41 +1208,59 @@ def codeql_jobs_ready(
         raise ContractError("CodeQL job count must be an integer")
     if total_count == 0 and jobs == []:
         return False
-    if total_count != 1 or len(jobs) != 1:
-        raise ContractError("expected exactly one CodeQL job for the source SHA")
-    job = _object(jobs[0], "CodeQL job")
-    if (
-        job.get("name") != CODEQL_JOB_NAME
-        or job.get("run_id") != run_id
-        or job.get("run_attempt") != run_attempt
-        or job.get("head_sha") != source_sha
-        or job.get("head_branch") != "main"
-        or job.get("workflow_name") != CODEQL_WORKFLOW_NAME
-    ):
-        raise ContractError("CodeQL job identity or source binding is not exact")
-    status = job.get("status")
-    conclusion = job.get("conclusion")
-    if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
-        if conclusion is not None:
-            raise ContractError("incomplete CodeQL job has a foreign conclusion")
-        return False
-    if status != "completed" or conclusion != "success":
-        raise ContractError("CodeQL job did not complete successfully")
-    conclusions: dict[str, str] = {}
-    ordered_steps: list[tuple[str, str]] = []
-    for value in _array(job.get("steps"), "CodeQL job steps"):
-        step = _object(value, "CodeQL job step")
-        name = step.get("name")
-        conclusion = step.get("conclusion")
-        if not isinstance(name, str) or not name or name in conclusions:
-            raise ContractError("CodeQL step names must be non-empty and unique")
-        if not isinstance(conclusion, str) or not conclusion:
-            raise ContractError("CodeQL step conclusion is missing")
-        conclusions[name] = conclusion
-        ordered_steps.append((name, conclusion))
-    if tuple(ordered_steps) != CODEQL_EXACT_STEPS:
-        raise ContractError("CodeQL step order, inventory, or conclusions are not exact")
-    return True
+    if total_count != len(CODEQL_EXACT_STEPS) or len(jobs) != len(CODEQL_EXACT_STEPS):
+        raise ContractError("expected exact Python and Go CodeQL jobs for the source SHA")
+    by_name: dict[str, Mapping[str, object]] = {}
+    for value in jobs:
+        job = _object(value, "CodeQL job")
+        name = job.get("name")
+        if not isinstance(name, str) or not name or name in by_name:
+            raise ContractError("CodeQL job names must be non-empty and unique")
+        by_name[name] = job
+    if set(by_name) != set(CODEQL_EXACT_STEPS):
+        raise ContractError("CodeQL job inventory is not exact")
+
+    pending = False
+    for name, expected_steps in CODEQL_EXACT_STEPS.items():
+        job = by_name[name]
+        if (
+            job.get("run_id") != run_id
+            or job.get("run_attempt") != run_attempt
+            or job.get("head_sha") != source_sha
+            or job.get("head_branch") != "main"
+            or job.get("workflow_name") != CODEQL_WORKFLOW_NAME
+        ):
+            raise ContractError("CodeQL job identity or source binding is not exact")
+        status = job.get("status")
+        conclusion = job.get("conclusion")
+        if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
+            if conclusion is not None:
+                raise ContractError("incomplete CodeQL job has a foreign conclusion")
+            pending = True
+            continue
+        if status != "completed" or conclusion != "success":
+            raise ContractError("CodeQL job did not complete successfully")
+        conclusions: dict[str, str] = {}
+        ordered_steps: list[tuple[str, str]] = []
+        for value in _array(job.get("steps"), "CodeQL job steps"):
+            step = _object(value, "CodeQL job step")
+            step_name = step.get("name")
+            step_conclusion = step.get("conclusion")
+            if (
+                not isinstance(step_name, str)
+                or not step_name
+                or step_name in conclusions
+            ):
+                raise ContractError("CodeQL step names must be non-empty and unique")
+            if not isinstance(step_conclusion, str) or not step_conclusion:
+                raise ContractError("CodeQL step conclusion is missing")
+            conclusions[step_name] = step_conclusion
+            ordered_steps.append((step_name, step_conclusion))
+        if tuple(ordered_steps) != expected_steps:
+            raise ContractError(
+                "CodeQL step order, inventory, or conclusions are not exact"
+            )
+    return not pending
 
 
 def validate_app_provisioning_receipt(
@@ -1562,7 +1890,11 @@ def validate_release_record(
     if target_commitish != source_sha and not grandfathered:
         raise ContractError("GitHub Release target is not the exact source commit")
     actual_body = release_record.get("body")
-    if not isinstance(actual_body, str) or actual_body.rstrip("\r\n") != body.rstrip("\r\n"):
+    body_matches = actual_body == body if body.startswith("{") else (
+        isinstance(actual_body, str)
+        and actual_body.rstrip("\r\n") == body.rstrip("\r\n")
+    )
+    if not isinstance(actual_body, str) or not body_matches:
         raise ContractError("GitHub Release notes are not exact")
     if release_record.get("draft") is not False or release_record.get("prerelease") is not False:
         raise ContractError("GitHub Release must be published and non-prerelease")
@@ -1576,6 +1908,603 @@ def validate_release_record(
         raise ContractError("GitHub Release author is not the GitHub Actions bot")
     if release_record.get("assets") != []:
         raise ContractError("GitHub Release asset inventory must be exactly empty")
+
+
+def validate_draft_release_record(
+    release_record: Mapping[str, object],
+    *,
+    tag: str,
+    source_sha: str,
+    title: str,
+    body: str,
+) -> None:
+    """Validate the sole short-lived self-ID draft before publication."""
+    source_sha = require_sha(source_sha, "draft Release target SHA")
+    release_id = release_record.get("id")
+    if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+        raise ContractError("draft Release ID is invalid")
+    if (
+        release_record.get("tag_name") != tag
+        or release_record.get("name") != title
+        or release_record.get("target_commitish") != source_sha
+    ):
+        raise ContractError("draft Release identity is not exact")
+    if release_record.get("body") != body:
+        raise ContractError("draft Release body is not byte-exact")
+    if release_record.get("draft") is not True or release_record.get("prerelease") is not False:
+        raise ContractError("draft Release lifecycle state is not exact")
+    if release_record.get("immutable") is not False:
+        raise ContractError("draft Release became immutable before publication")
+    author = _object(release_record.get("author"), "draft Release author")
+    if author.get("login") != "github-actions[bot]" or author.get("id") != 41898282:
+        raise ContractError("draft Release author is not the GitHub Actions bot")
+    if release_record.get("assets") != []:
+        raise ContractError("draft Release asset inventory must be exactly empty")
+
+
+def _canonical_release_identity(payload: bytes) -> Mapping[str, object]:
+    if not payload or len(payload) > MAX_RELEASE_IDENTITY_BYTES:
+        raise ContractError("platform release identity size is invalid")
+    if b"\r" in payload or not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+        raise ContractError("platform release identity must have one terminal LF")
+    identity = _decode_json_object(payload, "platform release identity")
+    canonical = (
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if payload != canonical:
+        raise ContractError("platform release identity is not canonical JSON")
+    return identity
+
+
+def _strict_base64(value: object, label: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{label} is absent")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ContractError(f"{label} is not canonical base64") from exc
+    if not decoded or base64.b64encode(decoded).decode("ascii") != value:
+        raise ContractError(f"{label} is not canonical base64")
+    return decoded
+
+
+def _sigstore_bundle(payload: bytes, identity: bytes) -> Mapping[str, object]:
+    """Bind the supported Sigstore bundle envelope to exact identity bytes."""
+    if not payload or len(payload) > MAX_RELEASE_IDENTITY_BUNDLE_BYTES:
+        raise ContractError("platform release identity Sigstore bundle size is invalid")
+    bundle = _decode_json_object(payload, "platform release identity Sigstore bundle")
+    if (
+        set(bundle) != {"mediaType", "messageSignature", "verificationMaterial"}
+        or bundle.get("mediaType")
+        != "application/vnd.dev.sigstore.bundle.v0.3+json"
+    ):
+        raise ContractError("platform release identity Sigstore bundle is unsupported")
+    signature = _object(
+        bundle.get("messageSignature"),
+        "platform release identity Sigstore message signature",
+    )
+    digest = _object(
+        signature.get("messageDigest"),
+        "platform release identity Sigstore message digest",
+    )
+    if (
+        set(signature) != {"messageDigest", "signature"}
+        or set(digest) != {"algorithm", "digest"}
+        or digest.get("algorithm") != "SHA2_256"
+        or _strict_base64(
+            digest.get("digest"),
+            "platform release identity Sigstore message digest",
+        )
+        != hashlib.sha256(identity).digest()
+    ):
+        raise ContractError(
+            "platform release identity Sigstore bundle signs foreign bytes"
+        )
+    _strict_base64(
+        signature.get("signature"),
+        "platform release identity Sigstore signature",
+    )
+    verification = _object(
+        bundle.get("verificationMaterial"),
+        "platform release identity Sigstore verification material",
+    )
+    if (
+        not {"certificate", "tlogEntries"}.issubset(verification)
+        or not set(verification).issubset(
+            {"certificate", "timestampVerificationData", "tlogEntries"}
+        )
+    ):
+        raise ContractError(
+            "platform release identity Sigstore verification material is incomplete"
+        )
+    certificate = _object(
+        verification.get("certificate"),
+        "platform release identity Sigstore certificate",
+    )
+    tlog_entries = verification.get("tlogEntries")
+    if (
+        set(certificate) != {"rawBytes"}
+        or not isinstance(tlog_entries, list)
+        or not tlog_entries
+        or any(not isinstance(entry, Mapping) or not entry for entry in tlog_entries)
+    ):
+        raise ContractError(
+            "platform release identity Sigstore verification material is invalid"
+        )
+    _strict_base64(
+        certificate.get("rawBytes"),
+        "platform release identity Sigstore certificate",
+    )
+    timestamp = verification.get("timestampVerificationData")
+    if timestamp is not None and not isinstance(timestamp, Mapping):
+        raise ContractError(
+            "platform release identity Sigstore timestamp material is invalid"
+        )
+    return bundle
+
+
+def _validate_identity_asset_metadata(
+    release_record: Mapping[str, object],
+    identity: bytes,
+    bundle: bytes,
+    *,
+    staged: bool,
+) -> Mapping[str, object]:
+    release_id = release_record.get("id")
+    if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+        raise ContractError("GitHub Release ID is invalid")
+    assets = release_record.get("assets")
+    if not isinstance(assets, list) or len(assets) != 2:
+        raise ContractError("GitHub Release must carry exactly two identity assets")
+    asset_records = [
+        _object(asset, "platform release identity asset") for asset in assets
+    ]
+    if any(not isinstance(asset.get("name"), str) for asset in asset_records):
+        raise ContractError("GitHub Release identity asset set is foreign")
+    by_name = {asset["name"]: asset for asset in asset_records}
+    expected_names = {
+        RELEASE_IDENTITY_ASSET_NAME,
+        RELEASE_IDENTITY_BUNDLE_ASSET_NAME,
+    }
+    if set(by_name) != expected_names or len(by_name) != len(asset_records):
+        raise ContractError("GitHub Release identity asset set is foreign")
+    required_asset_fields = {
+        "browser_download_url",
+        "content_type",
+        "digest",
+        "download_count",
+        "id",
+        "label",
+        "name",
+        "size",
+        "state",
+        "uploader",
+        "url",
+    }
+    for name, asset_payload in (
+        (RELEASE_IDENTITY_ASSET_NAME, identity),
+        (RELEASE_IDENTITY_BUNDLE_ASSET_NAME, bundle),
+    ):
+        asset = by_name[name]
+        if not required_asset_fields.issubset(asset):
+            raise ContractError("platform release identity asset metadata is partial")
+        asset_id = asset.get("id")
+        if not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id <= 0:
+            raise ContractError("platform release identity asset ID is invalid")
+        asset_digest = "sha256:" + hashlib.sha256(asset_payload).hexdigest()
+        expected_api_url = (
+            "https://api.github.com/repos/snaraj/website-infrastructure/"
+            f"releases/assets/{asset_id}"
+        )
+        final_download_url = (
+            "https://github.com/snaraj/website-infrastructure/releases/download/"
+            f"{release_record.get('tag_name')}/{name}"
+        )
+        browser_download_url = asset.get("browser_download_url")
+        staged_download_url_ok = (
+            isinstance(browser_download_url, str)
+            and browser_download_url.startswith(
+                "https://github.com/snaraj/website-infrastructure/releases/download/"
+            )
+            and browser_download_url.endswith(f"/{name}")
+        )
+        if (
+            asset.get("name") != name
+            or asset.get("label") is not None
+            or asset.get("state") != "uploaded"
+            or asset.get("content_type") != "application/json"
+            or asset.get("size") != len(asset_payload)
+            or asset.get("digest") != asset_digest
+            or asset.get("url") != expected_api_url
+            or (staged and not staged_download_url_ok)
+            or (not staged and browser_download_url != final_download_url)
+        ):
+            raise ContractError("platform release identity asset metadata is foreign")
+        uploader = _object(asset.get("uploader"), "platform release identity uploader")
+        if (
+            not {"id", "login"}.issubset(uploader)
+            or uploader.get("login") != "github-actions[bot]"
+            or uploader.get("id") != 41898282
+        ):
+            raise ContractError("platform release identity uploader is foreign")
+        download_count = asset.get("download_count")
+        if (
+            not isinstance(download_count, int)
+            or isinstance(download_count, bool)
+            or download_count < 0
+        ):
+            raise ContractError("platform release identity download count is invalid")
+    evidence = _canonical_release_identity(identity)
+    _sigstore_bundle(bundle, identity)
+    return evidence
+
+
+def selector_image_from_release(
+    release_record: Mapping[str, object], *, identity: bytes, bundle: bytes,
+    expected_tag: str, expected_sha: str,
+    expected_selector_build_sha: str,
+    expected_tag_object_sha: str | None = None,
+    expected_tree_sha: str | None = None,
+    staged: bool = False,
+) -> str:
+    """Validate the identity asset and carry its immutable selector digest."""
+    expected_sha = require_sha(expected_sha, "selector predecessor SHA")
+    expected_selector_build_sha = require_sha(
+        expected_selector_build_sha, "selector image build source SHA"
+    )
+    if expected_tag_object_sha is not None:
+        expected_tag_object_sha = require_sha(
+            expected_tag_object_sha, "selector predecessor tag-object SHA"
+        )
+    if expected_tree_sha is not None:
+        expected_tree_sha = require_sha(
+            expected_tree_sha, "selector predecessor tree SHA"
+        )
+    evidence = _validate_identity_asset_metadata(
+        release_record, identity, bundle, staged=staged
+    )
+
+    def exact(value: object, fields: set[str], label: str) -> Mapping[str, object]:
+        record = _object(value, label)
+        if set(record) != fields:
+            raise ContractError(f"{label} fields are incomplete or foreign")
+        return record
+
+    if set(evidence) != {
+        "changelog",
+        "main_ci",
+        "platform_release",
+        "predecessor",
+        "release",
+        "repository",
+        "schema",
+        "selector",
+        "sites",
+        "source",
+        "tag",
+    }:
+        raise ContractError("selector predecessor top-level fields are foreign")
+    if (
+        evidence.get("schema") != RELEASE_IDENTITY_SCHEMA
+        or evidence.get("repository") != "snaraj/website-infrastructure"
+    ):
+        raise ContractError("selector predecessor schema or repository is foreign")
+    source = exact(
+        evidence["source"], {"merge_sha", "protected_ref", "tree_sha"}, "source"
+    )
+    if (
+        source.get("merge_sha") != expected_sha
+        or source.get("protected_ref") != PROTECTED_REF
+        or not isinstance(source.get("tree_sha"), str)
+        or SHA_RE.fullmatch(source["tree_sha"]) is None
+        or (
+            expected_tree_sha is not None
+            and source.get("tree_sha") != expected_tree_sha
+        )
+    ):
+        raise ContractError("selector predecessor protected source is foreign")
+    release = exact(
+        evidence["release"],
+        {
+            "asset_count",
+            "draft",
+            "id",
+            "immutable",
+            "prerelease",
+            "tag_name",
+            "target_commitish",
+        },
+        "release evidence",
+    )
+    expected_release = {
+        "asset_count": 2,
+        "draft": False,
+        "id": release_record.get("id"),
+        "immutable": True,
+        "prerelease": False,
+        "tag_name": expected_tag,
+        "target_commitish": expected_sha,
+    }
+    if (
+        type(release.get("asset_count")) is not int
+        or type(release.get("id")) is not int
+        or release["id"] <= 0
+        or type(release.get("draft")) is not bool
+        or type(release.get("immutable")) is not bool
+        or type(release.get("prerelease")) is not bool
+        or release != expected_release
+    ):
+        raise ContractError("selector predecessor release evidence is foreign")
+    if (
+        release_record.get("tag_name") != expected_tag
+        or release_record.get("name") != f"Platform {expected_tag}"
+        or release_record.get("target_commitish") != expected_sha
+        or release_record.get("draft") is not staged
+        or release_record.get("prerelease") is not False
+        or release_record.get("immutable") is not (not staged)
+        or not isinstance(release_record.get("body"), str)
+    ):
+        raise ContractError("selector predecessor REST release is foreign")
+    author = _object(release_record.get("author"), "selector predecessor author")
+    if (
+        not {"id", "login"}.issubset(author)
+        or author.get("login") != "github-actions[bot]"
+        or author.get("id") != 41898282
+    ):
+        raise ContractError("selector predecessor author is foreign")
+    tag = exact(
+        evidence["tag"],
+        {"name", "object_sha", "object_type", "peeled_commit"},
+        "tag evidence",
+    )
+    if (
+        tag.get("name") != expected_tag
+        or tag.get("object_type") != "tag"
+        or tag.get("peeled_commit") != expected_sha
+        or not isinstance(tag.get("object_sha"), str)
+        or SHA_RE.fullmatch(tag["object_sha"]) is None
+    ):
+        raise ContractError("selector predecessor tag evidence is foreign")
+    if (
+        expected_tag_object_sha is not None
+        and tag.get("object_sha") != expected_tag_object_sha
+    ):
+        raise ContractError("selector predecessor annotated tag object moved")
+    predecessor = exact(
+        evidence["predecessor"], {"peeled_commit", "tag"}, "predecessor evidence"
+    )
+    predecessor_tag = predecessor.get("tag")
+    predecessor_sha = predecessor.get("peeled_commit")
+    predecessor_match = (
+        TAG_RE.fullmatch(predecessor_tag)
+        if isinstance(predecessor_tag, str)
+        else None
+    )
+    candidate_match = TAG_RE.fullmatch(expected_tag)
+    if (
+        predecessor_match is None
+        or candidate_match is None
+        or not isinstance(predecessor_sha, str)
+        or SHA_RE.fullmatch(predecessor_sha) is None
+        or predecessor_sha == expected_sha
+        or tuple(int(part) for part in candidate_match.groups())
+        != (
+            int(predecessor_match.group(1)),
+            int(predecessor_match.group(2)),
+            int(predecessor_match.group(3)) + 1,
+        )
+    ):
+        raise ContractError("selector predecessor edge is foreign")
+    changelog = exact(
+        evidence["changelog"],
+        {"fragment_path", "fragment_sha256"},
+        "changelog evidence",
+    )
+    if (
+        not isinstance(changelog.get("fragment_path"), str)
+        or FRAGMENT_PATH_RE.fullmatch(changelog["fragment_path"]) is None
+        or not isinstance(changelog.get("fragment_sha256"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", changelog["fragment_sha256"])
+        is None
+    ):
+        raise ContractError("selector predecessor changelog evidence is foreign")
+    for key, workflow, event, with_conclusion in (
+        ("main_ci", WORKFLOW_PATH, "push", True),
+        ("platform_release", PLATFORM_WORKFLOW_PATH, "workflow_run", False),
+    ):
+        fields = {
+            "event",
+            "head_sha",
+            "ref",
+            "run_attempt",
+            "run_id",
+            "workflow",
+        }
+        if with_conclusion:
+            fields.add("conclusion")
+        run = exact(evidence[key], fields, key)
+        if (
+            run.get("event") != event
+            or run.get("head_sha") != expected_sha
+            or run.get("ref") != PROTECTED_REF
+            or run.get("workflow") != workflow
+            or not isinstance(run.get("run_id"), int)
+            or isinstance(run.get("run_id"), bool)
+            or run["run_id"] <= 0
+            or not isinstance(run.get("run_attempt"), int)
+            or isinstance(run.get("run_attempt"), bool)
+            or run["run_attempt"] <= 0
+            or (with_conclusion and run.get("conclusion") != "success")
+        ):
+            raise ContractError(f"selector predecessor {key} is foreign")
+    selector = exact(
+        evidence["selector"], {"digest", "image", "provenance", "signature"}, "selector"
+    )
+    digest = selector.get("digest")
+    if (
+        selector.get("image") != SELECTOR_IMAGE
+        or not isinstance(digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ):
+        raise ContractError("selector predecessor image is foreign")
+    signature = exact(
+        selector["signature"], {"certificate_identity", "oidc_issuer"}, "signature"
+    )
+    if signature != {
+        "certificate_identity": SELECTOR_CERTIFICATE_SUBJECT,
+        "oidc_issuer": SELECTOR_CERTIFICATE_ISSUER,
+    }:
+        raise ContractError("selector predecessor signature identity is foreign")
+    provenance = exact(
+        selector["provenance"],
+        {"attestor_identity", "predicate_type", "source_sha", "subject_digest"},
+        "provenance",
+    )
+    if provenance != {
+        "attestor_identity": SELECTOR_CERTIFICATE_SUBJECT,
+        "predicate_type": SLSA_PROVENANCE_V1,
+        "source_sha": expected_selector_build_sha,
+        "subject_digest": digest,
+    }:
+        raise ContractError("selector predecessor provenance identity is foreign")
+    sites = exact(
+        evidence["sites"], {"lidersea-com", "naranjo-online"}, "sites"
+    )
+    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+    version_pattern = re.compile(
+        r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+    )
+    for slug in ("lidersea-com", "naranjo-online"):
+        site = exact(sites[slug], {"chart", "workload"}, f"{slug} site")
+        chart = exact(
+            site["chart"],
+            {"layer_digest", "manifest_digest", "repository", "version"},
+            f"{slug} chart",
+        )
+        workload = exact(
+            site["workload"], {"arm64_digest", "image"}, f"{slug} workload"
+        )
+        version = chart.get("version")
+        manifest_digest = chart.get("manifest_digest")
+        layer_digest = chart.get("layer_digest")
+        arm64_digest = workload.get("arm64_digest")
+        image = workload.get("image")
+        image_prefix = f"ghcr.io/snaraj/{slug}:v{version}@"
+        if (
+            chart.get("repository") != f"ghcr.io/snaraj/charts/{slug}"
+            or not isinstance(version, str)
+            or version_pattern.fullmatch(version) is None
+            or not isinstance(manifest_digest, str)
+            or digest_pattern.fullmatch(manifest_digest) is None
+            or not isinstance(layer_digest, str)
+            or digest_pattern.fullmatch(layer_digest) is None
+            or manifest_digest == layer_digest
+            or not isinstance(arm64_digest, str)
+            or digest_pattern.fullmatch(arm64_digest) is None
+            or not isinstance(image, str)
+            or not image.startswith(image_prefix)
+            or digest_pattern.fullmatch(image.removeprefix(image_prefix)) is None
+            or image.removeprefix(image_prefix) == arm64_digest
+        ):
+            raise ContractError(f"selector predecessor {slug} identity is foreign")
+    return digest
+
+
+def validate_identity_run_records(
+    identity: bytes,
+    main_run_record: Mapping[str, object],
+    platform_run_record: Mapping[str, object],
+) -> None:
+    """Prove the signed receipt names two exact successful workflow attempts."""
+    evidence = _canonical_release_identity(identity)
+    source = _object(evidence.get("source"), "release identity source")
+    source_sha = require_sha(
+        source.get("merge_sha"), "release identity workflow source SHA"
+    )
+    for key, actual, workflow, event, receipt_conclusion in (
+        ("main_ci", main_run_record, WORKFLOW_PATH, "push", True),
+        (
+            "platform_release",
+            platform_run_record,
+            PLATFORM_WORKFLOW_PATH,
+            "workflow_run",
+            False,
+        ),
+    ):
+        receipt = _object(evidence.get(key), f"release identity {key}")
+        expected_receipt_fields = {
+            "event",
+            "head_sha",
+            "ref",
+            "run_attempt",
+            "run_id",
+            "workflow",
+        }
+        if receipt_conclusion:
+            expected_receipt_fields.add("conclusion")
+        repository = _object(actual.get("repository"), f"{key} run repository")
+        if (
+            set(receipt) != expected_receipt_fields
+            or receipt.get("event") != event
+            or receipt.get("head_sha") != source_sha
+            or receipt.get("ref") != PROTECTED_REF
+            or receipt.get("workflow") != workflow
+            or not isinstance(receipt.get("run_id"), int)
+            or isinstance(receipt.get("run_id"), bool)
+            or receipt["run_id"] <= 0
+            or not isinstance(receipt.get("run_attempt"), int)
+            or isinstance(receipt.get("run_attempt"), bool)
+            or receipt["run_attempt"] <= 0
+            or (receipt_conclusion and receipt.get("conclusion") != "success")
+            or actual.get("id") != receipt.get("run_id")
+            or actual.get("run_attempt") != receipt.get("run_attempt")
+            or actual.get("event") != event
+            or actual.get("head_branch") != "main"
+            or actual.get("head_sha") != source_sha
+            or actual.get("path") != workflow
+            or actual.get("status") != "completed"
+            or actual.get("conclusion") != "success"
+            or repository.get("full_name")
+            != "snaraj/website-infrastructure"
+        ):
+            raise ContractError(
+                f"release identity {key} workflow attempt is foreign"
+            )
+
+
+def validate_identity_release_record(
+    release_record: Mapping[str, object],
+    *,
+    identity: bytes,
+    bundle: bytes,
+    tag: str,
+    source_sha: str,
+    selector_build_sha: str | None = None,
+    tag_object_sha: str | None = None,
+    tree_sha: str | None = None,
+    staged: bool = False,
+) -> None:
+    if selector_build_sha is None:
+        # The first canonical release builds the selector from its own source.
+        # Long-lived callers must pass the carried build SHA explicitly.
+        selector_build_sha = source_sha
+    selector_image_from_release(
+        release_record,
+        identity=identity,
+        bundle=bundle,
+        expected_tag=tag,
+        expected_sha=source_sha,
+        expected_selector_build_sha=selector_build_sha,
+        expected_tag_object_sha=tag_object_sha,
+        expected_tree_sha=tree_sha,
+        staged=staged,
+    )
 
 
 def classify_tag_state(
@@ -1622,6 +2551,42 @@ def classify_release_state(
         title=title,
         body=body,
         allow_grandfathered_main_target=allow_grandfathered_main_target,
+    )
+    return "exact"
+
+
+def classify_identity_release_state(
+    http_status: int,
+    release_record: Mapping[str, object] | None,
+    identity: bytes | None,
+    bundle: bytes | None,
+    *,
+    tag: str,
+    source_sha: str,
+    selector_build_sha: str | None = None,
+    tag_object_sha: str | None = None,
+    tree_sha: str | None = None,
+) -> str:
+    source_sha = require_sha(source_sha, "GitHub Release target SHA")
+    if http_status == 404:
+        if release_record is not None or identity is not None or bundle is not None:
+            raise ContractError("absent identity Release cannot carry records")
+        return "absent"
+    if http_status != 200:
+        raise ContractError(
+            f"identity Release probe returned unexpected HTTP {http_status}"
+        )
+    if release_record is None or identity is None or bundle is None:
+        raise ContractError("present identity Release requires metadata and both assets")
+    validate_identity_release_record(
+        release_record,
+        identity=identity,
+        bundle=bundle,
+        tag=tag,
+        source_sha=source_sha,
+        selector_build_sha=selector_build_sha,
+        tag_object_sha=tag_object_sha,
+        tree_sha=tree_sha,
     )
     return "exact"
 
@@ -1680,6 +2645,20 @@ def _parser() -> argparse.ArgumentParser:
     notes.add_argument("--tag", required=True)
     notes.add_argument("--base-sha")
     notes.add_argument("--base-tag")
+    identity = commands.add_parser("release-identity")
+    identity.add_argument("--repository", type=Path, required=True)
+    identity.add_argument("--head", required=True)
+    identity.add_argument("--tag", required=True)
+    identity.add_argument("--base-sha", required=True)
+    identity.add_argument("--base-tag", required=True)
+    identity.add_argument("--tag-object-sha", required=True)
+    identity.add_argument("--release-id", type=int, required=True)
+    identity.add_argument("--main-run-id", type=int, required=True)
+    identity.add_argument("--main-run-attempt", type=int, required=True)
+    identity.add_argument("--platform-run-id", type=int, required=True)
+    identity.add_argument("--platform-run-attempt", type=int, required=True)
+    identity.add_argument("--selector-image-digest", required=True)
+    identity.add_argument("--selector-build-sha", required=True)
     recovery = commands.add_parser("recovery-release")
     recovery.add_argument("--repository", type=Path, required=True)
     recovery.add_argument("--source-sha", required=True)
@@ -1739,15 +2718,43 @@ def _parser() -> argparse.ArgumentParser:
     tag_state.add_argument("--tagger-name", required=True)
     tag_state.add_argument("--tagger-email", required=True)
     tag_state.add_argument("--tagger-date", required=True)
-    release_record = commands.add_parser("release-record")
-    release_record.add_argument("--release-json", type=Path, required=True)
-    release_record.add_argument("--tag", required=True)
-    release_record.add_argument("--source-sha", required=True)
-    release_record.add_argument(
-        "--allow-grandfathered-main-target", action="store_true"
-    )
-    release_record.add_argument("--title", required=True)
-    release_record.add_argument("--body", type=Path, required=True)
+    release_draft_record = commands.add_parser("release-draft-record")
+    release_draft_record.add_argument("--release-json", type=Path, required=True)
+    release_draft_record.add_argument("--tag", required=True)
+    release_draft_record.add_argument("--source-sha", required=True)
+    release_draft_record.add_argument("--title", required=True)
+    release_draft_record.add_argument("--body", type=Path, required=True)
+    identity_release_record = commands.add_parser("identity-release-record")
+    identity_release_record.add_argument("--release-json", type=Path, required=True)
+    identity_release_record.add_argument("--identity", type=Path, required=True)
+    identity_release_record.add_argument("--bundle", type=Path, required=True)
+    identity_release_record.add_argument("--tag", required=True)
+    identity_release_record.add_argument("--source-sha", required=True)
+    identity_release_record.add_argument("--selector-build-sha", required=True)
+    identity_release_record.add_argument("--tag-object-sha")
+    identity_release_record.add_argument("--source-tree-sha")
+    staged_identity_record = commands.add_parser("staged-identity-release-record")
+    staged_identity_record.add_argument("--release-json", type=Path, required=True)
+    staged_identity_record.add_argument("--identity", type=Path, required=True)
+    staged_identity_record.add_argument("--bundle", type=Path, required=True)
+    staged_identity_record.add_argument("--tag", required=True)
+    staged_identity_record.add_argument("--source-sha", required=True)
+    staged_identity_record.add_argument("--selector-build-sha", required=True)
+    staged_identity_record.add_argument("--tag-object-sha")
+    staged_identity_record.add_argument("--source-tree-sha")
+    selector_image = commands.add_parser("selector-image-from-release")
+    selector_image.add_argument("--release-json", type=Path, required=True)
+    selector_image.add_argument("--identity", type=Path, required=True)
+    selector_image.add_argument("--bundle", type=Path, required=True)
+    selector_image.add_argument("--tag", required=True)
+    selector_image.add_argument("--source-sha", required=True)
+    selector_image.add_argument("--selector-build-sha", required=True)
+    selector_image.add_argument("--tag-object-sha")
+    selector_image.add_argument("--source-tree-sha")
+    identity_runs = commands.add_parser("identity-run-records")
+    identity_runs.add_argument("--identity", type=Path, required=True)
+    identity_runs.add_argument("--main-run-json", type=Path, required=True)
+    identity_runs.add_argument("--platform-run-json", type=Path, required=True)
     release_state = commands.add_parser("release-state")
     release_state.add_argument("--http-status", type=int, required=True)
     release_state.add_argument("--require", choices=("absent", "exact"))
@@ -1759,6 +2766,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     release_state.add_argument("--title", required=True)
     release_state.add_argument("--body", type=Path, required=True)
+    identity_release_state = commands.add_parser("identity-release-state")
+    identity_release_state.add_argument("--http-status", type=int, required=True)
+    identity_release_state.add_argument("--require", choices=("absent", "exact"))
+    identity_release_state.add_argument("--release-json", type=Path)
+    identity_release_state.add_argument("--identity", type=Path)
+    identity_release_state.add_argument("--bundle", type=Path)
+    identity_release_state.add_argument("--tag", required=True)
+    identity_release_state.add_argument("--source-sha", required=True)
+    identity_release_state.add_argument("--selector-build-sha")
+    identity_release_state.add_argument("--tag-object-sha")
+    identity_release_state.add_argument("--source-tree-sha")
     return parser
 
 
@@ -1798,6 +2816,25 @@ def main(argv: list[str] | None = None) -> int:
                     args.tag,
                     expected_base_sha=args.base_sha,
                     expected_base_tag=args.base_tag,
+                ),
+                end="",
+            )
+        elif args.command == "release-identity":
+            print(
+                render_release_identity(
+                    args.repository,
+                    args.head,
+                    args.tag,
+                    expected_base_sha=args.base_sha,
+                    expected_base_tag=args.base_tag,
+                    tag_object_sha=args.tag_object_sha,
+                    release_id=args.release_id,
+                    main_run_id=args.main_run_id,
+                    main_run_attempt=args.main_run_attempt,
+                    platform_run_id=args.platform_run_id,
+                    platform_run_attempt=args.platform_run_attempt,
+                    selector_image_digest=args.selector_image_digest,
+                    selector_build_sha=args.selector_build_sha,
                 ),
                 end="",
             )
@@ -1901,14 +2938,49 @@ def main(argv: list[str] | None = None) -> int:
                 tagger_date=args.tagger_date,
             )
             print(require_publication_state(state, args.require) if args.require else state)
-        elif args.command == "release-record":
-            validate_release_record(
+        elif args.command == "release-draft-record":
+            validate_draft_release_record(
                 _read_object(args.release_json),
                 tag=args.tag,
                 source_sha=args.source_sha,
                 title=args.title,
                 body=args.body.read_text(encoding="utf-8"),
-                allow_grandfathered_main_target=args.allow_grandfathered_main_target,
+            )
+            print("exact")
+        elif args.command in {
+            "identity-release-record",
+            "staged-identity-release-record",
+        }:
+            validate_identity_release_record(
+                _read_object(args.release_json),
+                identity=args.identity.read_bytes(),
+                bundle=args.bundle.read_bytes(),
+                tag=args.tag,
+                source_sha=args.source_sha,
+                selector_build_sha=args.selector_build_sha,
+                tag_object_sha=args.tag_object_sha,
+                tree_sha=args.source_tree_sha,
+                staged=args.command == "staged-identity-release-record",
+            )
+            print("exact")
+        elif args.command == "selector-image-from-release":
+            print(
+                selector_image_from_release(
+                    _read_object(args.release_json),
+                    identity=args.identity.read_bytes(),
+                    bundle=args.bundle.read_bytes(),
+                    expected_tag=args.tag,
+                    expected_sha=args.source_sha,
+                    expected_selector_build_sha=args.selector_build_sha,
+                    expected_tag_object_sha=args.tag_object_sha,
+                    expected_tree_sha=args.source_tree_sha,
+                )
+            )
+        elif args.command == "identity-run-records":
+            validate_identity_run_records(
+                args.identity.read_bytes(),
+                _read_object(args.main_run_json),
+                _read_object(args.platform_run_json),
             )
             print("exact")
         elif args.command == "release-state":
@@ -1920,6 +2992,19 @@ def main(argv: list[str] | None = None) -> int:
                 title=args.title,
                 body=args.body.read_text(encoding="utf-8"),
                 allow_grandfathered_main_target=args.allow_grandfathered_main_target,
+            )
+            print(require_publication_state(state, args.require) if args.require else state)
+        elif args.command == "identity-release-state":
+            state = classify_identity_release_state(
+                args.http_status,
+                _read_object(args.release_json) if args.release_json else None,
+                args.identity.read_bytes() if args.identity else None,
+                args.bundle.read_bytes() if args.bundle else None,
+                tag=args.tag,
+                source_sha=args.source_sha,
+                selector_build_sha=args.selector_build_sha,
+                tag_object_sha=args.tag_object_sha,
+                tree_sha=args.source_tree_sha,
             )
             print(require_publication_state(state, args.require) if args.require else state)
         else:  # pragma: no cover - argparse owns this path

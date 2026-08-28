@@ -205,12 +205,11 @@ CI repeats structure, path, recipient, and ciphertext-envelope checks, but CI
 has no private identity and therefore cannot authenticate the MAC or plaintext
 token identity. A CI PASS is not a decrypt proof.
 
-After the launcher blocker is resolved, the ciphertext/revision change is
-reviewed and merged, and its protected MAC proof succeeds, the future procedure
-runs `bootstrap.sh --apply-sync`. Supply the protected age
-identity file(s) and pinned age-keygen so it can compare the exact live Secret
-bytes. It first verifies the installed age Secret, then
-applies the namespaces, bootstrap-owned least-privilege access, and anonymous
-sync manifests archived from the exact reviewed `main` commit. `verify.sh`
-delegates to the same protected target implementation. Flux cannot modify its
-own controller or reconciliation authorization.
+`bootstrap.sh --apply-sync` remains blocked and is retired as a recovery path.
+Its dormant implementation predates the exact-consumer, authority-quarantine,
+and compare-and-swap requirements of ADR 0016; it must not be enabled or used to
+apply all of `access.yaml` or `gotk-sync.yaml`. The only sanctioned initial site
+sync is the owner-attended, release-bound
+`bootstrap/flux/release-selector/bootstrap.sh` transaction. Controller install,
+controller RBAC, SOPS custody, and Cloudflare recovery remain separate
+out-of-band procedures and never enter the two site Kustomizations.

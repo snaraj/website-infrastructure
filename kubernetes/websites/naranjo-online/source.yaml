@@ -1,12 +1,10 @@
 # naranjo.online's Helm chart is published as a signed OCI artifact by that
-# site's own release publisher, so the published version tag — not a branch
-# head or a raw commit — is this site's official release identity, and the
-# SemVer range below is what selects it. Tracking the chart repository with a
-# bounded range is what makes a new published release reach the cluster
-# without a human editing desired state.
+# site's own release publisher. The immutable manifest digest below is the
+# only selector source-controller consumes; the release annotation is the
+# reviewed human label whose tag-to-digest mapping was independently resolved.
 #
-# The chart VERSION and the SIGNING REF are two different things and this file
-# uses both. The version is a release tag. The signature is minted by a
+# The chart VERSION and the SIGNING REF are two different things. The version
+# is audit metadata; the signature is minted by a
 # workflow_dispatch run of the publisher selected from that repository's
 # protected `main` branch, which its own reviewed release contract enforces, so
 # the certificate identity ends in @refs/heads/main. That ref is the stronger
@@ -27,11 +25,10 @@
 #     at any other ref — a tag ref included — and any look-alike host are all
 #     rejected: the two site identity tuples must never couple (AGENTS.md
 #     safety invariant 14).
-#   * The SemVer range stays inside major zero while this site's
-#     release-policy.env production-graduation gate reads `no` (ADR 0014), and
-#     its lower bound is a reviewed ratchet: it denies resolution to any
-#     release older than the last reviewed one, so a deleted or re-pointed
-#     newer tag cannot silently roll the cluster backwards.
+#   * spec.ref contains exactly one nonzero sha256 digest. Moving, deleting,
+#     or replacing a registry tag cannot change the bytes Flux selects. A new
+#     site release reaches the cluster only through a reviewed platform change
+#     that re-resolves the human tag and verifies the new digest and signer.
 #   * No secretRef, serviceAccountName, certSecretRef, or proxySecretRef: the
 #     registry is read anonymously and the cluster holds no registry
 #     credential, exactly as it holds no Git credential (ADR 0003, safety
@@ -39,13 +36,13 @@
 #   * The layer selector pins the Helm chart media type, so a non-chart layer
 #     smuggled into the artifact is not what gets reconciled.
 #
-# The digest-only deploy invariant (safety invariant 6) is unaffected: the
-# image digest still reaches the workload as a value, and the chart published
-# under this tag is the object that carries it once the site publishers embed
-# it at publish time (ADR 0016).
+# The chart is also the sole workload image-identity carrier; platform
+# HelmRelease values contain no repository, tag, or digest override (ADR 0016).
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: OCIRepository
 metadata:
+  annotations:
+    platform.snaraj.dev/chart-release: "0.1.50"
   name: naranjo-online-chart
   namespace: naranjo-online
 spec:
@@ -54,7 +51,7 @@ spec:
     mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
     operation: copy
   ref:
-    semver: ">=0.1.9 <1.0.0"
+    digest: sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42
   timeout: 60s
   url: oci://ghcr.io/snaraj/charts/naranjo-online
   verify:

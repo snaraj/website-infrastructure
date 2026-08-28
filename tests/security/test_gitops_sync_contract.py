@@ -1,4 +1,4 @@
-"""The tag-driven release-sync contract of ADR 0016, modelled end to end.
+"""The digest-selected release-sync contract of ADR 0016, modelled end to end.
 
 WHAT IS AND IS NOT PROVEN HERE
 ------------------------------
@@ -10,13 +10,14 @@ diverged from this model would fail the very first test below; and (2) the
 release-sync contract those values describe refuses every hostile input
 enumerated here, and refuses it for the stated reason.
 
-NOT proven: that a running Flux controller behaves this way. No
+NOT proven by this battery: that a running Flux controller behaves this way. No
 source-controller, helm-controller, cosign, Helm, or Kubernetes API server
 executes in this battery, and no signature is cryptographically verified —
-``tests/security/testsupport`` is a model, and it says so. Flux is not installed on the
-cluster; installing it is platform-lane work gated on the platform-stable
-signal (ADR 0016, transition step 2). Reading any test name here as evidence
-about live behavior would be reading it wrong.
+``tests/security/testsupport`` is only a source-state model, and it says so.
+This battery proves neither a completed #141/#189 transaction nor live Flux
+state. The composed source tree already pins the two direct site
+Kustomizations to ``prune: false`` with no aggregate or admission dependency;
+live activation still requires the separately authorized transaction evidence.
 """
 
 from __future__ import annotations
@@ -30,12 +31,9 @@ from .testsupport.flux_sync import (
     RolloutOutcome,
     SourceOutcome,
     observe_rollout,
-    parse_range,
-    parse_tag,
     reconcile_release,
     reconcile_source,
     remediate,
-    resolve_range,
 )
 from .testsupport.kubernetes_api import (
     DEPLOYMENT,
@@ -58,6 +56,7 @@ SIGNATURE_MODULE = load_script("validate_signature_policy.py")
 STATE_MODULE = load_script("validate_release_state.py")
 
 SITES = ("naranjo-online", "lidersea-com")
+REVIEWED_RELEASES = SIGNATURE_MODULE.CHART_RELEASES
 PROMOTED_DIGEST = "sha256:" + ("a1" * 32)
 NEXT_DIGEST = "sha256:" + ("b2" * 32)
 
@@ -68,7 +67,7 @@ def chart_repository_path(slug):
     return SIGNATURE_MODULE.CHART_REPOSITORIES[slug][len("oci://") :].split("/", 1)[1]
 
 
-def publisher_identity(slug, *, tag="v0.1.9", ref="refs/heads/main"):
+def publisher_identity(slug, *, tag, ref="refs/heads/main"):
     """Build the certificate identity that site's publisher would carry.
 
     ``ref`` defaults to the protected `main` branch, which is what the real
@@ -91,16 +90,18 @@ def publisher_identity(slug, *, tag="v0.1.9", ref="refs/heads/main"):
     )
 
 
-def source_spec(slug, *, suspend=False):
+def source_spec(slug, *, suspend=False, digest=None):
     """Build the chart-source spec from the committed contract's own values."""
 
+    if digest is None:
+        digest = REVIEWED_RELEASES[slug]["digest"]
     return {
         "interval": "10m0s",
         "layerSelector": {
             "mediaType": SIGNATURE_MODULE.CHART_LAYER_MEDIA_TYPE,
             "operation": "copy",
         },
-        "ref": {"semver": SIGNATURE_MODULE.CHART_SEMVER_RANGES[slug]},
+        "ref": {"digest": digest},
         "suspend": suspend,
         "timeout": "60s",
         "url": SIGNATURE_MODULE.CHART_REPOSITORIES[slug],
@@ -116,50 +117,38 @@ def source_spec(slug, *, suspend=False):
     }
 
 
-def release_spec(slug, *, suspend=True, ready=False, digest=ZERO_DIGEST):
+def release_spec(slug, *, suspend=True, values=None):
     """Build the release spec from the committed release contract's values.
 
-    The defaults are the fail-closed baseline — suspended, readiness shut, the
-    all-zeros digest — because that is the state a release must be refused
-    from, not because it is the state currently committed. Tests that mean
-    "the release this repository actually commits" pass ``committed_release``
-    explicitly; everything else names the hostile state it is exercising.
+    The verified chart is the sole workload-image identity carrier. Platform
+    values contain exactly one readiness key; hostile tests pass an explicit
+    alternate map so they exercise that closed boundary directly.
     """
 
     contract = STATE_MODULE.RELEASE_CONTRACTS[slug]
+    if values is None:
+        values = {"deploymentReady": True}
     return {
         "suspend": suspend,
         "interval": "10m0s",
         "releaseName": slug,
         "serviceAccountName": "helm-reconciler",
         "chartRef": {"kind": OCI_REPOSITORY, "name": contract["chart_ref"]},
-        "values": {
-            "deploymentReady": ready,
-            "image": {"repository": contract["repository"], "digest": digest},
-        },
+        "values": values,
     }
 
 
 def committed_release(slug):
     """Return the reviewed release state this repository currently commits.
 
-    The committed phase is deliberately NOT a constant here. A promotion is a
-    two-scalar edit to ``release.yaml`` — ``deploymentReady`` and
-    ``image.digest`` — and it touches nothing else in this repository, so a
-    battery that restated either scalar would pin one moment of the release
-    arc and go red on the next reviewed promotion for no safety reason. The
-    values are therefore read back through the release-state validator, which
-    is itself the gate that refuses any non-canonical or incoherent pair, and
-    the invariants that make those scalars safe are asserted directly in
-    ``ManifestBindingTests`` below rather than encoded as a literal.
+    The validator is the source of truth for this exact values-only contract;
+    a second platform image identity would create a conflicting authority.
     """
 
     state = STATE_MODULE.load_helm_release(slug, REPO_ROOT)
-    return {
-        "suspend": state.suspended,
-        "ready": state.values[("deploymentReady",)] == "true",
-        "digest": str(state.values[("image", "digest")]),
-    }
+    if state.values != {("deploymentReady",): "true"}:
+        raise AssertionError("committed HelmRelease is not exact values-only state")
+    return {"suspend": state.suspended, "values": {"deploymentReady": True}}
 
 
 class SyncContractHarness(unittest.TestCase):
@@ -175,6 +164,14 @@ class SyncContractHarness(unittest.TestCase):
         self.namespace = self.slug
         self.source_name = STATE_MODULE.RELEASE_CONTRACTS[self.slug]["chart_ref"]
         self.apply_source()
+
+    @property
+    def floor_tag(self):
+        return REVIEWED_RELEASES[self.slug]["tag"]
+
+    @property
+    def source_digest(self):
+        return REVIEWED_RELEASES[self.slug]["digest"]
 
     def apply_source(self, **kwargs):
         return self.api.apply(
@@ -194,12 +191,23 @@ class SyncContractHarness(unittest.TestCase):
             release_spec(self.slug, **kwargs),
         )
 
-    def publish(self, version, *, signature="own", image_digest=None, digest=None):
+    def publish(
+        self,
+        version,
+        *,
+        signature="own",
+        image_repository="own",
+        image_digest=PROMOTED_DIGEST,
+        digest=None,
+    ):
         """Publish one chart version into this site's chart repository."""
 
         identities = {
             "own": publisher_identity(self.slug, tag=version),
-            "sibling": publisher_identity("lidersea-com", tag=version),
+            "sibling": publisher_identity(
+                "lidersea-com" if self.slug == "naranjo-online" else "naranjo-online",
+                tag=version,
+            ),
             # Re-pointed 2026-08-22 with the identity itself (ADR 0016
             # amendment). This row is the ref-family refusal and it survives
             # the re-point by swapping sides: the trusted ref is now protected
@@ -238,11 +246,14 @@ class SyncContractHarness(unittest.TestCase):
             ),
             None: None,
         }
+        if image_repository == "own":
+            image_repository = "ghcr.io/snaraj/{}".format(self.slug)
         return self.registry.publish(
             chart_repository_path(self.slug),
             PublishedChart(
                 version=version,
-                digest=digest or synthetic_digest(self.slug + version),
+                digest=digest or self.source_digest,
+                image_repository=image_repository,
                 image_digest=image_digest,
                 signature=identities[signature],
             ),
@@ -278,7 +289,13 @@ class ManifestBindingTests(unittest.TestCase):
                 )
                 spec = source_spec(slug)
                 self.assertIn(
-                    'semver: "{}"'.format(spec["ref"]["semver"]), committed
+                    "digest: {}".format(spec["ref"]["digest"]), committed
+                )
+                self.assertIn(
+                    'platform.snaraj.dev/chart-release: "{}"'.format(
+                        REVIEWED_RELEASES[slug]["tag"]
+                    ),
+                    committed,
                 )
                 self.assertIn("url: {}".format(spec["url"]), committed)
                 self.assertIn(
@@ -295,28 +312,7 @@ class ManifestBindingTests(unittest.TestCase):
                 )
 
     def test_release_fixtures_match_the_committed_release_state(self):
-        """Bind the model to the committed release in every reviewed phase.
-
-        This assertion used to compare the fixture against the all-zeros
-        sentinel as a literal, which pinned ONE phase of the release arc
-        rather than the property that makes the sentinel safe — so a reviewed
-        promotion (a two-scalar edit that this repository sanctions and gates
-        elsewhere) turned it red for no safety reason. The binding is now
-        re-derived and the safety property is asserted directly, which holds
-        in `initial` and `promoted` alike and denies strictly more:
-
-        * readiness is open IF AND ONLY IF the digest is not the all-zeros
-          sentinel — so an unverified digest can never carry an open gate,
-          and a reviewed digest can never hide behind a shut one;
-        * the digest obeys the canonical content-address grammar;
-        * ``site_phase`` classifies the tree into the closed reviewed set,
-          which additionally requires BOTH reconciliation layers suspended
-          and refuses every mixed state outright;
-        * the identity half of the fixture — the image repository and the
-          chart reference — still comes from the closed release contract and
-          is compared against the committed file, so neither side can be
-          re-pointed without the other.
-        """
+        """Bind the model to exact active values-only committed state."""
 
         for slug in SITES:
             with self.subTest(slug=slug):
@@ -324,39 +320,23 @@ class ManifestBindingTests(unittest.TestCase):
                 committed = committed_release(slug)
                 fixture = release_spec(slug, **committed)
 
-                # Identity: the left side is the closed release contract, the
-                # right side is the parsed committed manifest, and the chart
-                # reference is compared against a literal rather than against
-                # the constant that produced it.
-                self.assertEqual(
-                    fixture["values"]["image"]["repository"],
-                    state.values[("image", "repository")],
-                )
                 self.assertEqual(
                     fixture["chartRef"],
                     {"kind": OCI_REPOSITORY, "name": slug + "-chart"},
                 )
-
-                # Suspension: ADR 0016 step 3 is a separate reviewed event.
-                self.assertTrue(
-                    state.suspended,
-                    "committed release must still be suspended (ADR 0016 step 3)",
-                )
-                self.assertIs(fixture["suspend"], True)
-
-                # The sentinel's safety property, as the biconditional it has
-                # always been rather than as one of its two sides.
-                digest = str(state.values[("image", "digest")])
-                self.assertRegex(digest, r"\Asha256:[0-9a-f]{64}\Z")
+                self.assertFalse(state.suspended)
+                self.assertIs(fixture["suspend"], False)
                 self.assertEqual(
-                    state.values[("deploymentReady",)] == "true",
-                    digest != ZERO_DIGEST,
-                    "readiness and digest must never disagree about deployability",
+                    state.values,
+                    {("deploymentReady",): "true"},
                 )
-                self.assertIn(
-                    STATE_MODULE.site_phase(slug, REPO_ROOT),
-                    ("initial", "promoted"),
-                )
+                self.assertEqual(fixture["values"], {"deploymentReady": True})
+                committed_text = REPO_ROOT.joinpath(
+                    "kubernetes", "websites", slug, "release.yaml"
+                ).read_text(encoding="utf-8")
+                self.assertNotIn("image:", committed_text)
+                self.assertNotIn("repository:", committed_text)
+                self.assertNotIn("digest:", committed_text)
 
     def test_the_two_site_tuples_never_share_a_value(self):
         for attribute in ("CHART_REPOSITORIES",):
@@ -375,85 +355,83 @@ class ManifestBindingTests(unittest.TestCase):
         self.assertEqual(len(set(chart_refs.values())), len(SITES))
 
 
-class SemverResolutionTests(unittest.TestCase):
-    """Range grammar and selection, isolated from the rest of the machine."""
+class DigestSelectionTests(unittest.TestCase):
+    """The reviewed audit label can never replace the immutable selector."""
 
-    def test_committed_ranges_parse_and_are_non_empty(self):
+    def test_each_release_pair_is_canonical_nonzero_and_site_distinct(self):
+        digests = set()
         for slug in SITES:
             with self.subTest(slug=slug):
-                bounds = parse_range(SIGNATURE_MODULE.CHART_SEMVER_RANGES[slug])
-                self.assertIsNotNone(bounds)
-                floor, ceiling = bounds
-                self.assertLess(floor, ceiling)
-                self.assertEqual(ceiling, (1, 0, 0))
-
-    def test_ungrammatical_ranges_have_no_parse(self):
-        for candidate in (
-            ">=0.1.9",
-            "^0.1.9",
-            "~0.1.9",
-            ">=0.1.9 <1.0.1",
-            ">=0.1.9 || >=2.0.0 <3.0.0",
-            "*",
-            "",
-            None,
-            0,
-        ):
-            with self.subTest(candidate=candidate):
-                self.assertIsNone(parse_range(candidate))
-
-    def test_only_stable_release_tags_are_candidates(self):
-        for candidate in (
-            "latest",
-            "main",
-            "v0.1.9-rc1",
-            "v0.1.9+build",
-            "0.1.9",
-            "sha-" + ("a" * 40),
-            "sha256-" + ("a" * 64) + ".sig",
-            "v01.1.9",
-        ):
-            with self.subTest(candidate=candidate):
-                self.assertIsNone(parse_tag(candidate))
-                self.assertIsNone(resolve_range([candidate], ">=0.0.0 <1.0.0"))
-
-    def test_selection_picks_the_newest_version_inside_the_range(self):
-        tags = ["v0.1.8", "v0.1.9", "v0.1.10", "v0.2.0", "v1.0.0", "latest"]
-        self.assertEqual(resolve_range(tags, ">=0.1.9 <1.0.0"), "v0.2.0")
-        self.assertEqual(resolve_range(["v0.1.9", "v0.1.10"], ">=0.1.9 <1.0.0"), "v0.1.10")
-        # Below the floor and at/above the ceiling are both outside the window.
-        self.assertIsNone(resolve_range(["v0.1.8"], ">=0.1.9 <1.0.0"))
-        self.assertIsNone(resolve_range(["v1.0.0", "v2.3.4"], ">=0.1.9 <1.0.0"))
+                tag, digest = SIGNATURE_MODULE.chart_source_release(slug)
+                self.assertRegex(tag, r"\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+                self.assertRegex(digest, r"\Asha256:[0-9a-f]{64}\Z")
+                self.assertNotEqual(digest, ZERO_DIGEST)
+                digests.add(digest)
+        self.assertEqual(len(digests), len(SITES))
 
 
 class ChartSourceSyncTests(SyncContractHarness):
     """The verification decision, and every way it must refuse."""
 
-    def test_a_signed_in_range_release_becomes_the_resolved_artifact(self):
-        published = self.publish("v0.1.9")
+    def assert_no_tag_list_request(self):
+        self.assertFalse(
+            any(path.endswith("/tags/list") for path in self.client.requests),
+            self.client.requests,
+        )
+
+    def test_the_signed_exact_digest_becomes_the_resolved_artifact(self):
+        published = self.publish(self.floor_tag)
         result = self.sync_source()
         self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UPDATED)
-        self.assertEqual(result.version, "v0.1.9")
+        self.assertEqual(result.version, self.floor_tag)
         self.assertEqual(result.digest, published.digest)
-        self.assertEqual(result.revision, "v0.1.9@" + published.digest)
+        self.assertEqual(result.revision, published.digest)
         source = self.source()
         self.assertTrue(source.is_ready())
-        self.assertEqual(source.status["artifact"]["digest"], published.digest)
+        self.assertEqual(source.status["artifact"]["revision"], published.digest)
+        self.assertNotEqual(source.status["artifact"]["digest"], published.digest)
         self.assertEqual(
             source.status["observedGeneration"], source.metadata.generation
         )
+        self.assert_no_tag_list_request()
 
-    def test_publishing_a_newer_release_moves_the_artifact_forward(self):
-        self.publish("v0.1.9")
+    def test_moving_the_human_tag_cannot_change_a_digest_selected_artifact(self):
+        original = self.publish(self.floor_tag)
         self.sync_source()
-        self.assertEqual(self.sync_source().outcome, SourceOutcome.ARTIFACT_UNCHANGED)
-        newer = self.publish("v0.2.0")
+        replacement = self.publish(
+            self.floor_tag,
+            digest=synthetic_digest("moved-human-tag"),
+            image_digest=NEXT_DIGEST,
+        )
         result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UPDATED)
-        self.assertEqual(result.digest, newer.digest)
+        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UNCHANGED)
+        self.assertNotEqual(replacement.digest, original.digest)
+        self.assertEqual(self.source().status["artifact"]["revision"], original.digest)
+        self.assert_no_tag_list_request()
+
+    def test_deleting_the_human_tag_cannot_change_a_digest_selected_artifact(self):
+        original = self.publish(self.floor_tag)
+        self.sync_source()
+        self.registry.remove(chart_repository_path(self.slug), self.floor_tag)
+        result = self.sync_source()
+        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UNCHANGED)
+        self.assertEqual(self.source().status["artifact"]["revision"], original.digest)
+        self.assert_no_tag_list_request()
+
+    def test_only_an_older_tag_never_replaces_or_resolves_the_pinned_digest(self):
+        older = self.publish(
+            "0.1.1",
+            digest=synthetic_digest("older-only-chart"),
+            image_digest=NEXT_DIGEST,
+        )
+        result = self.sync_source()
+        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UNAVAILABLE)
+        self.assertNotEqual(older.digest, self.source_digest)
+        self.assertNotIn("artifact", self.source().status)
+        self.assert_no_tag_list_request()
 
     def test_an_unsigned_chart_never_becomes_an_artifact(self):
-        self.publish("v0.1.9", signature=None)
+        self.publish(self.floor_tag, signature=None)
         result = self.sync_source()
         self.assertEqual(result.outcome, SourceOutcome.VERIFICATION_FAILED)
         source = self.source()
@@ -470,7 +448,7 @@ class ChartSourceSyncTests(SyncContractHarness):
         ):
             with self.subTest(signature=label):
                 self.setUp()
-                self.publish("v0.1.9", signature=label)
+                self.publish(self.floor_tag, signature=label)
                 self.assertEqual(
                     self.sync_source().outcome, SourceOutcome.VERIFICATION_FAILED
                 )
@@ -479,107 +457,70 @@ class ChartSourceSyncTests(SyncContractHarness):
     def test_cross_site_tuple_substitution_is_refused_in_both_directions(self):
         """Neither site's source may accept the other's publisher or path."""
 
-        for slug, other in (("naranjo-online", "lidersea-com"), ("lidersea-com", "naranjo-online")):
+        for slug in SITES:
             with self.subTest(slug=slug):
                 self.slug = slug
                 self.setUp()
-                self.publish("v0.1.9", signature="own")
-                self.assertEqual(
-                    self.sync_source().outcome, SourceOutcome.ARTIFACT_UPDATED
-                )
-                # Now substitute the other site's publisher identity into the
-                # SAME repository path and publish a newer version.
-                self.registry.publish(
-                    chart_repository_path(slug),
-                    PublishedChart(
-                        version="v0.2.0",
-                        digest=synthetic_digest(slug + "v0.2.0"),
-                        signature=publisher_identity(other, tag="v0.2.0"),
-                    ),
-                )
+                floor_tag = REVIEWED_RELEASES[slug]["tag"]
+                self.publish(floor_tag, signature="sibling")
                 result = self.sync_source()
                 self.assertEqual(result.outcome, SourceOutcome.VERIFICATION_FAILED)
-                # The verified release that was already running is untouched.
-                self.assertEqual(
-                    self.source().status["artifact"]["version"], "v0.1.9"
-                )
+                self.assertNotIn("artifact", self.source().status)
         self.slug = "naranjo-online"
 
     def test_a_verification_failure_never_removes_the_running_artifact(self):
-        self.publish("v0.1.9")
+        self.publish(self.floor_tag)
         self.sync_source()
         running = self.source().status["artifact"]
-        self.publish("v0.2.0", signature=None)
+        unsigned = self.publish(
+            "0.2.0",
+            digest=synthetic_digest("unsigned-next-chart"),
+            signature=None,
+        )
+        self.apply_source(digest=unsigned.digest)
         self.assertEqual(self.sync_source().outcome, SourceOutcome.VERIFICATION_FAILED)
         self.assertEqual(self.source().status["artifact"], running)
 
-    def test_no_release_inside_the_range_leaves_the_source_unready(self):
-        self.publish("v0.1.8")
-        self.publish("v1.4.0")
+    def test_an_unavailable_pinned_digest_leaves_the_source_unready(self):
         result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.NO_MATCHING_VERSION)
+        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UNAVAILABLE)
         self.assertFalse(self.source().is_ready())
         self.assertNotIn("artifact", self.source().status)
 
-    def test_a_version_above_the_graduation_ceiling_is_never_selected(self):
-        """The SemVer ceiling IS the ADR 0014 production-graduation gate."""
-
-        self.publish("v0.1.9")
-        self.sync_source()
-        self.publish("v1.0.0")
-        result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.ARTIFACT_UNCHANGED)
-        self.assertEqual(self.source().status["artifact"]["version"], "v0.1.9")
-
-    def test_a_downgrade_outside_the_range_cannot_pull_the_site_backwards(self):
-        self.publish("v0.2.0")
-        self.sync_source()
-        # The newer release is withdrawn from the registry; only an
-        # out-of-range-older one remains.
-        self.registry.remove(chart_repository_path(self.slug), "v0.2.0")
-        self.publish("v0.1.8")
-        result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.NO_MATCHING_VERSION)
-        self.assertEqual(self.source().status["artifact"]["version"], "v0.2.0")
-
-    def test_a_downgrade_inside_the_range_is_refused_as_a_downgrade(self):
-        self.publish("v0.2.0")
-        self.sync_source()
-        self.registry.remove(chart_repository_path(self.slug), "v0.2.0")
-        self.publish("v0.1.9")
-        result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.DOWNGRADE_REFUSED)
-        self.assertEqual(self.source().status["artifact"]["version"], "v0.2.0")
-
-    def test_reassigning_a_published_version_to_new_content_is_refused(self):
-        original = self.publish("v0.1.9")
-        self.sync_source()
-        self.publish("v0.1.9", digest=synthetic_digest("reassigned"))
-        result = self.sync_source()
-        self.assertEqual(result.outcome, SourceOutcome.TAG_REUSE_REFUSED)
-        self.assertEqual(self.source().status["artifact"]["digest"], original.digest)
-
     def test_a_suspended_source_performs_no_registry_read_at_all(self):
         self.apply_source(suspend=True)
-        self.publish("v0.1.9")
+        self.publish(self.floor_tag)
         result = self.sync_source()
         self.assertEqual(result.outcome, SourceOutcome.SUSPENDED)
         self.assertEqual(self.client.requests, [])
         self.assertEqual(self.source().status, {})
 
-    def test_an_ungrammatical_range_resolves_nothing(self):
-        spec = source_spec(self.slug)
-        spec["ref"] = {"semver": "*"}
-        self.api.apply(
-            OCI_REPOSITORY,
-            "source.toolkit.fluxcd.io/v1",
-            self.namespace,
-            self.source_name,
-            spec,
-        )
-        self.publish("v0.1.9")
-        self.assertEqual(self.sync_source().outcome, SourceOutcome.RANGE_UNGRAMMATICAL)
-        self.assertFalse(self.source().is_ready())
+    def test_every_mutable_or_ambiguous_selector_shape_fails_before_registry_io(self):
+        for ref in (
+            {},
+            {"tag": self.floor_tag},
+            {"semver": ">=0.1.0 <1.0.0"},
+            {"digest": ZERO_DIGEST},
+            {"digest": "sha256:not-a-digest"},
+            {"digest": self.source_digest, "tag": self.floor_tag},
+            {"digest": self.source_digest, "semver": ">=0.1.0 <1.0.0"},
+        ):
+            with self.subTest(ref=ref):
+                spec = source_spec(self.slug)
+                spec["ref"] = ref
+                self.api.apply(
+                    OCI_REPOSITORY,
+                    "source.toolkit.fluxcd.io/v1",
+                    self.namespace,
+                    self.source_name,
+                    spec,
+                )
+                self.assertEqual(
+                    self.sync_source().outcome,
+                    SourceOutcome.DIGEST_INVALID,
+                )
+                self.assertFalse(self.source().is_ready())
+                self.assertEqual(self.client.requests, [])
 
 
 class ReleaseUpgradeTests(SyncContractHarness):
@@ -587,84 +528,81 @@ class ReleaseUpgradeTests(SyncContractHarness):
 
     def setUp(self):
         super().setUp()
-        self.publish("v0.1.9", image_digest=PROMOTED_DIGEST)
+        self.publish(self.floor_tag, image_digest=PROMOTED_DIGEST)
         self.assertEqual(self.sync_source().outcome, SourceOutcome.ARTIFACT_UPDATED)
 
-    def test_the_committed_suspended_release_takes_no_action(self):
-        """Suspension dominates the committed state whatever its phase.
+    def test_a_suspended_copy_of_the_committed_release_takes_no_action(self):
+        """Suspension still dominates the configured release identity.
 
         Driven by the values this repository actually commits rather than by
         the fail-closed defaults. That distinction is the point: while the
         sites were at the all-zeros sentinel this proved only that a release
-        the sentinel would already refuse stays inert, so suspension was never
-        the load-bearing refusal. Applied to a promoted, deploy-eligible
-        release, suspension is the ONLY thing standing between this state and
-        a rollout — and it must leave no trace of having considered one.
+        the sentinel would already refuse stays inert. The committed site is
+        now active, so this test explicitly freezes a copy and proves the
+        rollback gate still leaves no trace of considering a rollout.
         """
 
-        self.apply_release(**committed_release(self.slug))
+        committed = committed_release(self.slug)
+        self.assertFalse(committed["suspend"])
+        self.apply_release(**{**committed, "suspend": True})
         result = self.sync_release()
         self.assertEqual(result.outcome, ReleaseOutcome.SUSPENDED)
         release = self.api.get(HELM_RELEASE, self.namespace, self.slug)
         self.assertEqual(release.status, {})
         self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
 
-    def test_the_committed_release_unsuspended_matches_its_reviewed_phase(self):
-        """Lifting suspension yields exactly the committed phase's outcome.
-
-        The executable half of the sentinel guard, bound to whatever this
-        repository has committed rather than to a phase constant. An
-        `initial` site must be refused for the sentinel even though the chart
-        published here embeds a perfectly good image digest — proving the
-        platform's zero-digest override is never rescued by the chart. A
-        `promoted` site must deploy the exact reviewed digest its own
-        manifest names, and NOT the chart-embedded one, proving the override
-        still wins while ADR 0016 step 4 remains untaken.
-        """
+    def test_the_committed_active_release_uses_only_the_verified_chart_identity(self):
+        """The chart carries the workload identity; platform values do not."""
 
         committed = committed_release(self.slug)
-        phase = STATE_MODULE.site_phase(self.slug, REPO_ROOT)
-        # setUp published this chart with PROMOTED_DIGEST embedded, which is
-        # deliberately not the committed digest, so the two sources of a
-        # digest are distinguishable in the assertions below.
-        self.assertNotEqual(committed["digest"], PROMOTED_DIGEST)
-        self.apply_release(**{**committed, "suspend": False})
-        result = self.sync_release()
-        if phase == "initial":
-            self.assertEqual(result.outcome, ReleaseOutcome.SENTINEL_REFUSED)
-            self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
-        else:
-            self.assertEqual(phase, "promoted")
-            self.assertEqual(result.outcome, ReleaseOutcome.UPGRADED)
-            self.assertEqual(
-                self.api.get(DEPLOYMENT, self.namespace, self.slug).spec["image"],
-                "{}@{}".format(
-                    STATE_MODULE.RELEASE_CONTRACTS[self.slug]["repository"],
-                    committed["digest"],
-                ),
-            )
-
-    def test_the_all_zeros_sentinel_still_refuses_deployment(self):
-        self.apply_release(suspend=False, ready=False, digest=ZERO_DIGEST)
-        result = self.sync_release()
-        self.assertEqual(result.outcome, ReleaseOutcome.SENTINEL_REFUSED)
-        self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
-
-    def test_a_readiness_gate_left_closed_refuses_deployment(self):
-        self.apply_release(suspend=False, ready=False, digest=PROMOTED_DIGEST)
-        self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SENTINEL_REFUSED)
-
-    def test_a_zero_digest_with_readiness_open_still_refuses(self):
-        """Neither half of the sentinel may carry the gate alone."""
-
-        self.apply_release(suspend=False, ready=True, digest=ZERO_DIGEST)
-        self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SENTINEL_REFUSED)
-
-    def test_a_promoted_release_deploys_the_exact_digest(self):
-        self.apply_release(suspend=False, ready=True, digest=PROMOTED_DIGEST)
+        self.assertFalse(committed["suspend"])
+        self.assertEqual(committed["values"], {"deploymentReady": True})
+        self.apply_release(**committed)
         result = self.sync_release()
         self.assertEqual(result.outcome, ReleaseOutcome.UPGRADED)
-        self.assertEqual(result.version, "v0.1.9")
+        self.assertEqual(
+            self.api.get(DEPLOYMENT, self.namespace, self.slug).spec["image"],
+            "ghcr.io/snaraj/{}@{}".format(self.slug, PROMOTED_DIGEST),
+        )
+
+    def test_platform_values_must_be_exact_readiness_only(self):
+        for values in (
+            None,
+            {},
+            {"deploymentReady": False},
+            {"deploymentReady": "true"},
+            {"deploymentReady": True, "other": True},
+            {
+                "deploymentReady": True,
+                "image": {
+                    "repository": "ghcr.io/snaraj/naranjo-online",
+                    "digest": PROMOTED_DIGEST,
+                },
+            },
+        ):
+            with self.subTest(values=values):
+                spec = release_spec(self.slug, suspend=False)
+                spec["values"] = values
+                self.api.apply(
+                    HELM_RELEASE,
+                    "helm.toolkit.fluxcd.io/v2",
+                    self.namespace,
+                    self.slug,
+                    spec,
+                )
+                self.assertEqual(
+                    self.sync_release().outcome,
+                    ReleaseOutcome.VALUES_REFUSED,
+                )
+                self.assertIsNone(
+                    self.api.find(DEPLOYMENT, self.namespace, self.slug)
+                )
+
+    def test_verified_chart_deploys_its_exact_workload_identity(self):
+        self.apply_release(suspend=False)
+        result = self.sync_release()
+        self.assertEqual(result.outcome, ReleaseOutcome.UPGRADED)
+        self.assertEqual(result.version, self.floor_tag)
         deployment = self.api.get(DEPLOYMENT, self.namespace, self.slug)
         self.assertEqual(
             deployment.spec["image"],
@@ -672,62 +610,35 @@ class ReleaseUpgradeTests(SyncContractHarness):
         )
         self.assertEqual(self.sync_release().outcome, ReleaseOutcome.UNCHANGED)
 
-    def test_the_chart_embedded_digest_carries_the_release_once_the_override_is_gone(self):
-        """ADR 0016 step 4: the chart, not the platform, holds the digest."""
-
-        spec = release_spec(self.slug, suspend=False, ready=True)
-        spec["values"] = {
-            "deploymentReady": True,
-            "image": {"repository": "ghcr.io/snaraj/naranjo-online"},
-        }
-        self.api.apply(
-            HELM_RELEASE,
-            "helm.toolkit.fluxcd.io/v2",
-            self.namespace,
-            self.slug,
-            spec,
-        )
-        result = self.sync_release()
-        self.assertEqual(result.outcome, ReleaseOutcome.UPGRADED)
-        self.assertEqual(
-            result.image, "ghcr.io/snaraj/naranjo-online@" + PROMOTED_DIGEST
-        )
-
-    def test_a_chart_that_embeds_no_digest_cannot_deploy(self):
-        self.registry.remove(chart_repository_path(self.slug), "v0.1.9")
-        self.publish("v0.2.0", image_digest=None)
-        self.sync_source()
-        spec = release_spec(self.slug, suspend=False, ready=True)
-        spec["values"] = {
-            "deploymentReady": True,
-            "image": {"repository": "ghcr.io/snaraj/naranjo-online"},
-        }
-        self.api.apply(
-            HELM_RELEASE,
-            "helm.toolkit.fluxcd.io/v2",
-            self.namespace,
-            self.slug,
-            spec,
-        )
-        self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SENTINEL_REFUSED)
-
-    def test_a_chart_that_embeds_the_zero_digest_cannot_deploy(self):
-        self.registry.remove(chart_repository_path(self.slug), "v0.1.9")
-        self.publish("v0.2.0", image_digest=ZERO_DIGEST)
-        self.sync_source()
-        spec = release_spec(self.slug, suspend=False, ready=True)
-        spec["values"] = {
-            "deploymentReady": True,
-            "image": {"repository": "ghcr.io/snaraj/naranjo-online"},
-        }
-        self.api.apply(
-            HELM_RELEASE,
-            "helm.toolkit.fluxcd.io/v2",
-            self.namespace,
-            self.slug,
-            spec,
-        )
-        self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SENTINEL_REFUSED)
+    def test_malformed_or_cross_site_chart_workload_identity_is_refused(self):
+        for repository, digest in (
+            (None, PROMOTED_DIGEST),
+            ("ghcr.io/snaraj/naranjo-online", None),
+            ("ghcr.io/snaraj/naranjo-online", ZERO_DIGEST),
+            ("ghcr.io/snaraj/naranjo-online", "sha256:not-a-digest"),
+            ("ghcr.io/snaraj/lidersea-com", PROMOTED_DIGEST),
+            ("registry.example.invalid/naranjo-online", PROMOTED_DIGEST),
+        ):
+            with self.subTest(repository=repository, digest=digest):
+                self.setUp()
+                candidate = self.publish(
+                    "0.2.0",
+                    digest=synthetic_digest(
+                        "invalid-chart-identity:{}:{}".format(repository, digest)
+                    ),
+                    image_repository=repository,
+                    image_digest=digest,
+                )
+                self.apply_source(digest=candidate.digest)
+                self.sync_source()
+                self.apply_release(suspend=False)
+                self.assertEqual(
+                    self.sync_release().outcome,
+                    ReleaseOutcome.CHART_IDENTITY_REFUSED,
+                )
+                self.assertIsNone(
+                    self.api.find(DEPLOYMENT, self.namespace, self.slug)
+                )
 
     def test_an_unverified_source_cannot_be_upgraded_from(self):
         self.api.patch_status(
@@ -736,20 +647,17 @@ class ReleaseUpgradeTests(SyncContractHarness):
             self.source_name,
             {"conditions": [{"type": "Ready", "status": "False", "reason": "x"}]},
         )
-        self.apply_release(suspend=False, ready=True, digest=PROMOTED_DIGEST)
+        self.apply_release(suspend=False)
         self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SOURCE_NOT_READY)
         self.assertIsNone(self.api.find(DEPLOYMENT, self.namespace, self.slug))
 
     def test_a_release_pointed_at_a_missing_source_refuses(self):
-        spec = release_spec(self.slug, suspend=False, ready=True, digest=PROMOTED_DIGEST)
-        spec["chartRef"]["name"] = "absent-chart"
-        self.api.apply(
-            HELM_RELEASE, "helm.toolkit.fluxcd.io/v2", self.namespace, self.slug, spec
-        )
+        self.api.delete(OCI_REPOSITORY, self.namespace, self.source_name)
+        self.apply_release(suspend=False)
         self.assertEqual(self.sync_release().outcome, ReleaseOutcome.SOURCE_NOT_READY)
 
     def test_a_cross_namespace_chart_reference_is_refused(self):
-        spec = release_spec(self.slug, suspend=False, ready=True, digest=PROMOTED_DIGEST)
+        spec = release_spec(self.slug, suspend=False)
         spec["chartRef"]["namespace"] = "lidersea-com"
         self.api.apply(
             HELM_RELEASE, "helm.toolkit.fluxcd.io/v2", self.namespace, self.slug, spec
@@ -761,9 +669,7 @@ class ReleaseUpgradeTests(SyncContractHarness):
     def test_a_non_oci_chart_reference_is_refused(self):
         for chart_ref in ({"kind": "HelmChart", "name": "x"}, {"kind": OCI_REPOSITORY}, {}):
             with self.subTest(chart_ref=chart_ref):
-                spec = release_spec(
-                    self.slug, suspend=False, ready=True, digest=PROMOTED_DIGEST
-                )
+                spec = release_spec(self.slug, suspend=False)
                 spec["chartRef"] = dict(chart_ref)
                 self.api.apply(
                     HELM_RELEASE,
@@ -782,9 +688,9 @@ class RolloutAndRollbackTests(SyncContractHarness):
 
     def setUp(self):
         super().setUp()
-        self.publish("v0.1.9", image_digest=PROMOTED_DIGEST)
+        self.publish(self.floor_tag, image_digest=PROMOTED_DIGEST)
         self.sync_source()
-        self.apply_release(suspend=False, ready=True, digest=PROMOTED_DIGEST)
+        self.apply_release(suspend=False)
         self.assertEqual(self.sync_release().outcome, ReleaseOutcome.UPGRADED)
 
     def test_a_healthy_rollout_is_recorded_against_its_own_generation(self):
@@ -810,9 +716,14 @@ class RolloutAndRollbackTests(SyncContractHarness):
 
     def test_a_failed_upgrade_returns_to_the_previous_digest(self):
         observe_rollout(self.api, self.namespace, self.slug, healthy=True)
-        newer = self.publish("v0.2.0", image_digest=NEXT_DIGEST)
+        newer = self.publish(
+            "0.2.0",
+            digest=synthetic_digest("next-chart"),
+            image_digest=NEXT_DIGEST,
+        )
+        self.apply_source(digest=newer.digest)
         self.assertEqual(self.sync_source().outcome, SourceOutcome.ARTIFACT_UPDATED)
-        self.apply_release(suspend=False, ready=True, digest=NEXT_DIGEST)
+        self.apply_release(suspend=False)
         self.assertEqual(self.sync_release().outcome, ReleaseOutcome.UPGRADED)
         self.assertEqual(
             observe_rollout(self.api, self.namespace, self.slug, healthy=False),
@@ -829,8 +740,13 @@ class RolloutAndRollbackTests(SyncContractHarness):
             "ghcr.io/snaraj/naranjo-online@" + PROMOTED_DIGEST,
         )
         history = self.api.get(HELM_RELEASE, self.namespace, self.slug).status["history"]
-        self.assertEqual(history[0]["chartVersion"], "v0.1.9")
-        self.assertEqual(history[1]["chartVersion"], "v0.2.0")
+        self.assertEqual(
+            history[0]["chartVersion"],
+            self.floor_tag + "+" + self.source_digest[7:19],
+        )
+        self.assertEqual(
+            history[1]["chartVersion"], "0.2.0+" + newer.digest[7:19]
+        )
         self.assertEqual(history[1]["status"], "failed")
         self.assertIsNotNone(newer)
 
@@ -838,20 +754,26 @@ class RolloutAndRollbackTests(SyncContractHarness):
         """A rollback the registry could steer would not be a rollback."""
 
         observe_rollout(self.api, self.namespace, self.slug, healthy=True)
-        self.publish("v0.2.0", image_digest=NEXT_DIGEST)
+        newer = self.publish(
+            "0.2.0",
+            digest=synthetic_digest("next-chart-for-rollback"),
+            image_digest=NEXT_DIGEST,
+        )
+        self.apply_source(digest=newer.digest)
         self.sync_source()
-        self.apply_release(suspend=False, ready=True, digest=NEXT_DIGEST)
+        self.apply_release(suspend=False)
         self.sync_release()
         observe_rollout(self.api, self.namespace, self.slug, healthy=False)
         # The registry is rewritten under us before remediation runs.
-        self.registry.remove(chart_repository_path(self.slug), "v0.1.9")
+        self.registry.remove(chart_repository_path(self.slug), self.floor_tag)
         self.registry.publish(
             chart_repository_path(self.slug),
             PublishedChart(
-                version="v0.3.0",
+                version="0.3.0",
                 digest=synthetic_digest("hostile"),
+                image_repository="ghcr.io/snaraj/naranjo-online",
                 image_digest="sha256:" + ("c3" * 32),
-                signature=publisher_identity(self.slug, tag="v0.3.0"),
+                signature=publisher_identity(self.slug, tag="0.3.0"),
             ),
         )
         self.assertEqual(

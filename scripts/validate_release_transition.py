@@ -19,7 +19,6 @@ from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADMISSION_PATH = Path("kubernetes/reconciliation/admission.yaml")
 CLOUDFLARE_RELEASE_KUSTOMIZATION = Path(
     "kubernetes/platform/cloudflare-public/release/kustomization.yaml"
 )
@@ -225,19 +224,18 @@ class TransitionPlan(NamedTuple):
     naranjo_online: str
     lidersea_com: str
     cloudflare_public: str
-    admission_suspended: bool
     platform_suspended: bool
     naranjo_parent_suspended: bool
     lidersea_parent_suspended: bool
 
     @property
     def any_website_active(self) -> bool:
-        """Keep production controls while a site is live or still reconcilable.
+        """Keep production controls while a site is live or directly selected.
 
-        During child-first rollback and parent-first resume, desired suspension
-        is not proof that Flux has observed the child.  An active outer
-        Kustomization therefore keeps the website signature/capacity envelope
-        mandatory until that outer controller is separately suspended.
+        The #189 topology has no suspendable aggregate parent: both direct site
+        Kustomizations always select their exact website paths. A staged
+        HelmRelease therefore still sits inside an active reconciliation and
+        keeps the website signature/capacity envelope mandatory.
         """
 
         return (
@@ -262,53 +260,8 @@ class TransitionPlan(NamedTuple):
         return (
             self.any_website_active
             or self.cloudflare_public == "active"
-            or not self.admission_suspended
             or not self.platform_suspended
         )
-
-
-def _admission_shape():
-    """Return the complete, ordered allowlist for the admission parent."""
-
-    return [
-        "apiVersion: kustomize.toolkit.fluxcd.io/v1",
-        "kind: Kustomization",
-        "metadata:",
-        "  name: admission",
-        "  namespace: flux-system",
-        "  annotations:",
-        "    platform.snaraj.dev/readiness: suspended-until-reviewed-kyverno-artifact-digests-rbac-and-runtime-evidence",
-        "spec:",
-        "  dependsOn:",
-        "    - name: platform-prerequisites",
-        "  interval: 10m0s",
-        "  path: ./kubernetes/platform/admission",
-        "  prune: true",
-        "  retryInterval: 1m0s",
-        "  serviceAccountName: admission-reconciler",
-        "  sourceRef:",
-        "    kind: GitRepository",
-        "    name: flux-system",
-        re.compile(r"  suspend: (?:true|false)\Z"),
-        "  timeout: 5m0s",
-        "  wait: true",
-    ]
-
-
-def load_admission_suspension(root: Path = ROOT) -> bool:
-    """Validate the exact admission Kustomization and return suspension."""
-
-    text = STATE._read_canonical_text(root / ADMISSION_PATH)
-    STATE._require_exact_significant_lines(text, _admission_shape())
-    if STATE.canonical_scalar(text, ("apiVersion",)) != (
-        "kustomize.toolkit.fluxcd.io/v1"
-    ):
-        raise STATE.CanonicalYamlError("admission apiVersion is unsupported")
-    if STATE.canonical_scalar(text, ("kind",)) != "Kustomization":
-        raise STATE.CanonicalYamlError("admission kind is unsupported")
-    if STATE.canonical_scalar(text, ("metadata", "name")) != "admission":
-        raise STATE.CanonicalYamlError("admission identity is unsupported")
-    return STATE._bool_scalar(STATE.canonical_scalar(text, ("spec", "suspend")))
 
 
 _BLOCK_KIND_KEY = re.compile(r"^(?:kind|\"kind\"|'kind')\s*:")
@@ -987,17 +940,7 @@ def _website_phase(name: str, root: Path, parent_suspended: bool) -> str:
             "active website release requires an active parent"
         )
 
-    ready = STATE._bool_scalar(str(release.values[("deploymentReady",)]))
-    digest = str(release.values[("image", "digest")])
-    promoted = digest != STATE.ZERO_DIGEST
-
-    if release.suspended and not ready and not promoted:
-        return "initial"
-    if release.suspended and ready and promoted:
-        return "staged"
-    if not release.suspended and ready and promoted:
-        return "active"
-    raise STATE.CanonicalYamlError("website readiness state is unsafe")
+    return "staged" if release.suspended else "active"
 
 
 def _cloudflare_phase(root: Path, platform_suspended: bool) -> str:
@@ -1039,7 +982,6 @@ def classify(root: Path = ROOT) -> TransitionPlan:
 
     root = root.resolve()
     _require_cloudflare_phase_contract(root)
-    admission_suspended = load_admission_suspension(root)
     platform_suspended = STATE.load_parent_suspension("cloudflare-public", root)
     naranjo_parent_suspended = STATE.load_parent_suspension(
         "naranjo-online", root
@@ -1055,19 +997,13 @@ def classify(root: Path = ROOT) -> TransitionPlan:
     )
     cloudflare_phase = _cloudflare_phase(root, platform_suspended)
 
-    any_website_release_active = "active" in (naranjo_phase, lidersea_phase)
-    if not platform_suspended and admission_suspended:
-        raise STATE.CanonicalYamlError("active platform requires active admission")
-    if any_website_release_active and (admission_suspended or platform_suspended):
-        raise STATE.CanonicalYamlError(
-            "active website requires active admission and platform services"
-        )
+    # The direct website loop is independent of any retired admission-controller
+    # premise.
 
     if (
-        naranjo_phase == "initial"
-        and lidersea_phase == "initial"
+        naranjo_phase == "staged"
+        and lidersea_phase == "staged"
         and cloudflare_phase == "initial"
-        and admission_suspended
         and platform_suspended
         and naranjo_parent_suspended
         and lidersea_parent_suspended
@@ -1077,7 +1013,6 @@ def classify(root: Path = ROOT) -> TransitionPlan:
         naranjo_phase == "active"
         and lidersea_phase == "active"
         and cloudflare_phase == "active"
-        and not admission_suspended
         and not platform_suspended
     ):
         mode = "release"
@@ -1089,7 +1024,6 @@ def classify(root: Path = ROOT) -> TransitionPlan:
         naranjo_phase,
         lidersea_phase,
         cloudflare_phase,
-        admission_suspended,
         platform_suspended,
         naranjo_parent_suspended,
         lidersea_parent_suspended,
@@ -1103,6 +1037,11 @@ def _print_plan(plan: TransitionPlan) -> None:
     print("naranjo-online={}".format(plan.naranjo_online))
     print("lidersea-com={}".format(plan.lidersea_com))
     print("cloudflare-public={}".format(plan.cloudflare_public))
+    print(
+        "platform-services-suspended={}".format(
+            "true" if plan.platform_suspended else "false"
+        )
+    )
     print(
         "any-website-active={}".format(
             "true" if plan.any_website_active else "false"

@@ -2,8 +2,8 @@
 
 Extracted verbatim from the retired release-gate.sh --live lane so the unit
 suite keeps executing this validator while the post-cutover successor gate is
-built. argv: STATE_ROOT then the ten pinned runtime images/versions
-(naranjo, lidersea, cloudflared, admission, three Flux controllers,
+built. argv: STATE_ROOT then the nine pinned runtime images/versions
+(naranjo, lidersea, cloudflared, three Flux controllers,
 Kubernetes version, CoreDNS, etcd) exactly as versions.env defines them.
 """
 import json
@@ -15,13 +15,12 @@ root = pathlib.Path(sys.argv[1])
 naranjo_image = sys.argv[2]
 lidersea_image = sys.argv[3]
 cloudflared_image = sys.argv[4]
-admission_image = sys.argv[5]
-flux_source_image = sys.argv[6]
-flux_kustomize_image = sys.argv[7]
-flux_helm_image = sys.argv[8]
-kubernetes_version = sys.argv[9]
-coredns_image = sys.argv[10]
-etcd_image = sys.argv[11]
+flux_source_image = sys.argv[5]
+flux_kustomize_image = sys.argv[6]
+flux_helm_image = sys.argv[7]
+kubernetes_version = sys.argv[8]
+coredns_image = sys.argv[9]
+etcd_image = sys.argv[10]
 
 
 def load_items(name):
@@ -199,7 +198,6 @@ expected_namespaces = {
     "kube-public",
     "kube-system",
     "flux-system",
-    "kyverno",
     "cloudflare-public",
     "naranjo-online",
     "lidersea-com",
@@ -228,7 +226,6 @@ base_deployments = {
     ("naranjo-online", "naranjo-online"),
     ("lidersea-com", "lidersea-com"),
     ("cloudflare-public", "cloudflared"),
-    ("kyverno", "kyverno-admission-controller"),
     ("flux-system", "source-controller"),
     ("flux-system", "kustomize-controller"),
     ("flux-system", "helm-controller"),
@@ -283,7 +280,6 @@ expected_deployment_images = {
     ("naranjo-online", "naranjo-online"): naranjo_image,
     ("lidersea-com", "lidersea-com"): lidersea_image,
     ("cloudflare-public", "cloudflared"): cloudflared_image,
-    ("kyverno", "kyverno-admission-controller"): admission_image,
     ("flux-system", "source-controller"): flux_source_image,
     ("flux-system", "kustomize-controller"): flux_kustomize_image,
     ("flux-system", "helm-controller"): flux_helm_image,
@@ -523,7 +519,6 @@ expected_services = {
     ("default", "kubernetes"),
     ("kube-system", "kube-dns"),
     ("flux-system", "source-controller"),
-    ("kyverno", "kyverno-svc"),
     ("naranjo-online", "naranjo-online"),
     ("lidersea-com", "lidersea-com"),
 }
@@ -541,31 +536,9 @@ for identity, service in services.items():
 
 if load_items("mutatingwebhooks.json"):
     raise SystemExit("live MutatingWebhookConfiguration inventory must be empty")
-validating = load_items("webhooks.json")
-if len(validating) != 1 or metadata(validating[0]).get("name") != "kyverno-resource-validating-webhook-cfg":
-    raise SystemExit("live ValidatingWebhookConfiguration inventory differs from the exact Kyverno boundary")
-tenant_namespaces = {"cloudflare-public", "naranjo-online", "lidersea-com"}
-webhooks = validating[0].get("webhooks", [])
-if not isinstance(webhooks, list) or not webhooks:
-    raise SystemExit("exact Kyverno validating webhook set is unavailable")
-for webhook in webhooks:
-    service = webhook.get("clientConfig", {}).get("service", {})
-    selector = webhook.get("namespaceSelector", {})
-    expressions = selector.get("matchExpressions", [])
-    if (
-        webhook.get("failurePolicy") != "Fail"
-        or service.get("namespace") != "kyverno"
-        or service.get("name") != "kyverno-svc"
-        or selector.get("matchLabels")
-        or not isinstance(expressions, list)
-        or len(expressions) != 1
-        or expressions[0].get("key") != "kubernetes.io/metadata.name"
-        or expressions[0].get("operator") != "In"
-        or set(expressions[0].get("values", [])) != tenant_namespaces
-        or len(expressions[0].get("values", [])) != len(tenant_namespaces)
-    ):
-        raise SystemExit("live Kyverno validating webhook does not fail closed over the exact tenant set")
+if load_items("webhooks.json"):
+    raise SystemExit("live ValidatingWebhookConfiguration inventory must be empty")
 
 print(
-    "release-gate: PASS exact global namespace, controller, Pod, Service, and admission inventories are closed"
+    "release-gate: PASS exact global namespace, controller, Pod, Service, and webhook inventories are closed"
 )

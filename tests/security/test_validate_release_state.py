@@ -13,12 +13,7 @@ from .support import load_script
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE = load_script("validate_release_state.py")
 
-NONZERO_DIGEST = "sha256:" + ("a" * 64)
-NONZERO_TAG = "v1.2.3"
-SITE_DOMAINS = {
-    "naranjo-online": "naranjo.online",
-    "lidersea-com": "lidersea.com",
-}
+SITE_NAMES = ("naranjo-online", "lidersea-com")
 
 
 def write_lf(path, text):
@@ -34,18 +29,11 @@ def release_path(root, name):
     return root / str(MODULE.RELEASE_CONTRACTS[name]["release"])
 
 
-def parent_path(root, name):
-    return root / str(MODULE.RELEASE_CONTRACTS[name]["parent"])
-
-
 def website_release_text(
     name,
     *,
     suspended=True,
-    ready=False,
-    digest=MODULE.ZERO_DIGEST,
-    tag=MODULE.ZERO_TAG,
-    repository=None,
+    deployment_ready=True,
     extra_values="",
     max_history: "str | None" = "2",
 ):
@@ -56,8 +44,6 @@ def website_release_text(
     absent one rather than merely accepting the canonical fixture.
     """
 
-    domain = SITE_DOMAINS[name]
-    repository = repository or "ghcr.io/snaraj/{}".format(name)
     return (
         "apiVersion: helm.toolkit.fluxcd.io/v2\n"
         "kind: HelmRelease\n"
@@ -86,21 +72,13 @@ def website_release_text(
         "      retries: 0\n"
         "      strategy: rollback\n"
         "  values:\n"
-        "    deploymentReady: {ready}\n"
-        "    image:\n"
-        "      repository: {repository}\n"
-        "      tag: {tag}\n"
-        "      digest: {digest}\n"
+        "    deploymentReady: {deployment_ready}\n"
         "{extra_values}"
     ).format(
         name=name,
-        domain=domain,
         readiness=MODULE.RELEASE_CONTRACTS[name]["readiness"],
         suspended=str(suspended).lower(),
-        ready=str(ready).lower(),
-        repository=repository,
-        tag=tag,
-        digest=digest,
+        deployment_ready=str(deployment_ready).lower(),
         extra_values=extra_values,
         max_history=(
             "" if max_history is None else "  maxHistory: {}\n".format(max_history)
@@ -165,169 +143,82 @@ def cloudflare_release_text(
     )
 
 
-def parent_text(name, *, suspended=True):
-    """Return one complete canonical parent Kustomization fixture."""
-
-    parent_name = Path(str(MODULE.RELEASE_CONTRACTS[name]["parent"])).stem
-    contract = MODULE.RELEASE_CONTRACTS[name]
-    prefix = (
-        "apiVersion: kustomize.toolkit.fluxcd.io/v1\n"
-        "kind: Kustomization\n"
-        "metadata:\n"
-        "  name: {parent_name}\n"
-        "  namespace: flux-system\n"
-        "spec:\n"
-    ).format(parent_name=parent_name)
-    if name == "cloudflare-public":
-        prefix += (
-            "  decryption:\n"
-            "    provider: sops\n"
-            "    secretRef:\n"
-            "      name: sops-age\n"
-        )
-    prefix += "  dependsOn:\n"
-    prefix += "".join(
-        "    - name: {}\n".format(dependency)
-        for dependency in contract["parent_dependencies"]
-    )
-    return prefix + (
-        "  interval: 10m0s\n"
-        "  path: {path}\n"
-        "  prune: true\n"
-        "  retryInterval: 1m0s\n"
-        "  serviceAccountName: {service_account}\n"
-        "  sourceRef:\n"
-        "    kind: GitRepository\n"
-        "    name: flux-system\n"
-        "  suspend: {suspended}\n"
-        "  timeout: 5m0s\n"
-        "  wait: false\n"
-    ).format(
-        path=contract["parent_path"],
-        service_account=contract["parent_service_account"],
-        suspended=str(suspended).lower(),
-    )
-
-
 def write_complete_tree(root):
-    """Write all closed release identities and their parent manifests."""
+    """Write all closed release identities.
 
-    for name in SITE_DOMAINS:
+    The two website parents are bootstrap-owned runtime objects. Their exact
+    rendering and hostile-shape coverage lives in the bootstrap contract
+    suite, not in this repository release-state parser.
+    """
+
+    for name in SITE_NAMES:
         write_lf(release_path(root, name), website_release_text(name))
     write_lf(
         release_path(root, "cloudflare-public"),
         cloudflare_release_text(),
     )
-    for name in MODULE.RELEASE_CONTRACTS:
-        write_lf(parent_path(root, name), parent_text(name))
 
 
 class StrictReleaseStateTests(unittest.TestCase):
     """Keep release-state interpretation exact, closed, and fail-safe."""
 
-    def test_current_repository_sites_are_suspended_in_a_reviewed_phase(self):
-        """The committed tree stays a safe desired state as promotions land.
+    def test_current_repository_uses_exact_values_only(self):
+        """The chart source, not HelmRelease values, owns image identity."""
 
-        Pre-promotion each live site is 'initial' (the all-zeros digest
-        sentinel); a reviewed digest promotion moves a site to 'promoted'
-        while BOTH suspension gates stay true (the runbook's staged flow —
-        activation is a separate reviewed arc). The strict parser refuses
-        every incoherent mixture outright, and this pin keeps rejecting any
-        live tree whose sites leave those two phases or whose suspensions
-        loosen outside that arc.
-        """
-
-        for name in SITE_DOMAINS:
+        for name in SITE_NAMES:
             with self.subTest(name=name):
-                self.assertIn(
-                    MODULE.site_phase(name, REPO_ROOT),
-                    ("initial", "promoted"),
-                )
-        self.assertTrue(MODULE.all_helm_releases_suspended(REPO_ROOT))
-        for name in MODULE.RELEASE_CONTRACTS:
-            with self.subTest(parent=name):
-                self.assertTrue(MODULE.load_parent_suspension(name, REPO_ROOT))
+                release = MODULE.load_helm_release(name, REPO_ROOT)
+                self.assertFalse(release.suspended)
+                self.assertFalse(MODULE.load_parent_suspension(name, REPO_ROOT))
+                self.assertEqual(release.values, {("deploymentReady",): "true"})
+                self.assertEqual(release.values_text, "deploymentReady: true\n")
 
-    def test_complete_temporary_states_distinguish_initial_promoted_and_mixed(self):
+        self.assertTrue(
+            MODULE.load_helm_release("cloudflare-public", REPO_ROOT).suspended
+        )
+        self.assertTrue(
+            MODULE.load_parent_suspension("cloudflare-public", REPO_ROOT)
+        )
+
+    def test_temporary_site_states_are_only_staged_or_active(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             write_complete_tree(root)
-            self.assertEqual(MODULE.site_phase("naranjo-online", root), "initial")
+            self.assertEqual(MODULE.site_phase("naranjo-online", root), "staged")
 
             write_lf(
                 release_path(root, "naranjo-online"),
-                website_release_text(
-                    "naranjo-online",
-                    ready=True,
-                    digest=NONZERO_DIGEST,
-                    tag=NONZERO_TAG,
-                ),
+                website_release_text("naranjo-online", suspended=False),
             )
-            self.assertEqual(MODULE.site_phase("naranjo-online", root), "promoted")
-            self.assertEqual(
-                MODULE.site_phase(
-                    "naranjo-online",
-                    root,
-                    NONZERO_DIGEST,
-                ),
-                "promoted",
-            )
-            with self.assertRaises(MODULE.CanonicalYamlError):
-                MODULE.site_phase(
-                    "naranjo-online",
-                    root,
-                    "sha256:" + ("b" * 64),
-                )
-            # The expected-tag guard is the tag's exact counterpart: a caller
-            # that names the release it verified must find that release here.
-            self.assertEqual(
-                MODULE.site_phase("naranjo-online", root, None, NONZERO_TAG),
-                "promoted",
-            )
-            for wrong_tag in ("v9.9.9", "latest", "0.1.9", MODULE.ZERO_TAG):
-                with self.subTest(expected_tag=wrong_tag):
-                    with self.assertRaises(MODULE.CanonicalYamlError):
-                        MODULE.site_phase("naranjo-online", root, None, wrong_tag)
+            self.assertEqual(MODULE.site_phase("naranjo-online", root), "active")
 
-            # Every half-advanced combination of the three-field identity is
-            # an unsafe mixed state, including the two that move the release
-            # NAME and the release BYTES apart.
-            for ready, digest, tag in (
-                (False, NONZERO_DIGEST, NONZERO_TAG),
-                (True, MODULE.ZERO_DIGEST, MODULE.ZERO_TAG),
-                (True, NONZERO_DIGEST, MODULE.ZERO_TAG),
-                (True, MODULE.ZERO_DIGEST, NONZERO_TAG),
-                (False, MODULE.ZERO_DIGEST, NONZERO_TAG),
-                (False, NONZERO_DIGEST, MODULE.ZERO_TAG),
-            ):
-                with self.subTest(ready=ready, digest=digest, tag=tag):
-                    write_lf(
-                        release_path(root, "naranjo-online"),
-                        website_release_text(
-                            "naranjo-online",
-                            ready=ready,
-                            digest=digest,
-                            tag=tag,
-                        ),
-                    )
-                    with self.assertRaises(MODULE.CanonicalYamlError):
-                        MODULE.site_phase("naranjo-online", root)
 
-            # A tag outside the release grammar is refused by the closed line
-            # allowlist before any value is interpreted.
-            for bad_tag in ("latest", "0.1.9", "v0.1", "vmain", "v01.2.3"):
-                with self.subTest(bad_tag=bad_tag):
-                    write_lf(
-                        release_path(root, "naranjo-online"),
-                        website_release_text(
-                            "naranjo-online",
-                            ready=True,
-                            digest=NONZERO_DIGEST,
-                            tag=bad_tag,
-                        ),
-                    )
+    def test_site_values_reject_every_extra_or_image_override(self):
+        hostile_values = {
+            "readiness false": {"deployment_ready": False},
+            "image digest": {
+                "extra_values": "    image:\n      digest: sha256:" + "a" * 64 + "\n"
+            },
+            "image tag": {"extra_values": "    image:\n      tag: v1.2.3\n"},
+            "repository": {
+                "extra_values": "    image:\n      repository: example.invalid/site\n"
+            },
+            "unreviewed scalar": {"extra_values": "    featureFlag: true\n"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            write_complete_tree(root)
+            release = release_path(root, "naranjo-online")
+            for label, kwargs in hostile_values.items():
+                with self.subTest(label=label):
+                    write_lf(release, website_release_text("naranjo-online", **kwargs))
                     with self.assertRaises(MODULE.CanonicalYamlError):
-                        MODULE.site_phase("naranjo-online", root)
+                        MODULE.load_helm_release("naranjo-online", root)
+            write_lf(release, website_release_text("naranjo-online"))
+            self.assertEqual(
+                MODULE.load_helm_release("naranjo-online", root).values,
+                {("deploymentReady",): "true"},
+            )
 
     def test_duplicate_critical_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -359,17 +250,6 @@ class StrictReleaseStateTests(unittest.TestCase):
                         MODULE.load_helm_release("naranjo-online", root)
                     release.write_bytes(canonical)
 
-            parent = parent_path(root, "naranjo-online")
-            parent.write_bytes(
-                parent.read_bytes().replace(
-                    b"  suspend: true\n",
-                    b"  suspend: true\n  suspend: true\n",
-                    1,
-                )
-            )
-            with self.assertRaises(MODULE.CanonicalYamlError):
-                MODULE.load_parent_suspension("naranjo-online", root)
-
     def test_block_scalar_suspend_decoy_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -398,14 +278,8 @@ class StrictReleaseStateTests(unittest.TestCase):
                     1,
                 ),
                 canonical.replace(
-                    b"    deploymentReady: false\n",
-                    b"    deploymentReady: false\n    deploymentReady: true\n",
-                    1,
-                ),
-                canonical.replace(
-                    b"      repository: ghcr.io/snaraj/naranjo-online\n",
-                    b"      repository: ghcr.io/snaraj/naranjo-online\n"
-                    b"      repository: ghcr.io/snaraj/naranjo-online\n",
+                    b"    deploymentReady: true\n",
+                    b"    deploymentReady: true\n    deploymentReady: true\n",
                     1,
                 ),
             )
@@ -419,10 +293,7 @@ class StrictReleaseStateTests(unittest.TestCase):
             decoy = (
                 b"decoy:\n"
                 b"  values:\n"
-                b"    deploymentReady: true\n"
-                b"    image:\n"
-                b"      repository: ghcr.io/snaraj/naranjo-online\n"
-                + ("      digest: {}\n".format(NONZERO_DIGEST)).encode("ascii")
+                b"    deploymentReady: false\n"
             )
             release.write_bytes(canonical.replace(b"spec:\n", decoy + b"spec:\n", 1))
             with self.assertRaises(MODULE.CanonicalYamlError):
@@ -569,64 +440,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                         MODULE.load_helm_release("naranjo-online", root)
                     release.write_bytes(canonical)
 
-    def test_closed_parent_rejects_transforms_and_identity_drift(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            write_complete_tree(root)
-            parent = parent_path(root, "naranjo-online")
-            canonical = parent.read_bytes()
-            variants = {
-                "namespace": canonical.replace(
-                    b"  namespace: flux-system\n",
-                    b"  namespace: default\n",
-                    1,
-                ),
-                "path": canonical.replace(
-                    b"  path: ./kubernetes/websites/naranjo-online\n",
-                    b"  path: ./kubernetes/websites/lidersea-com\n",
-                    1,
-                ),
-                "service-account": canonical.replace(
-                    b"  serviceAccountName: naranjo-online-reconciler\n",
-                    b"  serviceAccountName: default\n",
-                    1,
-                ),
-                "source": canonical.replace(
-                    b"    name: flux-system\n",
-                    b"    name: another-source\n",
-                    1,
-                ),
-                "dependency": canonical.replace(
-                    b"    - name: platform-services\n",
-                    b"    - name: unreviewed-service\n",
-                    1,
-                ),
-                "post-build": canonical.replace(
-                    b"  suspend: true\n",
-                    b"  postBuild:\n"
-                    b"    substitute:\n"
-                    b"      UNREVIEWED: value\n"
-                    b"  suspend: true\n",
-                    1,
-                ),
-                "image-transform": canonical.replace(
-                    b"  suspend: true\n",
-                    b"  images:\n"
-                    b"    - name: ghcr.io/snaraj/naranjo-online\n"
-                    b"      newName: ghcr.io/snaraj/lidersea-com\n"
-                    b"  suspend: true\n",
-                    1,
-                ),
-                "wait": canonical.replace(b"  wait: false\n", b"  wait: true\n", 1),
-            }
-            for label, candidate in variants.items():
-                with self.subTest(label=label):
-                    parent.write_bytes(candidate)
-                    with self.assertRaises(MODULE.CanonicalYamlError):
-                        MODULE.load_parent_suspension("naranjo-online", root)
-                    parent.write_bytes(canonical)
-
-    def test_wrong_identity_namespace_and_repository_are_rejected(self):
+    def test_wrong_identity_namespace_and_chart_source_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             write_complete_tree(root)
@@ -644,8 +458,8 @@ class StrictReleaseStateTests(unittest.TestCase):
                     1,
                 ),
                 canonical.replace(
-                    b"      repository: ghcr.io/snaraj/naranjo-online\n",
-                    b"      repository: ghcr.io/snaraj/lidersea-com\n",
+                    b"    name: naranjo-online-chart\n",
+                    b"    name: lidersea-com-chart\n",
                     1,
                 ),
             )
@@ -668,7 +482,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                     1,
                 )
             )
-            self.assertEqual(MODULE.site_phase("naranjo-online", root), "initial")
+            self.assertEqual(MODULE.site_phase("naranjo-online", root), "staged")
 
     def test_token_revision_requires_a_canonical_non_magic_string(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -833,13 +647,7 @@ class StrictReleaseStateTests(unittest.TestCase):
                 release_path(root, "naranjo-online"),
                 website_release_text("naranjo-online"),
             )
-            expected = (
-                "deploymentReady: false\n"
-                "image:\n"
-                "  repository: ghcr.io/snaraj/naranjo-online\n"
-                "  tag: {}\n"
-                "  digest: {}\n"
-            ).format(MODULE.ZERO_TAG, MODULE.ZERO_DIGEST)
+            expected = "deploymentReady: true\n"
             state = MODULE.load_helm_release("naranjo-online", root)
             self.assertEqual(state.values_text, expected)
 

@@ -4,9 +4,9 @@ metadata:
   name: lidersea-com
   namespace: lidersea-com
   annotations:
-    platform.snaraj.dev/readiness: suspended-until-capacity-lock-build-signature-and-digest
+    platform.snaraj.dev/readiness: active-via-signature-verified-chart
 spec:
-  suspend: true
+  suspend: false
   interval: 10m0s
   # Helm keeps every release revision as a Secret in this namespace, and
   # helm-controller retains five when this field is unset. `storage.Create`
@@ -24,9 +24,8 @@ spec:
   driftDetection:
     mode: enabled
   # The chart artifact comes from the signature-verified OCIRepository beside
-  # this file, so the release this cluster runs is whichever published version
-  # its reviewed SemVer range resolves to — no branch head, no raw commit, and
-  # no per-release edit here. chartRef carries no namespace, so helm-controller
+  # this file, whose immutable digest is a reviewed platform value — no branch
+  # head, mutable tag, or raw commit can decide what runs. chartRef carries no namespace, so helm-controller
   # (started with --no-cross-namespace-refs=true) can only ever resolve it
   # inside this site's own namespace.
   chartRef:
@@ -40,28 +39,9 @@ spec:
     remediation:
       retries: 0
       strategy: rollback
-  # The platform's own fail-closed release gate, deliberately retained through
-  # the move to tag-driven chart sync. These two scalars are the pair the
-  # release-state policy classifies and the only pair promote-image.sh
-  # advances under review: readiness shut over the all-zeros digest is the
-  # `initial` state the release Rego rejects, and a reviewed digest with
-  # readiness open is the `promoted` state it accepts. Neither reconciles
-  # while spec.suspend above is true. The pair leaves this file only after
-  # this site's publisher embeds the built image digest into the published
-  # chart (ADR 0016, transition step 1), and then only by a reviewed PR that
-  # moves the same denial into the chart (transition step 4).
-  #
-  # `tag` is the human half of the same identity (ADR 0016: the version tag IS
-  # the release) and is written by the SAME promotion transaction, from the
-  # same pair the registry was proved to bind. It makes the rendered workload
-  # reference read `repository:tag@digest`, so `kubectl describe pod` names the
-  # release instead of only its content address. It never replaces the digest:
-  # only the digest resolves, only the digest is signed and attested, and the
-  # release-state classifier refuses any half-advanced tag/digest/readiness
-  # combination.
+  # The exact-site Cosign-verified chart is the sole carrier of image
+  # repository, tag, and digest. A platform image override would decouple the
+  # selected chart release from the workload it deploys. This one explicit
+  # value remains the chart's reviewed activation gate.
   values:
     deploymentReady: true
-    image:
-      repository: ghcr.io/snaraj/lidersea-com
-      tag: v0.1.25
-      digest: sha256:22745912327de4b09fbe3e10860a799e21966c774cd3e36034bd7964af6cd1c7

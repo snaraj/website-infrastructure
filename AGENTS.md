@@ -172,42 +172,36 @@ and dependency-governed Draft capacity is recorded durably in
   by line range — a delivery-lane change may correct what the model
   asserts about reviewed state, never what the custody surface above
   permits or requires.
-- `policies/conftest/**`, `policies/kyverno/**`, and
-  `policies/release-conftest/**` — DELIVERY. The enumeration is exact,
-  not shorthand for `policies/**`: these three subtrees are the
+- `policies/conftest/**` and `policies/release-conftest/**` — DELIVERY.
+  The enumeration is exact, not shorthand for `policies/**`: these subtrees are the
   executable expression of the gates this lane already owns. Every other
   file under `policies/` — the pinned secret-scan policy
   `policies/gitleaks.toml` among them — is unchanged by this ruling and
-  reached only through the rule below. One caveat: a change to ADMISSION
-  policy semantics needs independent validation by the platform (peer)
-  lane, recorded on the pull request, before enforcement is enabled
-  anywhere.
+  reached only through the rule below. Issue #195 retired Kyverno entirely;
+  Conftest is a pre-merge static control and must never be described as live
+  admission.
 - `.githooks/**` — DELIVERY: the pre-push hook implements delivery-lane
   requirements 2 and 3. Changing what it PERMITS is a security-control
   change and needs an owner decision, not a lane call (issue #83).
 - `kubernetes/flux-system/**` — DELIVERY: the GitOps desired state this
   lane authors, and what the reviewed-state model above pins.
-- `kubernetes/websites/*/release.yaml` — DELIVERY when the change is
-  produced by `scripts/promote-image.sh` and the pull request carries its
-  evidence, under the owner's standing deploy grant. Outside
-  `kubernetes/flux-system/**`, that promotion surface and the
-  `cloudflare-public` row below are the only parts of `kubernetes/**`
-  this ruling assigns to the delivery lane; `kubernetes/reconciliation/**`,
-  the rest of `kubernetes/platform/**`, and the remaining
-  `kubernetes/websites/**` files are unchanged by this ruling and stay
-  unruled — reach them only through the rule below.
-  A RETENTION field is not a promotion. The delivery lane set
-  `spec.maxHistory` on both site releases under issue #198, and that edit is
-  outside this row: it is not `scripts/promote-image.sh` output and moves no
-  digest, tag, or readiness scalar. It is a DECLARED CROSSING under the rule
-  below, not a lane transfer, and it grants no standing claim on the tree.
-  The field is load-bearing for reliability rather than release identity —
-  helm-controller's unset five-revision default exceeded the measured
-  namespace Secret budget, which wedged a site release permanently and
-  blocked every subsequent deploy. Record the owner or platform (peer) ruling
-  in this row when it arrives, including whether release-retention fields
-  belong to this lane given that they gate whether a promotion can land at
-  all.
+- `kubernetes/websites/*/release.yaml` — the former DELIVERY grant applied
+  only to output from `scripts/promote-image.sh`. Issue #195 retires that
+  script fail-closed and removes the image override, so the grant has no
+  remaining write shape and must not be read as authority to recreate one.
+  Each site release now supplies exactly `deploymentReady: true`; its signed
+  chart is the sole image authority. Outside `kubernetes/flux-system/**`, the
+  `cloudflare-public` row below is the only current part of `kubernetes/**`
+  assigned to delivery. `kubernetes/reconciliation/**`, the rest of
+  `kubernetes/platform/**`, and the remaining `kubernetes/websites/**` files
+  stay unruled — reach them only through the rule below.
+  The delivery lane set `spec.maxHistory` on both site releases under issue
+  #198 as a DECLARED CROSSING, not a lane transfer. Retention is load-bearing
+  for reliability rather than release identity: helm-controller's unset
+  five-revision default exceeded the measured namespace Secret budget, wedged
+  a site release permanently, and blocked every subsequent deploy. Record the
+  owner or platform (peer) ruling here when it arrives, including whether
+  release-retention fields belong to this lane.
 - `kubernetes/platform/cloudflare-public/**` — DELIVERY, DERIVED from the
   Cloudflare/edge re-cut recorded in the paragraph above, not granted
   here: that re-cut names only `infrastructure/cloudflare/**` and the
@@ -217,15 +211,13 @@ and dependency-governed Draft capacity is recorded durably in
   already owns, serving the sites this lane promotes through the row
   above. PR #87 already writes it under this reading. Amend this row if
   the owner or the platform (peer) lane rules otherwise.
-- `kubernetes/platform/admission-install/**` — NOT transferred. It is
-  platform-shaped admission-control install machinery and the platform
-  (peer) lane remains its ruling authority. The delivery lane is
-  authoring it under the owner's 2026-08-12 authorization to install
-  Kyverno (issue #88): that is a DECLARED CROSSING under the rule below,
-  not a lane transfer, and it grants no standing claim on the tree.
-  Promotion to enforcement still needs independent validation by the
-  platform (peer) lane, recorded on the pull request. Amend this row if
-  the owner or the platform (peer) lane rules otherwise.
+- `kubernetes/platform/admission/**` and
+  `kubernetes/platform/admission-install/**` — RETIRED and absent under the
+  owner's issue #195 decision. No lane may recreate a Kyverno controller,
+  policy, installer, or report-only/enforce overlay from the old issue #88
+  authorization. A material trust-boundary expansion, including another
+  independent tenant or untrusted/third-party workload, triggers a new
+  threat model and ADR; it is not standing install authority.
 - `kubernetes/websites/*/source.yaml` — NOT transferred, ruling PENDING.
   The row above assigns `kubernetes/websites/*/release.yaml` to delivery
   through the promotion surface and leaves the remaining
@@ -238,15 +230,19 @@ and dependency-governed Draft capacity is recorded durably in
   lanes without one of them going stale. The delivery lane touched these
   two files under issue #185 to re-point that identity: a DECLARED
   CROSSING under the rule below, not a lane transfer, and it grants no
-  standing claim on the tree. Record the owner or platform (peer) ruling
-  in this row when it arrives.
+  standing claim on the tree. Issue #195 is a second DECLARED CROSSING: it
+  replaces mutable SemVer selection with one separately receipted audit-tag
+  and exact OCI manifest-digest pair per site, while retiring the former
+  HelmRelease promotion override. Future forward or rollback selection changes
+  require a new exact acquisition receipt and remain crossings until the owner
+  or platform (peer) records a lane ruling here.
 - `docs/adr/0016-tag-driven-flux-release-sync.md` — NOT transferred,
   ruling PENDING. The lane split above assigns "the remaining ADRs" to
   the platform lane, and "Lane discipline in docs" says the delivery lane
   cites them by number rather than editing them. ADR 0016 is nonetheless
   the decision record for surfaces this lane owns outright (the
-  signature-policy validators, the conftest and Kyverno policies, the
-  promotion script), and it was authored from this lane in commit
+  OCI signature validators, Conftest policies, and release-transition
+  controls), and it was authored from this lane in commit
   `c0911d7` without a recorded ruling. Issue #185 amended it, because
   leaving it asserting a signing identity the platform no longer trusts
   would have been a silent contradiction. The amendment is append-only:
@@ -268,21 +264,10 @@ and dependency-governed Draft capacity is recorded durably in
   measurement, and add a closed Darwin/arm64 renderer pin without changing
   the Linux live-install tuple. That is a DECLARED CROSSING under the rule
   below, not a lane transfer, and grants no standing claim on these paths.
-  The same change deactivates `require-zero-site-capacity.yaml` in the
-  delivery-owned `policies/kyverno/kustomization.yaml`, because that policy
-  admits only the sentinel shape being replaced. Its source remains
-  unmodified as historical material and as a possible input to a separately
-  reviewed restoration; restoration requires a coordinated policy-inventory,
-  report-only-overlay, render-lock, and validator recut, not merely re-listing
-  the source. Removing it from the rendered set also orphans its report-only
-  patch under
-  `kubernetes/platform/admission-install/report-only/`, which remains under
-  platform (peer) ruling authority; deleting that patch and enumeration is
-  the same declared crossing. Under the `policies/**` caveat, the admission
-  semantic change still needs independent platform (peer) validation on the
-  eventual pull request. Record the owner or platform ruling here when it
-  arrives, including whether the measured budget and its evidence document
-  belong to this lane because delivery validators enforce them.
+  Issue #195 subsequently retired the Kyverno capacity policy and its install
+  overlay rather than preserving them as restoration inputs. The reviewed
+  quota and evidence binding remain enforced by Conftest and repository
+  validators.
 
 **A path in neither list is not implicitly delivery.** Silence is not
 permission. Declare the crossing in the pull request body before touching
@@ -331,7 +316,10 @@ Delivery-lane requirements, explicit and numbered:
    at `v0.1.9`, requires one fragment across every adjacent ledger edge, waits
    until an earlier main SHA has both its exact tag and exact immutable Release,
    derives exactly one next patch, and publishes an annotated plain `vX.Y.Z` tag
-   plus exact zero-asset GitHub Release at the complete final SHA. Release notes bind the
+   plus an exact immutable GitHub Release at the complete final SHA. Starting
+   with `v0.1.41`, that Release carries exactly the canonical identity JSON and
+   its detached Sigstore bundle; `v0.1.40` is the sole zero-asset transition
+   predecessor. Release notes bind the
    fragment path, SHA-256, and bytes; fragments and immutable Releases are the
    permanent post-migration changelog. This source release never deploys or
    promotes platform or site workloads. The authoritative GET-only protected-main settings
@@ -683,7 +671,7 @@ is the consolidated command view:
   plus the ambient-artifact check, Kubernetes render + validation in
   the release-transition mode the release-state policy selects, render
   determinism, the assurance-ledger / no-security-toggles /
-  attack-surface-manifest / ingress-guard validators, Kyverno policy
+  attack-surface-manifest / ingress-guard validators, Conftest hostile-policy
   tests, and credential-free OpenTofu validation — plus a separate
   `dependency-review` job (pull requests only; fails on high severity). Main
   pushes run the same repository/infrastructure battery plus the exact
@@ -717,9 +705,9 @@ is the consolidated command view:
 ## Docs conventions
 
 - **Truthful README.** The deployment-state table is the honest source
-  of truth — the repository is deliberately not deployable until the
-  fail-closed sentinels are replaced with reviewed evidence, and prose
-  never claims otherwise. Badge honesty is enforced: the coverage badge
+  of truth — unresolved lanes remain blocked until fail-closed sentinels are
+  replaced with reviewed evidence, and safe-active desired state never claims
+  live reconciliation, readiness, or traffic without live proof. Badge honesty is enforced: the coverage badge
   is regenerated byte-exact by the gate and cannot claim what CI did
   not measure.
 - **Platform source changelog.** `VERSION` and `CHANGELOG.md` are frozen legacy

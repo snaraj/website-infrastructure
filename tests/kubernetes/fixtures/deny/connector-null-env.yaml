@@ -1,9 +1,8 @@
 # `env: null` is a STORED null, not an absent key. Rego's object.get
 # returns that null rather than its default and `every entry in null`
 # iterates nothing, so a mismatch-hunting rule would silently stop firing
-# while CEL's has() is true on an explicitly-null field and .all() errors,
-# making Kyverno refuse it. The positive-proof form here refuses it in
-# both engines, which is the only way the two agree on this shape.
+# while the retired CEL mirror treated the explicit field as present and
+# errored. The positive-proof Rego form now independently refuses the shape.
 #
 # ONE document per file, deliberately: the fixture runner asserts only that a
 # FILE is rejected, so pairing arms in one file would keep the file "rejected"

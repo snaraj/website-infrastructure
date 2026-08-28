@@ -502,11 +502,11 @@ verify_reviewed_live_state() {
   capture_live_json "${live_cluster_role_bindings}" get clusterrolebindings || return 1
   if [[ "${scope}" == full ]]; then
     capture_live_json "${live_namespaces}" get namespaces flux-system \
-      cloudflare-public naranjo-online lidersea-com kyverno || return 1
+      cloudflare-public naranjo-online lidersea-com || return 1
     capture_live_json "${live_git_repository}" -n flux-system get \
-      gitrepository flux-system || return 1
+      gitrepositories || return 1
     capture_live_json "${live_kustomization}" -n flux-system get \
-      kustomization flux-system || return 1
+      kustomizations || return 1
   else
     capture_live_json "${live_namespaces}" get namespace flux-system || return 1
   fi
@@ -888,27 +888,29 @@ def check_deployments(document):
 
 CONTROLLER_NAMES = {"source-controller", "kustomize-controller", "helm-controller"}
 FLUX_ACCESS_NAMES = {
-    "default",
-    "root-reconciler",
-    "platform-prerequisites-reconciler",
-    "admission-reconciler",
-    "platform-services-reconciler",
-    "naranjo-online-reconciler",
-    "lidersea-com-reconciler",
+    "default", "naranjo-online-reconciler", "lidersea-com-reconciler",
 }
 ACCESS_SERVICE_ACCOUNTS = {
     ("flux-system", name) for name in FLUX_ACCESS_NAMES
 } | {
     ("cloudflare-public", "default"),
-    ("cloudflare-public", "helm-reconciler"),
     ("naranjo-online", "default"),
     ("naranjo-online", "helm-reconciler"),
     ("lidersea-com", "default"),
     ("lidersea-com", "helm-reconciler"),
-    ("kyverno", "default"),
+}
+RETIRED_ACCESS_SERVICE_ACCOUNTS = {
+    ("flux-system", "root-reconciler"),
+    ("flux-system", "platform-prerequisites-reconciler"),
+    ("flux-system", "platform-services-reconciler"),
+    ("cloudflare-public", "helm-reconciler"),
 }
 CONTROLLER_SERVICE_ACCOUNTS = {("flux-system", name) for name in CONTROLLER_NAMES}
-PROTECTED_SERVICE_ACCOUNTS = ACCESS_SERVICE_ACCOUNTS | CONTROLLER_SERVICE_ACCOUNTS
+PROTECTED_SERVICE_ACCOUNTS = (
+    ACCESS_SERVICE_ACCOUNTS
+    | RETIRED_ACCESS_SERVICE_ACCOUNTS
+    | CONTROLLER_SERVICE_ACCOUNTS
+)
 
 
 def check_service_account(value, namespace, name, controller=False):
@@ -1131,23 +1133,32 @@ def expected_cluster_binding_labels(name):
 
 def access_role_rules():
     mutate = ["get", "list", "watch", "create", "update", "patch", "delete"]
-    prerequisite = [
-        rule([""], ["serviceaccounts", "resourcequotas", "limitranges"], mutate),
-        rule(["networking.k8s.io"], ["networkpolicies"], mutate),
-    ]
-    # The connector release still resolves its chart from a Git source; both
-    # sites resolve theirs from a signed OCI artifact, so their reconcilers
-    # apply an OCIRepository and never a GitRepository.
-    git_release = [
-        rule(["source.toolkit.fluxcd.io"], ["gitrepositories"], mutate),
-        rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], mutate),
-    ]
-    oci_release = [
-        rule(["source.toolkit.fluxcd.io"], ["ocirepositories"], mutate),
-        rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], mutate),
+    def site_release(site):
+        return [
+            rule(["source.toolkit.fluxcd.io"], ["ocirepositories"], ["list"]),
+            rule(["source.toolkit.fluxcd.io"], ["ocirepositories"], ["create"]),
+            rule(
+                ["source.toolkit.fluxcd.io"], ["ocirepositories"],
+                ["get", "update", "patch"], resource_names=[site + "-chart"],
+            ),
+            rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], ["list"]),
+            rule(["helm.toolkit.fluxcd.io"], ["helmreleases"], ["create"]),
+            rule(
+                ["helm.toolkit.fluxcd.io"], ["helmreleases"],
+                ["get", "update", "patch"], resource_names=[site],
+            ),
+            rule(["networking.k8s.io"], ["networkpolicies"], ["list"]),
+            rule(["networking.k8s.io"], ["networkpolicies"], ["create"]),
+            rule(
+                ["networking.k8s.io"], ["networkpolicies"],
+                ["get", "update", "patch"], resource_names=["default-deny"],
+            ),
     ]
     helm = [
-        rule([""], ["configmaps", "secrets", "services", "serviceaccounts"], mutate),
+        rule(
+            [""], ["configmaps", "secrets", "services", "serviceaccounts"],
+            mutate,
+        ),
         rule([""], ["pods"], ["get", "list", "watch"]),
         rule(["apps"], ["deployments"], mutate),
         rule(["apps"], ["replicasets"], ["get", "list", "watch"]),
@@ -1158,8 +1169,8 @@ def access_role_rules():
     ]
     # Controller identity. These are the namespaced Roles that replace the
     # deleted cluster-admin binding: leader election and controller-owned
-    # ConfigMaps, the SOPS key read, and the name-restricted impersonation
-    # grants through which every applied object actually reaches the API.
+    # ConfigMaps and the name-restricted impersonation grants through which
+    # every applied object actually reaches the API.
     controller_runtime = [
         rule(["coordination.k8s.io"], ["leases"], mutate),
         rule([""], ["configmaps"], mutate),
@@ -1167,26 +1178,16 @@ def access_role_rules():
     ]
     return {
         ("flux-system", "flux-controller-runtime"): controller_runtime,
-        ("flux-system", "flux-controller-decryption"): [
-            rule([""], ["secrets"], ["get"], resource_names=["sops-age"])
-        ],
         ("flux-system", "flux-controller-impersonation"): [
             rule(
                 [""],
                 ["serviceaccounts"],
                 ["impersonate"],
                 resource_names=[
-                    "root-reconciler",
-                    "platform-prerequisites-reconciler",
-                    "admission-reconciler",
-                    "platform-services-reconciler",
                     "naranjo-online-reconciler",
                     "lidersea-com-reconciler",
                 ],
             )
-        ],
-        ("cloudflare-public", "flux-controller-impersonation"): [
-            rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
         ],
         ("naranjo-online", "flux-controller-impersonation"): [
             rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
@@ -1194,25 +1195,8 @@ def access_role_rules():
         ("lidersea-com", "flux-controller-impersonation"): [
             rule([""], ["serviceaccounts"], ["impersonate"], resource_names=["helm-reconciler"])
         ],
-        ("flux-system", "root-reconciler"): [
-            rule(["kustomize.toolkit.fluxcd.io"], ["kustomizations"], mutate)
-        ],
-        ("cloudflare-public", "platform-prerequisites-reconciler"): prerequisite,
-        ("naranjo-online", "platform-prerequisites-reconciler"): prerequisite,
-        ("lidersea-com", "platform-prerequisites-reconciler"): prerequisite,
-        ("kyverno", "platform-prerequisites-reconciler"): [
-            rule(["networking.k8s.io"], ["networkpolicies"], mutate)
-        ],
-        ("kyverno", "admission-reconciler"): [
-            rule([""], ["configmaps", "services", "serviceaccounts"], mutate),
-            rule(["apps"], ["deployments"], mutate),
-        ],
-        ("cloudflare-public", "flux-release-reconciler"): git_release + [
-            rule([""], ["secrets"], mutate)
-        ],
-        ("naranjo-online", "flux-release-reconciler"): oci_release,
-        ("lidersea-com", "flux-release-reconciler"): oci_release,
-        ("cloudflare-public", "helm-reconciler"): helm,
+        ("naranjo-online", "flux-release-reconciler"): site_release("naranjo-online"),
+        ("lidersea-com", "flux-release-reconciler"): site_release("lidersea-com"),
         ("naranjo-online", "helm-reconciler"): naranjo_helm,
         ("lidersea-com", "helm-reconciler"): helm,
     }
@@ -1241,15 +1225,9 @@ def expected_bindings():
     controllers = [sa_subject("flux-system", name) for name in sorted(CONTROLLER_NAMES)]
     result = {
         ("flux-system", "flux-controller-runtime"): (role("flux-controller-runtime"), controllers),
-        ("flux-system", "flux-controller-decryption"): (
-            role("flux-controller-decryption"), [sa_subject("flux-system", "kustomize-controller")]
-        ),
         ("flux-system", "flux-controller-impersonation"): (
             role("flux-controller-impersonation"),
             [sa_subject("flux-system", "kustomize-controller")],
-        ),
-        ("cloudflare-public", "flux-controller-impersonation"): (
-            role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
         ),
         ("naranjo-online", "flux-controller-impersonation"): (
             role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
@@ -1257,16 +1235,8 @@ def expected_bindings():
         ("lidersea-com", "flux-controller-impersonation"): (
             role("flux-controller-impersonation"), [sa_subject("flux-system", "helm-controller")]
         ),
-        ("flux-system", "root-reconciler"): (role("root-reconciler"), [sa_subject("flux-system", "root-reconciler")]),
-        ("cloudflare-public", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
-        ("naranjo-online", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
-        ("lidersea-com", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
-        ("kyverno", "platform-prerequisites-reconciler"): (role("platform-prerequisites-reconciler"), [sa_subject("flux-system", "platform-prerequisites-reconciler")]),
-        ("kyverno", "admission-reconciler"): (role("admission-reconciler"), [sa_subject("flux-system", "admission-reconciler")]),
-        ("cloudflare-public", "platform-services-reconciler"): (role("flux-release-reconciler"), [sa_subject("flux-system", "platform-services-reconciler")]),
         ("naranjo-online", "naranjo-online-reconciler"): (role("flux-release-reconciler"), [sa_subject("flux-system", "naranjo-online-reconciler")]),
         ("lidersea-com", "lidersea-com-reconciler"): (role("flux-release-reconciler"), [sa_subject("flux-system", "lidersea-com-reconciler")]),
-        ("cloudflare-public", "helm-reconciler"): (role("helm-reconciler"), [sa_subject("cloudflare-public", "helm-reconciler")]),
         ("naranjo-online", "helm-reconciler"): (role("helm-reconciler"), [sa_subject("naranjo-online", "helm-reconciler")]),
         ("lidersea-com", "helm-reconciler"): (role("helm-reconciler"), [sa_subject("lidersea-com", "helm-reconciler")]),
     }
@@ -1496,7 +1466,7 @@ def check_namespaces(document, scope):
     actual = index(document, "Namespace", namespaced=False)
     expected_names = {"flux-system"}
     if scope == "full":
-        expected_names |= {"cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"}
+        expected_names |= {"cloudflare-public", "naranjo-online", "lidersea-com"}
     require(set(actual) == expected_names)
     for name, value in actual.items():
         require(value.get("apiVersion") == "v1")
@@ -1515,10 +1485,6 @@ def check_namespaces(document, scope):
         else:
             labels = {**PSA_LABELS, "kubernetes.io/metadata.name": name}
             annotations = {"kustomize.toolkit.fluxcd.io/prune": "disabled"}
-            if name == "kyverno":
-                annotations["platform.snaraj.dev/readiness"] = (
-                    "blocked-until-reviewed-controller-digests-and-runtime-evidence"
-                )
         check_metadata(value.get("metadata"), name, None, labels, annotations)
         require(value.get("spec", {"finalizers": ["kubernetes"]}) == {"finalizers": ["kubernetes"]})
 
@@ -1529,54 +1495,103 @@ def check_flux_source(git_document, kustomization_document):
     git_value = git_values[("flux-system", "flux-system")]
     require(git_value.get("apiVersion") == "source.toolkit.fluxcd.io/v1")
     require(set(git_value) <= {"apiVersion", "kind", "metadata", "spec", "status"})
+    git_spec = git_value.get("spec")
+    require(isinstance(git_spec, dict))
+    ref = git_spec.get("ref")
+    require(
+        isinstance(ref, dict)
+        and set(ref) == {"tag"}
+        and isinstance(ref["tag"], str)
+        and re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+", ref["tag"])
+    )
+    annotation_prefix = "release-selector.platform.snaraj.dev/"
+    annotation_names = {
+        "schema", "release-id", "release-tag", "release-target-sha",
+        "tag-object-sha", "main-ci", "platform-release",
+        "selector-image-digest", "identity-sha256",
+    }
+    annotations = copy.deepcopy((git_value.get("metadata") or {}).get("annotations", {}))
+    require(isinstance(annotations, dict))
+    annotations.pop(LAST_APPLIED, None)
+    require(set(annotations) == {annotation_prefix + name for name in annotation_names})
+    selector = {
+        name: annotations[annotation_prefix + name] for name in annotation_names
+    }
+    require(all(isinstance(value, str) for value in selector.values()))
+    require(selector["release-tag"] == ref["tag"])
+    require(selector["schema"] in {
+        "legacy-bootstrap/v1",
+        "https://snaraj.dev/schemas/platform-release-identity/v1",
+    })
+    require(re.fullmatch(r"[0-9]+", selector["release-id"]))
+    require(re.fullmatch(r"[0-9a-f]{40}", selector["release-target-sha"]))
+    require(re.fullmatch(r"[0-9a-f]{40}", selector["tag-object-sha"]))
+    require(re.fullmatch(r"[0-9]+/[0-9]+", selector["main-ci"]))
+    require(re.fullmatch(r"[0-9]+/[0-9]+", selector["platform-release"]))
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", selector["identity-sha256"]))
     check_metadata(
         git_value.get("metadata"),
         "flux-system",
         "flux-system",
         {},
+        annotations=annotations,
         allow_flux_finalizer=True,
     )
     require(
-        git_value.get("spec")
+        git_spec
         == {
-            "ignore": "/*\n!/kubernetes\n!/policies\n",
+            "ignore": "/*\n!/kubernetes/\n/kubernetes/*\n!/kubernetes/websites/\n"
+            "/kubernetes/websites/*\n!/kubernetes/websites/naranjo-online/\n"
+            "!/kubernetes/websites/naranjo-online/**\n"
+            "!/kubernetes/websites/lidersea-com/\n"
+            "!/kubernetes/websites/lidersea-com/**\n",
             "interval": "1m0s",
-            "ref": {"branch": "main"},
-            "sparseCheckout": ["kubernetes", "policies"],
+            "ref": ref,
+            "sparseCheckout": [
+                "kubernetes/websites/naranjo-online",
+                "kubernetes/websites/lidersea-com",
+            ],
             "timeout": "60s",
             "url": "https://github.com/snaraj/website-infrastructure.git",
         }
     )
 
     kustomization_values = index(kustomization_document, "Kustomization")
-    require(set(kustomization_values) == {("flux-system", "flux-system")})
-    kustomization = kustomization_values[("flux-system", "flux-system")]
-    require(kustomization.get("apiVersion") == "kustomize.toolkit.fluxcd.io/v1")
-    require(set(kustomization) <= {"apiVersion", "kind", "metadata", "spec", "status"})
-    check_metadata(
-        kustomization.get("metadata"),
-        "flux-system",
-        "flux-system",
-        {},
-        allow_flux_finalizer=True,
-    )
-    spec = copy.deepcopy(kustomization.get("spec"))
-    require(isinstance(spec, dict))
-    if spec.get("force") is False:
-        spec.pop("force")
-    require(
-        spec
-        == {
-            "interval": "10m0s",
-            "path": "./kubernetes/reconciliation",
-            "prune": True,
-            "retryInterval": "1m0s",
-            "serviceAccountName": "root-reconciler",
-            "sourceRef": {"kind": "GitRepository", "name": "flux-system"},
-            "timeout": "5m0s",
-            "wait": True,
-        }
-    )
+    expected_sites = {
+        ("flux-system", "naranjo-online-reconciler"): "naranjo-online",
+        ("flux-system", "lidersea-com-reconciler"): "lidersea-com",
+    }
+    require(set(kustomization_values) == set(expected_sites))
+    for key, site in expected_sites.items():
+        kustomization = kustomization_values[key]
+        require(kustomization.get("apiVersion") == "kustomize.toolkit.fluxcd.io/v1")
+        require(set(kustomization) <= {"apiVersion", "kind", "metadata", "spec", "status"})
+        check_metadata(
+            kustomization.get("metadata"),
+            key[1],
+            key[0],
+            {},
+            allow_flux_finalizer=True,
+        )
+        spec = copy.deepcopy(kustomization.get("spec"))
+        require(isinstance(spec, dict))
+        if spec.get("force") is False:
+            spec.pop("force")
+        require(
+            spec
+            == {
+                "deletionPolicy": "Orphan",
+                "interval": "10m0s",
+                "path": "./kubernetes/websites/" + site,
+                "prune": False,
+                "retryInterval": "1m0s",
+                "serviceAccountName": site + "-reconciler",
+                "sourceRef": {"kind": "GitRepository", "name": "flux-system"},
+                "suspend": False,
+                "timeout": "5m0s",
+                "wait": True,
+            }
+        )
 
 
 def main():
@@ -1656,7 +1671,8 @@ git_repository="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get \
   gitrepository flux-system -o go-template='{{.spec.url}} {{if .spec.secretRef}}{{.spec.secretRef.name}}{{else}}none{{end}}' 2>/dev/null)" || fail
 [[ "${git_repository}" == 'https://github.com/snaraj/website-infrastructure.git none' ]] || fail
 "${kubectl}" "${kubectl_target_args[@]}" -n flux-system wait --for=condition=Ready \
-  gitrepository/flux-system kustomization/flux-system --timeout=30s >/dev/null 2>&1 || fail
+  gitrepository/flux-system kustomization/naranjo-online-reconciler \
+  kustomization/lidersea-com-reconciler --timeout=30s >/dev/null 2>&1 || fail
 git_secret_count="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get secret \
   -o jsonpath='{range .items[?(@.type=="kubernetes.io/basic-auth")]}x{end}{range .items[?(@.type=="kubernetes.io/ssh-auth")]}x{end}' | wc -c)" || fail
 [[ "${git_secret_count}" -eq 0 ]] || fail

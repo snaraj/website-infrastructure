@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Complete the Release for the frozen owner-prepared v0.1.0 tag, then converge
-# this exact main SHA. This transaction receives only the workflow write token;
-# a separate prerequisite job proves the immutable-release server setting.
+# Complete the exact next platform Release while retaining the frozen v0.1.0
+# recovery edge. This transaction receives only the workflow write token; a
+# separate prerequisite job proves the immutable-release server setting.
 set -euo pipefail
 
 : "${GH_TOKEN:?GH_TOKEN is required}"
@@ -9,8 +9,14 @@ set -euo pipefail
 : "${TAG:?TAG is required}"
 : "${BASE_SHA:?BASE_SHA is required}"
 : "${BASE_TAG:?BASE_TAG is required}"
+: "${MAIN_RUN_ID:?MAIN_RUN_ID is required}"
+: "${MAIN_RUN_ATTEMPT:?MAIN_RUN_ATTEMPT is required}"
+: "${SELECTOR_IMAGE_DIGEST:?SELECTOR_IMAGE_DIGEST is required}"
+: "${SELECTOR_BUILD_SHA:?SELECTOR_BUILD_SHA is required}"
 : "${GITHUB_API_URL:?GITHUB_API_URL is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+: "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+: "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 test -z "${IMMUTABLE_SETTINGS_TOKEN-}"
 test -z "${ACTIONS_READ_TOKEN-}"
@@ -31,20 +37,128 @@ ref_json="${RUNNER_TEMP}/platform-ref.json"
 tag_json="${RUNNER_TEMP}/platform-tag.json"
 release_json="${RUNNER_TEMP}/platform-release.json"
 notes="${RUNNER_TEMP}/platform-notes.md"
+identity_asset="${RUNNER_TEMP}/platform-release-identity.v1.json"
+identity_bundle="${RUNNER_TEMP}/platform-release-identity.v1.json.sigstore.json"
+identity_download="${RUNNER_TEMP}/platform-release-identity.download.json"
+bundle_download="${RUNNER_TEMP}/platform-release-identity.sigstore.download.json"
+asset_upload_json="${RUNNER_TEMP}/platform-release-asset-upload.json"
+draft_marker="${RUNNER_TEMP}/platform-release-draft-marker.json"
+draft_request="${RUNNER_TEMP}/platform-release-draft-request.json"
+body_patch="${RUNNER_TEMP}/platform-release-body-patch.json"
+publish_patch="${RUNNER_TEMP}/platform-release-publish-patch.json"
+legacy_main_run_json="${RUNNER_TEMP}/platform-legacy-main-run.json"
+legacy_platform_run_json="${RUNNER_TEMP}/platform-legacy-platform-run.json"
+legacy_main_runs_json="${RUNNER_TEMP}/platform-legacy-main-runs.json"
+legacy_platform_runs_json="${RUNNER_TEMP}/platform-legacy-platform-runs.json"
+legacy_predecessor_json="${RUNNER_TEMP}/platform-legacy-predecessor.json"
 tagger_name='github-actions[bot]'
 tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
 recovery_source_sha='51c5f44f9cf1d35f68c6e9613e73ad50ef2e644e'
 recovery_tag='v0.1.0'
+identity_asset_name='platform-release-identity.v1.json'
+identity_bundle_name='platform-release-identity.v1.json.sigstore.json'
+identity_subject='https://github.com/snaraj/website-infrastructure/.github/workflows/platform-release.yml@refs/heads/main'
+identity_issuer='https://token.actions.githubusercontent.com'
 
 get_json() {
   local token="$1" url="$2" output="$3"
   curl --silent --show-error --location \
-    --proto '=https' --tlsv1.2 \
+    --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --output "${output}" --write-out '%{http_code}' \
     --header 'Accept: application/vnd.github+json' \
     --header "X-GitHub-Api-Version: ${api_version}" \
     --header "Authorization: Bearer ${token}" \
     "${url}"
+}
+
+get_public_json() {
+  local url="$1" output="$2"
+  curl --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --output "${output}" --write-out '%{http_code}' \
+    --header 'Accept: application/vnd.github+json' \
+    --header "X-GitHub-Api-Version: ${api_version}" \
+    "${url}"
+}
+
+download_identity_asset() {
+  local token="$1" release_record="$2" name="$3" output="$4" count="$5"
+  local asset_id status expected
+  if [ "${count}" = 1 ]; then
+    expected="[\"${identity_asset_name}\"]"
+  else
+    test "${count}" = 2
+    expected="[\"${identity_asset_name}\",\"${identity_bundle_name}\"]"
+  fi
+  jq -e --argjson count "${count}" --argjson expected "${expected}" '
+    (.assets | type == "array") and (.assets | length == $count) and
+    (([.assets[].name] | sort) == ($expected | sort))' \
+    "${release_record}" >/dev/null
+  asset_id="$(jq -er --arg name "${name}" '
+    [.assets[] | select(.name == $name)] | select(length == 1) |
+    .[0].id | select(type == "number" and . > 0)' "${release_record}")"
+  status="$(curl --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --output "${output}" --write-out '%{http_code}' \
+    --header 'Accept: application/octet-stream' \
+    --header "X-GitHub-Api-Version: ${api_version}" \
+    --header "Authorization: Bearer ${token}" \
+    "${api}/releases/assets/${asset_id}")"
+  test "${status}" = 200
+}
+
+verify_identity_signature() {
+  local identity="$1" bundle="$2"
+  env -u COSIGN_REPOSITORY cosign verify-blob \
+    --bundle "${bundle}" \
+    --certificate-identity "${identity_subject}" \
+    --certificate-oidc-issuer "${identity_issuer}" \
+    "${identity}" >/dev/null
+}
+
+download_identity_pair() {
+  local release_record="$1"
+  download_identity_asset "${write_token}" "${release_record}" \
+    "${identity_asset_name}" "${identity_download}" 2
+  download_identity_asset "${write_token}" "${release_record}" \
+    "${identity_bundle_name}" "${bundle_download}" 2
+  verify_identity_signature "${identity_download}" "${bundle_download}"
+}
+
+upload_identity_asset() {
+  local release_id="$1" name="$2" path="$3" status
+  status="$(curl --silent --show-error \
+    --proto '=https' --tlsv1.2 --request POST \
+    --output "${asset_upload_json}" --write-out '%{http_code}' \
+    --header 'Accept: application/vnd.github+json' \
+    --header 'Content-Type: application/json' \
+    --header "X-GitHub-Api-Version: ${api_version}" \
+    --header "Authorization: Bearer ${write_token}" \
+    --data-binary "@${path}" \
+    "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${name}")"
+  test "${status}" = 201
+}
+
+validate_identity_runs() {
+  local identity="$1" main_id main_attempt platform_id platform_attempt
+  main_id="$(jq -er '.main_ci.run_id | select(type == "number" and . > 0)' \
+    "${identity}")"
+  main_attempt="$(jq -er '.main_ci.run_attempt | select(type == "number" and . > 0)' \
+    "${identity}")"
+  platform_id="$(jq -er '.platform_release.run_id | select(type == "number" and . > 0)' \
+    "${identity}")"
+  platform_attempt="$(jq -er '.platform_release.run_attempt | select(type == "number" and . > 0)' \
+    "${identity}")"
+  test "$(get_public_json \
+    "${api}/actions/runs/${main_id}/attempts/${main_attempt}" \
+    "${legacy_main_run_json}")" = 200
+  test "$(get_public_json \
+    "${api}/actions/runs/${platform_id}/attempts/${platform_attempt}" \
+    "${legacy_platform_run_json}")" = 200
+  python3 -I -B "${contract}" identity-run-records \
+    --identity "${identity}" \
+    --main-run-json "${legacy_main_run_json}" \
+    --platform-run-json "${legacy_platform_run_json}" >/dev/null
 }
 
 run_write_gh() {
@@ -81,15 +195,29 @@ write_recovery_notes() {
   } > "${notes}"
 }
 
+write_current_identity() {
+  local release_id="$1" tag_object_sha="$2"
+  local main_run_id="${3:-${MAIN_RUN_ID}}"
+  local main_run_attempt="${4:-${MAIN_RUN_ATTEMPT}}"
+  local platform_run_id="${5:-${GITHUB_RUN_ID}}"
+  local platform_run_attempt="${6:-${GITHUB_RUN_ATTEMPT}}"
+  local selector_digest="${7:-${SELECTOR_IMAGE_DIGEST}}"
+  python3 -I -B "${contract}" release-identity \
+    --repository . --head "${SOURCE_SHA}" --tag "${TAG}" \
+    --base-sha "${BASE_SHA}" --base-tag "${BASE_TAG}" \
+    --tag-object-sha "${tag_object_sha}" --release-id "${release_id}" \
+    --main-run-id "${main_run_id}" \
+    --main-run-attempt "${main_run_attempt}" \
+    --platform-run-id "${platform_run_id}" \
+    --platform-run-attempt "${platform_run_attempt}" \
+    --selector-image-digest "${selector_digest}" \
+    --selector-build-sha "${SELECTOR_BUILD_SHA}" > "${identity_asset}"
+}
+
 write_current_notes() {
   python3 -I -B "${contract}" release-notes \
     --repository . --head "${SOURCE_SHA}" --tag "${TAG}" \
     --base-sha "${BASE_SHA}" --base-tag "${BASE_TAG}" > "${notes}"
-}
-
-write_predecessor_notes() {
-  python3 -I -B "${contract}" release-notes \
-    --repository . --head "${BASE_SHA}" --tag "${BASE_TAG}" > "${notes}"
 }
 
 classify_release() {
@@ -106,6 +234,108 @@ classify_release() {
     --allow-grandfathered-main-target \
     --source-sha "${source_sha}" \
     --title "Platform ${tag}" --body "${notes}"
+}
+
+classify_current_release() {
+  local required="$1" status tag_object tree_sha evidence_selector_digest
+  local -a record_args=()
+  status="$(get_json "${write_token}" \
+    "${api}/releases/tags/${TAG}" "${release_json}")"
+  if [ "${status}" = 200 ]; then
+    tag_object="$(jq -er '.object.sha' "${ref_json}")"
+    tree_sha="$(git rev-parse "${SOURCE_SHA}^{tree}")"
+    download_identity_pair "${release_json}"
+    evidence_selector_digest="$(python3 -I -B "${contract}" \
+      selector-image-from-release --release-json "${release_json}" \
+      --identity "${identity_download}" --bundle "${bundle_download}" \
+      --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+      --tag-object-sha "${tag_object}" --source-tree-sha "${tree_sha}" \
+      --selector-build-sha "${SELECTOR_BUILD_SHA}")"
+    test "${evidence_selector_digest}" = "${SELECTOR_IMAGE_DIGEST}"
+    record_args=(--release-json "${release_json}" \
+      --identity "${identity_download}" --bundle "${bundle_download}" \
+      --tag-object-sha "${tag_object}" --source-tree-sha "${tree_sha}" \
+      --selector-build-sha "${SELECTOR_BUILD_SHA}")
+  fi
+  python3 -I -B "${contract}" identity-release-state \
+    --http-status "${status}" --require "${required}" \
+    "${record_args[@]}" --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+    --selector-build-sha "${SELECTOR_BUILD_SHA}"
+}
+
+classify_predecessor_release() {
+  local status tag_object tree_sha legacy_main_run_id legacy_main_run_attempt
+  local legacy_platform_run_id legacy_platform_run_attempt
+  local predecessor_build_sha predecessor_selector_digest
+  status="$(get_json "${write_token}" \
+    "${api}/releases/tags/${BASE_TAG}" "${release_json}")"
+  test "${status}" = 200
+  tag_object="$(jq -er '.object.sha' "${ref_json}")"
+  if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then
+    tree_sha="$(git rev-parse "${BASE_SHA}^{tree}")"
+    download_identity_pair "${release_json}"
+    predecessor_build_sha="$(jq -er '.selector.provenance.source_sha |
+      select(type == "string" and test("^[0-9a-f]{40}$"))' \
+      "${identity_download}")"
+    predecessor_selector_digest="$(python3 -I -B "${contract}" \
+      selector-image-from-release \
+      --release-json "${release_json}" --identity "${identity_download}" \
+      --bundle "${bundle_download}" --tag "${BASE_TAG}" \
+      --source-sha "${BASE_SHA}" --tag-object-sha "${tag_object}" \
+      --source-tree-sha "${tree_sha}" \
+      --selector-build-sha "${predecessor_build_sha}")"
+    test "${predecessor_selector_digest}" = "${SELECTOR_IMAGE_DIGEST}"
+    test "${predecessor_build_sha}" = "${SELECTOR_BUILD_SHA}"
+    validate_identity_runs "${identity_download}"
+  else
+    # v0.1.40 is the sole immutable zero-asset predecessor. Derive its exact
+    # historical workflow attempts from filtered REST listings; v0.1.41 builds
+    # the first selector and establishes the signed canonical asset format.
+    test "${BASE_TAG}" = v0.1.40
+    test "${TAG}" = v0.1.41
+    tag_object="$(jq -er '.object.sha' "${ref_json}")"
+    test "$(get_public_json \
+      "${api}/actions/workflows/pull-request.yml/runs?branch=main&event=push&head_sha=${BASE_SHA}&status=success&per_page=100" \
+      "${legacy_main_runs_json}")" = 200
+    test "$(get_public_json \
+      "${api}/actions/workflows/platform-release.yml/runs?branch=main&event=workflow_run&head_sha=${BASE_SHA}&status=success&per_page=100" \
+      "${legacy_platform_runs_json}")" = 200
+    python3 -I -B scripts/ci/validate_platform_predecessor.py \
+      --repository . \
+      --base-tag "${BASE_TAG}" --target-tag "${TAG}" \
+      --release-json "${release_json}" \
+      --ref-json "${ref_json}" --tag-json "${tag_json}" \
+      --main-runs-json "${legacy_main_runs_json}" \
+      --platform-runs-json "${legacy_platform_runs_json}" \
+      --emit > "${legacy_predecessor_json}"
+    test "$(jq -er '.source.merge_sha' "${legacy_predecessor_json}")" = \
+      "${BASE_SHA}"
+    test "$(jq -er '.tag.object_sha' "${legacy_predecessor_json}")" = \
+      "${tag_object}"
+    legacy_main_run_id="$(jq -er '.main_ci.run_id' \
+      "${legacy_predecessor_json}")"
+    legacy_main_run_attempt="$(jq -er '.main_ci.run_attempt' \
+      "${legacy_predecessor_json}")"
+    legacy_platform_run_id="$(jq -er '.platform_release.run_id' \
+      "${legacy_predecessor_json}")"
+    legacy_platform_run_attempt="$(jq -er '.platform_release.run_attempt' \
+      "${legacy_predecessor_json}")"
+    test "$(get_public_json \
+      "${api}/actions/runs/${legacy_main_run_id}/attempts/${legacy_main_run_attempt}" \
+      "${legacy_main_run_json}")" = 200
+    test "$(get_public_json \
+      "${api}/actions/runs/${legacy_platform_run_id}/attempts/${legacy_platform_run_attempt}" \
+      "${legacy_platform_run_json}")" = 200
+    python3 -I -B scripts/ci/validate_platform_predecessor.py \
+      --repository . \
+      --base-tag "${BASE_TAG}" --target-tag "${TAG}" \
+      --release-json "${release_json}" \
+      --ref-json "${ref_json}" --tag-json "${tag_json}" \
+      --main-runs-json "${legacy_main_runs_json}" \
+      --platform-runs-json "${legacy_platform_runs_json}" \
+      --main-run-json "${legacy_main_run_json}" \
+      --platform-run-json "${legacy_platform_run_json}"
+  fi
 }
 
 preflight_publication_state() {
@@ -126,11 +356,10 @@ preflight_publication_state() {
   # Both recovery/current Releases and the current tag may be reused only when
   # exact; every other present record is foreign, and a current Release without
   # its exact tag is impossible state.
-  write_predecessor_notes
   classify_tag exact \
     "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
     "${predecessor_tagger_date}" >/dev/null
-  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null
+  classify_predecessor_release >/dev/null
 
   write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
@@ -143,7 +372,6 @@ preflight_publication_state() {
     recovery_release_state=absent
   fi
 
-  write_current_notes
   if classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null 2>&1; then
@@ -154,10 +382,10 @@ preflight_publication_state() {
       "${current_tagger_date}" >/dev/null
     current_tag_state=absent
   fi
-  if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
+  if classify_current_release exact >/dev/null 2>&1; then
     current_release_state=exact
   else
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
+    classify_current_release absent >/dev/null
     current_release_state=absent
   fi
   if [ "${current_tag_state}" = absent ]; then
@@ -167,22 +395,20 @@ preflight_publication_state() {
   # Repeat the same closed classification after the complete first pass. A
   # tag or Release that changes while its sibling is inspected cannot cross a
   # later mutation boundary on the strength of a stale observation.
-  write_predecessor_notes
   classify_tag exact \
     "${BASE_SHA}" "${BASE_TAG}" "${predecessor_message}" \
     "${predecessor_tagger_date}" >/dev/null
-  classify_release exact "${BASE_TAG}" "${BASE_SHA}" >/dev/null
+  classify_predecessor_release >/dev/null
   write_recovery_notes "${recovery_source_sha}" "${recovery_tag}"
   classify_tag exact \
     "${recovery_source_sha}" "${recovery_tag}" "${recovery_message}" \
     "${recovery_tagger_date}" >/dev/null
   classify_release "${recovery_release_state}" "${recovery_tag}" \
     "${recovery_source_sha}" >/dev/null
-  write_current_notes
   classify_tag "${current_tag_state}" \
     "${SOURCE_SHA}" "${TAG}" "${current_message}" \
     "${current_tagger_date}" >/dev/null
-  classify_release "${current_release_state}" "${TAG}" "${SOURCE_SHA}" >/dev/null
+  classify_current_release "${current_release_state}" >/dev/null
 }
 
 complete_recovery_release() {
@@ -236,7 +462,7 @@ complete_recovery_release() {
 }
 
 publish_current_release() {
-  local tagger_date message tag_object
+  local tagger_date message tag_object release_id tree_sha
   local tag_race_verified release_race_verified attempt
   tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
   message="Platform release ${TAG} from ${SOURCE_SHA}"
@@ -247,11 +473,11 @@ publish_current_release() {
   else
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
+    classify_current_release absent >/dev/null
     preflight_publication_state
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
+    classify_current_release absent >/dev/null
     tag_object="$(run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -264,7 +490,7 @@ publish_current_release() {
     preflight_publication_state
     classify_tag absent \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
+    classify_current_release absent >/dev/null
     if ! run_write_gh api --method POST \
       --header 'Accept: application/vnd.github+json' \
       --header "X-GitHub-Api-Version: ${api_version}" \
@@ -286,26 +512,87 @@ publish_current_release() {
   classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
 
-  write_current_notes
-  if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
+  if classify_current_release exact >/dev/null 2>&1; then
     printf 'verified complete existing GitHub Release %s\n' "${TAG}"
   else
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
+    classify_current_release absent >/dev/null
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
     preflight_publication_state
-    write_current_notes
     classify_tag exact \
       "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
-    classify_release absent "${TAG}" "${SOURCE_SHA}" >/dev/null
-    if ! run_write_gh release create "${TAG}" --verify-tag \
-      --target "${SOURCE_SHA}" \
-      --title "Platform ${TAG}" --notes-file "${notes}"; then
-      printf 'Release create did not succeed; checking for an exact concurrent winner\n' >&2
-    fi
+    classify_current_release absent >/dev/null
+
+    # The Release ID is part of the canonical identity asset. Allocate a draft,
+    # bind that ID into the asset, upload exactly once, re-download and validate
+    # the byte/digest/metadata tuple, and only then publish the immutable Release.
+    # A pre-existing or interrupted draft is a partial state and is rejected on
+    # rerun; this transaction never guesses which partial object to recover.
+    printf '{"schema":"https://snaraj.dev/schemas/platform-release-draft/v1","source_sha":"%s","tag":"%s"}\n' \
+      "${SOURCE_SHA}" "${TAG}" > "${draft_marker}"
+    jq -n --arg tag "${TAG}" --arg target "${SOURCE_SHA}" \
+      --arg name "Platform ${TAG}" --rawfile body "${draft_marker}" \
+      '{body:$body,draft:true,name:$name,prerelease:false,tag_name:$tag,target_commitish:$target}' \
+      > "${draft_request}"
+    release_id="$(run_write_gh api --method POST \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/releases" \
+      --input "${draft_request}" --jq '.id')"
+    [[ "${release_id}" =~ ^[1-9][0-9]*$ ]]
+    test "$(get_json "${write_token}" "${api}/releases/${release_id}" \
+      "${release_json}")" = 200
+    python3 -I -B "${contract}" release-draft-record \
+      --release-json "${release_json}" --tag "${TAG}" \
+      --source-sha "${SOURCE_SHA}" --title "Platform ${TAG}" \
+      --body "${draft_marker}" >/dev/null
+
+    write_current_notes
+    jq -n --rawfile body "${notes}" '{body:$body}' > "${body_patch}"
+    run_write_gh api --method PATCH \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+      --input "${body_patch}" >/dev/null
+    test "$(get_json "${write_token}" "${api}/releases/${release_id}" \
+      "${release_json}")" = 200
+    python3 -I -B "${contract}" release-draft-record \
+      --release-json "${release_json}" --tag "${TAG}" \
+      --source-sha "${SOURCE_SHA}" --title "Platform ${TAG}" \
+      --body "${notes}" >/dev/null
+
+    tag_object="$(jq -er '.object.sha' "${ref_json}")"
+    write_current_identity "${release_id}" "${tag_object}"
+    env -u COSIGN_REPOSITORY cosign sign-blob --yes \
+      --bundle "${identity_bundle}" "${identity_asset}" >/dev/null
+    verify_identity_signature "${identity_asset}" "${identity_bundle}"
+    upload_identity_asset "${release_id}" "${identity_asset_name}" \
+      "${identity_asset}"
+    upload_identity_asset "${release_id}" "${identity_bundle_name}" \
+      "${identity_bundle}"
+    test "$(get_json "${write_token}" "${api}/releases/${release_id}" \
+      "${release_json}")" = 200
+    download_identity_pair "${release_json}"
+    cmp -s "${identity_asset}" "${identity_download}"
+    cmp -s "${identity_bundle}" "${bundle_download}"
+    tree_sha="$(git rev-parse "${SOURCE_SHA}^{tree}")"
+    python3 -I -B "${contract}" staged-identity-release-record \
+      --release-json "${release_json}" --identity "${identity_download}" \
+      --bundle "${bundle_download}" \
+      --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+      --tag-object-sha "${tag_object}" \
+      --source-tree-sha "${tree_sha}" \
+      --selector-build-sha "${SELECTOR_BUILD_SHA}" >/dev/null
+
+    printf '{"draft":false}\n' > "${publish_patch}"
+    run_write_gh api --method PATCH \
+      --header 'Accept: application/vnd.github+json' \
+      --header "X-GitHub-Api-Version: ${api_version}" \
+      "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+      --input "${publish_patch}" >/dev/null
     release_race_verified=false
     for attempt in 1 2 3 4 5; do
-      if classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null 2>&1; then
+      if classify_current_release exact >/dev/null 2>&1; then
         release_race_verified=true
         break
       fi
@@ -313,7 +600,7 @@ publish_current_release() {
     done
     test "${release_race_verified}" = true
   fi
-  classify_release exact "${TAG}" "${SOURCE_SHA}" >/dev/null
+  classify_current_release exact >/dev/null
   classify_tag exact \
     "${SOURCE_SHA}" "${TAG}" "${message}" "${tagger_date}" >/dev/null
 }
@@ -322,10 +609,9 @@ test "${SOURCE_SHA}" != "${recovery_source_sha}"
 test "${TAG}" != "${recovery_tag}"
 test "${SOURCE_SHA}" != "${BASE_SHA}"
 test "${TAG}" != "${BASE_TAG}"
-# Re-derive notes and the tag binding from the checked-out source and fetched
+# Re-derive the tag binding from the checked-out source and fetched
 # immutable tag ledger before the first REST observation. Every later mutation
 # boundary reaches the same derivation through the complete-state preflight.
-write_current_notes
 preflight_publication_state
 complete_recovery_release
 publish_current_release

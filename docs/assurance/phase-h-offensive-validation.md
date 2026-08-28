@@ -73,7 +73,7 @@ would.
 | --- | --- | --- | --- |
 | Site hostname resolution | Resolves to Cloudflare proxied IPs only; never an A/AAAA record pointing at the residential IP | PLAT-EXP-001 | live (public DNS, no origin contact) |
 | Direct-to-origin connection attempt | Fails — no inbound port, no forward, nothing listening at the residential IP | PLAT-EXP-001 | live, owner-scheduled (external vantage) |
-| Tunnel connector compromise blast radius | Serving the two hostnames only; signature admission + closed NetworkPolicies bound lateral damage | design + Phase C controls | design |
+| Tunnel connector compromise blast radius | Serving the two hostnames only; verified digest-only artifacts + closed NetworkPolicies bound lateral damage | design + Phase C controls | design |
 
 ### Surface 4 — the cluster (assume-breach: a compromised site pod)
 
@@ -87,7 +87,7 @@ H proves it adversarially with a canary "attacker" pod.
 | Pod → API server (6443) | Denied | PLAT-EXP-006 | live canary |
 | Pod → etcd (2379) / kubelet (10250) | Denied | PLAT-EXP-006 | live canary |
 | Pod → node host / escape | Blocked (restricted PSA, no privileged/hostPath/host namespaces, seccomp, dropped caps) | PLAT-EXP-003 | live canary + kube-bench |
-| Deploy unsigned/mutated/privileged image | Rejected at admission | PLAT-SUP-001/002, PLAT-EXP-003 | live + Phase C fixtures |
+| Select unsigned/mutated chart or mutable/privileged workload | Flux source verification or static release policy rejects it; runtime image identity must match the receipt | PLAT-SUP-001/002, PLAT-EXP-003 | live source evidence + Phase C fixtures |
 | Pod egress (phone-home / exfil) | Denied (default-deny egress) | PLAT-EXP-002, PLAT-EGR-001 | live canary |
 | Pod → admin plane / admin subnet | Isolated — a compromised workload cannot reach the WG admin interface | PLAT-EXP-007 | live canary |
 

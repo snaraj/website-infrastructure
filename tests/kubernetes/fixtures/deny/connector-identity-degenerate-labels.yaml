@@ -7,9 +7,9 @@
 # `object.get(object.get(metadata, "labels", {}), ...) != name` shape — the
 # builtin type error on this null makes the deny body UNDEFINED under OPA's
 # default non-strict mode, the rule silently does not fire, and this document
-# is ACCEPTED while every other fixture still fails. That is a fail-OPEN the
-# Kyverno mirror does not share (its CEL errors and denies), and without this
-# document nothing in either suite can tell the two formulations apart.
+# is ACCEPTED while every other fixture still fails. Historical comparison to
+# the retired CEL mirror exposed that fail-open; this document now pins the
+# self-sufficient Rego formulation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -405,17 +405,6 @@ rules:
     resources: [pods]
     verbs: [get, list, watch, delete]
 ---
-# The exception is a tenant identity tuple, not any Role with this name.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: helm-reconciler
-  namespace: kyverno
-rules:
-  - apiGroups: [apps]
-    resources: [replicasets]
-    verbs: [get, list, watch]
----
 # The exception is also the exact Role name, not any tenant-local identity.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

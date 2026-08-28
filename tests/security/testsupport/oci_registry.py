@@ -1,8 +1,10 @@
 """A loopback mock of the OCI registry surface this platform reads.
 
-The platform never pushes: it lists a chart repository's tags, resolves one to
-a digest, and asks whether that digest carries a cosign signature made by an
-exact keyless identity. Those are the only operations modelled here, and they
+The platform never pushes or lists tags: it fetches one exact chart manifest
+digest and asks whether that digest carries a cosign signature made by an
+exact keyless identity. The tag-list route exists only so hostile tests can
+prove it was never used. These operations are served over a real loopback
+HTTP server, and they
 are served over a real ``http.server`` on ``127.0.0.1`` so the client under
 test performs genuine HTTP — status codes, headers, JSON bodies, 404s — rather
 than calling into a stub that can only say yes.
@@ -51,14 +53,13 @@ class SigningIdentity:
 class PublishedChart:
     """One published chart release as a registry would hold it.
 
-    ``image_digest`` is the digest the chart's own values carry — the
-    publish-time embedding of ADR 0016. ``None`` models a chart published
-    before that embedding exists; the all-zeros digest models a chart whose
-    fail-closed sentinel was never replaced.
+    ``image_repository`` and ``image_digest`` are the exact workload identity
+    carried by the chart. ``None`` models a missing publish-time binding.
     """
 
     version: str
     digest: str
+    image_repository: str | None = None
     image_digest: str | None = None
     signature: SigningIdentity | None = None
     media_type: str = HELM_CHART_MEDIA_TYPE
@@ -78,6 +79,7 @@ class MockOciRegistry:
 
     def __init__(self) -> None:
         self._charts: dict[str, dict[str, PublishedChart]] = {}
+        self._manifests: dict[str, dict[str, PublishedChart]] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -86,11 +88,18 @@ class MockOciRegistry:
     def publish(self, repository: str, chart: PublishedChart) -> PublishedChart:
         """Add or replace one version in one repository path.
 
-        Replacing an existing version with a different digest is exactly the
-        tag-reuse incident ADR 0014 treats as an incident; the registry permits
-        it here precisely so the sync model can be shown refusing it.
+        Tags may be replaced, while content remains addressable by immutable
+        digest. Reusing one digest for different bytes is rejected by the mock
+        just as a content-addressed registry must reject it.
         """
 
+        manifests = self._manifests.setdefault(repository, {})
+        existing = manifests.get(chart.digest)
+        if existing is not None and existing != chart:
+            raise MockRegistryError(
+                "one content digest cannot identify two different chart manifests"
+            )
+        manifests[chart.digest] = chart
         self._charts.setdefault(repository, {})[chart.version] = chart
         return chart
 
@@ -205,13 +214,11 @@ class MockOciRegistry:
             handler._respond(404, {"errors": ["NAME_UNKNOWN"]})
             return
         if reference.endswith(".sig"):
-            self._handle_signature(handler, versions, reference)
+            self._handle_signature(handler, repository, reference)
             return
         chart = versions.get(reference)
         if chart is None:
-            chart = next(
-                (item for item in versions.values() if item.digest == reference), None
-            )
+            chart = self._manifests.get(repository, {}).get(reference)
         if chart is None:
             handler._respond(404, {"errors": ["MANIFEST_UNKNOWN"]})
             return
@@ -222,16 +229,15 @@ class MockOciRegistry:
                 "config": {"mediaType": "application/vnd.cncf.helm.config.v1+json"},
                 "layers": [{"mediaType": chart.media_type, "digest": chart.digest}],
                 "annotations": {"org.opencontainers.image.version": chart.version},
+                "imageRepository": chart.image_repository,
                 "imageDigest": chart.image_digest,
             },
             {"Docker-Content-Digest": chart.digest},
         )
 
-    def _handle_signature(self, handler, versions, reference):
+    def _handle_signature(self, handler, repository, reference):
         target = "sha256:" + reference[len("sha256-"):-len(".sig")]
-        chart = next(
-            (item for item in versions.values() if item.digest == target), None
-        )
+        chart = self._manifests.get(repository, {}).get(target)
         if chart is None or chart.signature is None:
             # An unsigned artifact is indistinguishable from a missing one at
             # this layer, and both must fail closed downstream.

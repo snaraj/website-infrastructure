@@ -36,10 +36,11 @@ flowchart LR
 ```
 
 > [!IMPORTANT]
-> This repository is deliberately **not deployable yet**. Everything ships
-> fail-closed first: values marked `REPLACE_*` or `UNRESOLVED` are sentinels
-> that refuse to work until real, reviewed evidence replaces them. The
-> deployment-state table below tells you exactly how far along things are.
+> This repository remains fail-closed wherever reviewed evidence is unresolved:
+> values marked `REPLACE_*`, `UNRESOLVED`, or explicit all-zero release bindings
+> refuse to work. The two website paths are safe-active desired state, but that
+> does not claim the owner-attended bootstrap or live convergence has occurred.
+> The deployment-state table below tells you exactly how far along things are.
 
 ## Website catalog
 
@@ -54,8 +55,8 @@ immutable digest only.
 
 Both are Svelte frontends embedded into single dependency-free Go binaries,
 shipped as distroless multi-arch containers with Cosign-signed images and
-charts. The public URLs go live at platform cutover; until then the
-deployment-state table below is the honest source of truth.
+charts. Desired state, live reconciliation, and public traffic are separate
+claims; the deployment-state table below is the honest source of truth.
 
 ## Designed to expand
 
@@ -71,7 +72,7 @@ and mutation authority that stays with the owner alone.
 
 ## The rules the machines enforce
 
-These aren't aspirations — validators, CI, and admission policies reject
+These aren't aspirations — validators, required CI, and reviewed runtime controls reject
 violations automatically:
 
 - **$0, forever.** Cloudflare stays on exactly two Free-plan zones; registrar
@@ -85,8 +86,9 @@ violations automatically:
   private identity never touches Git, CI, logs, or chat. Commit metadata
   itself is scanned — a real email address can't even ride along in a
   trailer.
-- **Only what was reviewed runs.** Images deploy by immutable digest after
-  keyless signature admission; version tags never move.
+- **Only what was reviewed runs.** Signed charts are selected by immutable OCI
+  digest and verified by Flux against each site's protected-main publisher;
+  their workloads remain digest-only.
 - **Heavy media stays out of the control plane.** Video, audio, and large
   images never enter Git, embeds, OCI images, ConfigMaps, or etcd — they get
   their own storage story on the platform.
@@ -103,7 +105,7 @@ bootstrap/             user-run Pi, Flux, and recovery procedures
 docs/                  architecture, ADRs, security model, audits, runbooks
 infrastructure/        credential-free OpenTofu for Cloudflare
 kubernetes/            desired state for the single environment
-policies/              Conftest and Kyverno controls
+policies/              Conftest static controls
 scripts/               the "prove it first" validator suite
 skills/                reusable agent/operator workflows
 tests/                 allow/deny fixtures collected by canonical unittest discovery
@@ -170,6 +172,7 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Gate | State |
 | --- | --- |
 | Repository and policies | Credential-free scaffold + negative-policy tests implemented; live evidence pending |
+| Kyverno | Retired: absent live, no installer, controller desired state, policy tree, or webhook claim |
 | Pi discovery | Read-only discovery completed; private evidence stays off Git |
 | Independent recovery drill | Not proven; host/network/cluster mutation blocked |
 | Protected legacy archive | Local archive exists; off-device restore proof pending |
@@ -178,15 +181,17 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Cloudflare subscription audit | Not run |
 | kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
 | CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
-| Cluster initialization | Not run or evidenced from this repository; a live cluster nevertheless exists and is running Flux (see the Flux rows below) |
-| Flux controller install | Reviewed desired state only: render + guarded installer (`scripts/install-flux-controllers.sh`) + [runbook](docs/runbooks/flux-install.md). A stock upstream v2.9.3 install is ALREADY live and does not match it; the installer is fresh-install-only and refuses that cluster |
-| Flux live-vs-reviewed drift | Open. The live install still grants `cluster-admin` through `cluster-reconciler-flux-system`, still allows blanket `flux-system` egress, and carries warn-only Pod Security. Converging it (in place or by reinstall) is an owner decision, not part of this repository's merge path |
-| `flux-system` egress policy | Fail-closed set committed; the API-server allow keeps an unresolved sentinel address until an operator substitutes it locally. Not applied to the cluster |
-| Flux reconciliation (suspend flip) | Not run; every source and release stays `suspend: true` pending a separate reviewed change |
-| Flux bootstrap (SOPS + sync) | Not run |
+| Cluster initialization | Historical repository evidence only. Terminal #141's protected `v0.1.40` merge/tag/Release publishes the frozen transaction source; its live receipt, not publication alone, is the initialization proof |
+| Flux controller install | Terminal #141's reviewed `v0.1.40` in-place convergence transaction does not install Flux; no live execution or current controller version is claimed here |
+| Flux live-vs-reviewed drift | Open serialization gate: `v0.1.40` publication alone is not #141 terminal execution/convergence evidence, which remains required before combined #195/#189 can advance |
+| `flux-system` egress policy | Committed desired state only. The #141 transaction explicitly excludes `kubernetes/flux-system/access.yaml`; no live application or health is claimed |
+| Flux site desired state | Combined #195/#189 candidate: both manifests are unsuspended at the exact currently healthy signed chart digests (naranjo `0.1.50`, lidersea `0.1.37`) behind one exact-tag source and two direct `prune: false`, `deletionPolicy: Orphan` reconcilers; no live equivalence, readiness, or traffic is claimed |
+| Flux bootstrap (site sync only) | Combined-release candidate targets exact `v0.1.41` through an owner-attended create-or-exact transaction with suspended staging and containment; it does not reconcile SOPS, controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
 | SOPS key ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |
 
-No script in this repository authorizes mutating an external system; every
-mutation runbook has an explicit stop point, and the owner holds every key.
+No script in this repository is itself authorization to mutate an external
+system. The narrow site bootstrap requires an exact release, explicit target,
+and owner confirmation; every other mutation runbook retains its stop point,
+and the owner holds every key.

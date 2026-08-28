@@ -128,10 +128,6 @@ install_archive_binary \
   '029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d' \
   'kustomize' 'kustomize' 'kustomize'
 install_archive_binary \
-  'https://github.com/kyverno/kyverno/releases/download/v1.18.2/kyverno-cli_v1.18.2_linux_x86_64.tar.gz' \
-  'cb2feb8356149fd2fe774c894ccf0969f4a60a83867dd913af724f74ffbbc18b' \
-  'kyverno' 'kyverno' 'kyverno'
-install_archive_binary \
   'https://github.com/opentofu/opentofu/releases/download/v1.12.5/tofu_1.12.5_linux_amd64.tar.gz' \
   'a6894d45ae7a17ce83189cce8fe04b5a65f68cefceb62455b5a6a89fa53ab38f' \
   'tofu' 'tofu' 'tofu'
@@ -177,6 +173,16 @@ fetch \
   'c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507' \
   "${hadolint_file}"
 install -m 0755 "${hadolint_file}" "${install_root}/hadolint"
+
+# The release publisher signs its selector image and canonical identity asset.
+# Ubuntu runner images do not promise Cosign, so those release-critical calls
+# must use the same checksum-pinned ephemeral tool boundary as every validator.
+cosign_file="${download_root}/cosign"
+fetch \
+  'https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64' \
+  '4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71' \
+  "${cosign_file}"
+install -m 0755 "${cosign_file}" "${install_root}/cosign"
 
 # GitHub Actions receives the external path through its command file; local
 # callers get an explicit instruction instead of this script mutating their

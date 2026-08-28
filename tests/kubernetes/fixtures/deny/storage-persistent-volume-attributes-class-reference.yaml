@@ -3,7 +3,7 @@
 # The reference, not the object. Every other field is admissible; the volume
 # names a VolumeAttributesClass, which carries a driver name plus a free-form
 # parameter map and can retarget the volume at a backend. SR-14 refuses the
-# CLASS; without SR-15 the REFERENCE was un-gated in both engines.
+# CLASS; without SR-15 the REFERENCE was ungated by the retained static policy.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

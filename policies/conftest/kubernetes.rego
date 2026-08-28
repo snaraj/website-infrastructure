@@ -6,12 +6,7 @@ workload_kinds := {"Pod", "Deployment", "ReplicaSet", "DaemonSet", "StatefulSet"
 
 tenant_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com"}
 
-restricted_role_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"}
-
-# The admission namespace. It is not a tenant namespace — it runs the controller
-# that judges the tenants — so it carries its own exact network contract rather
-# than the tenant one.
-admission_namespace := "kyverno"
+restricted_role_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com"}
 
 # Every private, loopback, link-local, carrier-grade-NAT, multicast, and
 # reserved block that a "public destinations only" egress rule must exclude.
@@ -41,13 +36,10 @@ gateway_kinds := {
   "ReferenceGrant",
 }
 
-# The CI mirror of policies/kyverno/disallow-undiscovered-storage.yaml rule
-# `restrict-storage-to-enumerated-local-means`. Storage objects are admitted;
-# storage reachable from outside the cluster by a means the owner has not
-# enumerated is not. These six sets ARE the enumeration and must stay
-# byte-identical to the Kyverno CEL variables of the same meaning;
-# tests/security/test_storage_exposure_policy_contract.py fails if they drift,
-# and fails if either engine stops covering a storage kind the other covers.
+# Static storage objects are admitted only through the owner's enumerated local
+# means. These sets are the complete repository-side enumeration; hostile
+# fixtures and tests pin every kind and degenerate shape independently of any
+# runtime admission engine.
 storage_kinds := {
   "PersistentVolume",
   "PersistentVolumeClaim",
@@ -130,8 +122,8 @@ pod_spec := input.spec.template.spec if {
   input.kind in {"Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job"}
 }
 
-# The Pod-level metadata that carries the workload identity labels. Volume
-# admission needs it because a connector's mounted Secret must be bound to that
+# The Pod-level metadata that carries the workload identity labels. Static
+# policy needs it because a connector's mounted Secret must be bound to that
 # connector's own instance, not merely to the set of known token names.
 pod_metadata := object.get(input, "metadata", {}) if {
   input.kind == "Pod"
@@ -171,30 +163,18 @@ containers := array.concat(
 }
 
 approved_kustomization_accounts := {
-  "flux-system": "root-reconciler",
-  "platform-prerequisites": "platform-prerequisites-reconciler",
-  "admission": "admission-reconciler",
-  "platform-services": "platform-services-reconciler",
-  "naranjo-online": "naranjo-online-reconciler",
-  "lidersea-com": "lidersea-com-reconciler",
+  "naranjo-online-reconciler": "naranjo-online-reconciler",
+  "lidersea-com-reconciler": "lidersea-com-reconciler",
 }
 
 approved_kustomization_paths := {
-  "flux-system": "./kubernetes/reconciliation",
-  "platform-prerequisites": "./kubernetes/platform/prerequisites",
-  "admission": "./kubernetes/platform/admission",
-  "platform-services": "./kubernetes/platform/cloudflare-public/release",
-  "naranjo-online": "./kubernetes/websites/naranjo-online",
-  "lidersea-com": "./kubernetes/websites/lidersea-com",
+  "naranjo-online-reconciler": "./kubernetes/websites/naranjo-online",
+  "lidersea-com-reconciler": "./kubernetes/websites/lidersea-com",
 }
 
 approved_kustomization_dependencies := {
-  "flux-system": set(),
-  "platform-prerequisites": set(),
-  "admission": {"platform-prerequisites"},
-  "platform-services": {"platform-prerequisites", "admission"},
-  "naranjo-online": {"platform-prerequisites", "admission", "platform-services"},
-  "lidersea-com": {"platform-prerequisites", "admission", "platform-services"},
+  "naranjo-online-reconciler": set(),
+  "lidersea-com-reconciler": set(),
 }
 
 site_workload_accounts := {
@@ -230,13 +210,17 @@ site_chart_urls := {
   "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
 }
 
-# The reviewed SemVer window per site: an inclusive ratchet floor that denies
-# resolution to a release older than the last reviewed one, and an exclusive
-# major-1 ceiling that keeps the range inside the pre-graduation majors of
-# ADR 0014.
-site_chart_semver := {
-  "naranjo-online": ">=0.1.9 <1.0.0",
-  "lidersea-com": ">=0.1.9 <1.0.0",
+# The audit tag is paired with the immutable manifest digest Flux consumes.
+# The annotation is not a selector; exact ref.digest is load-bearing.
+site_chart_releases := {
+  "naranjo-online": {
+    "tag": "0.1.50",
+    "digest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+  },
+  "lidersea-com": {
+    "tag": "0.1.37",
+    "digest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+  },
 }
 
 site_chart_layer_media_type := "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
@@ -260,19 +244,18 @@ site_chart_identities := {
 }
 
 approved_git_source_scopes := {
-  "flux-system/flux-system": {
-    "ignore": "/*\n!/kubernetes\n!/policies\n",
-    "sparseCheckout": ["kubernetes", "policies"],
-  },
   "cloudflare-public/cloudflare-public-source": {
     "ignore": "/*\n!/kubernetes\n/kubernetes/*\n!/kubernetes/platform\n/kubernetes/platform/*\n!/kubernetes/platform/cloudflare-public\n/kubernetes/platform/cloudflare-public/*\n!/kubernetes/platform/cloudflare-public/chart\n",
     "sparseCheckout": ["kubernetes/platform/cloudflare-public/chart"],
   },
 }
 
+approved_git_source_refs := {
+  "cloudflare-public/cloudflare-public-source": {"branch": "main"},
+}
+
 # The remaining tenant source pulls this repository; nothing else may.
 approved_git_source_urls := {
-  "flux-system/flux-system": "https://github.com/snaraj/website-infrastructure.git",
   "cloudflare-public/cloudflare-public-source": "https://github.com/snaraj/website-infrastructure.git",
 }
 
@@ -291,10 +274,9 @@ valid_site_chart_verification(namespace) if {
 # superseded `cloudflared-to-` prefix — so every render of the real desired
 # state was refused by a check that was modelling a shape nothing deploys.
 #
-# Kept as an exact literal rather than a configurable value on purpose. The
-# Kyverno mirror cannot read a repository-side constant, so a values-derived
-# prefix would exist on this side only and the two engines would silently
-# diverge — the exact failure this reconciliation is fixing. Accepting BOTH
+# Kept as an exact literal rather than a configurable value on purpose. A
+# values-derived prefix would silently diverge from the reviewed desired-state
+# contract. Accepting BOTH
 # prefixes was rejected outright: it would weaken an exact-name match into an
 # alternation, and an alternation is what lets a superseded identity survive.
 # The literal is also the provider-NEUTRAL one (delivery-lane requirement 7):
@@ -537,166 +519,6 @@ flux_network_policy_allowlisted if {
   valid_flux_egress_policy
 }
 
-# --- admission namespace network contract ------------------------------------
-#
-# The CI mirror of kubernetes/platform/admission-install/enforce/network-policies.yaml.
-# The admission namespace is closed by default and opened by exactly four
-# reviewed flows; a fifth policy, or one of these four in a wider shape, is a
-# path nobody reviewed into or out of the controller that judges every write.
-#
-# The committed API paths are exact fail-closed sentinels. At apply time the
-# installer substitutes a private, live-cross-checked contract rather than the
-# operator kubeconfig target: every control-plane webhook source plus either the
-# kubernetes.default Service VIP/TCP 443 or the complete API endpoint set/TCP
-# 6443, according to the selected CNI dataplane. CI proves both the sentinel and
-# the closed family of possible runtime SHAPES; private addresses stay out of
-# this index.
-admission_policy_names := {
-  "kyverno-admission-webhook",
-  "kyverno-dns",
-  "kyverno-kube-apiserver",
-  "kyverno-public-https",
-}
-
-# TWO SELECTORS, BY ROLE, AND THE DIFFERENCE IS LOAD-BEARING.
-#
-# `app.kubernetes.io/part-of: kyverno` selects EVERY controller in the
-# namespace, and the recorded render parameters install a reports controller
-# beside the admission controller carrying the same value. DNS and the
-# in-cluster API path are genuinely shared — both controllers need them — so
-# they keep the shared selector. Webhook ingress on 9443 and unrestricted
-# public TCP/443 are not shared: only the admission controller serves the
-# webhook, and only it evaluates `verifyImages` (the signature policies are
-# `background: false`). Requiring the shared selector on those two granted the
-# reports controller an inbound listener path and the single broadest egress in
-# the namespace. These rules now REQUIRE the component label there, so the
-# previously accepted shape is denied.
-admission_pod_selector if {
-  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
-    "app.kubernetes.io/part-of": "kyverno",
-  }
-}
-
-admission_controller_pod_selector if {
-  object.get(object.get(input.spec, "podSelector", {}), "matchLabels", {}) == {
-    "app.kubernetes.io/component": "admission-controller",
-    "app.kubernetes.io/part-of": "kyverno",
-  }
-}
-
-# The single-egress SHAPE, with no selector claim of its own, so each policy
-# below binds the shape to the selector its role requires instead of inheriting
-# one silently.
-admission_egress_rule := rule if {
-  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Egress"}
-  count(object.get(input.spec, "ingress", [])) == 0
-  egress := object.get(input.spec, "egress", [])
-  count(egress) == 1
-  rule := egress[0]
-}
-
-admission_single_egress_rule := rule if {
-  admission_pod_selector
-  rule := admission_egress_rule
-}
-
-admission_controller_single_egress_rule := rule if {
-  admission_controller_pod_selector
-  rule := admission_egress_rule
-}
-
-valid_admission_runtime_peer(peer) if {
-  object.keys(peer) == {"ipBlock"}
-  ip_block := object.get(peer, "ipBlock", {})
-  object.keys(ip_block) == {"cidr"}
-  cidr := object.get(ip_block, "cidr", "")
-  endswith(cidr, "/32")
-  cidr != "192.0.2.10/32"
-  cidr != "192.0.2.20/32"
-}
-
-valid_admission_runtime_peers(peers) if {
-  count(peers) >= 1
-  every peer in peers {
-    valid_admission_runtime_peer(peer)
-  }
-  cidrs := {peer.ipBlock.cidr | some peer in peers}
-  count(cidrs) == count(peers)
-}
-
-valid_admission_webhook_peers(peers) if {
-  peers == [{"ipBlock": {"cidr": "192.0.2.10/32"}}]
-}
-
-valid_admission_webhook_peers(peers) if {
-  valid_admission_runtime_peers(peers)
-}
-
-valid_admission_api_rule(rule) if {
-  object.get(rule, "to", []) == [{"ipBlock": {"cidr": "192.0.2.20/32"}}]
-  object.get(rule, "ports", []) == [{"port": 65535, "protocol": "TCP"}]
-}
-
-# Service-VIP dataplanes observe the one kubernetes.default Service address on
-# its declared HTTPS port before kube-proxy translation.
-valid_admission_api_rule(rule) if {
-  peers := object.get(rule, "to", [])
-  count(peers) == 1
-  valid_admission_runtime_peers(peers)
-  object.get(rule, "ports", []) == [{"port": 443, "protocol": "TCP"}]
-}
-
-# Endpoint dataplanes observe every API backend after translation. The private
-# contract proves this peer set is complete, sorted, and duplicate-free against
-# live Endpoints; this mirror pins one-or-more unique /32 peers and only 6443.
-valid_admission_api_rule(rule) if {
-  peers := object.get(rule, "to", [])
-  valid_admission_runtime_peers(peers)
-  object.get(rule, "ports", []) == [{"port": 6443, "protocol": "TCP"}]
-}
-
-# Every API server may call the webhook. The committed sentinel is one exact
-# peer; substituted runtime bytes may carry one or more unique /32 HA sources.
-valid_admission_policy if {
-  input.metadata.name == "kyverno-admission-webhook"
-  admission_controller_pod_selector
-  {policy_type | some policy_type in object.get(input.spec, "policyTypes", [])} == {"Ingress"}
-  count(object.get(input.spec, "egress", [])) == 0
-  ingress := object.get(input.spec, "ingress", [])
-  count(ingress) == 1
-  peers := object.get(ingress[0], "from", [])
-  valid_admission_webhook_peers(peers)
-  object.get(ingress[0], "ports", []) == [{"port": 9443, "protocol": "TCP"}]
-}
-
-# Cluster DNS: the same exact kube-dns peer the tunnel egress uses.
-valid_admission_policy if {
-  input.metadata.name == "kyverno-dns"
-  valid_public_dns_rule(admission_single_egress_rule)
-}
-
-# Pods' in-cluster API path: the exact fail-closed sentinel or one selected-CNI
-# runtime shape (one Service VIP/443 or one-or-more API endpoints/6443).
-valid_admission_policy if {
-  input.metadata.name == "kyverno-kube-apiserver"
-  valid_admission_api_rule(admission_single_egress_rule)
-}
-
-# Signature verification: public addresses only, TCP 443 only. Keyless
-# verification is not offline, and a NetworkPolicy cannot select by hostname, so
-# the reviewed rule is the excluded-ranges shape rather than an allowlist.
-valid_admission_policy if {
-  input.metadata.name == "kyverno-public-https"
-  peers := object.get(admission_controller_single_egress_rule, "to", [])
-  count(peers) == 1
-  object.keys(peers[0]) == {"ipBlock"}
-  object.get(peers[0].ipBlock, "cidr", "") == "0.0.0.0/0"
-  {cidr | some cidr in object.get(peers[0].ipBlock, "except", [])} == private_and_reserved_ranges
-  {port | some port in object.get(admission_controller_single_egress_rule, "ports", [])} == {
-    {"port": 443, "protocol": "TCP"},
-  }
-}
-
 valid_zero_capacity_quota if {
   input.metadata.name == "capacity-not-ready"
   object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/readiness", "") == "blocked-until-pi-capacity-evidence"
@@ -789,13 +611,13 @@ public_connector_workload if {
 # reviewed two; and creating a bare Pod in this namespace is not a right any
 # reviewed principal holds. Closing it properly means requiring a controller
 # ownerReference on Pods here, which would rewrite every connector fixture in
-# the repository and is an admission-semantics addition in its own right —
+# the repository and is a separate static-policy change in its own right —
 # tracked, not smuggled into this change.
 #
 # `envFrom` is refused outright rather than pattern-matched: a `secretRef`
 # there injects EVERY key of the named Secret with no key selector to bind, so
-# an allowlist would have to reason about the Secret's contents, which
-# admission cannot see. The deployed connectors declare no envFrom at all, so
+# an allowlist would have to reason about the Secret's contents, which manifest
+# policy cannot inspect. The deployed connectors declare no envFrom at all, so
 # refusing it costs nothing and closes the second door into the same credential.
 connector_secret_env_binding_is_own_instance if {
   connector_instance in connector_deployments
@@ -809,8 +631,8 @@ connector_secret_env_binding_is_own_instance if {
 # non-object container, or a non-list `containers` makes this proof UNDEFINED
 # and `not` then fires the denial. A mismatch-hunting rule would instead go
 # undefined itself on exactly those degenerate shapes — under OPA's default
-# non-strict mode a builtin type error silently drops the deny body — and fail
-# OPEN where the Kyverno mirror errors and denies.
+# non-strict mode a builtin type error silently drops the deny body and fails
+# open on exactly those degenerate shapes.
 valid_connector_container_env(container) if {
   is_object(container)
   not "envFrom" in object.keys(container)
@@ -856,7 +678,7 @@ valid_connector_env_entry(entry) if {
 # proof below UNDEFINED, and `not` then fires the denial. A mismatch-hunting
 # rule would instead go undefined itself on exactly those degenerate shapes —
 # under OPA's default non-strict mode a builtin type error silently drops the
-# deny body — and fail OPEN where the Kyverno mirror errors and denies.
+# deny body and fails open on exactly those degenerate shapes.
 connector_identity_rooted_in_name if {
   input.metadata.labels["app.kubernetes.io/instance"] == input.metadata.name
   input.spec.selector.matchLabels["app.kubernetes.io/instance"] == input.metadata.name
@@ -1085,9 +907,25 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "Kustomization"
   input.apiVersion == "kustomize.toolkit.fluxcd.io/v1"
-  input.metadata.name in {"platform-prerequisites", "admission"}
+  input.metadata.name in object.keys(approved_kustomization_accounts)
   object.get(input.spec, "wait", false) != true
   msg := sprintf("Kustomization %s must wait for runtime readiness", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "Kustomization"
+  input.apiVersion == "kustomize.toolkit.fluxcd.io/v1"
+  input.metadata.name in object.keys(approved_kustomization_accounts)
+  object.get(input.spec, "prune", true) != false
+  msg := sprintf("Kustomization %s must not prune during the direct release boundary", [input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "Kustomization"
+  input.apiVersion == "kustomize.toolkit.fluxcd.io/v1"
+  input.metadata.name in object.keys(approved_kustomization_accounts)
+  object.get(input.spec, "deletionPolicy", "") != "Orphan"
+  msg := sprintf("Kustomization %s must orphan inventory on deletion", [input.metadata.name])
 }
 
 deny contains msg if {
@@ -1153,14 +991,20 @@ deny contains msg if {
   msg := sprintf("OCIRepository %s/%s must pull the canonical published chart repository", [input.metadata.namespace, input.metadata.name])
 }
 
-# Exactly one selector shape: a SemVer range. A tag, a digest, or an absent ref
-# would either freeze the site off the release train or let a mutable name
-# decide what runs, and both defeat tag-driven release identity.
+# Exactly one selector shape: an immutable nonzero digest. Registry tag moves,
+# deletion, or replacement cannot change what Flux pulls.
 deny contains msg if {
   input.kind == "OCIRepository"
   input.metadata.namespace in site_namespaces
-  object.get(input.spec, "ref", {}) != {"semver": site_chart_semver[input.metadata.namespace]}
-  msg := sprintf("OCIRepository %s/%s must select releases with the exact reviewed SemVer range", [input.metadata.namespace, input.metadata.name])
+  object.get(input.spec, "ref", {}) != {"digest": site_chart_releases[input.metadata.namespace].digest}
+  msg := sprintf("OCIRepository %s/%s must select the exact reviewed immutable chart digest", [input.metadata.namespace, input.metadata.name])
+}
+
+deny contains msg if {
+  input.kind == "OCIRepository"
+  input.metadata.namespace in site_namespaces
+  object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/chart-release", "") != site_chart_releases[input.metadata.namespace].tag
+  msg := sprintf("OCIRepository %s/%s must carry the reviewed audit-only chart release annotation", [input.metadata.namespace, input.metadata.name])
 }
 
 # The reconcile-time half of the digest-only invariant: an unsigned chart, or a
@@ -1273,14 +1117,15 @@ deny contains msg if {
   input.apiVersion == "source.toolkit.fluxcd.io/v1"
   key := sprintf("%s/%s", [input.metadata.namespace, input.metadata.name])
   key in object.keys(approved_git_source_scopes)
-  object.get(input.spec, "ref", {}) != {"branch": "main"}
-  msg := sprintf("GitRepository %s must track only public main", [key])
+  object.get(input.spec, "ref", {}) != approved_git_source_refs[key]
+  msg := sprintf("GitRepository %s must use its exact reviewed ref", [key])
 }
 
 deny contains msg if {
   input.kind == "GitRepository"
   input.apiVersion == "source.toolkit.fluxcd.io/v1"
   input.metadata.namespace in tenant_namespaces
+  input.metadata.namespace != "flux-system"
   object.get(input.spec, "ref", {}) != {"branch": "main"}
   msg := sprintf("GitRepository %s/%s must track only public main", [input.metadata.namespace, input.metadata.name])
 }
@@ -1386,7 +1231,21 @@ deny contains msg if {
 
 # A site release is bound to its published chart artifact and to nothing else.
 # An inline chart block would reintroduce branch-head tracking beside the
-# tag-driven source and give the release two competing chart identities.
+# digest-selected source and give the release two competing chart identities.
+valid_site_release_values if {
+  spec := object.get(input, "spec", null)
+  is_object(spec)
+  object.get(spec, "values", null) == {"deploymentReady": true}
+}
+
+deny contains msg if {
+  input.kind == "HelmRelease"
+  input.apiVersion == "helm.toolkit.fluxcd.io/v2"
+  input.metadata.namespace in site_namespaces
+  not valid_site_release_values
+  msg := sprintf("HelmRelease %s values must contain exactly deploymentReady: true", [input.metadata.name])
+}
+
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
@@ -1458,24 +1317,21 @@ storage_object_spec := spec if {
 # object.get, because a NESTED object.get FAILS OPEN. When the inner value is
 # null, a string, or a list, the outer object.get raises a builtin TYPE ERROR;
 # under OPA's default non-strict builtin-error handling the whole expression is
-# UNDEFINED, the deny body fails, and the rule SILENTLY DOES NOT FIRE. Kyverno's
-# CEL raises on those same shapes and the webhook's failurePolicy: Fail turns the
-# error into a denial, so the two engines disagreed on nine degenerate shapes,
-# eight of them fail-open in Rego — and Rego is the only engine that actually
-# runs while Kyverno is uninstalled (wi #96 adversarial review, 2026-08-12).
+# UNDEFINED, the deny body fails, and the rule SILENTLY DOES NOT FIRE. A prior
+# differential review found nine such shapes, eight fail-open in Rego.
 # Yielding {} for a degenerate value makes every read below fall back to the
 # empty value its rule already denies on, so "present but unusable" denies for
-# the same reason "absent" does. scripts/test-storage-engine-parity.sh feeds both
-# engines the same corpus and fails on any disagreement.
+# the same reason "absent" does. The storage fixture battery pins all of those
+# degenerate cases and their exact denial attribution.
 storage_sub_object(parent, key) := value if {
   value := object.get(parent, key, {})
   is_object(value)
 } else := {}
 
 # Presence, distinguished from an explicit null. object.get cannot tell "absent"
-# from "present but null", and the difference is load bearing: CEL's has() calls
-# an explicitly-null field PRESENT and denies on it, so a Rego arm keyed on
-# non-nullness admits exactly what admission refuses.
+# from "present but null"; a historical comparison with the retired CEL mirror
+# exposed that a Rego arm keyed on non-nullness admitted the explicitly-null
+# field. The retained static rule therefore keys on declaration.
 storage_spec_declares(field) if {
   field in object.keys(storage_object_spec)
 }
@@ -1493,7 +1349,7 @@ empty_collection(value) if {
 # storage_kinds is the mirror's declared surface, so every storage deny arm is
 # gated on membership: dropping a kind from that set stops the mirror covering
 # it, which is a behavioural change the deny fixtures catch, not just a
-# structural one. It is the Rego counterpart of the Kyverno rule's match block.
+# structural one.
 is_storage_object if {
   input.kind in storage_kinds
 }
@@ -1504,10 +1360,10 @@ persistent_volume_sources := {field |
 }
 
 # SR-0. A spec that is absent, or present but not a mapping, cannot be reasoned
-# about, so it is denied rather than skipped. Presence is checked explicitly:
-# the CEL arm is `has(object.spec) && type(object.spec) == type({})`, which
-# denies an ABSENT spec too, while object.get(input, "spec", {}) would have
-# returned {} and left this arm silently weaker than the one it mirrors.
+# about, so it is denied rather than skipped. Presence is checked explicitly.
+# A historical comparison with the retired CEL mirror exposed that
+# object.get(input, "spec", {}) returned {} for an absent spec and left this
+# static arm silently weaker.
 deny contains msg if {
   is_storage_object
   input.kind in {"PersistentVolume", "PersistentVolumeClaim"}
@@ -1543,7 +1399,8 @@ deny contains msg if {
 
 # SR-3. A csi source reaches wherever its driver reaches. A csi value that is
 # null, a scalar, or a list yields {} here and therefore an empty driver name,
-# which is not enumerated and denies — the shape CEL denies by erroring.
+# which is not enumerated and denies. A historical comparison with the retired
+# CEL mirror exposed this malformed shape by erroring.
 deny contains msg if {
   is_storage_object
   input.kind == "PersistentVolume"
@@ -1659,8 +1516,9 @@ deny contains msg if {
 
 # SR-12. dataSource/dataSourceRef import bytes the enumeration never described.
 # Keyed on DECLARATION, not on non-nullness: `dataSourceRef:` with a null value
-# is a declared import that CEL's has() denies, and it was admitted here while
-# this arm compared the value against null.
+# is a declared import. A historical comparison with the retired CEL mirror
+# exposed that it was admitted here while this arm compared the value against
+# null.
 deny contains msg if {
   is_storage_object
   input.kind == "PersistentVolumeClaim"
@@ -1845,14 +1703,13 @@ deny contains msg if {
 
 # `volumes: null` is a STORED null, not an absent key: object.get returns that
 # null rather than its default and `some volume in null` iterates nothing, so
-# every volume denial above silently stops firing. CEL's has() is true on an
-# explicitly-null field and .all() errors on it, so Kyverno refuses the same
-# object — the one shape in a 16-shape sweep where the two engines disagreed.
+# every volume denial above silently stops firing. This was the one fail-open
+# shape in a 16-shape sweep.
 # Refusing every non-list `volumes` here closes that divergence at the only
 # place it can be closed without weakening anything: normalizing the field to
 # an empty list instead would ALSO skip the walk of a map-shaped value, which
-# `some volume in` does iterate today. Scoped to the tenant namespaces because
-# that is exactly where Kyverno's two volume rules match.
+# `some volume in` does iterate today. Scoped to the exact tenant workload
+# storage boundaries.
 deny contains msg if {
   is_workload
   restricted_namespace
@@ -1956,30 +1813,6 @@ deny contains msg if {
 }
 
 deny contains msg if {
-  input.kind == "NetworkPolicy"
-  input.metadata.namespace == admission_namespace
-  input.metadata.name == "default-deny"
-  not valid_default_deny_policy
-  msg := sprintf("NetworkPolicy %s/default-deny must isolate every Pod for ingress and egress", [admission_namespace])
-}
-
-deny contains msg if {
-  input.kind == "NetworkPolicy"
-  input.metadata.namespace == admission_namespace
-  input.metadata.name != "default-deny"
-  not input.metadata.name in admission_policy_names
-  msg := sprintf("NetworkPolicy %s/%s is outside the exact admission webhook, DNS, API-server, and signature-verification allowlist", [admission_namespace, input.metadata.name])
-}
-
-deny contains msg if {
-  input.kind == "NetworkPolicy"
-  input.metadata.namespace == admission_namespace
-  input.metadata.name in admission_policy_names
-  not valid_admission_policy
-  msg := sprintf("NetworkPolicy %s/%s widens its exact reviewed admission flow", [admission_namespace, input.metadata.name])
-}
-
-deny contains msg if {
   is_workload
   object.get(object.get(pod_spec, "securityContext", {}), "runAsNonRoot", false) != true
   msg := sprintf("%s %s must run as non-root", [input.kind, input.metadata.name])
@@ -1988,7 +1821,7 @@ deny contains msg if {
 # The canonical publisher per tenant namespace, and the exact shape of the
 # reference that names it. A reference may carry the published release tag in
 # front of the digest — `repo:vMAJOR.MINOR.PATCH@sha256:...`, the form the
-# connector, Flux and Kyverno images already use — so an operator reading
+# connector and Flux images already use — so an operator reading
 # `kubectl describe pod` sees which release is running. The tag is legibility
 # only and is never what resolves: the `@sha256:` suffix stays MANDATORY and
 # anchored, so safety invariant 6 is untouched and dropping the digest for a
@@ -2096,7 +1929,7 @@ deny contains msg if {
 # repository rule above, and because the digest-only form must stay valid for
 # a rollback pin that names no release.
 approved_workload_image(image) if {
-  regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|reg[.]kyverno[.]io/kyverno/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", image)
+  regex.match("^(ghcr[.]io/(snaraj|fluxcd)/[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?|cloudflare/cloudflared:[A-Za-z0-9._-]+)@sha256:[0-9a-f]{64}$", image)
 }
 
 # One exact registry.k8s.io identity is admitted for the ephemeral API canary.
@@ -2149,7 +1982,7 @@ deny contains msg if {
 flux_aggregation_roles := {"flux-edit-flux-system", "flux-view-flux-system"}
 
 # Namespaces whose Roles are part of the Flux authorization surface.
-flux_rbac_namespaces := {"flux-system", "cloudflare-public", "naranjo-online", "lidersea-com", "kyverno"}
+flux_rbac_namespaces := {"flux-system", "cloudflare-public", "naranjo-online", "lidersea-com"}
 
 rbac_binding_kinds := {"RoleBinding", "ClusterRoleBinding"}
 

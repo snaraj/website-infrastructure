@@ -1,0 +1,62 @@
+{
+  "apiVersion": "admissionregistration.k8s.io/v1",
+  "kind": "ValidatingAdmissionPolicy",
+  "metadata": {
+    "name": "platform-release-selector"
+  },
+  "spec": {
+    "failurePolicy": "Fail",
+    "matchConditions": [
+      {
+        "expression": "request.userInfo.username == 'system:serviceaccount:flux-system:platform-release-selector'",
+        "name": "selector-service-account"
+      }
+    ],
+    "matchConstraints": {
+      "matchPolicy": "Exact",
+      "resourceRules": [
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "apiVersions": [
+            "v1"
+          ],
+          "operations": [
+            "UPDATE"
+          ],
+          "resources": [
+            "gitrepositories"
+          ],
+          "scope": "Namespaced"
+        }
+      ]
+    },
+    "validations": [
+      {
+        "expression": "oldObject != null && request.namespace == 'flux-system' && request.name == 'flux-system' && object.apiVersion == 'source.toolkit.fluxcd.io/v1' && object.kind == 'GitRepository' && oldObject.apiVersion == object.apiVersion && oldObject.kind == object.kind && object.metadata.name == 'flux-system' && object.metadata.namespace == 'flux-system' && oldObject.metadata.name == object.metadata.name && oldObject.metadata.namespace == object.metadata.namespace",
+        "message": "the selector may update only the exact served-v1 root source"
+      },
+      {
+        "expression": "oldObject != null && object.metadata.uid == oldObject.metadata.uid && object.metadata.resourceVersion == oldObject.metadata.resourceVersion && object.metadata.generation == oldObject.metadata.generation + 1 && object.metadata.creationTimestamp == oldObject.metadata.creationTimestamp && has(object.metadata.generateName) == has(oldObject.metadata.generateName) && (!has(object.metadata.generateName) || object.metadata.generateName == oldObject.metadata.generateName) && has(object.metadata.deletionTimestamp) == has(oldObject.metadata.deletionTimestamp) && (!has(object.metadata.deletionTimestamp) || object.metadata.deletionTimestamp == oldObject.metadata.deletionTimestamp) && has(object.metadata.deletionGracePeriodSeconds) == has(oldObject.metadata.deletionGracePeriodSeconds) && (!has(object.metadata.deletionGracePeriodSeconds) || object.metadata.deletionGracePeriodSeconds == oldObject.metadata.deletionGracePeriodSeconds) && has(object.metadata.labels) == has(oldObject.metadata.labels) && (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) && has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) && (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) && has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) && (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers) && has(object.status) == has(oldObject.status) && (!has(object.status) || object.status == oldObject.status)",
+        "message": "the selector must preserve source identity, metadata, finalizers, and status"
+      },
+      {
+        "expression": "oldObject != null && has(oldObject.spec.ref) && has(object.spec.ref) && has(oldObject.spec.ref.tag) && has(object.spec.ref.tag) && !has(oldObject.spec.ref.branch) && !has(object.spec.ref.branch) && !has(oldObject.spec.ref.commit) && !has(object.spec.ref.commit) && !has(oldObject.spec.ref.name) && !has(object.spec.ref.name) && !has(oldObject.spec.ref.semver) && !has(object.spec.ref.semver) && has(oldObject.spec.ignore) && has(object.spec.ignore) && has(oldObject.spec.sparseCheckout) && has(object.spec.sparseCheckout) && has(oldObject.spec.timeout) && has(object.spec.timeout) && !has(oldObject.spec.include) && !has(object.spec.include) && !has(oldObject.spec.provider) && !has(object.spec.provider) && !has(oldObject.spec.proxySecretRef) && !has(object.spec.proxySecretRef) && !has(oldObject.spec.recurseSubmodules) && !has(object.spec.recurseSubmodules) && !has(oldObject.spec.secretRef) && !has(object.spec.secretRef) && !has(oldObject.spec.serviceAccountName) && !has(object.spec.serviceAccountName) && !has(oldObject.spec.suspend) && !has(object.spec.suspend) && !has(oldObject.spec.verify) && !has(object.spec.verify) && object.spec.url == oldObject.spec.url && object.spec.interval == oldObject.spec.interval && object.spec.timeout == oldObject.spec.timeout && object.spec.ignore == oldObject.spec.ignore && object.spec.sparseCheckout == oldObject.spec.sparseCheckout",
+        "message": "the selector may change only spec.ref.tag"
+      },
+      {
+        "expression": "oldObject != null && oldObject.spec.ref.tag.matches('^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$') && object.spec.ref.tag.matches('^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$') && object.spec.ref.tag.split('.')[0] == oldObject.spec.ref.tag.split('.')[0] && object.spec.ref.tag.split('.')[1] == oldObject.spec.ref.tag.split('.')[1] && int(object.spec.ref.tag.split('.')[2]) == int(oldObject.spec.ref.tag.split('.')[2]) + 1",
+        "message": "the selector tag must advance by exactly one patch"
+      },
+      {
+        "expression": "oldObject != null && has(oldObject.metadata.annotations) && has(object.metadata.annotations) && oldObject.metadata.annotations.filter(k, k.startsWith('release-selector.platform.snaraj.dev/')).size() == 9 && object.metadata.annotations.filter(k, k.startsWith('release-selector.platform.snaraj.dev/')).size() == 9 && ['release-selector.platform.snaraj.dev/schema', 'release-selector.platform.snaraj.dev/release-id', 'release-selector.platform.snaraj.dev/release-tag', 'release-selector.platform.snaraj.dev/release-target-sha', 'release-selector.platform.snaraj.dev/tag-object-sha', 'release-selector.platform.snaraj.dev/main-ci', 'release-selector.platform.snaraj.dev/platform-release', 'release-selector.platform.snaraj.dev/selector-image-digest', 'release-selector.platform.snaraj.dev/identity-sha256'].all(k, k in oldObject.metadata.annotations && k in object.metadata.annotations) && object.metadata.annotations.all(k, k.startsWith('release-selector.platform.snaraj.dev/') || (k in oldObject.metadata.annotations && object.metadata.annotations[k] == oldObject.metadata.annotations[k])) && oldObject.metadata.annotations.all(k, k.startsWith('release-selector.platform.snaraj.dev/') || (k in object.metadata.annotations && oldObject.metadata.annotations[k] == object.metadata.annotations[k]))",
+        "message": "the selector must preserve non-reserved annotations and use the exact reserved inventory"
+      },
+      {
+        "expression": "oldObject != null && object.metadata.annotations['release-selector.platform.snaraj.dev/schema'] == 'https://snaraj.dev/schemas/platform-release-identity/v1' && object.metadata.annotations['release-selector.platform.snaraj.dev/release-tag'] == object.spec.ref.tag && object.metadata.annotations['release-selector.platform.snaraj.dev/release-id'].matches('^[1-9][0-9]*$') && object.metadata.annotations['release-selector.platform.snaraj.dev/release-target-sha'].matches('^[0-9a-f]{40}$') && object.metadata.annotations['release-selector.platform.snaraj.dev/release-target-sha'] != '0000000000000000000000000000000000000000' && object.metadata.annotations['release-selector.platform.snaraj.dev/tag-object-sha'].matches('^[0-9a-f]{40}$') && object.metadata.annotations['release-selector.platform.snaraj.dev/tag-object-sha'] != '0000000000000000000000000000000000000000' && object.metadata.annotations['release-selector.platform.snaraj.dev/main-ci'].matches('^[1-9][0-9]*/[1-9][0-9]*$') && object.metadata.annotations['release-selector.platform.snaraj.dev/platform-release'].matches('^[1-9][0-9]*/[1-9][0-9]*$') && object.metadata.annotations['release-selector.platform.snaraj.dev/selector-image-digest'].matches('^sha256:[0-9a-f]{64}$') && object.metadata.annotations['release-selector.platform.snaraj.dev/selector-image-digest'] != 'sha256:0000000000000000000000000000000000000000000000000000000000000000' && object.metadata.annotations['release-selector.platform.snaraj.dev/identity-sha256'].matches('^sha256:[0-9a-f]{64}$') && object.metadata.annotations['release-selector.platform.snaraj.dev/identity-sha256'] != 'sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+        "message": "the selector evidence annotations are incomplete or malformed"
+      }
+    ]
+  }
+}

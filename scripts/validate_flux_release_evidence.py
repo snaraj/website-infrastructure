@@ -1,9 +1,10 @@
-"""Validate captured Flux revision and security-policy live evidence.
+"""Validate captured Flux revision and network-policy live evidence.
 
 Extracted verbatim from the retired release-gate.sh --live lane so the unit
 suite keeps executing this validator while the post-cutover successor gate is
 built. argv: STATE_ROOT RELEASE_GIT_COMMIT. STATE_ROOT holds the kubectl JSON
-captures and server-normalized desired-policy JSON the successor must produce.
+captures and server-normalized desired NetworkPolicy JSON the successor must
+produce.
 """
 import json
 import pathlib
@@ -44,6 +45,24 @@ def one_ready(item, kind, identity):
     ]
     if len(ready) != 1 or ready[0].get("status") != "True":
         raise SystemExit(f"{kind} {identity} does not have exactly one Ready=True condition")
+
+
+def one_source_verified(item, identity, generation):
+    conditions = status(item).get("conditions", [])
+    verified = [
+        condition
+        for condition in conditions
+        if isinstance(condition, dict) and condition.get("type") == "SourceVerified"
+    ]
+    if (
+        len(verified) != 1
+        or verified[0].get("status") != "True"
+        or verified[0].get("reason") != "Succeeded"
+        or verified[0].get("observedGeneration") != generation
+    ):
+        raise SystemExit(
+            f"OCIRepository {identity} does not have exact SourceVerified=True/Succeeded"
+        )
 
 
 def exact_generation(item, kind, identity):
@@ -104,7 +123,6 @@ def desired_flux_object(kind, api_version, namespace, name):
 kustomization_identities = {
     ("flux-system", "flux-system"),
     ("flux-system", "platform-prerequisites"),
-    ("flux-system", "admission"),
     ("flux-system", "platform-services"),
     ("flux-system", "naranjo-online"),
     ("flux-system", "lidersea-com"),
@@ -116,7 +134,6 @@ exact_namespaced_inventory(
 for name in (
     "flux-system",
     "platform-prerequisites",
-    "admission",
     "platform-services",
     "naranjo-online",
     "lidersea-com",
@@ -183,20 +200,14 @@ for filename, kind in (
 
 
 # Chart sources: exactly two, one per site, each verified against that site's
-# own keyless publisher identity. The artifact digest is what makes the running
-# chart content-addressed even though the SemVer range selected it by tag.
-#
-# Note the deliberate split between the two "tag" ideas below. CHART_TAG_RE
-# constrains the chart VERSION the SemVer range resolved — that is still a
-# stable vMAJOR.MINOR.PATCH release tag. The certificate SUBJECT constrains the
-# REF THE PUBLISHER RAN AT, which is the protected `main` branch: a run at a ref
-# executes the definition at that ref, and `main` is the only ref those site
-# repositories gate on creation and update with no bypass actors
-# (ADR 0016 amendment 2026-08-22).
-CHART_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+# own keyless publisher identity. Flux selects the exact OCI manifest digest;
+# the human chart release annotation is audit metadata, not a mutable selector.
 oci_chart_sources = {
     ("naranjo-online", "naranjo-online-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/naranjo-online",
+        "tag": "0.1.50",
+        "digest": "sha256:22a29d488a9578d87d4a2f69fd02e4ef35daa1fb5800bc6bd12ac974b73a8c42",
+        "artifact_digest": "sha256:4d1215d746c601d8ad1ed97a4a6d8b7785489dc4c39f3d5f264ebeeead053dd1",
         "subject": (
             r"^https://github\.com/snaraj/naranjo\.online/\.github/workflows/"
             r"release-publisher\.yml@refs/heads/main$"
@@ -204,6 +215,9 @@ oci_chart_sources = {
     },
     ("lidersea-com", "lidersea-com-chart"): {
         "url": "oci://ghcr.io/snaraj/charts/lidersea-com",
+        "tag": "0.1.37",
+        "digest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+        "artifact_digest": "sha256:1190b1297885d233a01f362467a00eb8f32c49ca5843edeb8af53d5a25f21b3b",
         "subject": (
             r"^https://github\.com/snaraj/lidersea\.com/\.github/workflows/"
             r"release-publisher\.yml@refs/heads/main$"
@@ -222,13 +236,15 @@ for (namespace, name), contract in sorted(oci_chart_sources.items()):
     desired = desired_flux_object(
         "OCIRepository", "source.toolkit.fluxcd.io/v1", namespace, name
     )
-    exact_generation(item, "OCIRepository", identity)
+    generation = exact_generation(item, "OCIRepository", identity)
     one_ready(item, "OCIRepository", identity)
+    one_source_verified(item, identity, generation)
     spec = item.get("spec", {})
     verify = spec.get("verify", {})
     identities = verify.get("matchOIDCIdentity") if isinstance(verify, dict) else None
     if (
         spec.get("url") != contract["url"]
+        or spec.get("ref") != {"digest": contract["digest"]}
         or spec.get("secretRef") is not None
         or spec.get("serviceAccountName") is not None
         or spec.get("insecure") not in (None, False)
@@ -243,32 +259,33 @@ for (namespace, name), contract in sorted(oci_chart_sources.items()):
         raise SystemExit(
             f"OCIRepository {identity} is not the exact anonymous, cosign-verified chart source"
         )
+    annotations = metadata(item).get("annotations", {})
+    if (
+        not isinstance(annotations, dict)
+        or annotations.get("platform.snaraj.dev/chart-release") != contract["tag"]
+    ):
+        raise SystemExit(
+            f"OCIRepository {identity} lacks its reviewed audit-only chart release annotation"
+        )
     if spec != desired.get("spec"):
         raise SystemExit(f"OCIRepository {identity} spec differs from exact desired state")
     artifact = status(item).get("artifact", {})
     revision = artifact.get("revision") if isinstance(artifact, dict) else None
     digest = artifact.get("digest") if isinstance(artifact, dict) else None
-    # Flux records an OCI artifact revision as "<tag>@<digest>". Both halves are
-    # load-bearing: the tag is the release identity the owner reads, the digest
-    # is what actually ran, and a revision carrying only one of them means the
-    # controller resolved something this contract cannot pin.
+    # With ref.digest, source-controller v1.9.3 reports the upstream OCI
+    # manifest digest as the bare revision. With layerSelector.operation=copy,
+    # artifact.digest is the separately receipt-bound chart-layer digest.
     if (
-        not isinstance(revision, str)
-        or revision.count("@") != 1
-        or not isinstance(digest, str)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
-    ):
-        raise SystemExit(f"OCIRepository {identity} has no tag-and-digest artifact revision")
-    chart_tag, chart_digest = revision.split("@", 1)
-    if (
-        CHART_TAG_RE.fullmatch(chart_tag) is None
-        or chart_digest != digest
-        or chart_digest == "sha256:" + ("0" * 64)
+        revision != contract["digest"]
+        or digest != contract["artifact_digest"]
     ):
         raise SystemExit(
-            f"OCIRepository {identity} artifact is not one stable release tag bound to its digest"
+            f"OCIRepository {identity} is not ready at its exact immutable chart digest"
         )
-    chart_artifact_revisions[(namespace, name)] = (chart_tag, revision)
+    chart_artifact_revisions[(namespace, name)] = (
+        contract["tag"],
+        contract["digest"],
+    )
 
 
 helmreleases = load_items("helmreleases.json")
@@ -296,6 +313,12 @@ for (namespace, name), chart_source in release_sources.items():
     desired_release = desired_flux_object(
         "HelmRelease", "helm.toolkit.fluxcd.io/v2", namespace, name
     )
+    if chart_source is not None and release.get("spec", {}).get("values") != {
+        "deploymentReady": True
+    }:
+        raise SystemExit(
+            f"HelmRelease {identity} values are not exactly deploymentReady=true"
+        )
     if release.get("spec") != desired_release.get("spec"):
         raise SystemExit(f"HelmRelease {identity} spec differs from exact desired state")
     generation = exact_generation(release, "HelmRelease", identity)
@@ -321,8 +344,8 @@ for (namespace, name), chart_source in release_sources.items():
             f"HelmRelease {identity} attempted revision is not its latest deployed revision"
         )
     if chart_source is not None:
-        # Tag-driven site release: the chart it deployed must be the exact
-        # version its own verified OCIRepository currently resolves, and the
+        # Digest-selected site release: the chart it deployed must be the exact
+        # reviewed tag+digest pair its verified OCIRepository carries, and the
         # HelmRelease must reference that source rather than a HelmChart.
         if release.get("spec", {}).get("chartRef") != {
             "kind": "OCIRepository",
@@ -335,8 +358,13 @@ for (namespace, name), chart_source in release_sources.items():
             raise SystemExit(
                 f"HelmRelease {identity} must not materialize a HelmChart on the chartRef path"
             )
-        chart_tag, chart_revision = chart_artifact_revisions[chart_source]
-        if attempted_revision not in {chart_tag, chart_tag.lstrip("v"), chart_revision}:
+        chart_tag, chart_digest = chart_artifact_revisions[chart_source]
+        digest_qualified_version = chart_tag + "+" + chart_digest[7:19]
+        if (
+            attempted_revision != digest_qualified_version
+            or release_status.get("lastAttemptedRevisionDigest") != chart_digest
+            or latest.get("ociDigest") not in (None, chart_digest)
+        ):
             raise SystemExit(
                 f"HelmRelease {identity} deployed a chart version its verified source does not currently resolve"
             )
@@ -371,57 +399,63 @@ for (namespace, name), chart_source in release_sources.items():
         )
 
 
-required_policies = {
-    "disallow-public-services",
-    "disallow-tenant-media-payloads",
-    "disallow-undiscovered-storage",
-    "require-approved-images",
-    "require-exact-tenant-networking",
-    "require-release-readiness",
-    "require-replicaset-admission-identity",
-    "require-restricted-workloads",
-    "require-signed-naranjo-online",
-    "require-signed-lidersea-com",
-}
-live_policies = {
-    metadata(policy).get("name"): policy for policy in load_items("policies.json")
-}
-if len(live_policies) != len(required_policies) or set(live_policies) != required_policies:
-    raise SystemExit("live ClusterPolicy inventory differs from the exact desired state")
-for name in sorted(required_policies):
-    live = live_policies.get(name)
-    if live is None:
-        raise SystemExit(f"required live ClusterPolicy is missing: {name}")
-    desired_path = root / f"desired-policy-{name}.json"
-    desired = json.loads(desired_path.read_text(encoding="utf-8"))
-    if (
-        desired.get("apiVersion") != "kyverno.io/v1"
-        or desired.get("kind") != "ClusterPolicy"
-        or metadata(desired).get("name") != name
-        or not isinstance(desired.get("spec"), dict)
-    ):
-        raise SystemExit(f"desired ClusterPolicy normalization is invalid: {name}")
-    if live.get("spec") != desired.get("spec"):
-        raise SystemExit(f"live ClusterPolicy spec differs from exact desired state: {name}")
-
-
-# The tenant NetworkPolicy inventory this gate expects to find, reconciled to a
-# read-only capture of the cluster on 2026-08-12. It was previously a list of
-# what the committed manifests declare, which is not the same thing: this gate
-# compares LIVE objects against desired-state evidence, so an inventory that
-# names objects the cluster does not have fails for the wrong reason and hides
-# the ones it does have. The cloudflare-public default-deny is named
-# `default-deny-all` live; the committed prerequisites manifest calls it
-# `default-deny`, and that manifest has never been applied.
+# Exact post-activation tenant NetworkPolicy inventory. The two website
+# default-denies are reconciled directly from their website paths; the signed
+# charts independently supply only the exact per-site application policies.
+# The pre-activation capture did not contain those two default-denies, so their
+# first reconciliation is an expected creation, not a drift exemption. The
+# older cloudflare-public default-deny keeps its observed live name until its
+# separately authorized platform transition.
 expected_network_policies = {
     ("cloudflare-public", "default-deny-all"),
     ("cloudflare-public", "cloudflared-dns"),
     ("cloudflare-public", "cloudflared-edge"),
     ("cloudflare-public", "cloudflared-naranjo-online"),
     ("cloudflare-public", "cloudflared-lidersea-com"),
+    ("naranjo-online", "default-deny"),
     ("naranjo-online", "ingress-to-naranjo-online"),
+    ("lidersea-com", "default-deny"),
     ("lidersea-com", "ingress-to-lidersea-com"),
 }
+
+
+def exact_site_application_policy_spec(namespace):
+    """The signed chart's sole allow for one website namespace."""
+
+    policy_types = ["Ingress"]
+    spec = {
+        "podSelector": {
+            "matchLabels": {
+                "app.kubernetes.io/name": namespace,
+                "app.kubernetes.io/instance": namespace,
+            }
+        },
+        "policyTypes": policy_types,
+        "ingress": [
+            {
+                "from": [
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {
+                                "kubernetes.io/metadata.name": "cloudflare-public"
+                            }
+                        },
+                        "podSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "cloudflare-public",
+                                "app.kubernetes.io/instance": namespace + "-tunnel",
+                            }
+                        },
+                    }
+                ],
+                "ports": [{"port": 8080, "protocol": "TCP"}],
+            }
+        ],
+    }
+    if namespace == "lidersea-com":
+        spec["policyTypes"] = ["Ingress", "Egress"]
+        spec["egress"] = []
+    return spec
 
 # EVERY tenant namespace is REQUIRED to carry a namespace-wide default-deny: a
 # policy whose podSelector is `{}`, isolating every Pod for both directions. A
@@ -432,24 +466,14 @@ namespaces_requiring_namespace_wide_default_deny = {
     "naranjo-online",
     "lidersea-com",
 }
-
-# AUDIT NP7 — DECLARED LIVE DIVERGENCE, recorded rather than normalised away.
-# Captured read-only 2026-08-12: cloudflare-public satisfies the requirement
-# above; NEITHER site namespace does. naranjo-online carries one policy, with
-# `policyTypes: [Ingress]` only, so its pods have unrestricted egress and any
-# other pod scheduled into that namespace has unrestricted everything.
-# lidersea-com denies its own pods' egress but its policy is podSelector-scoped,
-# so the same holds for any other pod there.
-#
-# Closing it is a traffic-policy change to workloads that have been serving for
-# a day and needs an owner decision plus an observation pass of what those
-# namespaces actually egress to, so it is NOT done here. It is declared so the
-# gap lives in the repository instead of only in a capture — and the check below
-# fails the moment the declaration goes STALE, so closing the gap forces the
-# declaration to be removed rather than leaving a permanent exemption behind.
-namespaces_without_a_namespace_wide_default_deny = {
-    "naranjo-online",
-    "lidersea-com",
+expected_default_deny_identities = {
+    ("cloudflare-public", "default-deny-all"),
+    ("naranjo-online", "default-deny"),
+    ("lidersea-com", "default-deny"),
+}
+exact_default_deny_spec = {
+    "podSelector": {},
+    "policyTypes": ["Ingress", "Egress"],
 }
 
 tenant_namespaces = set(namespaces_requiring_namespace_wide_default_deny)
@@ -472,20 +496,12 @@ for namespace in sorted(namespaces_requiring_namespace_wide_default_deny):
         name
         for (found_namespace, name), policy in live_network_policies.items()
         if found_namespace == namespace
-        and policy.get("spec", {}).get("podSelector") == {}
-        and set(policy.get("spec", {}).get("policyTypes") or ()) == {"Ingress", "Egress"}
+        and (found_namespace, name) in expected_default_deny_identities
+        and policy.get("spec") == exact_default_deny_spec
     ]
-    if namespace in namespaces_without_a_namespace_wide_default_deny:
-        if namespace_wide:
-            raise SystemExit(
-                "declared default-deny divergence is stale: "
-                f"{namespace} now carries a namespace-wide default-deny; "
-                "remove it from the declaration"
-            )
-        continue
     if not namespace_wide:
         raise SystemExit(
-            f"tenant namespace has no namespace-wide default-deny: {namespace}"
+            f"tenant namespace has no exact namespace-wide default-deny: {namespace}"
         )
 for namespace, name in sorted(expected_network_policies):
     desired_path = root / f"desired-networkpolicy-{namespace}-{name}.json"
@@ -499,6 +515,18 @@ for namespace, name in sorted(expected_network_policies):
     ):
         raise SystemExit(
             f"desired NetworkPolicy normalization is invalid: {namespace}/{name}"
+        )
+    if name == f"ingress-to-{namespace}" and desired.get("spec") != (
+        exact_site_application_policy_spec(namespace)
+    ):
+        raise SystemExit(
+            f"desired signed-chart application NetworkPolicy is not exact: {namespace}/{name}"
+        )
+    if (namespace, name) in expected_default_deny_identities and (
+        desired.get("spec") != exact_default_deny_spec
+    ):
+        raise SystemExit(
+            f"desired namespace-wide default-deny is not exact: {namespace}/{name}"
         )
     if live_network_policies[(namespace, name)].get("spec") != desired.get("spec"):
         raise SystemExit(

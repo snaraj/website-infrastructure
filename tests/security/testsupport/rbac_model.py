@@ -355,9 +355,9 @@ def controller_root_rbac(root=REPO_ROOT):
 
     Modelled separately from `effective_flux_rbac` because the two are applied
     by different actors at different times. `scripts/install-flux-controllers.sh`
-    applies THIS root and nothing else; `access.yaml` arrives later, reconciled
-    by Flux from `./kubernetes/reconciliation`, and cannot help a controller that
-    has to start an informer before Flux is running at all.
+    applies THIS root and nothing else; bootstrap applies `access.yaml` later,
+    outside Flux self-reconciliation, and it cannot help a controller that has
+    to start an informer before Flux is running at all.
 
     That distinction is not academic. The narrowing patch strips every Flux API
     group from the shared `crd-controller-flux-system` ClusterRole, so while the
@@ -595,13 +595,18 @@ class Authorizer:
 # What the reviewed desired state asks for
 # ---------------------------------------------------------------------------
 
-# MODEL. The verbs a Flux apply issues against an object it manages: it reads
-# the live object, creates it when absent, patches it when present, and — with
-# ``prune: true`` — deletes it when it leaves the source. ``watch`` is
-# deliberately not required: Flux polls managed objects, and requiring a verb the
-# reconciler may not use would produce false failures in the only direction that
-# matters (a red build for a permission nothing needs).
-APPLY_VERBS = ("get", "list", "create", "update", "patch", "delete")
+# MODEL. A Kustomize apply reads the live object, creates it when absent, and
+# updates or patches it when present. ``delete`` is added only for pruning.
+# Helm's default waiter instead uses list/watch for rendered objects throughout
+# install and upgrade, so its namespaced lifecycle set includes both verbs plus
+# delete. This is site-local readiness authority, not a controller-wide watcher.
+APPLY_VERBS = ("get", "list", "create", "update", "patch")
+HELM_APPLY_VERBS = (
+    "get", "list", "watch", "create", "update", "patch", "delete",
+)
+PVC_LIFECYCLE_VERBS = (
+    "get", "list", "watch", "create", "update", "patch", "delete",
+)
 
 # MODEL. Kubernetes kind -> (apiGroup, resource plural, namespaced). Only the
 # kinds this repository's reviewed desired state actually contains are listed;
@@ -619,14 +624,11 @@ KIND_RESOURCES = {
     "Namespace": ("", "namespaces", False),
     "NetworkPolicy": ("networking.k8s.io", "networkpolicies", True),
     "OCIRepository": ("source.toolkit.fluxcd.io", "ocirepositories", True),
+    "PersistentVolumeClaim": ("", "persistentvolumeclaims", True),
     "ResourceQuota": ("", "resourcequotas", True),
     "Secret": ("", "secrets", True),
     "Service": ("", "services", True),
     "ServiceAccount": ("", "serviceaccounts", True),
-    "ClusterPolicy": ("kyverno.io", "clusterpolicies", False),
-    "ValidatingWebhookConfiguration": (
-        "admissionregistration.k8s.io", "validatingwebhookconfigurations", False,
-    ),
 }
 
 # MODEL, and the one input that cannot be derived from this repository: each
@@ -642,6 +644,7 @@ KIND_RESOURCES = {
 SITE_CHART_KINDS = {
     ("HelmRelease", "naranjo-online"): (
         "Deployment", "Service", "ServiceAccount", "NetworkPolicy",
+        "PersistentVolumeClaim",
     ),
     ("HelmRelease", "lidersea-com"): (
         "Deployment", "Service", "ServiceAccount", "NetworkPolicy",
@@ -664,8 +667,8 @@ SOURCE_KINDS = ("GitRepository", "OCIRepository", "HelmRepository", "Bucket", "H
 # `spec.chartRef` through its own API client BEFORE the impersonation config is
 # built, so reading the source is the CONTROLLER's authority and never the
 # impersonated account's. It is also the first thing every reconciliation does —
-# without it the root Kustomization cannot read the GitRepository it syncs from
-# and nothing reconciles at all.
+# without it a direct site Kustomization cannot read the GitRepository it syncs
+# from and nothing reconciles at all.
 SOURCE_READ_VERBS = ("get", "list", "watch")
 
 # What source-controller does to the sources it owns, under its own identity.
@@ -1219,11 +1222,44 @@ def _classify_flux_document(document, origin, kustomizations, helm_releases, sou
     return False
 
 
+def bootstrap_flux_documents(root=REPO_ROOT):
+    """Render the non-applicable review template into its exact runtime shape.
+
+    ``gotk-sync.yaml.in`` is intentionally schema-invalid and is never applied
+    by Kustomize or kubectl.  The owner-attended bootstrap renders these two
+    sentinels from verified release evidence.  This test model performs only
+    the corresponding structural substitutions so RBAC derivation follows the
+    same two direct parents without creating a second activation path.
+    """
+
+    entry = Path(root) / "kubernetes/flux-system/gotk-sync.yaml.in"
+    text = entry.read_text(encoding="utf-8")
+    sparse_sentinel = "  sparseCheckout: BOOTSTRAP_RENDERS_EXACT_TWO_PATHS\n"
+    source_sentinel = "  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE\n"
+    if text.count(sparse_sentinel) != 1 or text.count(source_sentinel) != 2:
+        raise AssertionError(
+            "bootstrap review template sentinels are absent or duplicated"
+        )
+    text = text.replace(
+        sparse_sentinel,
+        "  sparseCheckout:\n"
+        "    - kubernetes/websites/naranjo-online\n"
+        "    - kubernetes/websites/lidersea-com\n",
+        1,
+    ).replace(
+        source_sentinel,
+        "  sourceRef:\n"
+        "    kind: GitRepository\n"
+        "    name: flux-system\n",
+    )
+    return parse_documents(text)
+
+
 def flux_custom_resources(root=REPO_ROOT):
     """Every Flux custom resource in the reviewed desired state.
 
     Discovered by FOLLOWING the reconciliation graph — the bootstrap-applied
-    root, then each Kustomization's ``spec.path`` through its Kustomize roots —
+    direct Kustomizations, then each ``spec.path`` through its Kustomize root —
     rather than by globbing known directories. A glob only finds custom
     resources where someone remembered to look: a HelmRelease added under a
     reconciled path that no glob covers reconciles for real, names a
@@ -1241,17 +1277,18 @@ def flux_custom_resources(root=REPO_ROOT):
     kustomizations = []
     helm_releases = []
     sources = []
-    # The root Kustomization and its GitRepository are applied by bootstrap, not
-    # by a reconciliation, so they are the one hard-coded entry point.
-    entry = root / "kubernetes/flux-system/gotk-sync.yaml"
+    # The direct Kustomizations and their GitRepository are applied by
+    # bootstrap, not by a reconciliation, so they are the hard-coded entry
+    # point.
+    entry = root / "kubernetes/flux-system/gotk-sync.yaml.in"
     pending = []
-    for document in load_documents(entry):
+    for document in bootstrap_flux_documents(root):
         if _classify_flux_document(document, entry, kustomizations, helm_releases, sources):
             if document.get("kind") == "Kustomization":
                 pending.append(document)
     if not pending:
         raise AssertionError(
-            "no root Kustomization found in " + str(entry) + ": the reconciliation "
+            "no direct Kustomization found in " + str(entry) + ": the reconciliation "
             "graph has no entry point and every requirement below it would vanish"
         )
     seen_paths = set()
@@ -1360,10 +1397,18 @@ def derive_requirements(root=REPO_ROOT):
             group, resource, namespaced = _kind_tuple(kind)
             target = object_namespace if namespaced else None
             reconciled_namespaces.add(target)
-            for verb in APPLY_VERBS:
+            verbs = list(APPLY_VERBS)
+            if spec.get("prune") is True:
+                verbs.append("delete")
+            for verb in verbs:
+                # Kustomize roots contain only fixed-name resources: generators,
+                # prefixes and components are refused by objects_applied_by.
+                # Kubernetes cannot name-restrict list or create, but every
+                # follow-up request can be locked to the object the root names.
+                request_name = None if verb in {"list", "create"} else object_name
                 requirements.append(
                     Requirement(
-                        subject, verb, group, resource, target, None, owner,
+                        subject, verb, group, resource, target, request_name, owner,
                         "{} applies {} {}".format(reason, kind, object_name),
                     )
                 )
@@ -1454,7 +1499,12 @@ def derive_requirements(root=REPO_ROOT):
         for kind in rendered + [HELM_STORAGE_KIND]:
             group, resource, namespaced = _kind_tuple(kind)
             target = namespace if namespaced else None
-            for verb in APPLY_VERBS:
+            verbs = (
+                PVC_LIFECYCLE_VERBS
+                if kind == "PersistentVolumeClaim"
+                else HELM_APPLY_VERBS
+            )
+            for verb in verbs:
                 requirements.append(
                     Requirement(
                         subject, verb, group, resource, target, None, owner,

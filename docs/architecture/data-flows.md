@@ -51,17 +51,21 @@ durable storage.
 5. The API server encrypts Secret values in etcd with the reviewed encryption
    configuration; the workload receives only its Secret.
 
-## Image promotion
+## Immutable chart selection
 
-CI reads each site's independently committed stable SemVer, builds amd64/arm64
-once, scans the exact graph, emits SBOM/provenance, and publishes immutable
-`sha-<full-commit>` and `vMAJOR.MINOR.PATCH` names to GHCR that must resolve to
-the same digest. Anonymous package visibility is a separate launch gate; only
-after that gate is proven may documentation or deployment treat the package as
-public. CI records source/version/SHA/digest evidence and signs/attests the
-digest keylessly. A human supplies the selected version and digest to the
-exact-site promotion command; it verifies their mapping and creates a
-digest-only diff. Flux does not write Git and never deploys a tag.
+Each site's protected-main publisher builds and signs its multi-architecture
+image, embeds that exact index identity in the signed Helm chart, and publishes
+the chart under a stable human version. This repository records that version
+only as an audit annotation and makes Flux select the chart by its exact OCI
+manifest digest. The tag-to-digest mapping, signature, sole chart layer, chart
+metadata, embedded workload index, and Linux ARM64 child are bound by a
+credential-free acquisition receipt before review.
+
+Moving or deleting a tag cannot change the selected bytes. Forward changes and
+rollbacks update the annotation and digest atomically after a separate receipt;
+an unavailable digest fails closed. Site HelmRelease values contain only
+`deploymentReady: true`, so the signed chart remains the sole image authority.
+Flux never writes Git and never selects a tag or SemVer range.
 
 ## Sensitive flows excluded from CI
 

@@ -1,0 +1,33 @@
+{
+  "apiVersion": "admissionregistration.k8s.io/v1",
+  "kind": "ValidatingAdmissionPolicyBinding",
+  "metadata": {
+    "name": "platform-release-selector"
+  },
+  "spec": {
+    "matchResources": {
+      "matchPolicy": "Exact",
+      "resourceRules": [
+        {
+          "apiGroups": [
+            "source.toolkit.fluxcd.io"
+          ],
+          "apiVersions": [
+            "v1"
+          ],
+          "operations": [
+            "UPDATE"
+          ],
+          "resources": [
+            "gitrepositories"
+          ],
+          "scope": "Namespaced"
+        }
+      ]
+    },
+    "policyName": "platform-release-selector",
+    "validationActions": [
+      "Deny"
+    ]
+  }
+}

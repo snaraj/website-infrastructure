@@ -29,7 +29,7 @@ app.kubernetes.io/version carries the connector's running release so
 without reading a digest. It is DERIVED from .Chart.AppVersion, never from a
 value, so it cannot disagree with the chart that rendered it; it is a label,
 never a selector key, so adding it changes no NetworkPolicy, Service, or
-Deployment selector, and no admission rule reads it as identity.
+Deployment selector, and no retained policy or selector reads it as identity.
 */}}
 {{- define "cloudflare-public.connectorLabels" -}}
 app.kubernetes.io/name: {{ include "cloudflare-public.name" .root }}

@@ -1,6 +1,0 @@
-apiVersion: cli.kyverno.io/v1alpha1
-kind: UserInfo
-metadata:
-  name: replicaset-live-owner-user-info
-userInfo:
-  username: system:kube-controller-manager

@@ -1,33 +1,15 @@
-"""One excluded-range set, four readers, no silent divergence.
+"""One excluded-range set, two exact Rego consumers, no silent widening.
 
 Every "public destinations only" egress rule in this repository is an
 ``ipBlock`` of ``0.0.0.0/0`` minus the private, loopback, link-local, CGNAT,
 multicast, and reserved blocks. The exclusion list IS the rule: a shorter list
 is a wider allow, and one dropped entry hands a rule whose only reason to exist
-is Sigstore/GHCR or the tunnel edge a LAN, a node, or a neighbouring namespace.
+is public HTTPS or the tunnel edge a LAN, a node, or a neighbouring namespace.
 
-The set is written out in four places that CANNOT reference each other:
-
-* ``policies/conftest/kubernetes.rego`` — the named ``private_and_reserved_ranges``
-  set, the one definition every rego rule now compares against. Its own comment
-  states the rule this battery enforces: "a set that exists twice is a set that
-  gets widened once". It existed twice anyway — ``valid_flux_public_https_rule``
-  retyped all eight literals inline — which is issue #138 F6 and is fixed in
-  the same change as this battery.
-* ``policies/kyverno/require-exact-tenant-networking.yaml`` — a CEL expression.
-  CEL cannot import rego, so the literal list is unavoidable there; what is
-  avoidable is its drifting from the rego unnoticed.
-* the two installer batteries' constants, which read the committed manifests
-  DIRECTLY and deliberately do not consult the policy engines: a widening
-  applied to a rego arm and to the manifest together passes conftest by
-  construction (that was reproduced on this repository), so those pins are the
-  independent reading that stays red. Their independence is authorial, not
-  numeric — nothing about it requires them to disagree, and a divergence is
-  drift rather than review.
-
-This battery adds no fifth copy of the numbers. It reads the rego definition
-and asserts the other readers equal it, so drift in any one of them fails here
-and names the reader that moved.
+The set lives once in ``policies/conftest/kubernetes.rego`` and both reviewed
+rules must actively compare against it. Each consumer has a single-document
+fixture missing exactly one range, so structural wiring and hostile behavior
+are both pinned without an absent runtime engine.
 
 WHY THE BINDING IS PER RULE AND OVER COMMENT-STRIPPED TEXT
 ---------------------------------------------------------
@@ -44,7 +26,7 @@ which rule owns which comparison, and raw text cannot tell code from prose.
 So the reviewed consumers are named individually, their bodies are extracted,
 comments are stripped, and each body must contain exactly one ACTIVE
 comparison. A dropped or commented-out comparison fails by rule name. The
-count is not hard-coded either: no active comparison may live outside the three
+count is not hard-coded either: no active comparison may live outside the two
 reviewed bodies, so a fourth consumer has to be registered here rather than
 inheriting an unexamined pass.
 
@@ -58,13 +40,24 @@ from __future__ import annotations
 import re
 import unittest
 
-from . import test_flux_install_contract as flux_battery
-from . import test_kyverno_install_contract as kyverno_battery
 from .support import REPO_ROOT
 
 REGO = REPO_ROOT / "policies" / "conftest" / "kubernetes.rego"
-TENANT_NETWORKING_POLICY = (
-    REPO_ROOT / "policies" / "kyverno" / "require-exact-tenant-networking.yaml"
+
+# Outside anchor for the exact threat boundary. If this were derived from the
+# policy, both reviewed consumers and their hostile fixtures could shrink with
+# the definition while the whole battery stayed green.
+EXPECTED_PRIVATE_AND_RESERVED_RANGES = frozenset(
+    {
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    }
 )
 
 # `private_and_reserved_ranges := { ... }` — the whole brace group, then the
@@ -72,8 +65,6 @@ TENANT_NETWORKING_POLICY = (
 REGO_DEFINITION = re.compile(
     r"private_and_reserved_ranges\s*:=\s*\{(?P<body>[^}]*)\}", re.DOTALL
 )
-# `... ipBlock.except == ['10.0.0.0/8', ...]` in the CEL expression.
-CEL_EXCLUSIONS = re.compile(r"ipBlock\.except\s*==\s*\[(?P<body>[^\]]*)\]")
 QUOTED = re.compile(r"""['"]([^'"]+)['"]""")
 # One comprehension over an `except` list compared to the canonical set. The
 # operand is captured rather than assumed so a comparison against some OTHER
@@ -83,12 +74,9 @@ EXCEPT_COMPARISON = re.compile(
 )
 
 # The reviewed consumers, by the exact rule head that opens each body, with the
-# discriminator that picks one body when a head is defined more than once
-# (`valid_admission_policy` has four bodies, one per admission flow).
 REVIEWED_CONSUMERS = (
     ("valid_public_edge_rule(rule)", None),
     ("valid_flux_public_https_rule(rule)", None),
-    ("valid_admission_policy", '"kyverno-public-https"'),
 )
 
 # Each consumer's behavioural killer: a deny fixture that is the reviewed shape
@@ -102,7 +90,6 @@ CONSUMER_FIXTURES = {
     "valid_flux_public_https_rule(rule)": (
         "flux-egress-04-public-allow-drops-a-private-range"
     ),
-    "valid_admission_policy": "admission-public-https-drops-a-private-range",
 }
 
 
@@ -213,7 +200,13 @@ class ExcludedRangeSetParityTests(unittest.TestCase):
             self.reviewed,
             sorted(self.reviewed),
             "the reviewed order is the order the rendered manifests use and "
-            "the order the CEL list is compared against",
+            "the order the hostile fixtures teach",
+        )
+        self.assertEqual(
+            set(self.reviewed),
+            set(EXPECTED_PRIVATE_AND_RESERVED_RANGES),
+            "the named exclusion set changed the exact private, loopback, "
+            "link-local, CGNAT, multicast, or reserved boundary",
         )
 
     def test_the_rego_states_each_range_exactly_once(self):
@@ -330,46 +323,6 @@ class ExcludedRangeSetParityTests(unittest.TestCase):
                     "only reason it can be rejected is this rule's "
                     "comparison; it drops {}".format(missing),
                 )
-
-    def test_the_kyverno_cel_list_equals_the_rego_set(self):
-        """Two engines that exclude different ranges enforce two contracts.
-
-        CEL compares lists by order as well as by membership, so the equality
-        asserted here is the exact list the admission engine demands.
-        """
-
-        match = CEL_EXCLUSIONS.search(
-            TENANT_NETWORKING_POLICY.read_text(encoding="utf-8")
-        )
-        self.assertIsNotNone(
-            match,
-            "the tunnel-edge egress rule no longer pins an excluded-range "
-            "list at all",
-        )
-        self.assertEqual(
-            QUOTED.findall(match.group("body")),
-            self.reviewed,
-            "the Kyverno CEL exclusion list drifted from the reviewed rego "
-            "set; whichever engine is installed would enforce the narrower "
-            "one",
-        )
-
-    def test_the_installer_batteries_pin_the_same_set(self):
-        """The manifest-reading pins are independent, not divergent."""
-
-        self.assertEqual(
-            list(flux_battery.EXPECTED_EXCLUDED_RANGES),
-            self.reviewed,
-            "the Flux install battery's excluded ranges drifted from the "
-            "reviewed rego set",
-        )
-        self.assertEqual(
-            list(kyverno_battery.AdmissionNetworkShapeTests.EXCLUDED_RANGES),
-            self.reviewed,
-            "the admission network-shape battery's excluded ranges drifted "
-            "from the reviewed rego set",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

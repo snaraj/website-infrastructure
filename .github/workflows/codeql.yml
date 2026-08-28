@@ -30,13 +30,15 @@ jobs:
         include:
           - language: python
             build-mode: none
+          - language: go
+            build-mode: autobuild
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # CodeQL installs a Go compiler tracing wrapper during initialization.
-      # Select the exact toolchain first so setup-go cannot replace that wrapper.
+      # Go autobuild discovers the root module; Python requires no build. This
+      # keeps CodeQL's compiler tracing inside its own pinned action boundary.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:

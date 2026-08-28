@@ -3,7 +3,6 @@
 import base64
 import contextlib
 import io
-import re
 import shutil
 import tempfile
 import textwrap
@@ -19,13 +18,9 @@ TRANSITION = load_script("validate_release_transition.py")
 RELEASE_FILES = (
     ".sops.yaml",
     "kubernetes/websites/naranjo-online/release.yaml",
-    "kubernetes/reconciliation/naranjo-online.yaml",
     "kubernetes/websites/lidersea-com/release.yaml",
-    "kubernetes/reconciliation/lidersea-com.yaml",
     "kubernetes/platform/cloudflare-public/release/release.yaml",
     "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
-    "kubernetes/reconciliation/platform-services.yaml",
-    "kubernetes/reconciliation/admission.yaml",
 ) + tuple(
     path.as_posix()
     for path in sorted(TRANSITION.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
@@ -54,23 +49,13 @@ SYNTHETIC_AGE_BODY = "\n".join(
     )
 )
 SITE_FILES = {
-    "naranjo-online": (
-        "kubernetes/websites/naranjo-online/release.yaml",
-        "kubernetes/reconciliation/naranjo-online.yaml",
-        "1",
-    ),
-    "lidersea-com": (
-        "kubernetes/websites/lidersea-com/release.yaml",
-        "kubernetes/reconciliation/lidersea-com.yaml",
-        "2",
-    ),
+    "naranjo-online": "kubernetes/websites/naranjo-online/release.yaml",
+    "lidersea-com": "kubernetes/websites/lidersea-com/release.yaml",
 }
 
 
 class ReleaseTransitionTests(unittest.TestCase):
-    """Reject unsafe mixtures while allowing staged promotion and rollback."""
-
-    DIGEST_LINE = re.compile(r"(?m)^      digest: sha256:[0-9a-f]{64}$")
+    """Reject unsafe mixtures while allowing staged activation and rollback."""
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -85,44 +70,15 @@ class ReleaseTransitionTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def normalize_scaffold_baseline(self):
-        """Pin every copied site file to the canonical pre-promotion baseline.
+        """Suspend the site HelmReleases; direct reconcilers remain active."""
 
-        The live repository legitimately moves between scaffold and
-        transition states as reviewed digest promotions land (the runbook's
-        staged flow), while this battery exercises transition MECHANICS from
-        one canonical starting point. Normalizing the copies — rather than
-        assuming the live tree's phase — keeps every mutation below
-        applicable on scaffold, transition, and release trees alike; the
-        live tree's own safety pin stays in
-        test_validate_release_state.StrictReleaseStateTests.
-        """
-
-        for release, parent, _ in SITE_FILES.values():
-            release_path = self.root / release
-            text = release_path.read_text(encoding="utf-8")
-            text = text.replace(
-                "    deploymentReady: true\n", "    deploymentReady: false\n"
-            )
-            text, digest_lines = self.DIGEST_LINE.subn(
-                "      digest: " + TRANSITION.STATE.ZERO_DIGEST, text
-            )
-            self.assertEqual(digest_lines, 1, release)
-            self.assertEqual(
-                text.count("    deploymentReady: false\n"), 1, release
-            )
-            with release_path.open(
-                "w", encoding="utf-8", newline="\n"
-            ) as output:
+        for relative in SITE_FILES.values():
+            path = self.root / relative
+            text = path.read_text(encoding="utf-8")
+            text = text.replace("  suspend: false\n", "  suspend: true\n")
+            self.assertEqual(text.count("  suspend: true\n"), 1, relative)
+            with path.open("w", encoding="utf-8", newline="\n") as output:
                 output.write(text)
-            for relative in (release, parent):
-                path = self.root / relative
-                text = path.read_text(encoding="utf-8")
-                text = text.replace("  suspend: false\n", "  suspend: true\n")
-                self.assertEqual(text.count("  suspend: true\n"), 1, relative)
-                with path.open(
-                    "w", encoding="utf-8", newline="\n"
-                ) as output:
-                    output.write(text)
 
     def replace_once(self, relative, before, after):
         path = self.root / relative
@@ -136,22 +92,8 @@ class ReleaseTransitionTests(unittest.TestCase):
         after = "  suspend: true\n" if suspended else "  suspend: false\n"
         self.replace_once(relative, before, after)
 
-    def promote_site(self, name):
-        release, _, digit = SITE_FILES[name]
-        self.replace_once(
-            release, "    deploymentReady: false\n", "    deploymentReady: true\n"
-        )
-        self.replace_once(
-            release,
-            "      digest: {}\n".format(TRANSITION.STATE.ZERO_DIGEST),
-            "      digest: sha256:{}\n".format(digit * 64),
-        )
-
     def activate_site(self, name):
-        release, parent, _ = SITE_FILES[name]
-        self.promote_site(name)
-        self.set_suspended(release, False)
-        self.set_suspended(parent, False)
+        self.set_suspended(SITE_FILES[name], False)
 
     def configure_cloudflare_revision(self, *, sites=None):
         """Resolve each named connector's own revision (default: all of them).
@@ -225,115 +167,73 @@ class ReleaseTransitionTests(unittest.TestCase):
         self.configure_cloudflare_revision()
         self.write_cloudflare_secret()
 
-    def activate_admission_and_platform(self):
-        self.set_suspended("kubernetes/reconciliation/admission.yaml", False)
-        self.set_suspended(
-            "kubernetes/reconciliation/platform-services.yaml", False
-        )
-
-    def make_full_release(self):
-        self.activate_admission_and_platform()
+    def activate_both_sites(self):
         for site in SITE_FILES:
             self.activate_site(site)
-        self.configure_cloudflare()
-        self.set_suspended(
-            "kubernetes/platform/cloudflare-public/release/release.yaml", False
-        )
 
-    def test_exact_initial_state_is_scaffold(self):
+    def test_exact_staged_state_is_a_direct_reconciliation_transition(self):
         plan = TRANSITION.classify(self.root)
-        self.assertEqual(plan.mode, "scaffold")
+        self.assertEqual(plan.mode, "transition")
         self.assertEqual(
             (plan.naranjo_online, plan.lidersea_com, plan.cloudflare_public),
-            ("initial", "initial", "initial"),
+            ("staged", "staged", "initial"),
         )
-        self.assertFalse(plan.any_website_active)
+        self.assertTrue(plan.any_website_active)
+        self.assertTrue(plan.any_workload_active)
+        self.assertFalse(plan.naranjo_parent_suspended)
+        self.assertFalse(plan.lidersea_parent_suspended)
 
-    def test_single_promoted_suspended_site_is_safe_transition(self):
-        self.promote_site("naranjo-online")
+    def test_extra_site_value_is_rejected(self):
+        self.replace_once(
+            SITE_FILES["naranjo-online"],
+            "    deploymentReady: true\n",
+            "    deploymentReady: true\n    image:\n      digest: sha256:"
+            + ("a" * 64)
+            + "\n",
+        )
+        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
+            TRANSITION.classify(self.root)
+
+    def test_staged_sites_keep_the_direct_safety_envelope(self):
+        """A direct Kustomization stays active while its HelmRelease is staged."""
+
         plan = TRANSITION.classify(self.root)
         self.assertEqual(plan.mode, "transition")
         self.assertEqual(plan.naranjo_online, "staged")
-        self.assertEqual(plan.lidersea_com, "initial")
-
-    def test_initial_site_with_active_parent_is_transition_not_scaffold(self):
-        """An outer-only resume step must never be mislabeled fully inert."""
-
-        _, parent, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(parent, False)
-        plan = TRANSITION.classify(self.root)
-        self.assertEqual(plan.mode, "transition")
-        self.assertEqual(plan.naranjo_online, "initial")
         self.assertTrue(plan.any_website_active)
         self.assertTrue(plan.any_workload_active)
 
-    def test_complete_active_state_is_release(self):
-        self.make_full_release()
+    def test_both_active_sites_remain_outside_the_cloudflare_loop(self):
+        self.activate_both_sites()
         plan = TRANSITION.classify(self.root)
-        self.assertEqual(plan.mode, "release")
+        self.assertEqual(plan.mode, "transition")
+        self.assertEqual(
+            (plan.naranjo_online, plan.lidersea_com, plan.cloudflare_public),
+            ("active", "active", "initial"),
+        )
+        self.assertTrue(plan.platform_suspended)
         self.assertTrue(plan.any_website_active)
 
-    def test_suspending_one_promoted_site_from_release_is_safe_transition(self):
-        self.make_full_release()
-        release, parent, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, True)
-        self.set_suspended(parent, True)
+    def test_committed_sites_are_active_without_an_admission_dependency(self):
+        """The safe live bridge has no retired controller prerequisite."""
+
+        plan = TRANSITION.classify(REPO_ROOT)
+        self.assertEqual(plan.mode, "transition")
+        self.assertEqual(
+            (plan.naranjo_online, plan.lidersea_com, plan.cloudflare_public),
+            ("active", "active", "initial"),
+        )
+        self.assertTrue(plan.platform_suspended)
+
+    def test_suspending_one_active_site_is_a_safe_transition(self):
+        self.activate_both_sites()
+        self.set_suspended(SITE_FILES["naranjo-online"], True)
         plan = TRANSITION.classify(self.root)
         self.assertEqual(plan.mode, "transition")
         self.assertEqual(plan.naranjo_online, "staged")
         self.assertEqual(plan.lidersea_com, "active")
 
-    def test_rollback_suspends_inner_release_before_parent(self):
-        """The parent must remain active long enough to apply HR suspension."""
-
-        self.make_full_release()
-        release, parent, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, True)
-        intermediate = TRANSITION.classify(self.root)
-        self.assertEqual(intermediate.mode, "transition")
-        self.assertEqual(intermediate.naranjo_online, "staged")
-        self.assertFalse(intermediate.naranjo_parent_suspended)
-        self.assertTrue(intermediate.any_website_active)
-
-        self.set_suspended(parent, True)
-        frozen = TRANSITION.classify(self.root)
-        self.assertEqual(frozen.mode, "transition")
-        self.assertEqual(frozen.naranjo_online, "staged")
-
-    def test_resume_activates_parent_before_inner_release(self):
-        """A staged digest remains inert while its parent is resumed first."""
-
-        self.make_full_release()
-        release, parent, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, True)
-        self.set_suspended(parent, True)
-
-        self.set_suspended(parent, False)
-        intermediate = TRANSITION.classify(self.root)
-        self.assertEqual(intermediate.mode, "transition")
-        self.assertEqual(intermediate.naranjo_online, "staged")
-        self.assertFalse(intermediate.naranjo_parent_suspended)
-        self.assertTrue(intermediate.any_website_active)
-
-        self.set_suspended(release, False)
-        resumed = TRANSITION.classify(self.root)
-        self.assertEqual(resumed.mode, "release")
-
-    def test_unsuspended_sentinel_site_is_rejected(self):
-        release, parent, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, False)
-        self.set_suspended(parent, False)
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_active_release_below_suspended_parent_is_rejected(self):
-        release, _, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, False)
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_active_unresolved_tunnel_is_rejected(self):
-        self.activate_admission_and_platform()
+    def test_cloudflare_cannot_enter_the_selected_site_loop(self):
         self.set_suspended(
             "kubernetes/platform/cloudflare-public/release/release.yaml", False
         )
@@ -345,9 +245,11 @@ class ReleaseTransitionTests(unittest.TestCase):
         not a safe intermediate: each Tunnel's revision is its own, so a mixed
         pair means a rotation or staging step was left half done."""
 
-        for site in TRANSITION.STATE.PUBLIC_CONNECTOR_SITES:
+        for index, site in enumerate(TRANSITION.STATE.PUBLIC_CONNECTOR_SITES):
             with self.subTest(configured=site):
-                self.setUp()
+                if index:
+                    self.tearDown()
+                    self.setUp()
                 self.configure_cloudflare_revision(sites=(site,))
                 self.write_cloudflare_secret()
                 with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
@@ -548,54 +450,37 @@ class ReleaseTransitionTests(unittest.TestCase):
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
-    def test_active_site_requires_active_admission(self):
+    def test_active_site_is_independent_of_suspended_platform_services(self):
         self.activate_site("naranjo-online")
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_active_site_requires_active_platform_services(self):
-        self.set_suspended("kubernetes/reconciliation/admission.yaml", False)
-        self.activate_site("naranjo-online")
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_active_platform_with_suspended_connector_is_allowed(self):
-        self.activate_admission_and_platform()
         plan = TRANSITION.classify(self.root)
         self.assertEqual(plan.mode, "transition")
+        self.assertEqual(plan.naranjo_online, "active")
+        self.assertTrue(plan.platform_suspended)
+        self.assertTrue(plan.any_website_active)
+        self.assertTrue(plan.any_workload_active)
+
+    def test_direct_sites_have_no_platform_services_prerequisite(self):
+        self.activate_both_sites()
+        plan = TRANSITION.classify(self.root)
+        self.assertEqual(plan.mode, "transition")
+        self.assertEqual((plan.naranjo_online, plan.lidersea_com), ("active", "active"))
         self.assertEqual(plan.cloudflare_public, "initial")
+        self.assertTrue(plan.platform_suspended)
         self.assertTrue(plan.any_workload_active)
 
-    def test_active_admission_alone_enters_the_workload_safety_envelope(self):
-        self.set_suspended("kubernetes/reconciliation/admission.yaml", False)
-        plan = TRANSITION.classify(self.root)
-        self.assertEqual(plan.mode, "transition")
-        self.assertTrue(plan.any_workload_active)
-
-    def test_active_connector_without_active_site_is_a_workload_transition(self):
-        self.activate_admission_and_platform()
-        self.configure_cloudflare()
-        self.set_suspended(
-            "kubernetes/platform/cloudflare-public/release/release.yaml", False
-        )
-        plan = TRANSITION.classify(self.root)
-        self.assertEqual(plan.mode, "transition")
-        self.assertEqual(plan.cloudflare_public, "active")
-        self.assertFalse(plan.any_website_active)
-        self.assertTrue(plan.any_workload_active)
-
-    def test_extra_admission_field_is_rejected(self):
-        self.replace_once(
-            "kubernetes/reconciliation/admission.yaml",
-            "  wait: true\n",
-            "  wait: true\n  unexpected: false\n",
-        )
+    def test_any_aggregate_reconciliation_manifest_is_rejected(self):
+        aggregate = self.root / "kubernetes/reconciliation/admission.yaml"
+        aggregate.parent.mkdir(parents=True)
+        aggregate.write_text("kind: Kustomization\n", encoding="utf-8")
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 
     def test_cli_failure_is_generic_and_does_not_disclose_paths(self):
-        release, _, _ = SITE_FILES["naranjo-online"]
-        self.set_suspended(release, False)
+        self.replace_once(
+            SITE_FILES["naranjo-online"],
+            "    deploymentReady: true\n",
+            "    deploymentReady: true\n    unreviewed: true\n",
+        )
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -614,18 +499,19 @@ class ReleaseTransitionTests(unittest.TestCase):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             status = TRANSITION.main(
-                ["--root", str(self.root), "plan", "--expect-mode", "scaffold"]
+                ["--root", str(self.root), "plan", "--expect-mode", "transition"]
             )
         self.assertEqual(status, 0)
         self.assertEqual(
             stdout.getvalue().splitlines(),
             [
-                "mode=scaffold",
-                "naranjo-online=initial",
-                "lidersea-com=initial",
+                "mode=transition",
+                "naranjo-online=staged",
+                "lidersea-com=staged",
                 "cloudflare-public=initial",
-                "any-website-active=false",
-                "any-workload-active=false",
+                "platform-services-suspended=true",
+                "any-website-active=true",
+                "any-workload-active=true",
             ],
         )
 

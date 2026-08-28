@@ -97,12 +97,13 @@ name during reconciliation, with changes observed on interval, retry, source
 event, or manual reconciliation. Helm permits only inline values and the local
 release namespace; external inputs and namespace redirects are rejected.
 
-The root sync objects live in
-[`kubernetes/flux-system/gotk-sync.yaml`](../../kubernetes/flux-system/gotk-sync.yaml).
-They are not part of the 30-object render. With no Flux custom resource to
-watch, the controllers elect leaders, establish watches, and idle. Both public
-sites continue through their independent outbound Cloudflare Tunnels whether
-Flux exists or not.
+The deliberately non-applicable root-sync review template lives in
+[`kubernetes/flux-system/gotk-sync.yaml.in`](../../kubernetes/flux-system/gotk-sync.yaml.in).
+It is not part of the 30-object controller render and cannot be applied as-is.
+The owner-attended #189 bootstrap renders the exact immutable-tag source and two
+site Kustomizations directly after the #141 prerequisite is terminal. Until that
+bootstrap, the controllers elect leaders, establish watches, and idle. Both
+public sites continue through their independent outbound Cloudflare Tunnels.
 
 ## Why the apply is ordered
 
@@ -177,10 +178,11 @@ Before any cluster-touching mode:
 6. stop if the CNI identity, controller prestate, Flux custom-resource prestate,
    or policy prestate differs from the reviewed plan.
 
-**Never apply `kubernetes/flux-system` — the parent root.** It carries
-`gotk-sync.yaml`, whose root reconciliation object has no `suspend`, enables
-pruning, and points at live desired state. Applying it can start reconciliation.
-The installer target is a constant and cannot be redirected to that root.
+**Never apply `kubernetes/flux-system` — the parent root.** Controller install
+and RBAC narrowing remain explicit protected transactions, while the #189 source
+and two `prune: false` site Kustomizations are created only by their reviewed
+owner-attended bootstrap. The installer target is a constant and cannot be
+redirected to that root.
 
 No step in this runbook authorizes a Flux custom resource, unsuspend, SOPS/age
 ceremony, Secret, public route, website rollout, NodePort, LoadBalancer,
@@ -493,7 +495,7 @@ not be a bounded validation.
 After any authorized live step, repeat section A. The final evidence must show:
 
 - no validation Namespace or canary Pod;
-- no added, deleted, or changed Flux custom resource and no changed `suspend`
+- no added, deleted, or changed Flux custom resource and no `suspend` changes
   field relative to the captured prestate;
 - no Secret/SOPS/Tunnel/public-route/website change;
 - no unexpected cluster-scoped object or RBAC widening;
@@ -610,7 +612,7 @@ wrong: the gap between the reviewed desired state and the live install stays
 exactly as wide the minute after this merges as the minute before, and it
 closes only when the separate reviewed in-place transaction executes it.
 
-Kyverno is not installed, so repository policies are CI assertions rather than
-live admission. The per-site SOPS/age token ceremonies and any reconciliation
-unsuspend also remain blocked. A green render, green CI, or healthy idle
-controller is evidence, never authorization.
+Kyverno is retired, not merely uninstalled. The retained Conftest policies are
+pre-merge CI controls rather than live admission. The per-site SOPS/age token
+ceremonies and any reconciliation unsuspend also remain blocked. A green
+render, green CI, or healthy idle controller is evidence, never authorization.

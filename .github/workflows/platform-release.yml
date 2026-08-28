@@ -122,9 +122,13 @@ jobs:
       format('PASS:{0}:{1}', github.repository,
       github.event.workflow_run.head_sha)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: write
+      id-token: write
+      packages: write
+    env:
+      SELECTOR_IMAGE: ghcr.io/snaraj/website-infrastructure/platform-release-selector
     steps:
       - name: Check out exact completed main SHA
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -157,11 +161,347 @@ jobs:
           printf 'base_sha=%s\nbase_tag=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
             "${base_sha}" "${base_tag}" "${source_sha}" "${version}" \
             "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Install checksum-verified release tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Select the immutable selector image lineage
+        id: selector-image-state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ steps.release.outputs.base_sha }}
+          BASE_TAG: ${{ steps.release.outputs.base_tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          current="${RUNNER_TEMP}/current-platform-release.json"
+          predecessor="${RUNNER_TEMP}/predecessor-platform-release.json"
+          current_identity="${RUNNER_TEMP}/current-platform-release-identity.json"
+          current_bundle="${RUNNER_TEMP}/current-platform-release-identity.sigstore.json"
+          predecessor_identity="${RUNNER_TEMP}/predecessor-platform-release-identity.json"
+          predecessor_bundle="${RUNNER_TEMP}/predecessor-platform-release-identity.sigstore.json"
+          legacy_predecessor="${RUNNER_TEMP}/legacy-platform-predecessor.json"
+          legacy_main_runs="${RUNNER_TEMP}/legacy-platform-main-runs.json"
+          legacy_platform_runs="${RUNNER_TEMP}/legacy-platform-release-runs.json"
+          legacy_main_run="${RUNNER_TEMP}/legacy-platform-main-run.json"
+          legacy_platform_run="${RUNNER_TEMP}/legacy-platform-release-run.json"
+          current_ref="${RUNNER_TEMP}/current-platform-tag-ref.json"
+          current_tag="${RUNNER_TEMP}/current-platform-tag.json"
+          predecessor_ref="${RUNNER_TEMP}/predecessor-platform-tag-ref.json"
+          predecessor_tag="${RUNNER_TEMP}/predecessor-platform-tag.json"
+          canonical_main_run="${RUNNER_TEMP}/canonical-platform-main-run.json"
+          canonical_platform_run="${RUNNER_TEMP}/canonical-platform-release-run.json"
+          identity_name='platform-release-identity.v1.json'
+          bundle_name='platform-release-identity.v1.json.sigstore.json'
+          identity_subject="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/platform-release.yml@refs/heads/main"
+          identity_issuer='https://token.actions.githubusercontent.com'
+          download_asset() {
+            local release_record="$1" name="$2" output="$3" count="$4"
+            local asset_id expected
+            if [ "${count}" = 1 ]; then
+              expected="[\"${identity_name}\"]"
+            else
+              test "${count}" = 2
+              expected="[\"${identity_name}\",\"${bundle_name}\"]"
+            fi
+            jq -e --argjson count "${count}" --argjson expected "${expected}" '
+              (.assets | type == "array") and (.assets | length == $count) and
+              (([.assets[].name] | sort) == ($expected | sort))' \
+              "${release_record}" >/dev/null
+            asset_id="$(jq -er --arg name "${name}" '
+              [.assets[] | select(.name == $name)] |
+              select(length == 1) | .[0].id |
+              select(type == "number" and . > 0)' "${release_record}")"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${output}" \
+              --header 'Accept: application/octet-stream' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/releases/assets/${asset_id}"
+          }
+          fetch_tag() {
+            local tag="$1" source_sha="$2" ref_output="$3" tag_output="$4"
+            local object_sha
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${ref_output}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/git/ref/tags/${tag}"
+            object_sha="$(jq -er --arg ref "refs/tags/${tag}" '
+              select(.ref == $ref and .object.type == "tag") |
+              .object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
+              "${ref_output}")"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${tag_output}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/git/tags/${object_sha}"
+            jq -e --arg tag "${tag}" --arg object "${object_sha}" \
+              --arg sha "${source_sha}" '
+              .sha == $object and .tag == $tag and
+              .object == {sha:$sha,type:"commit"}' "${tag_output}" >/dev/null
+            printf '%s\n' "${object_sha}"
+          }
+          fetch_run_records() {
+            local identity="$1" main_output="$2" platform_output="$3"
+            local main_id main_attempt platform_id platform_attempt
+            main_id="$(jq -er '.main_ci.run_id | select(type == "number" and . > 0)' "${identity}")"
+            main_attempt="$(jq -er '.main_ci.run_attempt | select(type == "number" and . > 0)' "${identity}")"
+            platform_id="$(jq -er '.platform_release.run_id | select(type == "number" and . > 0)' "${identity}")"
+            platform_attempt="$(jq -er '.platform_release.run_attempt | select(type == "number" and . > 0)' "${identity}")"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${main_output}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/runs/${main_id}/attempts/${main_attempt}"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${platform_output}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/runs/${platform_id}/attempts/${platform_attempt}"
+          }
+          verify_canonical_identity() {
+            local release_record="$1" identity="$2" bundle="$3"
+            local tag="$4" source_sha="$5" tag_object="$6" tree_sha="$7"
+            local build_sha digest
+            env -u COSIGN_REPOSITORY cosign verify-blob \
+              --bundle "${bundle}" \
+              --certificate-identity "${identity_subject}" \
+              --certificate-oidc-issuer "${identity_issuer}" \
+              "${identity}" >/dev/null
+            build_sha="$(jq -er '.selector.provenance.source_sha |
+              select(type == "string" and test("^[0-9a-f]{40}$"))' \
+              "${identity}")"
+            digest="$(python3 -I -B scripts/ci/platform_release_contract.py \
+              selector-image-from-release --release-json "${release_record}" \
+              --identity "${identity}" --bundle "${bundle}" --tag "${tag}" \
+              --source-sha "${source_sha}" --tag-object-sha "${tag_object}" \
+              --source-tree-sha "${tree_sha}" \
+              --selector-build-sha "${build_sha}")"
+            printf '%s %s\n' "${digest}" "${build_sha}"
+          }
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${current}" \
+            --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/releases/tags/${TAG}")"
+          if [ "${status}" = 200 ]; then
+            current_tag_object="$(fetch_tag "${TAG}" "${SOURCE_SHA}" \
+              "${current_ref}" "${current_tag}")"
+            current_tree="$(git rev-parse "${SOURCE_SHA}^{tree}")"
+            download_asset "${current}" "${identity_name}" "${current_identity}" 2
+            download_asset "${current}" "${bundle_name}" "${current_bundle}" 2
+            read -r digest selector_build_sha < <(verify_canonical_identity \
+              "${current}" "${current_identity}" "${current_bundle}" \
+              "${TAG}" "${SOURCE_SHA}" "${current_tag_object}" \
+              "${current_tree}")
+            fetch_run_records "${current_identity}" "${canonical_main_run}" \
+              "${canonical_platform_run}"
+            python3 -I -B scripts/ci/platform_release_contract.py \
+              identity-run-records --identity "${current_identity}" \
+              --main-run-json "${canonical_main_run}" \
+              --platform-run-json "${canonical_platform_run}"
+            printf 'state=reuse\ndigest=%s\nbuild_sha=%s\n' \
+              "${digest}" "${selector_build_sha}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          test "${status}" = 404
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${predecessor}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/releases/tags/${BASE_TAG}"
+          predecessor_tag_object="$(fetch_tag "${BASE_TAG}" "${BASE_SHA}" \
+            "${predecessor_ref}" "${predecessor_tag}")"
+          if [ "${BASE_TAG}" != v0.1.40 ] || [ "${TAG}" != v0.1.41 ]; then
+            predecessor_tree="$(git rev-parse "${BASE_SHA}^{tree}")"
+            download_asset "${predecessor}" "${identity_name}" \
+              "${predecessor_identity}" 2
+            download_asset "${predecessor}" "${bundle_name}" \
+              "${predecessor_bundle}" 2
+            read -r digest selector_build_sha < <(verify_canonical_identity \
+              "${predecessor}" "${predecessor_identity}" \
+              "${predecessor_bundle}" "${BASE_TAG}" "${BASE_SHA}" \
+              "${predecessor_tag_object}" "${predecessor_tree}")
+            fetch_run_records "${predecessor_identity}" "${canonical_main_run}" \
+              "${canonical_platform_run}"
+            python3 -I -B scripts/ci/platform_release_contract.py \
+              identity-run-records --identity "${predecessor_identity}" \
+              --main-run-json "${canonical_main_run}" \
+              --platform-run-json "${canonical_platform_run}"
+            printf 'state=reuse\ndigest=%s\nbuild_sha=%s\n' \
+              "${digest}" "${selector_build_sha}" >> "${GITHUB_OUTPUT}"
+          else
+            # v0.1.40 is the sole immutable zero-asset predecessor. Derive its
+            # exact successful attempts from filtered REST listings; v0.1.41
+            # builds the first selector and canonical signed identity assets.
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${legacy_main_runs}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/workflows/pull-request.yml/runs?branch=main&event=push&head_sha=${BASE_SHA}&status=success&per_page=100"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${legacy_platform_runs}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/workflows/platform-release.yml/runs?branch=main&event=workflow_run&head_sha=${BASE_SHA}&status=success&per_page=100"
+            python3 -I -B scripts/ci/validate_platform_predecessor.py \
+              --repository . \
+              --base-tag "${BASE_TAG}" --target-tag "${TAG}" \
+              --release-json "${predecessor}" \
+              --ref-json "${predecessor_ref}" \
+              --tag-json "${predecessor_tag}" \
+              --main-runs-json "${legacy_main_runs}" \
+              --platform-runs-json "${legacy_platform_runs}" \
+              --emit > "${legacy_predecessor}"
+            test "$(jq -er '.source.merge_sha' "${legacy_predecessor}")" = \
+              "${BASE_SHA}"
+            test "$(jq -er '.tag.object_sha' "${legacy_predecessor}")" = \
+              "${predecessor_tag_object}"
+            legacy_main_id="$(jq -er '.main_ci.run_id' "${legacy_predecessor}")"
+            legacy_main_attempt="$(jq -er '.main_ci.run_attempt' "${legacy_predecessor}")"
+            legacy_platform_id="$(jq -er \
+              '.platform_release.run_id' "${legacy_predecessor}")"
+            legacy_platform_attempt="$(jq -er \
+              '.platform_release.run_attempt' "${legacy_predecessor}")"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${legacy_main_run}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/runs/${legacy_main_id}/attempts/${legacy_main_attempt}"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --output "${legacy_platform_run}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}/actions/runs/${legacy_platform_id}/attempts/${legacy_platform_attempt}"
+            python3 -I -B scripts/ci/validate_platform_predecessor.py \
+              --repository . \
+              --base-tag "${BASE_TAG}" --target-tag "${TAG}" \
+              --release-json "${predecessor}" \
+              --ref-json "${predecessor_ref}" \
+              --tag-json "${predecessor_tag}" \
+              --main-runs-json "${legacy_main_runs}" \
+              --platform-runs-json "${legacy_platform_runs}" \
+              --main-run-json "${legacy_main_run}" \
+              --platform-run-json "${legacy_platform_run}"
+            printf 'state=build\ndigest=\nbuild_sha=%s\n' \
+              "${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Set up Buildx for the first selector image
+        if: steps.selector-image-state.outputs.state == 'build'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GHCR for the first selector image
+        if: steps.selector-image-state.outputs.state == 'build'
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          printf '%s' "${GHCR_PASSWORD}" |
+          docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+      - name: Build and publish the static ARM64 selector by digest
+        if: steps.selector-image-state.outputs.state == 'build'
+        id: selector-build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: https://github.com/snaraj/website-infrastructure.git#${{ steps.release.outputs.source_sha }}
+          file: cmd/platform-release-selector/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.SELECTOR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=https://github.com/snaraj/website-infrastructure
+            org.opencontainers.image.revision=${{ steps.release.outputs.source_sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          provenance: mode=max,version=v1
+          sbom: true
+      - name: Sign and attest the first selector digest
+        if: steps.selector-image-state.outputs.state == 'build'
+        env:
+          DIGEST: ${{ steps.selector-build.outputs.digest }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/platform-release.yml@refs/heads/main"
+          issuer='https://token.actions.githubusercontent.com'
+          predicate="${RUNNER_TEMP}/selector-provenance.json"
+          source_uri="https://github.com/snaraj/website-infrastructure.git#${SOURCE_SHA}"
+          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --ignore-unfixed=false --timeout 10m \
+            --cache-dir "${RUNNER_TEMP}/trivy-selector-cache" \
+            "${SELECTOR_IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${SELECTOR_IMAGE}@${DIGEST}" \
+            --format '{{ json (index .Provenance "linux/arm64").SLSA }}' \
+            > "${predicate}"
+          jq -e --arg source "${SOURCE_SHA}" --arg source_uri "${source_uri}" '
+            .buildDefinition as $definition |
+            $definition.buildType ==
+              "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md" and
+            $definition.externalParameters.configSource == {
+              "uri": $source_uri,
+              "digest": {"sha1": $source},
+              "path": "cmd/platform-release-selector/Dockerfile"
+            } and
+            .runDetails.metadata.buildkit_completeness.resolvedDependencies == true and
+            .runDetails.metadata.buildkit_hermetic == true
+          ' "${predicate}" >/dev/null
+          cosign sign --yes "${SELECTOR_IMAGE}@${DIGEST}"
+          cosign attest --yes --predicate "${predicate}" \
+            --type 'https://slsa.dev/provenance/v1' \
+            "${SELECTOR_IMAGE}@${DIGEST}"
+          cosign verify --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${SELECTOR_IMAGE}@${DIGEST}" >/dev/null
+          cosign verify-attestation --type slsaprovenance1 \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${SELECTOR_IMAGE}@${DIGEST}" >/dev/null
+      - name: Bind the selector digest used by release identity
+        id: selector-image
+        env:
+          BUILT_DIGEST: ${{ steps.selector-build.outputs.digest }}
+          CARRIED_DIGEST: ${{ steps.selector-image-state.outputs.digest }}
+          CARRIED_BUILD_SHA: ${{ steps.selector-image-state.outputs.build_sha }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          STATE: ${{ steps.selector-image-state.outputs.state }}
+        run: |
+          set -euo pipefail
+          case "${STATE}" in
+            build) digest="${BUILT_DIGEST}"; build_sha="${SOURCE_SHA}" ;;
+            reuse) digest="${CARRIED_DIGEST}"; build_sha="${CARRIED_BUILD_SHA}" ;;
+            *) exit 1 ;;
+          esac
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${build_sha}" =~ ^[0-9a-f]{40}$ ]]
+          printf 'digest=%s\nbuild_sha=%s\n' \
+            "${digest}" "${build_sha}" >> "${GITHUB_OUTPUT}"
       - name: Publish or verify exact immutable source release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE_SHA: ${{ steps.release.outputs.base_sha }}
           BASE_TAG: ${{ steps.release.outputs.base_tag }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          MAIN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SELECTOR_IMAGE_DIGEST: ${{ steps.selector-image.outputs.digest }}
+          SELECTOR_BUILD_SHA: ${{ steps.selector-image.outputs.build_sha }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |

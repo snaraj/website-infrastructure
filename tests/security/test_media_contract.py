@@ -56,7 +56,17 @@ class MediaContractTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     root = Path(directory).resolve()
                     root.joinpath(".sourceignore").write_text(
-                        "/*\n!/kubernetes/\n!/policies/kyverno/\n", encoding="utf-8"
+                        "/*\n"
+                        "!/.sourceignore\n"
+                        "!/kubernetes/\n"
+                        "/kubernetes/*\n"
+                        "!/kubernetes/websites/\n"
+                        "/kubernetes/websites/*\n"
+                        "!/kubernetes/websites/naranjo-online/\n"
+                        "!/kubernetes/websites/naranjo-online/**\n"
+                        "!/kubernetes/websites/lidersea-com/\n"
+                        "!/kubernetes/websites/lidersea-com/**\n",
+                        encoding="utf-8",
                     )
                     target = root / "kubernetes" / "websites" / "naranjo-online"
                     target.mkdir(parents=True)
@@ -90,15 +100,25 @@ class MediaContractTests(unittest.TestCase):
         # The OCI-image media ceiling moved to the site repositories with
         # their publishers; the platform Flux artifact bound stays here.
         sourceignore = (REPO_ROOT / ".sourceignore").read_text(encoding="utf-8")
-        for fragment in (
+        expected = (
             "/*",
+            "!/.sourceignore",
             "!/kubernetes/",
-            "!/policies/kyverno/",
-        ):
-            self.assertIn(fragment, sourceignore)
-        # Site charts arrive through their own GitRepository sources now; the
-        # platform artifact must not re-include any embedded website tree.
-        self.assertNotIn("websites/", sourceignore)
+            "/kubernetes/*",
+            "!/kubernetes/websites/",
+            "/kubernetes/websites/*",
+            "!/kubernetes/websites/naranjo-online/",
+            "!/kubernetes/websites/naranjo-online/**",
+            "!/kubernetes/websites/lidersea-com/",
+            "!/kubernetes/websites/lidersea-com/**",
+        )
+        self.assertEqual(
+            tuple(
+                line.strip() for line in sourceignore.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ),
+            expected,
+        )
 
 
 if __name__ == "__main__":

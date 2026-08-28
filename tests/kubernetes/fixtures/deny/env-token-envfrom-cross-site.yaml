@@ -1,8 +1,8 @@
 # The second door into the same credential. `envFrom.secretRef` injects
 # EVERY key of the named Secret with no key selector to bind, so a
 # per-key allowlist would have to reason about the Secret's contents,
-# which admission cannot see. Refused outright; the deployed connectors
-# declare no envFrom at all.
+# which manifest policy cannot inspect. Refused outright; the deployed
+# connectors declare no envFrom at all.
 #
 # ONE document per file, deliberately: the fixture runner asserts only that a
 # FILE is rejected, so pairing arms in one file would keep the file "rejected"

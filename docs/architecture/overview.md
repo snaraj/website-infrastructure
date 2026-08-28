@@ -53,8 +53,9 @@ is never a DNS origin and ports 22, 80, 443, and 6443 are not WAN-forwarded.
 
 Each frontend is compiled from Svelte into immutable assets and embedded into
 its own Go HTTP binary — in that site's standalone repository, which publishes
-the signed image this platform deploys by digest. Each release has its own image, chart, namespace,
-ServiceAccount, Service, HelmRelease, and digest-promotion path — and, per
+a signed chart embedding the exact digest-qualified image. Each release has its
+own image, chart, namespace, ServiceAccount, Service, HelmRelease, immutable
+chart-source digest pair, and separately receipted rollback path — and, per
 [ADR 0015](../adr/0015-per-site-tunnels.md), its own Cloudflare Tunnel,
 runtime token, and proxied apex CNAME, so the two sites share no edge object
 or failure domain. The services expose static content and health

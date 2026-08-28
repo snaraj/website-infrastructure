@@ -5,8 +5,10 @@
 This runbook implements issue #164. It changes source-release bookkeeping only:
 it grants no merge, tag, live-system, provider, cluster, deployment, or settings
 authority. The owner alone merges. GitHub Actions may create only the annotated
-platform source tag and immutable zero-asset Release after the exact protected-
-main checks and settings proofs pass.
+platform source tag and immutable Release with its exact signed identity asset
+pair after the protected-main checks and settings proofs pass. `v0.1.40` is the
+sole zero-asset transition predecessor; it is never the format for a new
+release.
 
 ## One fragment per pull request
 
@@ -46,13 +48,15 @@ For an untagged successful main SHA, the publisher:
 
 1. fetches public tags without persisted checkout credentials;
 2. validates the complete post-floor ledger;
-3. requires the latest tag and its zero-asset immutable Release to be exact;
+3. requires the latest tag and immutable Release to be exact, consuming the
+   canonical identity asset pair after the one-time `v0.1.40` bridge;
 4. requires exactly one newly added fragment since that predecessor;
 5. derives `next = latest patch + 1` without reading `VERSION`;
 6. renders deterministic notes containing the source SHA, fragment path,
    fragment SHA-256, and exact fragment Markdown; and
-7. reuses, resumes, or creates only the exact annotated tag and immutable
-   zero-asset Release through the existing closed REST transaction.
+7. reuses, resumes, or creates only the exact annotated tag, canonical identity
+   JSON, detached Sigstore bundle, and immutable Release through the existing
+   closed REST transaction.
 
 The bounded GET-only predecessor wait finishes before the short-lived
 Administration-read token is minted. The immutable-release setting is therefore

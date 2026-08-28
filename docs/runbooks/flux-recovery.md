@@ -26,8 +26,12 @@ copy, or environment changes.
    user-controlled tested backup using `install-sops-age-secret.sh`; both the
    create/replace response and a fresh live read must contain the intended
    private bytes. Never use a raw `--from-file` command.
-5. Use `bootstrap/flux/bootstrap.sh --apply-sync`. Prove the GitRepository has no `secretRef`, fetches
-   public `main`, and tenant Kustomizations use explicit ServiceAccounts.
+5. Never enable or invoke the retired `bootstrap/flux/bootstrap.sh --apply-sync`
+   body. Restore site sync only through the release-bound
+   `bootstrap/flux/release-selector/bootstrap.sh` transaction: prove the
+   GitRepository is credentialless and selects one exact immutable tag, its
+   consumer inventory is closed, and both tenant Kustomizations use their
+   explicit ServiceAccounts with `prune: false`.
 6. Inspect Flux events/status. Prefer a Git revert for bad desired state; do not
    patch Flux-owned resources as ordinary recovery.
 7. Before re-enabling a suspended release, render/policy-check the exact revision

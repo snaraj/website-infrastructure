@@ -1,11 +1,15 @@
-# Flux needs only declared cluster state and admission policy. Site charts
-# now arrive from the standalone site repositories through their own
-# GitRepository sources; default-denying this artifact keeps everything
-# else off the Pi.
+# Flux needs only declared site state. Signed charts arrive through the two
+# site-local OCIRepositories; this repository supplies their source/release
+# objects and default-deny policies. The GitRepository's own ignore and sparse
+# checkout independently narrow this broad directory exception to those exact
+# two website roots.
 /*
 !/.sourceignore
 !/kubernetes/
-!/policies/
-
-/policies/*
-!/policies/kyverno/
+/kubernetes/*
+!/kubernetes/websites/
+/kubernetes/websites/*
+!/kubernetes/websites/naranjo-online/
+!/kubernetes/websites/naranjo-online/**
+!/kubernetes/websites/lidersea-com/
+!/kubernetes/websites/lidersea-com/**
