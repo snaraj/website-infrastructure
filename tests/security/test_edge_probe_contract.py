@@ -35,6 +35,7 @@ The two defects the behavioural tests exist for are mirror images:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,60 @@ SCRIPT = REPO_ROOT / "scripts" / "edge-probe.sh"
 FIXTURES = Path(__file__).resolve().parent / "fixtures_edge_probe"
 BASH = shutil.which("bash")
 BASH_REQUIRED = "bash is required to exercise the shell parsers"
+
+
+# The issue #97 defect shape: building a Path directly out of the shared temp
+# root and appending a fixed name, so every concurrent run names the same file.
+# `tempfile.mkdtemp(dir=...)` is the SAFE use of the same variable, and it
+# reads as `mkdtemp(`, never as `Path(`. (The bad shape is deliberately not
+# spelled out here — this module scans its own source, so a literal example
+# would be a real offender on the line documenting it. The reassembled copy in
+# EdgeProbeConcurrencySafetyTests is what proves the regex still matches it.)
+FIXED_TEMP_PATH = re.compile(
+    r"""Path\(\s*(?:os\.environ\.get\(\s*["']TMPDIR|tempfile\.gettempdir\(\))"""
+)
+
+
+def fixed_temp_path_offenders(source):
+    """Return every source line that composes a fixed shared-temp-root path.
+
+    Kept as a module-level function taking the text, not a method reading a
+    file, so the scan itself can be shown to FAIL on a known-bad line: a
+    source pin whose regex has quietly stopped matching passes forever and
+    proves nothing, which is the exact failure mode this battery's own
+    docstring warns about for the other pins.
+    """
+
+    return [
+        line.strip()
+        for line in source.splitlines()
+        if FIXED_TEMP_PATH.search(line)
+    ]
+
+
+def private_scratch(test_case, prefix):
+    """Return a fresh private scratch directory owned by one test method.
+
+    ``$TMPDIR`` is per-USER, not per-worktree, so a composed path such as
+    ``$TMPDIR/edge-probe-records.tsv`` is the SAME file for every suite run
+    the owner starts. Two concurrent runs then collide deterministically and
+    each one's teardown (``rm -f "$RECORDS"``) deletes the other's fixture
+    mid-test, manufacturing red in tests that have no defect — which cost
+    review time on several pull requests before it was diagnosed (issue #97).
+    Running from different checkouts does not help: the collision is in the
+    shared temp root, not in the tree.
+
+    ``tempfile.mkdtemp`` is what the redirect-simulation class below already
+    used correctly; this routes every other shell program in the battery
+    through the same guarantee and registers the cleanup on the test, so a
+    program that dies before its own ``rm`` leaves nothing behind.
+    """
+
+    directory = Path(
+        tempfile.mkdtemp(prefix=prefix, dir=os.environ.get("TMPDIR"))
+    )
+    test_case.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+    return directory
 
 
 def call_parser(function, fixture_name=None, text=None):
@@ -231,7 +286,7 @@ class EdgeProbeCapabilityGateTests(unittest.TestCase):
     """Behavioural: an unproven client never produces a server verdict."""
 
     def _probe_tls_version(self, capability):
-        records = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-records.tsv"
+        records = private_scratch(self, "edge-probe-records.") / "records.tsv"
         program = (
             ". '{script}'\n"
             "RECORDS='{records}'\n"
@@ -268,8 +323,9 @@ class EdgeProbeCapabilityGateTests(unittest.TestCase):
         # transcript must reach the ERROR branch, never the refused-is-PASS
         # branch. `/bin/true` stands in for a killed s_client -- it exits 0 and
         # writes nothing, which is the worst case for a fail-open parser.
-        records = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-timeout.tsv"
-        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-timeout-dir"
+        scratch = private_scratch(self, "edge-probe-timeout.")
+        records = scratch / "records.tsv"
+        workdir = scratch / "work"
         program = (
             ". '{script}'\n"
             "WORKDIR='{workdir}'\n"
@@ -331,7 +387,7 @@ class EdgeProbeEnforcementScopeTests(unittest.TestCase):
     UNUSED_GAP_ITEM = "dnssec"
 
     def _enforce(self, extra_records=""):
-        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-enforce"
+        workdir = private_scratch(self, "edge-probe-enforce.") / "work"
         program = (
             ". '{script}'\n"
             "WORKDIR='{workdir}'\n"
@@ -427,7 +483,7 @@ class EdgeProbeEnforcementScopeTests(unittest.TestCase):
     def _two_zone_distinctness(self, naranjo_assets, lidersea_assets):
         """Run the real cross-zone check with BOTH zones selected."""
 
-        workdir = Path(os.environ.get("TMPDIR", "/tmp")) / "edge-probe-two-zone"
+        workdir = private_scratch(self, "edge-probe-two-zone.") / "work"
         program = (
             ". '{script}'\n"
             "WORKDIR='{workdir}'\n"
@@ -760,6 +816,56 @@ class EdgeProbeSourceContractTests(unittest.TestCase):
     def test_the_probe_takes_no_credential(self):
         for forbidden in ("CF_API_TOKEN", "CLOUDFLARE_API_TOKEN", "Authorization"):
             self.assertNotIn(forbidden, self.source)
+
+
+class EdgeProbeConcurrencySafetyTests(unittest.TestCase):
+    """Issue #97: this battery must not share a fixed path between runs.
+
+    ``$TMPDIR`` is per-user. Five shell programs here used to compose fixed
+    names under it, so two ``make check-fast`` runs by the same owner failed
+    deterministically — each run's ``rm`` deleted the other's fixture — and
+    the reds landed on tests that had no defect. The killer is a scan of this
+    module's own source, because the concurrency reproduction cannot run
+    inside the suite it would have to interfere with.
+    """
+
+    # The pre-fix line from the shared-path era, reassembled at import time.
+    # It is interpolated rather than written out because this module scans
+    # its OWN source: a verbatim copy of the defect would be a real offender
+    # on the very line that documents it.
+    HISTORICAL_DEFECT = (
+        '        records = Path(os.environ.get(%s, "/tmp")) '
+        '/ "edge-probe-records.tsv"' % '"TMPDIR"'
+    )
+
+    def test_the_scan_reports_the_historical_defect(self):
+        """Vacuity probe: an assertion no input can fail is decorative."""
+
+        self.assertEqual(
+            len(fixed_temp_path_offenders(self.HISTORICAL_DEFECT)),
+            1,
+            "the fixed-path scan no longer recognises the defect it exists "
+            "for, so the assertion below cannot fail",
+        )
+
+    def test_the_battery_composes_no_fixed_shared_temp_path(self):
+        offenders = fixed_temp_path_offenders(
+            Path(__file__).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            offenders,
+            [],
+            "a fixed path under the per-user shared temp root collides "
+            "deterministically with every other concurrent suite run; take a "
+            "private root from private_scratch() instead",
+        )
+
+    def test_private_scratch_never_hands_out_the_same_directory_twice(self):
+        first = private_scratch(self, "edge-probe-uniqueness.")
+        second = private_scratch(self, "edge-probe-uniqueness.")
+        self.assertNotEqual(first, second)
+        for directory in (first, second):
+            self.assertTrue(directory.is_dir())
 
 
 if __name__ == "__main__":
