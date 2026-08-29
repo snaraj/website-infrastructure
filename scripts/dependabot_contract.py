@@ -344,6 +344,11 @@ def _parse_node(entries, pos, indent, depth):
     return _parse_scalar(content, line_no), pos + 1
 
 
+# Diagnostics here report the structural failure and its exact source line and
+# never reproduce a key read from the inspected file: the same contract issue
+# #112 landed on the shared kubeadm/encryption parser, applied to this parser's
+# three residual echo sites by issue #175. The line number is what an operator
+# needs; the scalar is what a log must not carry.
 def _parse_mapping(entries, pos, indent, depth):
     mapping = {}
     while pos < len(entries):
@@ -356,7 +361,9 @@ def _parse_mapping(entries, pos, indent, depth):
             )
         key, value_text = _split_mapping_entry(content, line_no)
         if key in mapping:
-            raise DependabotContractError("line {}: duplicate key {!r}".format(line_no, key))
+            raise DependabotContractError(
+                "line {}: duplicate mapping key".format(line_no)
+            )
         pos += 1
         if value_text is None:
             if pos < len(entries) and entries[pos][1] > indent:
@@ -370,13 +377,13 @@ def _parse_mapping(entries, pos, indent, depth):
                 mapping[key] = node
             else:
                 raise DependabotContractError(
-                    "line {}: key {!r} has no value".format(line_no, key)
+                    "line {}: mapping key has no value".format(line_no)
                 )
         else:
             if pos < len(entries) and entries[pos][1] > indent:
                 raise DependabotContractError(
-                    "line {}: key {!r} has both an inline value and nested content"
-                    .format(line_no, key)
+                    "line {}: mapping key has both an inline value and nested "
+                    "content".format(line_no)
                 )
             mapping[key] = _parse_scalar(value_text, line_no)
     return mapping, pos

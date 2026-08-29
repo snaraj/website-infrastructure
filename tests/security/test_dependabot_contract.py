@@ -250,13 +250,16 @@ class GrammarHostileTests(unittest.TestCase):
         text = MINIMAL + "    groups:\n      g:\n        patterns: [\"a\", \"b\"]\n"
         self.assert_denied(text, "flow-style")
 
+    # The diagnostics name the structural failure and the exact source line,
+    # never the key: a key is an unrestricted scalar read out of the inspected
+    # file (issue #175, applying issue #112's contract to this parser).
     def test_duplicate_top_level_key_is_rejected(self):
         text = mutate(MINIMAL, "version: 2\n", "version: 2\nversion: 2\n")
-        self.assert_denied(text, "duplicate key")
+        self.assert_denied(text, "duplicate mapping key")
 
     def test_duplicate_key_within_an_entry_is_rejected(self):
         text = mutate(MINIMAL, "    directory: /\n", "    directory: /\n    directory: /\n")
-        self.assert_denied(text, "duplicate key")
+        self.assert_denied(text, "duplicate mapping key")
 
     def test_document_marker_is_rejected(self):
         self.assert_denied("---\n" + MINIMAL, "document markers")
@@ -564,6 +567,62 @@ class RegistryWiringTests(unittest.TestCase):
             text=True,
         )
         self.assertIn("PASS dependabot", completed.stdout, completed.stdout + completed.stderr)
+
+
+class ParserDiagnosticRedactionTests(unittest.TestCase):
+    """Issue #175: this parser's three key echoes, closed the issue #112 way.
+
+    The parser is a general structural gate over a file it does not control,
+    and its diagnostics reach CI logs. All three shapes — a duplicate key, a
+    valueless key, and a key carrying both an inline value and nested content
+    — used to print the key with ``{!r}``. Each now reports the structural
+    class and the exact source line, which is what locates the defect.
+    """
+
+    MARKER = "zz" + "dependabotkeymarker" + "zz"
+
+    def _errors(self, text):
+        errors = MODULE.document_errors(text)
+        self.assertTrue(errors, "the document must still be refused")
+        return errors
+
+    def test_no_diagnostic_reproduces_a_key_read_from_the_file(self):
+        cases = {
+            "duplicate-key": (
+                "version: 2\n{m}: a\n{m}: b\n".format(m=self.MARKER),
+                "duplicate mapping key",
+            ),
+            "valueless-key": (
+                "version: 2\n{}:\n".format(self.MARKER),
+                "mapping key has no value",
+            ),
+            "inline-value-and-nested-content": (
+                "version: 2\n{}: inline\n  nested: x\n".format(self.MARKER),
+                "has both an inline value and nested content",
+            ),
+        }
+        for label, (text, structural_fragment) in sorted(cases.items()):
+            with self.subTest(shape=label):
+                errors = self._errors(text)
+                self.assertFalse(
+                    any(self.MARKER in message for message in errors),
+                    "a file-derived key reached the diagnostic: {}".format(errors),
+                )
+                self.assertTrue(
+                    any(structural_fragment in message for message in errors),
+                    "the refusal must still name the structural failure: "
+                    "{}".format(errors),
+                )
+                self.assertTrue(
+                    any("line " in message for message in errors),
+                    "the refusal must still say WHERE: {}".format(errors),
+                )
+
+    def test_the_marker_probe_can_see_an_echo(self):
+        """Vacuity probe: the scan finds the marker when one is present."""
+
+        echoing = ["line 1: duplicate key {!r}".format(self.MARKER)]
+        self.assertTrue(any(self.MARKER in message for message in echoing))
 
 
 if __name__ == "__main__":

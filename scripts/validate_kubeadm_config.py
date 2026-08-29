@@ -336,7 +336,11 @@ def _require_scalar(mapping, key, expected, label, errors):
 
 
 # _require_keys closes each reviewed mapping against both missing and unexpected
-# kubeadm fields.
+# kubeadm fields. MISSING names come from the reviewed expectation and are safe
+# to print; UNEXPECTED names are unrestricted scalars read out of the inspected
+# file, so only their COUNT is reported (issue #175, the contract issue #112
+# landed on the shared parser). ``label`` is a reviewed constant at every call
+# site, so the operator is still told which mapping to open.
 def _require_keys(mapping, expected, label, errors):
     """Require an exact mapping shape so unsupported settings fail closed."""
     if not isinstance(mapping, dict):
@@ -350,7 +354,7 @@ def _require_keys(mapping, expected, label, errors):
         if missing:
             detail.append("missing " + ", ".join(missing))
         if unexpected:
-            detail.append("unexpected " + ", ".join(unexpected))
+            detail.append("{} unexpected field(s)".format(len(unexpected)))
         errors.append("{} must contain exactly the reviewed fields ({})".format(label, "; ".join(detail)))
         return False
     return True
@@ -388,9 +392,15 @@ def validate(text):
     if set(documents) != set(EXPECTED_DOCUMENTS):
         missing = sorted(set(EXPECTED_DOCUMENTS) - set(documents))
         unexpected = sorted(set(documents) - set(EXPECTED_DOCUMENTS))
+        # A document `kind` is an unrestricted scalar from the inspected file
+        # and this function is reached by every kubeadm consumer, so the count
+        # is reported and the scalar is not (issue #175). The MISSING names
+        # are the reviewed expectation and stay, because they are what makes
+        # the failure actionable.
         errors.append("configuration must contain exactly the four reviewed document kinds"
                       + ("; missing " + ", ".join(missing) if missing else "")
-                      + ("; unexpected " + ", ".join(unexpected) if unexpected else ""))
+                      + ("; {} unexpected document kind(s)".format(len(unexpected))
+                         if unexpected else ""))
     for kind, api_version in EXPECTED_DOCUMENTS.items():
         document = documents.get(kind, {})
         _require_keys(document, DOCUMENT_KEYS[kind], kind, errors)

@@ -108,7 +108,10 @@ def parse_plan(path: Path) -> tuple[dict[str, str], list[str]]:
             errors.append(f"line {line_number}: value must be nonempty and contain no whitespace")
             continue
         if key in values:
-            errors.append(f"line {line_number}: duplicate key {key}")
+            # The key comes out of the plan file the operator is validating.
+            # The line number is what makes the failure actionable; the scalar
+            # is not reproduced (issue #175, following issue #112's contract).
+            errors.append(f"line {line_number}: duplicate key")
             continue
         values[key] = value
     return values, errors
@@ -121,9 +124,11 @@ def validate(values: dict[str, str]) -> list[str]:
     missing = sorted(EXPECTED_KEYS - set(values))
     unknown = sorted(set(values) - EXPECTED_KEYS)
     if missing:
+        # Reviewed expectation, safe to name.
         errors.append("missing keys: " + ", ".join(missing))
     if unknown:
-        errors.append("unknown keys: " + ", ".join(unknown))
+        # File-derived; report how many, never which (issue #175).
+        errors.append(f"unknown keys: {len(unknown)}")
     if missing or unknown:
         return errors
 
