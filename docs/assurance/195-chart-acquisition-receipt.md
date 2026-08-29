@@ -1,8 +1,8 @@
 # Issue 195 chart acquisition receipt
 
-Captured 2026-08-29 for the issue #254 forward selection, which advances
-naranjo.online alone to its published release `0.1.62` and supersedes the
-issue #252 capture of the same day; the lidersea.com `0.1.40` record carries
+Captured 2026-08-29 for the issue #258 forward selection, which advances
+naranjo.online alone to its published release `0.1.63` and supersedes the
+issue #254 capture of the same day; the lidersea.com `0.1.40` record carries
 forward from that capture unchanged. The canonical,
 machine-checked record is `195-chart-acquisition-receipt.json`; this Markdown
 is its explanatory view and must not be used as an independent source of
@@ -22,12 +22,12 @@ workload indexes; chart trust remains each chart's exact Cosign signature.
 
 | site and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |
 | --- | --- | --- | --- | --- | --- |
-| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.62` | `sha256:12bab1e17f838615f81d3901cc08fec8a9e8741bf1023c7b06c83ca6442cabc2` / `sha256:349af40940d08ecf309cda01d7c5c38fde4c24e795676ec1322723455326acb1` / `sha256:2ceeb381106d3c75504d8c6769431db0d969ecf0af4aedd3b43bc3e88e00a62c` | name/version/appVersion `naranjo-online` / `0.1.62` / `0.1.62` | `ghcr.io/snaraj/naranjo-online:v0.1.62@sha256:be9593c9ecc3616f9cd1aaeaf641e8a52be5f8f6365498e958da8fcaf99cc4e6` | `sha256:81c30d13b79ae0bdba2c77af04e82868bc5ce50819cdabb6af387e5fcc90e89c` |
+| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.63` | `sha256:ee0b471a8d03e7163a485931b273663938851efcb6af595c7102ce76e3726d0d` / `sha256:36f22f2cdd60a16a2c047b603f273e1eac5ac08470cc401609379fbb6a535744` / `sha256:03d994b7767a4b94765137a68f605d8371ab310c89f84868161b69cf4729d062` | name/version/appVersion `naranjo-online` / `0.1.63` / `0.1.63` | `ghcr.io/snaraj/naranjo-online:v0.1.63@sha256:412719b2a8ec9570c5856948512629d3e15a669841c26bb03b45d7e7d757a2bc` | `sha256:8da8da5e8bc0f0c372ef9598a0ec9024fffd253f957b01621c939ff0466ba6d4` |
 | lidersea.com — `ghcr.io/snaraj/charts/lidersea-com` | `0.1.40` | `sha256:004eaecfcc3dbbe2693e4c400be3dbf755a7972d40b7a5b5755b64e10afb354b` / `sha256:bfeeb2bb371448f552e52ebdc1a0576f5f016e6421286315b4220ba8fb0a9c53` / `sha256:578296a596d8835a0e9185e46d6b2ac111ff19c181890e83b44d2caec0b4e517` | name/version/appVersion `lidersea-com` / `0.1.40` / `0.1.40` | `ghcr.io/snaraj/lidersea-com:v0.1.40@sha256:cf8dfc93c863296c7de42ec92850a68ab173417d87498f315fafaec9864484c0` | `sha256:694663936ee1061df4a74c19d6f3b5caa22892225dc776587e83721b7488840d` |
 
 Publisher Release bindings:
 
-- naranjo.online: protected-main source `9f8d1c59bc488e28205d05652c03f41103d5c038`; immutable Release asset `sha256:2d123341390376223f355437836b85caf2178458ff4422ac3dcca6877fa16d77`.
+- naranjo.online: protected-main source `ef75165997f392027f2d9e085a0b5c199b1521bd`; immutable Release asset `sha256:917f5a3e339fd2f825d6e633522d69bc3447f4f9e9ec0947890052482a7f7cef`.
 - lidersea.com: protected-main source `54790ce20cbe032bedcf12432001b754615b2f56`; immutable Release asset `sha256:c6d3571e10fda52ea9472e8f328f97892408dcaccbb237aa40d7b2d33a5eb771`.
 
 Each site's `vX.Y.Z` annotated tag was dereferenced to the commit above, and
@@ -48,8 +48,8 @@ Cosign accepted only these certificate subjects, with issuer
 
 Exact-layer inspection hashes provide a reproducible custody check:
 
-- naranjo `Chart.yaml`: `sha256:2ea122f195752ee5915755515e1e2296ec15697a0501f5b5482db716fa84b8cc`
-- naranjo `values.yaml`: `sha256:b20550302743700d449da263b3352d5667cf9442d3b1d1c0a567a27b7c06a297`
+- naranjo `Chart.yaml`: `sha256:9308a1b6e78e02996f3d8f581576973c2da4e7f0237a6179821a739bb7df2322`
+- naranjo `values.yaml`: `sha256:b65c79d8e80c5bfbc50828a5dc4d0a51e0d5f5fcdb6367e1d4926a6439746d01`
 - lidersea `Chart.yaml`: `sha256:60dc172458da049d5c074f9d07fce02d4f340480ceb32d383ed41be218dc2816`
 - lidersea `values.yaml`: `sha256:9a96dabb40f480ca8c4b47304738476bd47ebe1de7945c8f5795502396245cc5`
 
