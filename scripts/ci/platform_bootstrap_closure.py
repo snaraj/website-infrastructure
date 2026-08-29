@@ -1,6 +1,7 @@
-"""Reference fail-closed primitives for the #189 bootstrap closure review.
+"""Fail-closed primitives for the #189 bootstrap closure review.
 
-This is isolated design evidence, not repository code and not a live executor.
+These primitives are loaded and called by ``validate_platform_bootstrap.py``;
+the module performs no live cluster mutation of its own.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ hash-pinned coverage gate — rehearse the history gate with
 
 | Requirement | Checker | Status |
 | --- | --- | --- |
-| Layout/privacy/media/secret/workflow/Kubernetes/Cloudflare/activation/release validators | `validate_repository.py` (9 modes; `all` runs 8 and `release` is the deliberate deployment gate) in CI + `validate-security.sh` | LIVE |
+| Layout/privacy/media/secret/workflow/Kubernetes/Cloudflare/activation/release validators | `validate_repository.py` (10 modes; `all` runs 9 and `release` is the deliberate deployment gate) in CI + `validate-security.sh` | LIVE |
 | Full unit/security test discovery | `unittest discover` under pinned Python (CI) / `make check-fast` | LIVE |
 | Bash syntax + pinned ShellCheck | CI shellcheck step over `bootstrap scripts` (pinned via install-tools) | LIVE |
 | Python compile + unit tests | compile smoke list + suite | LIVE |

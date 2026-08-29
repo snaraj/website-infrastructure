@@ -97,3 +97,28 @@ desired state (one `cloudflare-public` connector chart and one
 `pi-websites-tunnel-token` Secret) still models the superseded shared shape;
 reconciling it into two per-site connector Deployments and Secrets belongs
 to the platform-lane GitOps work and is tracked there, not here.
+
+## Amendment (2026-08-29)
+
+The paragraph above described the Kubernetes desired state as still modelling
+the superseded shared shape — "one `cloudflare-public` connector chart and one
+`pi-websites-tunnel-token` Secret" — and deferred the split to platform-lane
+GitOps work. That reconciliation has since landed in this repository, so the
+sentence no longer describes the tree it names. Prior lines are left byte for
+byte intact; this section is the correction.
+
+`kubernetes/platform/cloudflare-public/chart` now runs one connector per
+website: two Deployments (`naranjo-online-tunnel`, `lidersea-com-tunnel`), each
+labelled with its own site-scoped `app.kubernetes.io/instance`, each mounting
+only its own runtime token Secret by name (`naranjo-online-tunnel-token`,
+`lidersea-com-tunnel-token`), sharing no object or failure domain. Connector
+egress is double-pinned so a site's own connector is the only one that can open
+its origin leg.
+
+Two things this amendment does not claim. The HelmRelease remains suspended,
+and the per-site encrypted token Secrets still await the user-run SOPS
+encryption ceremony before they enter the release Kustomization — the chart
+README's suspension checklist is unchanged and remains the authority on what
+must be true first. Separately, the authenticated Cloudflare apply ceremony
+still speaks this ADR's superseded vocabulary; issue #82 tracks that work and
+is deliberately out of scope here.

@@ -9,7 +9,6 @@ on-disk consequences (nothing created, nothing clobbered) rather than the
 internal reason strings, which stay covered at module level.
 """
 
-import os
 import subprocess
 import sys
 import tempfile

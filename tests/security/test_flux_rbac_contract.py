@@ -101,7 +101,6 @@ def _slack_requests(rows):
 SOURCE_GROUP = "source.toolkit.fluxcd.io"
 KUSTOMIZE_GROUP = "kustomize.toolkit.fluxcd.io"
 HELM_GROUP = "helm.toolkit.fluxcd.io"
-NETWORKING_GROUP = "networking.k8s.io"
 CLUSTER = (None,)
 
 # Reason 1 — THE CONFUSED DEPUTY, RETIRED (issue #98). It used to read: the one

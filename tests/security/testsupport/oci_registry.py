@@ -3,9 +3,8 @@
 The platform never pushes or lists tags: it fetches one exact chart manifest
 digest and asks whether that digest carries a cosign signature made by an
 exact keyless identity. The tag-list route exists only so hostile tests can
-prove it was never used. These operations are served over a real loopback
-HTTP server, and they
-are served over a real ``http.server`` on ``127.0.0.1`` so the client under
+prove it was never used. These operations are served over a real
+``http.server`` on ``127.0.0.1`` so the client under
 test performs genuine HTTP — status codes, headers, JSON bodies, 404s — rather
 than calling into a stub that can only say yes.
 

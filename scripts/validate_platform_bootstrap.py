@@ -1489,7 +1489,7 @@ def local_release() -> tuple[str, str]:
         raise SystemExit("bootstrap local tag must be annotated and peel to HEAD")
     current = tuple(int(item) for item in tags[0][1:].split("."))
     if current[:2] != (0, 1) or current[2] < 33:
-        raise SystemExit("bootstrap release precedes the canonical v0.1.40 floor")
+        raise SystemExit("bootstrap release precedes the canonical v0.1.33 floor")
     return tags[0], head
 
 

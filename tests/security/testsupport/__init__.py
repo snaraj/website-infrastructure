@@ -35,9 +35,7 @@ two things and claims nothing more:
    manifests carry and re-derive them through the repository's own validators.
 
 Proving that a running Flux controller behaves this way is a separate, live
-event that this repository deliberately cannot perform: the controllers are not
-installed, and installing them is a platform-lane decision gated on the
-platform-stable signal (ADR 0016, transition step 2). Where a test's name or
+event that this repository deliberately cannot perform. Where a test's name or
 docstring could be read as claiming live behavior, it says so explicitly
 instead.
 

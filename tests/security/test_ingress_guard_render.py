@@ -11,7 +11,6 @@ denied from the admin VPN — so the renderer cannot quietly drop the denial
 while still exiting zero.
 """
 
-import os
 import tempfile
 import unittest
 from pathlib import Path

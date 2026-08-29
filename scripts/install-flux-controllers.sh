@@ -103,10 +103,11 @@ umask 077
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # The install target is a constant, never an argument. Applying the parent root
-# would create the root GitRepository and Kustomization from gotk-sync.yaml;
-# neither is suspended, so reconciliation of ./kubernetes/reconciliation would
-# begin immediately with prune enabled. Making that unreachable is the single
-# most important thing this script does.
+# would create the GitRepository and both per-site Kustomizations from
+# gotk-sync.yaml; none is suspended, so reconciliation of
+# ./kubernetes/websites/naranjo-online and ./kubernetes/websites/lidersea-com
+# would begin immediately. Making that unreachable is the single most important
+# thing this script does.
 INSTALL_TARGET='kubernetes/flux-system/controllers'
 # The fail-closed egress overlay. Split by this script into the startup allows
 # the controllers need in order to start at all, and the public-HTTPS allow that

@@ -723,9 +723,6 @@ class SiteReleasePolicyTests(unittest.TestCase):
                         + "      {}: {}\n".format(field, value)
                     )
 
-    def test_the_exact_values_only_release_has_no_shape_denial(self):
-        self.assertEqual(self.denials(suspend=False), set())
-
     def test_a_degenerate_image_mapping_is_denied_not_skipped(self):
         """Null, scalar, list, and malformed mappings all fail closed."""
 

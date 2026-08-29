@@ -456,13 +456,6 @@ class Authorizer:
         authorizer.require_resolvable_role_refs()
         return authorizer
 
-    @classmethod
-    def from_paths(cls, paths):
-        documents = []
-        for path in paths:
-            documents.extend(load_documents(path))
-        return cls.from_documents(documents)
-
     def require_resolvable_role_refs(self):
         """Refuse a binding whose role is not in the reviewed document set.
 

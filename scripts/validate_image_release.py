@@ -50,29 +50,6 @@ def parse_semver(value, tagged=False):
     return tuple(int(part) for part in match.groups())
 
 
-def _read_exact_single_line(path):
-    """Read one newline-terminated UTF-8 line without normalizing its value."""
-
-    try:
-        raw = path.read_bytes()
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    if text.endswith("\r\n"):
-        value = text[:-2]
-        terminator = "\r\n"
-    elif text.endswith("\n"):
-        value = text[:-1]
-        terminator = "\n"
-    else:
-        return None
-    if not value or "\n" in value or "\r" in value:
-        return None
-    if text != value + terminator:
-        return None
-    return value
-
-
 def _read_policy_text(text):
     """Parse the closed production-graduation policy without shell semantics."""
 
