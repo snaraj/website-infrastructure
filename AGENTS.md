@@ -258,7 +258,12 @@ and dependency-governed Draft capacity is recorded durably in
   and exact OCI manifest-digest pair per site, while retiring the former
   HelmRelease promotion override. Future forward or rollback selection changes
   require a new exact acquisition receipt and remain crossings until the owner
-  or platform (peer) records a lane ruling here.
+  or platform (peer) records a lane ruling here. Issue #252 is the first such
+  forward selection and is DECLARED as a crossing on exactly those terms: it
+  recaptured the receipt and moved both sites to their published releases
+  without touching a fail-closed property, a signature contract, or
+  `release.yaml`. It is a worked precedent for the shape, not a ruling — the
+  row above stays PENDING, and the next selection declares its crossing too.
 - `docs/adr/0016-tag-driven-flux-release-sync.md` — NOT transferred,
   ruling PENDING. The lane split above assigns "the remaining ADRs" to
   the platform lane, and "Lane discipline in docs" says the delivery lane

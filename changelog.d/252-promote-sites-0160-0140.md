@@ -1,0 +1,4 @@
+### Changed
+
+- Advance both sites' exact signed chart selection to their published releases — naranjo.online `0.1.60` and lidersea.com `0.1.40` — by re-resolving each reviewed tag, verifying the repository-at-digest against that exact site's `release-publisher.yml@refs/heads/main` keyless identity, inspecting the sole Helm chart layer and its embedded workload image, and binding the protected-main source commit and immutable Release asset before the annotation and digest moved together. `scripts/promote-image.sh` stays retired fail-closed; the signed chart remains the sole image authority and no HelmRelease override is reintroduced.
+- Recapture `docs/assurance/195-chart-acquisition-receipt.{json,md}` for that acquisition, keeping every reviewed tag/digest pair identical across the receipt, `scripts/validate_signature_policy.py`, `policies/conftest/kubernetes.rego`, and both `kubernetes/websites/*/source.yaml` objects, so no two can disagree.

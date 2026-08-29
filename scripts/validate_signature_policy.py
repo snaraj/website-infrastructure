@@ -52,12 +52,12 @@ CHART_REPOSITORIES = {
 # and the exact-site keyless signature before changing either value.
 CHART_RELEASES = {
     "naranjo-online": {
-        "tag": "0.1.54",
-        "digest": "sha256:7223dd78f308c1e211da71f6e062195724aaedc47962b0a04907eeb0baf2d7bb",
+        "tag": "0.1.60",
+        "digest": "sha256:0c67bf604e25ddba0f5e2c43036884456d29137b153af22d8cb7c640628199c6",
     },
     "lidersea-com": {
-        "tag": "0.1.37",
-        "digest": "sha256:05ab03a6e7520ea6768e4efc3750c83f8f7bc827cac3289bf9ee1326c873c8fc",
+        "tag": "0.1.40",
+        "digest": "sha256:004eaecfcc3dbbe2693e4c400be3dbf755a7972d40b7a5b5755b64e10afb354b",
     },
 }
 # Helm charts pushed with `helm push` carry exactly this layer media type.
