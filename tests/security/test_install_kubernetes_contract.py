@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "bootstrap" / "pi" / "install-kubernetes.sh"
@@ -24,6 +26,7 @@ GUARD_DROPIN = (
     / "50-website-infrastructure-ingress-guard.conf"
 )
 BASH = shutil.which("bash")
+BASH_REQUIRED = "bash is required for the archive contract tests"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -42,7 +45,7 @@ class InstallerArchiveTests(unittest.TestCase):
     def validate(self, archive):
         return subprocess.run(
             [
-                BASH,
+                required_tool(BASH, BASH_REQUIRED),
                 "-c",
                 "source \"$1\"\nsafe_archive \"$2\" '^[A-Za-z0-9._-]+/?$'",
                 "installer-archive-test",

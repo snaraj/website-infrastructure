@@ -47,6 +47,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from .support import canonicalize_probe_spellings
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 POSTCHECK_SCRIPTS = (
@@ -77,7 +79,17 @@ def committed_text(relative):
 
 
 def shipped_cri_patterns(script_text):
-    return SHIPPED_PATTERN.findall(script_text)
+    """Extract the shipped CRI probe patterns from one script's text.
+
+    Canonical spelling, not raw bytes. ``SHIPPED_PATTERN`` keys on ONE
+    spelling — ``grep -Eq`` plus a single-quoted pattern whose dots are
+    written ``[.]`` — so an equivalent probe written with escaped dots inside
+    double quotes was invisible to this battery, and the self-flipping pin the
+    module docstring promises never flipped (issue #51). The shared
+    canonicaliser leaves today's committed scripts byte-identical.
+    """
+
+    return SHIPPED_PATTERN.findall(canonicalize_probe_spellings(script_text))
 
 
 def as_python_regex(posix_pattern):
@@ -238,6 +250,85 @@ class CriV2PostcheckRegressionTests(unittest.TestCase):
             self.assertTrue(
                 postcheck_accepts(patterns, V2_TABLE_FRONTEND_MISSING), relative
             )
+
+
+class ShippedPatternExtractionTests(unittest.TestCase):
+    """The lift itself, driven over spellings the committed scripts avoid.
+
+    Everything above is a conjunction over whatever ``shipped_cri_patterns``
+    lifted, so a probe the lift cannot see is a probe this battery silently
+    stops modelling — including the stale 1.x row the module exists to keep
+    out, and the self-flipping frontend tolerance the docstring promises.
+    These cases feed the extraction helper directly, so removing the
+    canonicaliser from it turns them red while the committed-script
+    assertions, reading byte-identical text, stay green (issue #51).
+    """
+
+    STALE_V1_PROBE = "^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]]"
+    EVASIVE = {
+        "escaped dots in double quotes": (
+            'grep -Eq "^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]"'
+        ),
+        "flags joined the other way": (
+            "grep -qE '^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]'"
+        ),
+        "flags written separately": (
+            "grep -E -q '^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]'"
+        ),
+        "long option names": (
+            "grep --extended-regexp --quiet "
+            "'^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]'"
+        ),
+        "ansi-c quoting": (
+            "grep -Eq $'^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]'"
+        ),
+    }
+
+    def test_todays_committed_scripts_lift_exactly_what_they_did_before(self):
+        """The canonicaliser must not invent or drop a committed probe."""
+
+        for relative in POSTCHECK_SCRIPTS:
+            with self.subTest(script=relative):
+                text = committed_text(relative)
+                self.assertEqual(
+                    shipped_cri_patterns(text), SHIPPED_PATTERN.findall(text)
+                )
+                self.assertTrue(shipped_cri_patterns(text), relative)
+
+    def test_an_evasively_spelled_stale_probe_is_lifted(self):
+        for label, line in self.EVASIVE.items():
+            with self.subTest(spelling=label):
+                # Vacuity: the case only means something if the raw line
+                # really does hide the probe from SHIPPED_PATTERN.
+                self.assertEqual(SHIPPED_PATTERN.findall(line), [], label)
+                self.assertEqual(shipped_cri_patterns(line), [self.STALE_V1_PROBE])
+
+    def test_an_evasively_spelled_stale_probe_models_the_stale_contract(self):
+        """End to end: the lifted probe behaves like the 1.x row probe it is.
+
+        This is the consequence the lift exists for. A script that reverted
+        to the 1.x row under an evasive spelling lifted NO patterns at all,
+        so the modelled conjunction was empty and every assertion above ran
+        against a script this battery could not see. Lifted, the stale probe
+        is modelled honestly: it accepts the v1-era table today's committed
+        probes reject, and it refuses the healthy 2.x surface whenever the
+        gRPC frontend row is absent — the pre-#49 shape
+        ``test_frontend_row_missing_is_currently_accepted`` pins as passing.
+        """
+
+        for label, line in self.EVASIVE.items():
+            with self.subTest(spelling=label):
+                patterns = shipped_cri_patterns(line)
+                self.assertTrue(postcheck_accepts(patterns, V1_TABLE_PADDED), label)
+                self.assertFalse(
+                    postcheck_accepts(patterns, V2_TABLE_FRONTEND_MISSING), label
+                )
+
+    def test_the_reviewed_spelling_is_lifted_unchanged(self):
+        """The other direction, so the lift is not merely permissive."""
+
+        line = "grep -Eq '" + self.STALE_V1_PROBE + "'"
+        self.assertEqual(shipped_cri_patterns(line), [self.STALE_V1_PROBE])
 
 
 if __name__ == "__main__":

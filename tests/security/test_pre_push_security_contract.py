@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .support import hermetic_git_environment, load_script
+from .support import hermetic_git_environment, load_script, required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +27,9 @@ if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
         BASH = str(candidate)
+BASH_REQUIRED = "bash is required for the pre-push contract"
 GITLEAKS = shutil.which("gitleaks")
+GITLEAKS_REQUIRED = "the pinned Gitleaks is required for policy behavior"
 if GITLEAKS is None:
     candidate = (
         ROOT / ".artifacts" / "test-tools" / "gitleaks-v8.30.1" / "gitleaks.exe"
@@ -145,7 +147,10 @@ class PrePushSecurityContractTests(unittest.TestCase):
     def test_shell_sources_parse(self):
         for path in (SCRIPT, HOOK):
             with self.subTest(path=path.name):
-                subprocess.run([BASH, "-n", str(path)], check=True)
+                subprocess.run(
+                    [required_tool(BASH, BASH_REQUIRED), "-n", str(path)],
+                    check=True,
+                )
 
     def test_hook_is_bound_to_one_exact_non_delete_branch_update(self):
         text = HOOK.read_text(encoding="utf-8")
@@ -290,7 +295,7 @@ class PrePushSecurityContractTests(unittest.TestCase):
                         )
                         result = subprocess.run(
                             [
-                                BASH,
+                                required_tool(BASH, BASH_REQUIRED),
                                 str(repo / ".githooks" / "pre-push"),
                                 "origin",
                                 remote_url,
@@ -824,7 +829,7 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
                 target.write_text(payload + "\n", encoding="utf-8")
                 result = subprocess.run(
                     [
-                        GITLEAKS,
+                        required_tool(GITLEAKS, GITLEAKS_REQUIRED),
                         "dir",
                         "--no-banner",
                         "--redact",
@@ -853,7 +858,7 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
                 target.write_text(payload, encoding="utf-8")
                 result = subprocess.run(
                     [
-                        GITLEAKS,
+                        required_tool(GITLEAKS, GITLEAKS_REQUIRED),
                         "dir",
                         "--no-banner",
                         "--redact",

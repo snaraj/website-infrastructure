@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .support import load_script
+from .support import load_script, required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +19,7 @@ VALIDATOR = ROOT / "scripts" / "validate_encryption_config.py"
 TEMPLATE = ROOT / "bootstrap" / "pi" / "encryption-config.yaml.example"
 CEREMONY = ROOT / "bootstrap" / "pi" / "generate-encryption-config.sh"
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required to execute the encryption ceremony"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -121,7 +122,7 @@ class EncryptionConfigGeneratorTests(unittest.TestCase):
             and not key.startswith("LD_")
         }
         result = subprocess.run(
-            [BASH, str(CEREMONY)],
+            [required_tool(BASH, BASH_REQUIRED), str(CEREMONY)],
             capture_output=True,
             check=False,
             text=True,
@@ -137,7 +138,9 @@ class EncryptionConfigGeneratorTests(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "Bash is required for parse checks")
     def test_ceremony_parses(self) -> None:
-        subprocess.run([BASH, "-n", str(CEREMONY)], check=True)
+        subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-n", str(CEREMONY)], check=True
+        )
 
 
 if __name__ == "__main__":

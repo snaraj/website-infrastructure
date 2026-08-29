@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.security.support import hermetic_git_environment
+from tests.security.support import hermetic_git_environment, required_tool
 from tests.security.test_validate_kubeconfig_snapshot import document_bytes, valid_document
 
 
@@ -24,6 +24,7 @@ VERIFY_ENTRY = ROOT / "bootstrap" / "flux" / "verify.sh"
 VERIFY_CIPHERTEXT = ROOT / "bootstrap" / "flux" / "verify-sops-ciphertext.sh"
 PROTECTED_FIXTURE_ROOT = os.environ.get("PROTECTED_LUKS_TEST_WORKSPACE")
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required to execute the SOPS/age blockers"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -189,7 +190,7 @@ class FluxSopsAgeStaticContractTests(unittest.TestCase):
         for path, arguments, expected in cases:
             with self.subTest(path=path.name, arguments=arguments):
                 result = subprocess.run(
-                    [BASH, str(path), *arguments],
+                    [required_tool(BASH, BASH_REQUIRED), str(path), *arguments],
                     capture_output=True,
                     check=False,
                     text=True,
@@ -228,7 +229,10 @@ class FluxSopsAgeStaticContractTests(unittest.TestCase):
     def test_scripts_parse(self):
         for path in (VERIFY, INSTALL, BOOTSTRAP, VERIFY_ENTRY, VERIFY_CIPHERTEXT):
             with self.subTest(path=path.name):
-                subprocess.run([BASH, "-n", str(path)], check=True)
+                subprocess.run(
+                    [required_tool(BASH, BASH_REQUIRED), "-n", str(path)],
+                    check=True,
+                )
 
 
 @unittest.skipUnless(
