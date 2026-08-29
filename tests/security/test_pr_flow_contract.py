@@ -1,10 +1,17 @@
 """Allow/deny contract for the gh-pr-flow rules (scripts/validate_pr_flow.py)."""
 
+import re
 import unittest
 
-from .support import load_script
+from .support import REPO_ROOT, load_script
 
 MODULE = load_script("validate_pr_flow.py")
+
+AGENTS_CONTRACT = REPO_ROOT / "AGENTS.md"
+# The agent-label roster as AGENTS.md writes it: a backticked label followed by
+# the model it names, inside the "Agent labels" bullet. Parsing that bullet
+# alone keeps every other backticked word in the contract out of the set.
+AGENT_LABEL_ROSTER = re.compile(r"`([a-z0-9][a-z0-9.-]*)`\s*\((?:Claude|ChatGPT|GPT)[^)]*\)")
 
 
 class BranchRuleTests(unittest.TestCase):
@@ -53,6 +60,105 @@ class BranchRuleTests(unittest.TestCase):
             "release-1",
         ):
             self.assertIsNotNone(MODULE.branch_denial(name), repr(name))
+
+
+class AgentLaneNamespaceTests(unittest.TestCase):
+    """Issue #137: the namespace list had fallen behind the label taxonomy.
+
+    `opus5/`, `opus4.8/`, `sonnet5/` and `daybreak-blue/` were all DENY while
+    real work shipped from exactly those branches. The measured consequence
+    was none — this validator is documentary, wired to no gate, and improving
+    it wires it nowhere new — but a policy file that denies the repository's
+    own convention is a trap for whoever eventually does wire it up.
+    """
+
+    def test_every_registered_lane_is_allowed_in_both_grammars(self):
+        for lane in MODULE.AGENT_LANES:
+            with self.subTest(lane=lane, grammar="legacy"):
+                self.assertIsNone(MODULE.branch_denial(lane + "/some-topic"))
+            for effort in MODULE.REASONING_EFFORTS:
+                name = "{}-{}/137-namespace-taxonomy".format(lane, effort)
+                with self.subTest(lane=lane, effort=effort):
+                    self.assertIsNone(MODULE.branch_denial(name), name)
+
+    def test_the_lane_registry_covers_every_agent_label_in_agents_md(self):
+        """The rule for adding a future lane, made enforceable.
+
+        AGENTS.md's "Agent labels" bullet is the roster; this validator must
+        never be behind it. Deliberately a SUBSET assertion: the repository's
+        live label set may register a lane before the contract prose names it,
+        and the direction that matters is a documented lane being refused.
+        """
+
+        bullet = AGENTS_CONTRACT.read_text(encoding="utf-8").split(
+            "- **Agent labels.**", 1
+        )[1].split("\n- **", 1)[0]
+        documented = set(AGENT_LABEL_ROSTER.findall(bullet))
+        self.assertGreaterEqual(
+            len(documented),
+            4,
+            "the agent-label roster parse found {}; it can no longer prove "
+            "anything about the lane registry".format(sorted(documented)),
+        )
+        missing = documented - set(MODULE.AGENT_LANES)
+        self.assertFalse(
+            missing,
+            "AGENTS.md documents agent labels this validator would deny: {} "
+            "— add them to AGENT_LANES".format(sorted(missing)),
+        )
+
+    def test_effort_tagged_branches_must_still_name_their_issue(self):
+        for name in (
+            "opus5-high/no-issue-number",
+            "fable5-med/-leading-dash",
+            "sonnet5-low/97",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNotNone(MODULE.branch_denial(name), name)
+
+    def test_an_unregistered_lane_or_effort_is_still_denied(self):
+        for name in (
+            "opus9/some-topic",
+            "opus5-turbo/97-topic",
+            "daybreak/97-topic",
+            "opus5-high",
+            "opus5-high/",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNotNone(MODULE.branch_denial(name), name)
+
+    def test_lane_parsing_is_longest_match_first(self):
+        """Vacuity probe for the sort in parse_lane.
+
+        Injected registry, because the property needs a shorter lane that is a
+        prefix of a longer one AND a leftover that spells a valid effort. With
+        shortest-first matching this returns ("alpha", "low", ...) and the
+        branch is attributed to the wrong writer.
+        """
+
+        lanes = ("alpha", "alpha-low")
+        self.assertEqual(
+            MODULE.parse_lane("alpha-low/97-topic", lanes=lanes),
+            ("alpha-low", None, "97-topic"),
+        )
+        self.assertEqual(
+            MODULE.parse_lane("alpha-low-high/97-topic", lanes=lanes),
+            ("alpha-low", "high", "97-topic"),
+        )
+        self.assertEqual(
+            MODULE.parse_lane("alpha-high/97-topic", lanes=lanes),
+            ("alpha", "high", "97-topic"),
+        )
+
+    def test_allowed_namespaces_is_derived_from_the_registry(self):
+        expected = len(MODULE.AGENT_LANES) * (1 + len(MODULE.REASONING_EFFORTS))
+        expected += len(MODULE.GENERIC_NAMESPACES)
+        self.assertEqual(len(MODULE.ALLOWED_NAMESPACES), expected)
+        self.assertEqual(
+            len(set(MODULE.ALLOWED_NAMESPACES)),
+            expected,
+            "a duplicated prefix means two registry entries collided",
+        )
 
 
 class RefspecRuleTests(unittest.TestCase):
