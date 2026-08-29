@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate exact-head adversarial-review and Main Worker receipt shapes."""
+"""Validate exact-head adversarial-review and Main Worker receipt shapes.
+
+This validator proves TEXT SHAPE and nothing else. It never sees who posted a
+comment, which is where AGENTS.md locates reviewer independence, and it never
+confers Ready or merge authority. The `main-worker` receipt kind below is
+contract-retired and kept only until issue #188 removes its remaining call
+sites; see its docstring.
+"""
 
 import argparse
 import re
@@ -17,7 +24,26 @@ MAIN_WORKER_SCOPE = (
 )
 
 
-def denial(text, expected_head, author_context, resource_kind):
+def denial(text, expected_head, resource_kind):
+    """Validate one exact-head adversarial-review receipt's SHAPE, and only that.
+
+    Reviewer independence is NOT decided here and deliberately cannot be: per
+    AGENTS.md "Reviewer independence" it binds to the POSTING ACTOR — the
+    review App that publishes the comment — and this script is handed a text
+    file with no author metadata attached, so it can never observe who posted
+    it. The coordinator reads that from the forge.
+
+    Until issue #203 this function also required the reviewer's signature to
+    differ textually from an author-context string. That check was retired
+    rather than repaired: a reviewer satisfies a textual comparison by typing
+    a different word, so it proved only that the reviewer can type, while
+    making the contract's own explicitly permitted same-lane review
+    unrepresentable. What remains is a closed shape — one bound head, one
+    supported verdict, a lane-provenance signature, and the audit evidence a
+    verdict must carry — every part of which a real receipt satisfies and a
+    forged or stale one does not.
+    """
+
     if resource_kind != "pull-request":
         return "exact-head review receipts apply only to pull requests"
     if not SHA.fullmatch(expected_head):
@@ -35,9 +61,10 @@ def denial(text, expected_head, author_context, resource_kind):
     match = SIGNATURE.fullmatch(nonempty[-1])
     if not match:
         return "final non-empty line must be adversarial reviewer signature"
-    reviewer = match.group(1).strip().casefold()
-    if not reviewer or reviewer == author_context.strip().casefold():
-        return "reviewer context must differ textually from author context"
+    # The signature is lane provenance, so it must name a lane; it is never
+    # compared against the author, only required to be present and non-blank.
+    if not match.group(1).strip():
+        return "adversarial reviewer signature must name the reviewing lane"
     if "mutation" not in text.casefold() or "claim" not in text.casefold():
         return "receipt must report mutation and claim audit evidence"
     return None
@@ -51,7 +78,16 @@ def main_worker_denial(
     resource_kind,
     required_verdict="PASS",
 ):
-    """Require one fresh, role-separated, bounded Ready-coordination receipt."""
+    """Require one fresh, role-separated, bounded Ready-coordination receipt.
+
+    TRANSITIONAL. The Main Worker Ready receipt is RETIRED in contract: per
+    AGENTS.md the coordinator flips Ready straight after an exact-head
+    APPROVE, and no receipt of this kind is a Ready input. This kind stays
+    executable only so the skill, template, and gate rows that still name it
+    are removed together by issue #188's machinery pass, rather than leaving
+    documented call sites pointing at an absent capability. Do not build new
+    call sites on it.
+    """
     if resource_kind != "pull-request":
         return "Main Worker receipts apply only to pull requests"
     if not SHA.fullmatch(expected_head):
@@ -96,7 +132,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("receipt", type=Path)
     parser.add_argument("--head", required=True)
-    parser.add_argument("--author-context", required=True)
+    # Optional for adversarial-review receipts since issue #203 retired the
+    # textual author/reviewer comparison; documented call sites that still
+    # pass it keep working. The retired main-worker kind still requires it.
+    parser.add_argument("--author-context")
     parser.add_argument("--resource-kind", required=True)
     parser.add_argument(
         "--receipt-kind",
@@ -121,7 +160,7 @@ def main(argv=None):
         ):
             reason = "adversarial-review receipt options are inconsistent"
         else:
-            reason = denial(text, args.head, args.author_context, args.resource_kind)
+            reason = denial(text, args.head, args.resource_kind)
             if reason is None and args.required_verdict is not None:
                 lines = text.replace("\r\n", "\n").splitlines()
                 if [line[9:] for line in lines if line.startswith("VERDICT: ")] != [
@@ -129,7 +168,9 @@ def main(argv=None):
                 ]:
                     reason = "adversarial-review receipt does not carry the required verdict"
     else:
-        if args.reviewer_context is None:
+        if args.author_context is None:
+            reason = "Main Worker receipt requires the author context"
+        elif args.reviewer_context is None:
             reason = "Main Worker receipt requires the adversarial reviewer context"
         elif args.required_verdict not in (None, "PASS", "BLOCK"):
             reason = "Main Worker receipt options are inconsistent"

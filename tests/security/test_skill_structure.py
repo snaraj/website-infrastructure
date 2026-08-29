@@ -1101,7 +1101,7 @@ class SkillStructureTests(unittest.TestCase):
             "Never acquire, extract, exchange, print, change, or repurpose",
             "author never posts its own verdict",
             "Neither the author nor the reviewer performs the readiness flip",
-            "coordinator/Main Worker context is distinct from both author and reviewer",
+            "coordinator context is distinct from both author and reviewer",
             "alone holds merge authority",
             "EVIDENCE, never",
             "is NOT a readiness signal",
@@ -1130,7 +1130,7 @@ class SkillStructureTests(unittest.TestCase):
         for fragment in (
             "branch author and independent reviewer are never the same context",
             "neither the author nor the reviewer performs the readiness flip",
-            "coordinator/main worker context is distinct from both author and reviewer",
+            "coordinator context is distinct from both author and reviewer",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, flow)
@@ -1149,7 +1149,7 @@ class SkillStructureTests(unittest.TestCase):
 
         def role_boundary_denial(flow_text, contract_text):
             required = (
-                "coordinator/main worker context is distinct from both author and reviewer",
+                "coordinator context is distinct from both author and reviewer",
                 "neither the author nor the reviewer performs the readiness flip",
             )
             forbidden = (
@@ -1169,8 +1169,8 @@ class SkillStructureTests(unittest.TestCase):
             (
                 (
                     flow.replace(
-                        "coordinator/main worker context is distinct from both author and reviewer",
-                        "coordinator/main worker may share the author or reviewer context",
+                        "coordinator context is distinct from both author and reviewer",
+                        "coordinator may share the author or reviewer context",
                         1,
                     ),
                     contract,
@@ -1178,8 +1178,8 @@ class SkillStructureTests(unittest.TestCase):
                 (
                     flow,
                     contract.replace(
-                        "coordinator/main worker context is distinct from both author and reviewer",
-                        "coordinator/main worker may share the author or reviewer context",
+                        "coordinator context is distinct from both author and reviewer",
+                        "coordinator may share the author or reviewer context",
                         1,
                     ),
                 ),
@@ -1254,7 +1254,7 @@ class SkillStructureTests(unittest.TestCase):
             "permission requires an owner ruling",
             "that removal is not a readiness signal",
             "neither the author nor the reviewer performs the readiness flip",
-            "coordinator/main worker context is distinct from both author and reviewer",
+            "coordinator context is distinct from both author and reviewer",
             "performs that flip",
             "the approve verdict and the flip by the coordinator",
             "the owner alone merges",

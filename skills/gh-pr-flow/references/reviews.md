@@ -17,8 +17,13 @@ and a final line:
 - Reviewer identity (adversarial reviewer)
 ```
 
-The identity must differ from the authoring context. Since one GitHub principal
-may post both, this is textual process evidence, not cryptographic separation.
+The identity names the reviewing lane — provenance, not authority. Independence
+is established by the POSTING ACTOR, and the receipt validator never sees it:
+the coordinator reads the comment's author from the forge. Do not compare the
+signature against the author's, and never invent a context string to make a
+validator return ALLOW; a reviewer satisfies a textual comparison by typing a
+different word, which proves nothing. Same-lane review is permitted where the
+repository contract permits it.
 
 ## Review procedure
 

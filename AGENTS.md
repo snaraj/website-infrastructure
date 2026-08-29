@@ -157,6 +157,16 @@ and dependency-governed Draft capacity is recorded durably in
   GOVERNANCE (owner ruling, 2026-08-20, source above). These exact intake files
   implement the issue-first and pull-request evidence contracts. The ruling is
   not shorthand for any other path under `.github/**`.
+- `.github/dependabot.yml` — DELIVERY, recorded here as issue #129 discharging
+  the amendment that PR #127's declared crossing assigned to it. The file
+  configures ecosystems, schedules, and `groups:` stanzas for the workflow and
+  module manifests this lane already owns, and a `groups:` stanza is the
+  root-cause fix for a split version-locked pair; it is the same surface as its
+  `.github/workflows/**` siblings and carries no platform-lane content. The
+  file's last change before PR #127 predates the lane split entirely, so no
+  post-split precedent or peer-lane claim conflicts with this assignment. Like
+  the row above, this one is exact and not shorthand for any other path under
+  `.github/**`.
 
 - `bootstrap/flux/**` — DELIVERY for its reviewed-state model, README, and
   docs. `bootstrap.sh` embeds the inventory and desired-state assertions
@@ -304,9 +314,14 @@ Delivery-lane requirements, explicit and numbered:
    author and the committer fields of every outgoing commit; the
    immutable-history gate (`scripts/validate_publication_history.py`)
    enforces this closure over the whole outgoing range.
-4. No co-author trailers: agent work is signed in the open with the acting
-   identity. This authoring lane signs commit and PR bodies `- 5.6 Sol` and
-   carries the matching `5.6-sol` label.
+4. No co-author trailers: agent work is signed in the open with the ACTING
+   agent's own identity — commit and PR bodies end with the signature that
+   matches the agent label the same work carries, per the roster in "Agent
+   labels" (`- Fable5` ↔ `fable5`, `- 5.6 Sol` ↔ `5.6-sol`, `- Opus5` ↔
+   `opus5`, `- Sonnet5` ↔ `sonnet5`). A fixed lane signature is wrong on its
+   face once several models work this repository: it would attribute one
+   lane's work to another. Precedents: #123 signed `- 5.6 Sol`, #127 signed
+   `- Sonnet5`, both owner-merged.
 5. Fail-closed, never weaken: a delivery-lane change strengthens or
    documents a check, never relaxes one, and every deliberate exception is
    an explicit, load-bearing justification that the suite re-verifies (the
@@ -351,38 +366,72 @@ step assumes a particular AI tool. (Claude sessions load this contract
 automatically through CLAUDE.md; other agents read AGENTS.md directly.
 Neither gets a different protocol.)
 
+**Review depth is risk-based** (owner reduction, 2026-08-22). Ceremony is
+spent where a mistake reaches something real; spending security-grade
+attention on a comment fix costs the attention a trust boundary needs.
+Three tiers, and a change takes the highest tier any of its paths earns:
+
+- **Security-surface changes** — credentials, authorization, public exposure,
+  signing, digests, immutable artifacts, destructive operations, workflows,
+  policies, validators, the safety invariants, and anything the delivery-lane
+  requirements gate — take focused tests, one full CI cycle at the exact head,
+  live validation where runtime behavior moves, ONE independent adversarial
+  review, and owner merge.
+- **Normal code changes** take focused tests and one full local gate; a live
+  check only when runtime behavior changes; one review.
+- **Documentation, comments, and formatting** run the relevant checks, and
+  adversarial review is the coordinator's routing decision rather than a
+  mandate. No tier ever skips the secret scans or the publication gate.
+
+Nothing here relaxes a fail-closed control at a real trust boundary: the
+safety invariants, owner-only merge, commit identity and signing, digest-only
+deploys, SOPS-only secrets, protected-branch settings, and the release
+transition gates are the same in every tier. Exact-head discipline is also
+unchanged for whatever review DOES run — a verdict binds the head it names.
+
 **Reviewer independence.** The reviewer is a different agent or context
 than the author — a fresh session of the same vendor qualifies; a
-different lane is better. Both contexts use this repository's already
-configured, task-authorized owner account: the GitHub principal is transport,
-not the independence boundary. Never acquire, extract, exchange, or change
-credentials to manufacture reviewer separation, and never print or repurpose
-them. The reviewer works in a disposable worktree at the PR head, stays
-read-only toward the author's workspace, reverts every experiment, and removes
-the worktree afterward.
+different lane is better. Independence is established by the POSTING
+ACTOR, never by signature wording: a verdict receipt is posted by the
+`snaraj-agent-reviews[bot]` GitHub App, a principal separate from the
+account that authors and pushes branches and one that holds repository
+Contents write nowhere, so a compromised review lane cannot alter what
+it reviews. The signature line is lane provenance — content rather than
+identity — so any current or future model name is valid there and this
+contract pins no model roster. No rule compares the reviewer's name to
+the author's: a textual same-lane denial is satisfied by typing a
+different word, which is evidence that the reviewer can type and
+nothing else. Same-lane review is therefore permitted and stays legible,
+and the actor is what a reader verifies. Authoring and reviewing both
+reach git and the API through this repository's already configured,
+task-authorized owner account; never acquire, extract, exchange, or
+change credentials to manufacture reviewer separation, and never print
+or repurpose them. The reviewer works in a disposable worktree at the PR
+head, stays read-only toward the author's workspace, reverts every
+experiment, and removes the worktree afterward.
 
-**Exact-head receipt.** Agents share the owner's GitHub principal, so identity
-is textual workflow evidence. A normal PR comment contains exactly one
-`HEAD: <40-lowercase-hex>` line, exactly one `VERDICT: APPROVE` or
-`VERDICT: REQUEST-CHANGES`, and ends `- <Agent> (adversarial reviewer)`.
-Any head change invalidates it and requires a fresh independent review. Validate
-the shape with `scripts/validate_review_receipt.py --resource-kind pull-request`;
-the validator rejects issue resources, and context independence still requires
-coordinator verification. If the owner merged first, record a post-merge audit
-rather than retroactive approval.
+**Exact-head receipt.** The receipt binds one exact head, and the bot actor
+above is what makes it a second party rather than a self-approval. A normal PR
+comment contains exactly one `HEAD: <40-lowercase-hex>` line, exactly one
+`VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`, and ends
+`- <Agent> (adversarial reviewer)`. Any head change invalidates it and requires
+a fresh independent review. Validate the shape with
+`scripts/validate_review_receipt.py --resource-kind pull-request`; the
+validator rejects issue resources and proves receipt SHAPE only — it never
+sees who posted the comment, so the coordinator reads the posting actor from
+GitHub. If the owner merged first, record a post-merge audit rather than
+retroactive approval.
 
-**Main Worker Ready receipt.** After an exact-head `APPROVE`, a coordinator
-context distinct from both author and reviewer performs one bounded sanity pass
-over architecture, merge order, authority, owner-observed settings, base
-freshness, and required checks. Its normal comment contains exactly one `HEAD:
-<40-lowercase-hex>`, exactly `ROLE: MAIN-WORKER`, exactly `VERDICT: PASS`, the
-closed scope line defined in `skills/gh-pr-flow/references/reviews.md`, and a
-final `- <context> (Main Worker)` signature. Validate it with
-`scripts/validate_review_receipt.py --receipt-kind main-worker
---resource-kind pull-request --required-verdict PASS`; `BLOCK`, a broadened
-scope, shared author/reviewer context, or any head change cannot satisfy Ready.
-This gate is architecture/order coordination, not a second code review, a
-settings mutation, Ready authority, or merge authority.
+**Main Worker Ready receipt — RETIRED** (owner reduction, 2026-08-22). There is
+no separate Main Worker pass: after an exact-head `APPROVE` and green required
+checks at that head, the coordinator flips Ready and the owner merges. No
+`ROLE: MAIN-WORKER` receipt is required, none is a Ready input, and no lane may
+reintroduce one as a local convention. Machinery for the retired receipt still
+exists and is transitional rather than authority — the `main-worker` receipt
+kind in `scripts/validate_review_receipt.py`, the Main Worker sections of
+`skills/gh-pr-flow/**`, and the `ROLE: MAIN-WORKER` rows of
+`.github/PULL_REQUEST_TEMPLATE.md` — and issue #188 owns removing it. Until
+that lands this file governs, because a skill never supersedes AGENTS.md.
 
 **The review must:**
 
@@ -403,8 +452,10 @@ settings mutation, Ready authority, or merge authority.
    suite cannot see, fixtures and gates that disable themselves, and the
    ways a fix written to close a finding is itself vacuous — each with
    its general correction.
-4. Probe for flakes: the full suite at least three times, plus the race
-   detector where the language has one. Any nondeterminism is a finding
+4. Probe for flakes: the author runs the complete local gate once on the
+   final head; the reviewer runs the focused checks its findings need,
+   plus the race detector where the language has one, and MAY re-run the
+   full suite when it has specific cause. Any nondeterminism is a finding
    naming the test.
 5. Check hygiene: commit identity (owner noreply in BOTH author and
    committer), signature conventions and agent labels, no co-author
@@ -432,7 +483,7 @@ the same branch owner — fixes land on the same branch and receive a
 delta re-review of the changed scope. Role compatibility is fixed: the
 branch author and independent reviewer are never the same context, and
 neither the author nor the reviewer performs the readiness flip. The
-coordinator/Main Worker context is distinct from both author and reviewer and
+coordinator context is distinct from both author and reviewer and
 performs that flip. The flip happens only once the verdict is APPROVE
 (or its findings are fixed and re-verified), no owner or peer comment is
 outstanding, and every check is green at the exact head. A coordination
@@ -474,14 +525,22 @@ authority: the owner alone merges.
   APPROVE receipt, or owner merge authority.
   The APPROVE verdict and the flip by the coordinator are necessary but not
   sufficient. Ready means zero unresolved blockers across code, CI, review,
-  sequencing, settings, Main Worker, metadata, or any other declared gate.
+  sequencing, settings, metadata, or any other declared gate.
   Owner review or owner merge authority does not waive a blocker; a
   blocker-bearing PR stays Draft.
+  Ordinary labels, body text, and process comments are coordination signals,
+  never security invariants: they are written by the same lane that authored
+  the change and carry no more authority than that. The control evidence is
+  the App-posted exact-head verdict — its posting actor and the head it binds —
+  alongside the signed-commit chain, the protected-branch settings, and the
+  gates that run at that head.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
-  (Claude Opus 5), `opus4.8` (Claude Opus 4.8). The signature must match
-  the label (delivery-lane bodies ending `- Fable5` ↔ `fable5`;
+  (Claude Opus 5), `opus4.8` (Claude Opus 4.8), `sonnet5` (Claude Sonnet 5,
+  color `0EA5E9`, description "Authored by Claude Sonnet 5"). The signature
+  must match the label (delivery-lane bodies ending `- Fable5` ↔ `fable5`,
+  `- Opus5` ↔ `opus5`, `- Sonnet5` ↔ `sonnet5`;
   Codex-lane titles ending " - Codex 5.6 Sol Ultra" ↔ `5.6-sol`).
   The umbrella description is model-neutral: `Authored by an AI agent on the
   repository owner's behalf`. Treat older model-specific umbrella descriptions
@@ -517,13 +576,77 @@ authority: the owner alone merges.
 - **Dependabot.** Dependency PRs obey the same issue/milestone/assignee,
   one-fragment release consequence, exact-head review, CI/coverage, and base freshness
   controls. Tool or runner outages are reported as infrastructure failures;
-  they never waive a real product failure.
+  they never waive a real product failure. When Dependabot splits a
+  version-locked pair into separate PRs — precedent: `github/codeql-action`
+  `init` and `analyze` as #124 and #125 — one agent PR supersedes BOTH,
+  applying the paired bump AND the root-cause fix in the same commit: a
+  `groups:` stanza in `.github/dependabot.yml` scoped to that pair, so the
+  split cannot recur. The superseded Dependabot PRs are left for Dependabot
+  to close on its next rebase (merged precedent #127).
 - **Merge readiness.** Keep Draft until the exact head has a fresh independent
-  APPROVE receipt and a fresh bounded Main Worker `PASS` receipt, all exact-head
+  APPROVE receipt, all exact-head
   checks succeed, protected base is current, all discussions/findings are
   resolved, metadata/scope/order remain exact, and the platform patch-release
   consequence is proven. Only the coordinator flips Ready and re-verifies;
   author and reviewer never do. Nobody but the repository owner merges.
+
+## Parallel agents in one checkout
+
+Several agents — different models and vendors, executors and reviewers — work
+this repository at once, sometimes on one machine. Git worktrees are the
+isolation mechanism, and these rules are part of the contract: they bind every
+lane whether or not any vendor-specific tooling is present. This section exists
+because the cold-start invariant above is literal — an agent that clones this
+repository must learn the isolation rules here, not from a machine-local
+skills folder that a fresh clone does not carry.
+
+- **The shared checkout is nobody's workspace.** It stays on `main`, clean, and
+  is used only for coordination — `git fetch`, worktree creation and removal,
+  ceremony reads. No agent builds, edits, or checks out a branch there. It may
+  lag `origin/main` harmlessly: every actor works from `origin/main` after its
+  own `git fetch origin`, never from a local `main`.
+- **One worktree per acting context, named for its lane.** The preferred branch
+  grammar is `<lane>-<effort>/<issue#>-<topic>` (e.g.
+  `opus5-high/218-contracts-fold`), carrying the dispatched reasoning effort
+  (`low | med | high | max`) and the tracking issue; `<lane>` is parsed by
+  longest match against the repository-registered agent-label set, then the
+  `-<effort>` suffix. Executors run `git worktree add
+  .claude/worktrees/<lane>-<effort>-<issue#>-<topic> -b
+  <lane>-<effort>/<issue#>-<topic> origin/main`. The legacy `<lane>/<topic>`
+  form remains accepted during the transition. Either way the directory and
+  the branch carry the SAME lane, because the cleanup rule below depends on
+  ownership being legible to every other agent. A worktree whose name and
+  branch disagree, or a branch with no lane prefix, is a contract violation.
+- **Reviewers work disposably.** A detached-HEAD worktree at the exact pull
+  request head (`git worktree add .claude/worktrees/<lane>-review-<PR#>
+  <headSHA>`), removed once the receipt posts. A reviewer stays read-only
+  toward every other workspace and reverts every experiment inside its own.
+- **One writer per branch, one branch per worktree.** A worktree that is not
+  yours is a worktree you never write to. Treat reads with care: a tree that
+  advances under you mid-operation is a live executor, not stale state.
+- **Some git state is shared — that is the trap.** HEAD, index, and working
+  tree are per-worktree; refs, remotes, config, and stash are repository-wide.
+  So `git fetch`, `git branch -d/-D`, and `git worktree prune` act on every
+  lane at once: run them only from the main checkout during deliberate
+  cleanup, never mid-task. Never `git config` anything — identity and signing
+  are pinned per command per "Commit identity mechanics", and one lane's
+  config write poisons all of them. A branch checked out in any worktree
+  cannot be deleted or checked out elsewhere; that lock marks live ownership.
+- **Clean only your own lane, and only after the owner merges.** Confirm the
+  merge against the remote, then remove your worktree and delete your branch
+  from the main checkout with `git worktree remove` and `git branch -d` — no
+  `--force`, no `-D`. Those refusals are the safety net: a dirty tree or an
+  unmerged branch is somebody's live work, very possibly another lane running
+  right now. Another lane's leftovers are that lane's to remove, and deleting
+  a remote ref is the owner's alone (delivery-lane requirement 2).
+- **Shared machines contend.** Heavy suites in several worktrees compete for
+  CPU and load-sensitive tests can flake under contention. Treat a contention
+  flake as an environment finding — name it, rerun it, never weaken the test —
+  and stagger the heaviest batteries when many lanes run at once.
+
+Only process doctrine belongs here. Host and service baselines, admin-ingress
+and tunnel design, and credential custody stay machine-local permanently:
+safety invariant 12 treats the Git index as public.
 
 ## Working a change end to end
 
@@ -541,7 +664,9 @@ The complete delivery loop, each step gated by the sections around it:
    owner, set a milestone. Do not put the PR-head-only `requires-review` label
    on an issue; request issue-spec review through an explicit normal comment.
 3. **Branch from `origin/main`** after `git fetch origin`; branch names
-   are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
+   are lane-prefixed, in the grammar "Parallel agents in one checkout"
+   defines (`opus5-high/218-contracts-fold`; legacy `fable5/<topic>` still
+   accepted). One writer per branch, always —
    a branch that is not yours is a branch you never push to. Add one unique
    issue-namespaced changelog fragment; never reserve a patch number or edit
    generated release files. Never rewrite a published branch.
@@ -558,13 +683,13 @@ The complete delivery loop, each step gated by the sections around it:
    `requires-review` once the PR is complete-from-author — every commit
    pushed, the body final; until it carries that label, nobody reviews
    it.
-7. **Adversarial review** per the protocol above; findings are fixed on
-   the same branch by the same writer and delta re-reviewed before the
-   flip to ready.
-8. **Main Worker gate** per the protocol above; its exact-head `PASS` receipt
-   is required after approval and before coordinator Ready evaluation.
-9. **Owner comments** are handled per the owner review protocol below.
-10. **The owner merges.** Nothing you can do — approval, green checks,
+7. **Adversarial review** per the protocol above, at the depth its risk
+   tier earns; findings are fixed on the same branch by the same writer
+   and delta re-reviewed. After an APPROVE at the exact final head with
+   every required check green, the coordinator flips Ready — there is no
+   second receipt between them.
+8. **Owner comments** are handled per the owner review protocol below.
+9. **The owner merges.** Nothing you can do — approval, green checks,
    ready state — substitutes for that.
 
 ## Commit identity mechanics
@@ -595,6 +720,46 @@ Read it from published history and pin it per command:
   amend, rebase, cherry-pick onto published history, force, or delete; use
   additive commits or a fresh branch. The publication-history validator checks
   both author and committer over the complete outgoing range.
+- **SSH-sign every agent commit, and select the key EXPLICITLY.** Signing is
+  pinned per command with the owner-registered signing key, never through
+  `git config`, for the same reason the identity is. The obvious selector is
+  broken: `key::$(ssh-add -L | grep ssh-ed25519)` matches EVERY loaded ed25519
+  line, so `key::` receives a multi-line value and signing fails on a
+  malformed key — not an exotic setup, since any agent that also loads a
+  deploy or push key hits it. Ask the forge which key is registered for
+  SIGNING, intersect that with what the agent actually holds, and require
+  exactly one match; the selection then names no key comment, no host, and no
+  ordering, so it works unchanged from any machine the owner signs on:
+
+      signing_key() {
+        local account matched
+        account="$(gh api /user --jq '.login')"
+        matched="$(comm -12 \
+          <(gh api "/users/${account}/ssh_signing_keys" --jq '.[].key' | sort) \
+          <(ssh-add -L | awk '{print $1, $2}' | sort))"
+        test "$(printf '%s' "${matched}" | grep -c '')" -eq 1 || {
+          printf 'expected exactly one registered signing key in the agent\n' >&2
+          return 1
+        }
+        printf '%s' "${matched}"
+      }
+
+      git -c gpg.format=ssh \
+          -c user.signingkey="key::$(signing_key)" \
+          commit -S ...
+
+  Local verification needs a SPACE-FREE principal in the allowed-signers
+  file — the bare identity email read from published history, never
+  `Name <email>`, because ssh reads the space as a field break, reports
+  `line 1: invalid key`, and matches nothing. That is the trap: a genuine
+  WRONG-KEY negative control also reports `No principal matched.`, so a
+  malformed file silently false-passes the negative control while proving
+  nothing. Run BOTH controls and require them to DIFFER — the positive must
+  print `G`, and the negative, holding only some other key, must print `U`.
+  If the positive is not `G` the file is broken; repair it before believing
+  the negative. Signature enforcement is a protected-branch setting on
+  `main`, not a repository-wide one, so it never blocks the owner's own
+  merges from a machine that lacks this key.
 - No `Co-Authored-By` trailers, ever. Signatures per lane (delivery-lane
   requirement 4), matching the agent label.
 - Treat the Git index as public (safety invariant 12): no hostname, IP
@@ -625,6 +790,17 @@ re-cut onto a fresh branch and replacement PR. A fresh branch is otherwise
 required only for a real code or semantic dependency, conflict, or current-main
 repair; port only the residual diff. Every PR that eventually targets main
 independently adds one fragment and passes the release gate.
+
+**Stale concurrent Drafts are re-cut, never rewritten.** A Draft that has
+fallen far behind current protected `main`, or that has absorbed repeated
+REQUEST-CHANGES rounds against a moving base until its published history no
+longer resembles the change under review, is superseded rather than repaired
+in place: branch fresh from current `origin/main`, port only the reviewed
+residual diff, add the new fragment, rerun every gate, obtain a fresh
+exact-head review, and close the stale PR as superseded — the branch stays,
+because ref deletion is the owner's. That is the #109 → #123 precedent, and
+it is a re-cut precisely because rebasing or force-pushing a published branch
+is barred by delivery-lane requirement 2.
 
 ## Quality gates — exact commands and patterns
 
@@ -666,8 +842,9 @@ is the consolidated command view:
   `--ignore-gitleaks-allow` and a verified-empty ignore file, so NO
   allowlist entry is ever honored on the merge path — this repository
   keeps no `.gitleaksignore`; fix the content, never allowlist it.
-- **Flake probe.** Before a PR leaves draft the full suite has run at
-  least three times (author and reviewer independently); any
+- **Flake probe.** The author runs the complete local gate ONCE on the
+  final head; the reviewer runs the focused checks its findings need and
+  MAY re-run the full suite when it has specific cause. Any
   nondeterminism is a finding naming the test.
 
 ## CI map
