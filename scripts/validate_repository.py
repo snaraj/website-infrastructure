@@ -1674,6 +1674,64 @@ def _yaml_documents(text):
     return re.split(r"(?m)^---\s*$", text)
 
 
+# One `subjects:` entry, matched a line at a time. Each pattern is anchored and
+# contains no cross-line `\s*`, so nothing here can scan past its own line.
+_SUBJECT_KIND_LINE = re.compile(r"^\s*-\s+kind:\s*ServiceAccount\s*$")
+_SUBJECT_NAME_LINE = re.compile(r"^\s*name:\s*(\S+)\s*$")
+_SUBJECT_NAMESPACE_LINE = re.compile(r"^\s*namespace:\s*(\S+)\s*$")
+
+
+def _service_account_subjects(document, *, with_namespace=False):
+    """Return the ServiceAccount subjects of one binding document.
+
+    Replaces the regex that spelled the same rule across lines::
+
+        (?m)^\\s*-\\s+kind:\\s*ServiceAccount\\s*$\\n\\s*name:\\s*(\\S+)\\s*$
+
+    ``\\s`` matches a newline, so the ``\\s*`` before ``name:`` could span an
+    unbounded run of whitespace-only lines and then backtrack through it one
+    position at a time — once per candidate start. The cost was QUADRATIC in
+    document length: measured on a hostile document of alternating subject
+    heads and blank lines, 1,000 lines took 12.7ms, 2,000 took 49.8ms, 4,000
+    took 202ms and 8,000 took 783ms — a clean 4x per 2x, extrapolating past
+    30 seconds at 100,000 lines (issue #166). It was slow rather than wrong,
+    which is why it survived three copies.
+
+    The line scan below reads each line once and keeps the same rule: a
+    subject head, then the next NON-BLANK line must be its ``name:`` (and,
+    when asked, the one after that its ``namespace:``). Whitespace-only lines
+    between them are skipped, which is exactly the set the old ``\\s*`` could
+    consume. Anything else ends that subject with no entry — and every caller
+    compares the result against an exact expected tuple, so extracting fewer
+    subjects raises the mismatch error rather than passing quietly.
+    """
+
+    lines = document.split("\n")
+    subjects = []
+    for index, line in enumerate(lines):
+        if not _SUBJECT_KIND_LINE.match(line):
+            continue
+        cursor = index + 1
+        fields = []
+        for pattern in (
+            (_SUBJECT_NAME_LINE, _SUBJECT_NAMESPACE_LINE)
+            if with_namespace
+            else (_SUBJECT_NAME_LINE,)
+        ):
+            while cursor < len(lines) and not lines[cursor].strip():
+                cursor += 1
+            match = pattern.match(lines[cursor]) if cursor < len(lines) else None
+            if match is None:
+                fields = None
+                break
+            fields.append(match.group(1))
+            cursor += 1
+        if fields is None:
+            continue
+        subjects.append(tuple(fields) if with_namespace else fields[0])
+    return subjects
+
+
 def _rbac_rule_blocks(document):
     """Return the text of each `rules:` entry in one RBAC document.
 
@@ -1847,9 +1905,7 @@ def flux_rbac_contract_errors(root):
     # subjects for controllers this install does not run.
     binding_patch = controllers / "patches/crd-controller-binding.yaml"
     if binding_patch.is_file():
-        subjects = re.findall(
-            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", read(binding_patch)
-        )
+        subjects = _service_account_subjects(read(binding_patch))
         if tuple(sorted(subjects)) != tuple(sorted(FLUX_CONTROLLER_ACCOUNTS)):
             errors.append(
                 "crd-controller subjects must be exactly the installed controllers: "
@@ -2041,14 +2097,13 @@ def flux_rbac_contract_errors(root):
                 r"\s*name:\s*(\S+)\s*$",
                 document,
             )
-            subjects = tuple(sorted(re.findall(
-                r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n"
-                r"\s*name:\s*(\S+)\s*$\n\s*namespace:\s*(\S+)\s*$",
-                document,
-            )))
-            # Regex captures (name, namespace); normalize to (namespace, name).
-            subjects = tuple(sorted((subject_namespace, subject_name)
-                                    for subject_name, subject_namespace in subjects))
+            # The scan yields (name, namespace); normalize to (namespace, name).
+            subjects = tuple(sorted(
+                (subject_namespace, subject_name)
+                for subject_name, subject_namespace in _service_account_subjects(
+                    document, with_namespace=True
+                )
+            ))
             expected = expected_bindings.get((namespace, name))
             if expected is None or role_ref is None or (
                 role_ref.group(1), subjects
@@ -2199,9 +2254,7 @@ def flux_rbac_contract_errors(root):
             document,
         )
         role_ref = role_ref_match.group(1) if role_ref_match else None
-        subjects = re.findall(
-            r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$", document
-        )
+        subjects = _service_account_subjects(document)
         seen_cluster_bindings[name_match.group(1)] = (
             role_ref,
             tuple(sorted(subjects)),

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import types
 import unittest
 from pathlib import Path
@@ -1771,6 +1772,146 @@ class RepositoryPolicyTests(unittest.TestCase):
                         "deploymentReady=true"
                     ],
                 )
+
+
+class ServiceAccountSubjectScanTests(unittest.TestCase):
+    """Issue #166: the subjects extraction is bounded, and still exact.
+
+    Three call sites shared one cross-line regex whose ``\\s*`` before
+    ``name:`` could span whitespace-only lines and then backtrack through them
+    once per candidate start — quadratic in document length, fail-closed but
+    slow enough to matter as rendered manifests grow. The replacement is a
+    single-pass line scan, so this battery proves two things: that it reads
+    the same documents the same way, and that its cost is linear.
+    """
+
+    # The retired pattern, kept as the oracle. Equivalence against the exact
+    # regex that shipped is stronger than a hand-written expectation, because
+    # it re-derives the old behaviour instead of restating a belief about it.
+    RETIRED_NAME_ONLY = re.compile(
+        r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n\s*name:\s*(\S+)\s*$"
+    )
+    RETIRED_WITH_NAMESPACE = re.compile(
+        r"(?m)^\s*-\s+kind:\s*ServiceAccount\s*$\n"
+        r"\s*name:\s*(\S+)\s*$\n\s*namespace:\s*(\S+)\s*$"
+    )
+
+    DOCUMENTS = {
+        "two complete subjects": (
+            "subjects:\n"
+            "  - kind: ServiceAccount\n    name: a\n    namespace: x\n"
+            "  - kind: ServiceAccount\n    name: b\n    namespace: y\n"
+        ),
+        "single unindented subject": (
+            "subjects:\n- kind: ServiceAccount\n  name: only\n"
+        ),
+        "blank line between the keys": (
+            "subjects:\n  - kind: ServiceAccount\n\n"
+            "    name: blankgap\n    namespace: n\n"
+        ),
+        "a head with no name at all": (
+            "subjects:\n  - kind: ServiceAccount\n"
+            "  - kind: ServiceAccount\n    name: second\n"
+        ),
+        "a non-ServiceAccount subject alongside": (
+            "subjects:\n  - kind: ServiceAccount\n    name: a\n"
+            "  - kind: Group\n    name: skipme\n"
+        ),
+        "empty document": "",
+        "a top-level ServiceAccount, not a subject": (
+            "kind: ServiceAccount\nname: notasubject\n"
+        ),
+    }
+
+    # 40,000 subject heads followed by 40,000 whitespace-only lines: every head
+    # is a candidate start whose trailing `\s*` used to consume, and then give
+    # back, the whole blank tail. Measured on the author's machine: the retired
+    # regex took 0.83s at 16,000 lines, 3.37s at 32,000 and 20.62s at 80,000
+    # (4x per 2x, the signature of a quadratic scan); the line scan takes 26ms
+    # at 80,000. The budget sits ten times under the quadratic cost and seventy
+    # times over the linear one, so it is a real killer rather than a stopwatch
+    # race on a loaded machine.
+    PATHOLOGICAL_HEADS = 40000
+    SCAN_BUDGET_SECONDS = 2.0
+
+    @staticmethod
+    def _hostile_document(heads):
+        return "  - kind: ServiceAccount\n" * heads + "   \n" * heads
+
+    def test_the_scan_reads_every_shape_the_retired_regex_read(self):
+        for label, document in sorted(self.DOCUMENTS.items()):
+            with self.subTest(document=label):
+                self.assertEqual(
+                    MODULE._service_account_subjects(document),
+                    self.RETIRED_NAME_ONLY.findall(document),
+                )
+                self.assertEqual(
+                    MODULE._service_account_subjects(
+                        document, with_namespace=True
+                    ),
+                    self.RETIRED_WITH_NAMESPACE.findall(document),
+                )
+
+    def test_the_equivalence_table_is_not_all_empty(self):
+        """Vacuity probe: two extractors that both find nothing agree."""
+
+        extracted = [
+            MODULE._service_account_subjects(document)
+            for document in self.DOCUMENTS.values()
+        ]
+        self.assertGreaterEqual(
+            sum(len(names) for names in extracted),
+            5,
+            "the equivalence table no longer exercises a matching document",
+        )
+
+    def test_the_pathological_document_stays_inside_the_scan_budget(self):
+        document = self._hostile_document(self.PATHOLOGICAL_HEADS)
+        start = time.perf_counter()
+        subjects = MODULE._service_account_subjects(document)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(subjects, [], "no head in this document has a name")
+        self.assertLess(
+            elapsed,
+            self.SCAN_BUDGET_SECONDS,
+            "subject extraction over {} lines took {:.2f}s; the bounded line "
+            "scan is linear, so this is issue #166's quadratic backtracking "
+            "returning".format(2 * self.PATHOLOGICAL_HEADS, elapsed),
+        )
+
+    def test_the_budget_is_one_a_quadratic_scan_fails(self):
+        """The killer, measured rather than asserted.
+
+        Run the RETIRED regex over a document a quarter of the pathological
+        size — small enough to keep this test near a second, large enough that
+        the quadratic cost is already unmistakable — and require both that it
+        is far worse than the line scan on the same bytes and that, scaled
+        quadratically to the full document, it would blow the budget. A budget
+        the old pattern would also have met is not a regression test.
+        """
+
+        document = self._hostile_document(self.PATHOLOGICAL_HEADS // 4)
+        start = time.perf_counter()
+        self.RETIRED_NAME_ONLY.findall(document)
+        retired = time.perf_counter() - start
+
+        start = time.perf_counter()
+        MODULE._service_account_subjects(document)
+        scanned = time.perf_counter() - start
+
+        self.assertGreater(
+            retired,
+            scanned * 20,
+            "the retired regex is no longer measurably worse than the line "
+            "scan ({:.3f}s vs {:.3f}s), so this battery has stopped measuring "
+            "the defect".format(retired, scanned),
+        )
+        self.assertGreater(
+            retired * (4 ** 2),
+            self.SCAN_BUDGET_SECONDS,
+            "extrapolated quadratically to the full pathological document the "
+            "retired pattern would still fit the budget; raise the size",
+        )
 
 
 if __name__ == "__main__":
