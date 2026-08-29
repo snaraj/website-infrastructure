@@ -256,32 +256,32 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             sites["naranjo-online"]["chart"],
             {
                 "layer_digest": (
-                    "sha256:a24ee5b9e4e644e0ff7ccccf"
-                    "916f2f86c37279c5f9448ba4c"
-                    "bb059907d60c166"
+                    "sha256:2ceeb381106d3c75504d8c67"
+                    "69431db0d969ecf0af4aedd3b"
+                    "43bc3e88e00a62c"
                 ),
                 "manifest_digest": (
-                    "sha256:0c67bf604e25ddba0f5e2c43"
-                    "036884456d29137b153af22d8"
-                    "cb7c640628199c6"
+                    "sha256:12bab1e17f838615f81d3901"
+                    "cc08fec8a9e8741bf1023c7b0"
+                    "6c83ca6442cabc2"
                 ),
                 "repository": "ghcr.io/snaraj/charts/naranjo-online",
-                "version": "0.1.60",
+                "version": "0.1.62",
             },
         )
         self.assertEqual(
             sites["naranjo-online"]["workload"],
             {
                 "arm64_digest": (
-                    "sha256:8f6ac1279083790ffbf8a46f"
-                    "57ba81364919edd8ee9e7871"
-                    "26bb2cf2cb2efe1b"
+                    "sha256:81c30d13b79ae0bdba2c77af"
+                    "04e82868bc5ce50819cdabb6"
+                    "af387e5fcc90e89c"
                 ),
                 "image": (
-                    "ghcr.io/snaraj/naranjo-online:v0.1.60@"
-                    "sha256:f9b9570396bfd4a555db829"
-                    "0cd71580136436c4c53e021a"
-                    "09a8317718cfe7e1f"
+                    "ghcr.io/snaraj/naranjo-online:v0.1.62@"
+                    "sha256:be9593c9ecc3616f9cd1aae"
+                    "af641e8a52be5f8f6365498e"
+                    "958da8fcaf99cc4e6"
                 ),
             },
         )
