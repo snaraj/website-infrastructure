@@ -1033,6 +1033,162 @@ class FluxEgressDenyFixtureTests(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0, completed.stdout)
                 self.assertIn(expected, completed.stderr)
 
+    def _policy_runner_harness(
+        self, stub_body, deny_text, sidecar_text=None, capacity_reasons=()
+    ):
+        """Build a disposable tree the real runner can be pointed at.
+
+        Returns the completed process. Same construction as the driver above,
+        extracted here because the issue #176 cases vary the FIXTURE rather
+        than the engine's verdict — and, unlike that driver, one of these
+        cases must reach the runner's LAST step, so the capacity allow/deny
+        pair the runner ends with is staged too. ``capacity_reasons`` is the
+        exact reviewed set that pair's release sidecar names; the stubbed
+        engine prints the same lines for every fixture, so it must equal what
+        the stub emits.
+        """
+
+        base = Path(
+            tempfile.mkdtemp(prefix="policy-runner-176.", dir=os.environ.get("TMPDIR"))
+        ).resolve()
+        self.addCleanup(shutil.rmtree, base, True)
+        (base / "bin").mkdir()
+        _write_executable(
+            base / "bin" / "conftest",
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in *fixtures/allow/*) exit 0 ;; esac\n"
+            + stub_body
+            + "\n",
+        )
+        (base / "scripts").mkdir()
+        shutil.copy2(self.RUNNER, base / "scripts" / "test-policy-fixtures.sh")
+        for kind in ("allow", "deny"):
+            (base / "tests" / "kubernetes" / "fixtures" / kind).mkdir(parents=True)
+        (
+            base / "tests" / "kubernetes" / "fixtures" / "allow" / "one.yaml"
+        ).write_text("kind: ConfigMap\n", encoding="utf-8")
+        deny = base / "tests" / "kubernetes" / "fixtures" / "deny" / "one.yaml"
+        deny.write_text(deny_text, encoding="utf-8")
+        if sidecar_text is not None:
+            deny.with_suffix(".expected").write_text(sidecar_text, encoding="utf-8")
+        fixtures = base / "tests" / "kubernetes" / "fixtures"
+        (fixtures / "allow" / "reviewed-capacity.yaml").write_text(
+            "kind: ResourceQuota\n", encoding="utf-8"
+        )
+        capacity_deny = fixtures / "deny" / "reviewed-capacity-bypasses.yaml"
+        capacity_deny.write_text(
+            "".join(
+                "# expect-deny: {}\n".format(reason) for reason in capacity_reasons[:1]
+            )
+            + "kind: ResourceQuota\nmetadata:\n  name: bypass\n",
+            encoding="utf-8",
+        )
+        capacity_deny.with_name(
+            "reviewed-capacity-bypasses.release.expected"
+        ).write_text(
+            "".join("{}\n".format(reason) for reason in capacity_reasons),
+            encoding="utf-8",
+        )
+        (base / "policies" / "conftest").mkdir(parents=True)
+        (base / "policies" / "release-conftest").mkdir(parents=True)
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join(
+            [str(base / "bin"), environment.get("PATH", "")]
+        )
+        return subprocess.run(
+            [
+                required_tool(BASH, BASH_REQUIRED),
+                str(base / "scripts" / "test-policy-fixtures.sh"),
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    @unittest.skipUnless(BASH, BASH_REQUIRED)
+    def test_an_empty_expect_deny_line_is_refused_by_name(self):
+        """Issue #176: the empty-valued declaration that defeated both layers.
+
+        The hostile shape is a TWO-document fixture where one document carries
+        a real reason and the other a bare ``# expect-deny:``. The tally
+        counted declaration LINES, so it saw two and matched the two
+        documents; the proof loop skipped empty values, so it proved one. The
+        runner printed "2 declared reason(s) proven" and exited 0 with a
+        document nothing asserted — and the inventory battery, requiring one
+        non-empty declaration per FILE, was satisfied by the sibling's reason.
+        Reproduced exactly that way before this fix.
+        """
+
+        real_reason = (
+            "NetworkPolicy flux-system/allow-egress must carry no egress rule; "
+            "the generated blanket allow is removed by patch"
+        )
+        rejecting = (
+            "printf 'FAIL - fixture - main - " + real_reason + "\\n'; exit 1"
+        )
+        hostile = (
+            "# expect-deny: " + real_reason + "\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: allow-egress\n"
+            "---\n"
+            "# expect-deny:\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: unasserted\n"
+        )
+        completed = self._policy_runner_harness(rejecting, hostile)
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("empty \"# expect-deny:\" declaration", completed.stderr)
+        self.assertIn("document 2", completed.stderr)
+        self.assertNotIn("declared reason(s) proven", completed.stdout)
+
+    @unittest.skipUnless(BASH, BASH_REQUIRED)
+    def test_a_compliant_multi_document_fixture_still_passes(self):
+        """The other direction, so the refusal above is not simply "all deny".
+
+        Same two documents, both with real reasons, same engine: the runner
+        must accept it and say it proved two.
+        """
+
+        first = "first reviewed reason"
+        second = "second reviewed reason"
+        rejecting = (
+            "printf 'FAIL - fixture - main - " + first + "\\n"
+            "FAIL - fixture - main - " + second + "\\n'; exit 1"
+        )
+        compliant = (
+            "# expect-deny: " + first + "\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: one\n"
+            "---\n"
+            "# expect-deny: " + second + "\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: two\n"
+        )
+        completed = self._policy_runner_harness(
+            rejecting, compliant, capacity_reasons=(first, second)
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("2 declared reason(s) proven", completed.stdout)
+
+    @unittest.skipUnless(BASH, BASH_REQUIRED)
+    def test_an_empty_reviewed_sidecar_is_refused_by_name(self):
+        """The related finding from the same receipt.
+
+        A sidecar holding only comments declares the EMPTY set. Before this
+        change the runner died on `set -e` when grep matched nothing: correct
+        outcome, no diagnostic, and nothing naming the fixture — which reads
+        as a broken runner rather than a broken fixture.
+        """
+
+        completed = self._policy_runner_harness(
+            "printf 'FAIL - fixture - main - anything\\n'; exit 1",
+            "kind: NetworkPolicy\nmetadata:\n  name: one\n",
+            sidecar_text="# reviewed denials\n\n",
+        )
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertIn("reviewed denial list names no message", completed.stderr)
+        self.assertIn("one.expected", completed.stderr)
+
 
 def _reviewed_render() -> str:
     """A faithful 30-object skeleton of the reviewed controller render.

@@ -77,6 +77,32 @@ strip_ansi() {
   sed -E $'s/\x1b\\[[0-9;]*m//g'
 }
 
+# Only a declaration that carries a REASON can be proven. The tally used to
+# count declaration LINES while the proof loop skipped empty values, so a
+# multi-document fixture carrying one real reason and one bare
+# `# expect-deny:` reported "2 declared reason(s) proven" having proven one --
+# and the inventory battery, which required one non-empty declaration per
+# FILE, was satisfied by the sibling document's real reason. Both layers
+# passed a fixture with an unasserted document (issue #176). Counting
+# non-empty declarations here and refusing the empty ones outright below
+# closes the runner's half.
+count_declared_reasons() {
+  grep -cE '^#[[:space:]]*expect-deny:[[:space:]]*[^[:space:]]' <"$1" || true
+}
+
+# The document index (1-based, `---` at column 0 separates documents) of every
+# empty-valued declaration, so a refusal in a long multi-document fixture says
+# WHICH document is unasserted instead of only that one is.
+empty_declaration_documents() {
+  awk '
+    /^---[[:space:]]*$/ { doc += 1; next }
+    /^#[[:space:]]*expect-deny:[[:space:]]*$/ {
+      printf "%s%d", separator, doc + 1
+      separator = ", "
+    }
+  ' <"$1"
+}
+
 # The exact-set form: the fixture's reviewed `.expected` sidecar must name every
 # denial the file produces, and no other.
 assert_reviewed_denial_set() {
@@ -85,7 +111,16 @@ assert_reviewed_denial_set() {
 
   actual="$(printf '%s\n' "$output" | strip_ansi |
     sed -n 's/^FAIL - .* - main - //p' | LC_ALL=C sort)"
-  expected="$(grep -vE '^[[:space:]]*(#|$)' "$expected_file" | LC_ALL=C sort)"
+  # `|| true`: an all-comment sidecar makes grep exit 1, and under `set -e`
+  # that aborted the whole runner with no message at all -- fail-closed, but
+  # unattributable. An empty reviewed set is refused here BY NAME instead.
+  expected="$(grep -vE '^[[:space:]]*(#|$)' "$expected_file" | LC_ALL=C sort || true)"
+  if [[ -z "$expected" ]]; then
+    printf 'reviewed denial list names no message: %s\n' "${expected_file}" >&2
+    printf 'the empty set matches any rejection that emits no FAIL line, so %s would be certified for a denial that never happened\n' \
+      "${fixture}" >&2
+    exit 1
+  fi
 
   if [[ "$actual" != "$expected" ]]; then
     printf 'deny fixture produced a different denial set than reviewed: %s\n' \
@@ -113,8 +148,10 @@ assert_declared_denial_reasons() {
       "${fixture}" "${expected_count}" "${documents}" >&2
     exit 1
   fi
+  # No `-n` guard: an empty value can no longer reach this loop, because
+  # expect_fixture_denials refuses the fixture outright before conftest runs.
+  # Skipping one here is what let a counted declaration go unproven.
   while IFS= read -r expected; do
-    [[ -n "${expected}" ]] || continue
     if ! grep -Fq -- "${expected}" <<<"${output}"; then
       printf '%s\n' "${output}" >&2
       printf 'deny fixture %s was rejected, but not for the declared reason: %s\n' \
@@ -134,7 +171,20 @@ expect_fixture_denials() {
   # The precondition, established before the engine is consulted: a fixture
   # that names no reviewed denial cannot be asserted by reason at all, so it is
   # refused here rather than downgraded to a file-level PASS.
-  expected_count="$(grep -cE '^#[[:space:]]*expect-deny:' <"${fixture}" || true)"
+  #
+  # An empty-valued declaration is refused first and unconditionally -- for a
+  # sidecar fixture too, where it is merely inert today, because "inert here"
+  # is exactly how it survived long enough to be counted somewhere else.
+  local empty_documents=''
+  empty_documents="$(empty_declaration_documents "${fixture}")"
+  if [[ -n "${empty_documents}" ]]; then
+    printf 'deny fixture carries an empty "# expect-deny:" declaration: %s (document %s)\n' \
+      "${fixture}" "${empty_documents}" >&2
+    printf 'a declaration with no reason cannot be proven; name the exact denial message the document must produce, or remove the document\n' >&2
+    exit 1
+  fi
+
+  expected_count="$(count_declared_reasons "${fixture}")"
   if [[ ! -f "$expected_file" ]] && ((expected_count == 0)); then
     printf 'deny fixture declares no reviewed denial mechanism: %s\n' "${fixture}" >&2
     printf 'add a reviewed %s naming every denial message the file must produce, or one "# expect-deny:" line per YAML document\n' \
