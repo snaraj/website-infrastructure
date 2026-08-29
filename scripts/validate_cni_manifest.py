@@ -301,7 +301,14 @@ def _direct_mapping(document, mapping_name, errors):
             continue
         key, raw = match.group(1), match.group(2) or ""
         if key in result:
-            errors.append("{} contains duplicate key {}".format(mapping_name, key))
+            # The key is read out of the inspected manifest, so the diagnostic
+            # names the mapping (a reviewed constant at every call site) and
+            # the exact source line instead of reproducing it — the same
+            # contract issue #112 landed on the shared kubeadm parser, applied
+            # to this residual site by issue #175.
+            errors.append(
+                "{} contains a duplicate key at line {}".format(mapping_name, number)
+            )
             continue
         if raw and raw not in ("|", "|-", ">", ">-"):
             result[key] = _unquote(raw)
