@@ -16,7 +16,6 @@ from pathlib import Path
 from .support import load_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GUARD_DIR = REPO_ROOT / "bootstrap" / "pi" / "ingress-guard"
 
 MODULE = load_script("validate_ingress_guard.py")
 

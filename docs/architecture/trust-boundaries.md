@@ -7,7 +7,7 @@
 | `lidersea-com` Tunnel connector | DNS, its own Cloudflare Tunnel transport, `lidersea-com` TCP 8080 only | `naranjo-online` service, Pi host, admin route, Kubernetes API, arbitrary egress |
 | `naranjo-online` pod | Serve `naranjo.online` on TCP 8080 after connector ingress | All egress, API token, other namespaces, host |
 | `lidersea-com` pod | Serve `lidersea.com` on TCP 8080 after connector ingress | All egress, API token, other namespaces, host |
-| Future naranjo media reader | Read single-link regular delivery derivatives through one rooted, read-only, mount-verified boundary | Originals, staging, metadata, links, nested mounts, writes, directory listing, other host paths |
+| naranjo media reader | Read single-link regular delivery derivatives through one rooted, read-only, mount-verified boundary | Originals, staging, metadata, links, nested mounts, writes, directory listing, other host paths |
 | Media operator | Stage, checksum, derive, atomically publish, back up, and restore through the protected path | Public upload API, in-place publication, anonymous writes, runtime transcoding |
 | Legacy archive operator | Preserve and verify an explicitly declared inactive archive through the protected local path | Runtime activation, public/Tunnel route, Kubernetes/Flux/CI access, broad filesystem operations, secret disclosure |
 | Flux source controller | Anonymous HTTPS Git fetch | Git write, deploy keys, cluster-wide tenant mutation |
@@ -33,6 +33,16 @@ cluster rebuild or ordinary rollback may not activate it.
 
 The Cloudflare service boundary is also a trust and entitlement boundary. A
 proxied Tunnel CNAME does not become a direct origin when a response bypasses
-cache. Current self-serve terms are incompatible with deliberate heavy-media
-delivery under this repository's zero-spend constraint, so no enabled storage
-profile or public large-media route may cross it.
+cache. Current self-serve terms remain incompatible with deliberate heavy-media
+delivery under this repository's zero-spend constraint, so no public
+large-media route may cross it.
+
+The in-cluster storage profile is the half that changed. It shipped ENABLED on
+2026-08-27 by owner directive, after the evidence the conditional was waiting on
+landed: a Bound claim on a `local` volume, the published tree, the delivery
+contract proven against the running binary, and a measured transfer budget. The
+no-go was lifted deliberately on that evidence, not weakened silently — the
+fail-closed conditional in the site chart's values schema is unchanged, so an
+incomplete enablement is still unrepresentable, and disabling media remains a
+values override rather than a code change. Serving that storage to the public
+across this boundary is still governed by the delivery clause above.

@@ -134,10 +134,11 @@ The replacement proof is deliberately redundant:
 The steady-state inventory is pinned, not bounded by a floor: `access.yaml`
 contains 24 objects (eight ServiceAccounts, eight Roles, eight RoleBindings),
 the effective RBAC contains 34 objects after the unchanged install-root split,
-and the model expands them to exactly 282 granted request atoms. The direct
-graph derives 109 applied requirements and 205 controller requirements. The
-remaining declared slack is exactly 25 atoms: nine ExternalArtifact grants,
-12 LeaseLock verb surplus grants, and four preserved HelmChart handoff writes.
+and the model expands them to exactly 306 granted request atoms. The direct
+graph derives 119 applied requirements and 205 controller requirements. The
+remaining declared slack is exactly 39 atoms: nine ExternalArtifact grants,
+12 LeaseLock verb surplus grants, four preserved HelmChart handoff writes, and
+14 site-local Helm ConfigMap lifecycle grants.
 
 The fast validator, RBAC model, bootstrap live-state mirror, and Conftest rules
 all enforce these properties. Conftest is additive defence in depth over the
@@ -506,7 +507,7 @@ constant-output tool from masquerading as migration evidence.
 The issue-98 crossing sweep is the following literal 18-request matrix, not a
 representative sample. Every request is cluster-wide (`allNamespaces=true`) and
 has no object name. The portable RBAC model expands the same ownership property
-exhaustively to 1,365 verb/resource/subresource/scope requests and also pins 94
+exhaustively to 1,365 verb/resource/subresource/scope requests and also pins 91
 per-controller grant atoms, 98 exclusive comparisons, and the six exact HelmChart
 handoff exemptions.
 

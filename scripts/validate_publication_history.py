@@ -196,7 +196,7 @@ MAX_UI_ASSET_BYTES = 1 * 1024 * 1024
 MAX_ASSET_TREE_BYTES = 2 * 1024 * 1024
 # The one deliberate exception to the history-wide no-media law: the
 # self-hosted coverage badge, admitted only in its strictest text form.
-# These four constants must stay byte-identical with their copies in
+# These five constants must stay byte-identical with their copies in
 # validate_repository.py (pinned by tests/security/test_approved_badge_contract.py).
 APPROVED_TEXT_BADGE_PATHS = {"docs/badges/coverage.svg"}
 MAX_TEXT_BADGE_BYTES = 2048

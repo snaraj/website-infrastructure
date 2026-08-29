@@ -58,11 +58,10 @@ class ReleaseCandidateTests(unittest.TestCase):
     def test_the_release_name_and_the_release_bytes_advance_together(self):
         """One transaction writes both halves of the identity, or neither.
 
-        promote-image.sh proves the registry maps the requested tag to the
-        requested digest before this runs, so a candidate that moved only one
-        of the pair would publish a release name the transaction never bound
-        to the bytes beside it. The source must expose exactly one of each
-        target, and the result must carry both new values.
+        A candidate that moved only one of the pair would publish a release
+        name the transaction never bound to the bytes beside it. The source
+        must expose exactly one of each target, and the result must carry both
+        new values.
         """
 
         with tempfile.TemporaryDirectory() as directory:

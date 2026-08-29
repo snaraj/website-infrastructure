@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Fail-closed structural contract for ``.github/dependabot.yml`` (issue #131).
 
-Nothing in this repository's gates ever looked at ``dependabot.yml``:
-``check_workflows`` in ``validate_repository.py`` globs
-``.github/workflows/*.yml`` only, and ``actionlint`` does not know the
-Dependabot config schema at all. PR #127's adversarial review proved the
-gap by mutation -- a corrupted ``groups`` stanza survived every existing
-check. The same contract is landing in parallel in ``naranjo.online``
-(issue #59) and ``lidersea.com`` (issue #56); this module converges with
-their design (same enums, same two-space block-YAML subset, same 0/2 exit
-contract) while wiring into this repository's own umbrella instead of
-standing alone -- see "Wiring" below.
+No other gate reads ``dependabot.yml``: ``check_workflows`` in
+``validate_repository.py`` globs ``.github/workflows/*.yml`` only, and
+``actionlint`` does not know the Dependabot config schema, so a corrupted
+``groups`` stanza survives every other check. This module closes that gap and
+shares its design with the sibling site repositories -- same enums, same
+two-space block-YAML subset, same 0/2 exit contract -- while wiring into this
+repository's own umbrella; see "Wiring" below.
 
 This is not a general YAML parser. It accepts only the small,
 indentation-based block subset every real ``dependabot.yml`` in this

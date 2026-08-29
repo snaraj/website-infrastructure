@@ -73,7 +73,8 @@ read-only worktree. It reproduces claims, runs hostile mutations and full gates,
 audits status checks and coverage, and posts one signed normal-comment receipt.
 Any head change invalidates it. See
 [review receipts](references/reviews.md). Use
-`scripts/validate_review_receipt.py --resource-kind pull-request` for receipt
+`scripts/validate_review_receipt.py --head <head> --resource-kind pull-request
+<receipt>` for receipt
 shape; it rejects issue resources but proves SHAPE only. It never sees who
 posted the comment, so the coordinator reads the posting actor from the forge
 and never treats signature wording as independence.

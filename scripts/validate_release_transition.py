@@ -244,17 +244,6 @@ class TransitionPlan(NamedTuple):
             or not self.lidersea_parent_suspended
         )
 
-    def website_parent_suspended(self, name: str) -> bool:
-        """Return the exact outer reconciliation state for one closed site."""
-
-        if name == "naranjo-online":
-            return self.naranjo_parent_suspended
-        if name == "lidersea-com":
-            return self.lidersea_parent_suspended
-        raise STATE.CanonicalYamlError(
-            "website escaped the closed transition identity set"
-        )
-
     @property
     def any_workload_active(self) -> bool:
         return (
@@ -705,7 +694,7 @@ def _top_level_resource_blocks(source: str):
 
 
 def _require_cloudflare_phase_contract(root: Path) -> None:
-    """Prove seven closed roots with exact false-by-default phase guards."""
+    """Prove six closed roots with exact false-by-default phase guards."""
 
     all_resource_identities = []
     reference_lock = None

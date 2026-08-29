@@ -416,7 +416,8 @@ comment contains exactly one `HEAD: <40-lowercase-hex>` line, exactly one
 `VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`, and ends
 `- <Agent> (adversarial reviewer)`. Any head change invalidates it and requires
 a fresh independent review. Validate the shape with
-`scripts/validate_review_receipt.py --resource-kind pull-request`; the
+`scripts/validate_review_receipt.py --head <head> --resource-kind
+pull-request <receipt>`; the
 validator rejects issue resources and proves receipt SHAPE only — it never
 sees who posted the comment, so the coordinator reads the posting actor from
 GitHub. If the owner merged first, record a post-merge audit rather than

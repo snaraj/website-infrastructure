@@ -163,10 +163,6 @@ class ReleaseTransitionTests(unittest.TestCase):
                 "  - tunnel-token.sops.yaml\n",
             )
 
-    def configure_cloudflare(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret()
-
     def activate_both_sites(self):
         for site in SITE_FILES:
             self.activate_site(site)
