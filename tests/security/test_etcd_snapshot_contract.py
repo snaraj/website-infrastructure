@@ -7,9 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required to execute the snapshot script"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -118,7 +121,7 @@ class EtcdSnapshotContractTests(unittest.TestCase):
                         fixture.write_text(content, encoding="utf-8")
                         result = subprocess.run(
                             [
-                                BASH,
+                                required_tool(BASH, BASH_REQUIRED),
                                 "-c",
                                 f"LC_ALL=C grep -Eq {shlex.quote(pattern)} \"$1\"",
                                 "recovery-ssd-gate",

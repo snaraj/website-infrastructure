@@ -9,10 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CANARY = ROOT / "bootstrap" / "pi" / "verify-secret-encryption-at-rest.sh"
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required to execute the encryption canary"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -66,7 +69,7 @@ class SecretEncryptionAtRestContractTests(unittest.TestCase):
             for mode in ("--check", "--dry-run", "--apply"):
                 with self.subTest(mode=mode):
                     result = subprocess.run(
-                        [BASH, str(CANARY), mode],
+                        [required_tool(BASH, BASH_REQUIRED), str(CANARY), mode],
                         capture_output=True,
                         check=False,
                         text=True,
@@ -175,7 +178,9 @@ class SecretEncryptionAtRestContractTests(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "Bash is required for parse checks")
     def test_script_parses(self) -> None:
-        subprocess.run([BASH, "-n", str(CANARY)], check=True)
+        subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), "-n", str(CANARY)], check=True
+        )
 
 
 if __name__ == "__main__":

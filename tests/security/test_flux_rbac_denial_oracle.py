@@ -22,10 +22,14 @@ from unittest import mock
 
 from scripts import flux_rbac_denial_oracle as oracle
 
+from .support import required_tool
+
 
 ROOT = Path(__file__).resolve().parents[2]
 KUBECTL = shutil.which("kubectl")
+KUBECTL_REQUIRED = "kubectl is required for production-adapter parity"
 OPENSSL = shutil.which("openssl")
+OPENSSL_REQUIRED = "openssl is required for authenticated TLS parity"
 POSIX_CUSTODY = os.name == "posix" and hasattr(os, "geteuid")
 FLUX_SERVICE_ACCOUNT_GROUPS = (
     "system:serviceaccounts",
@@ -653,7 +657,9 @@ class ProtocolFixture:
         )
         for command in commands:
             generated = subprocess.run(
-                [OPENSSL, *command], capture_output=True, check=False
+                [required_tool(OPENSSL, OPENSSL_REQUIRED), *command],
+                capture_output=True,
+                check=False,
             )
             if generated.returncode != 0:
                 self.server.server_close()
@@ -712,7 +718,9 @@ class ProtocolFixture:
             newline="\n",
         )
         self.kubeconfig_path.chmod(0o600)
-        self.kubectl_path = Path(KUBECTL).resolve()
+        self.kubectl_path = Path(
+            required_tool(KUBECTL, KUBECTL_REQUIRED)
+        ).resolve()
         self.kubectl = oracle.BoundFile(
             self.kubectl_path,
             executable=True,

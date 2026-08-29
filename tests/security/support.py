@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +95,117 @@ def required_tool(resolved: str | None, description: str) -> str:
     if resolved is None:
         raise AssertionError(description)
     return resolved
+
+
+_GREP_PATTERN_TOKEN = re.compile(
+    r"""
+    (?P<command>\bgrep\b(?:\s+-{1,2}[A-Za-z-]+)*)   # grep and its option words
+    \s+
+    (?P<token>
+        '[^']*'                                     # 'single quoted'
+      | \$'(?:\\.|[^'\\])*'                         # $'ansi-c quoted'
+      | "(?:\\.|[^"\\])*"                           # "double quoted"
+    )
+    """,
+    re.VERBOSE,
+)
+# The three ways a script can spell a literal dot inside a probe pattern. The
+# reviewed spelling is the POSIX bracket class, because it needs no escaping in
+# any quoting context; `\.` is what an evasive rewrite reaches for.
+_ESCAPED_DOT = re.compile(r"\\\.")
+# A `$` inside a double-quoted word introduces an expansion only when a name,
+# a brace, or a parenthesis follows it. A trailing `$` is the ERE end anchor —
+# which every probe pattern here ends with, so treating a bare `$` as an
+# expansion would refuse to canonicalise exactly the tokens that matter.
+_SHELL_EXPANSION = re.compile(r"(?<!\\)[$](?=[A-Za-z_{(])|(?<!\\)`")
+
+
+def canonicalize_probe_spellings(text: str) -> str:
+    """Rewrite grep pattern literals into this repository's reviewed spelling.
+
+    The CRI batteries read probe patterns out of the bootstrap scripts with
+    regexes keyed on ONE spelling: single-quoted, dots written ``[.]``. That
+    made every one of them, and both stale-row tripwires, blind to a
+    functionally equivalent probe written ``"^io\\.containerd\\.grpc\\.v1..."``
+    — a double-quoted, backslash-escaped rewrite passes all five checks while
+    changing what the host actually verifies (issue #51). The dangerous
+    direction is the stale 1.x row returning under a spelling the tripwire
+    cannot see.
+
+    Normalising the SOURCE, rather than teaching five patterns four spellings,
+    keeps one canonical form and leaves every existing check working on it.
+    Two rewrites, both confined to a grep invocation's pattern token:
+
+    * a double-quoted or ``$'...'`` token with no shell expansion in it becomes
+      a single-quoted token, with the quoting-level backslashes resolved;
+    * ``\\.`` becomes ``[.]``.
+
+    A token carrying a ``$`` expansion or a backtick is left EXACTLY as it
+    stands: its value is not knowable from the text, and silently rewriting it
+    would invent a pattern nobody wrote. Several legitimate probes interpolate
+    a version or an address that way, so this is the common case rather than an
+    edge one — callers that need to know a pattern was unresolvable ask for it
+    rather than reading a guess.
+
+    Canonicalising is IDENTIFICATION, not emulation: ``.`` and ``[.]`` are not
+    the same ERE, and this function does not claim they are. It claims that a
+    probe written either way is the same probe for the purpose of asking which
+    plugin rows the bootstrap verifies.
+    """
+
+    def canonical_command(command):
+        """``grep -Eq`` for every spelling of "extended regexp, quiet".
+
+        ``-Eq``, ``-qE``, ``-E -q`` and ``--extended-regexp --quiet`` are the
+        same invocation, and two of the three extraction regexes key on the
+        literal ``grep -Eq ``. Any OTHER flag set is left alone — ``-Fq`` is a
+        fixed-string search, not an ERE, and rewriting it would assert
+        something the script does not do.
+        """
+
+        flags = set()
+        for word in command.split()[1:]:
+            if word.startswith("--"):
+                flags.add({"extended-regexp": "E", "quiet": "q"}.get(word[2:], word))
+            else:
+                flags.update(word[1:])
+        return "grep -Eq" if flags == {"E", "q"} else command
+
+    def rewrite(match):
+        command = canonical_command(match.group("command"))
+        if command != "grep -Eq":
+            # Out of scope by construction. This helper exists for PROBE
+            # patterns — the quiet extended-regexp assertions the bootstrap
+            # scripts gate on — and the batteries' own extractors key on that
+            # exact invocation. A counting, inverting or fixed-string grep is
+            # a different question and is left byte-identical.
+            return match.group(0)
+        token = match.group("token")
+        if token.startswith("'"):
+            body = token[1:-1]
+        elif token.startswith("$'"):
+            # Inside `$'...'` a dollar sign is literal; only backslash escapes
+            # are resolved by the shell.
+            body = re.sub(r"\\(.)", _ansi_c_escape, token[2:-1])
+        else:
+            if _SHELL_EXPANSION.search(token[1:-1]):
+                return match.group(0)
+            body = re.sub(r'\\(["\\])', r"\1", token[1:-1])
+        if "'" in body:
+            # A literal single quote cannot be carried inside a single-quoted
+            # token; leave the invocation exactly as written.
+            return match.group(0)
+        return "{} '{}'".format(command, _ESCAPED_DOT.sub("[.]", body))
+
+    return _GREP_PATTERN_TOKEN.sub(rewrite, text)
+
+
+def _ansi_c_escape(match: "re.Match[str]") -> str:
+    """Resolve the ``$'...'`` escapes a probe pattern could plausibly use."""
+
+    return {"n": "\n", "t": "\t", "\\": "\\", "'": "'"}.get(
+        match.group(1), "\\" + match.group(1)
+    )
 
 
 def run_script(script: Path, *argv: object) -> subprocess.CompletedProcess:

@@ -25,6 +25,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 from .testsupport.capacity_model import (
     CapacityError,
     Quota,
@@ -41,6 +43,7 @@ RESOURCE_CONTROLS = (
 )
 CONNECTOR_NAMESPACE = "cloudflare-public"
 HELM = shutil.which("helm")
+HELM_REQUIRED = "helm is required to render the chart"
 
 
 def committed_quota(namespace):
@@ -75,7 +78,7 @@ def committed_quota(namespace):
 
 def render(*overrides):
     command = [
-        str(HELM), "template", "cloudflare-public", str(CHART),
+        required_tool(HELM, HELM_REQUIRED), "template", "cloudflare-public", str(CHART),
         "--namespace", CONNECTOR_NAMESPACE,
     ]
     for override in overrides:

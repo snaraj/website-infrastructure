@@ -9,7 +9,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from .support import load_script
+from .support import load_script, required_tool
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +45,7 @@ PULL_REQUEST_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "pull-request.yml"
 ).read_text(encoding="utf-8")
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required for blocker behavior"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -177,9 +178,9 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", AUDIT)
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("required=("))
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("CLOUDFLARE_API_TOKEN:?"))
-        bash = BASH
-        if bash is None:
-            self.fail("Bash disappeared between skip evaluation and execution")
+        # The shared fail-closed floor rather than a local re-implementation
+        # of it: one helper, one message shape, one place to fix (issue #51).
+        bash = required_tool(BASH, BASH_REQUIRED)
         result = subprocess.run(
             [bash, str(REPO_ROOT / "scripts" / "cloudflare-audit.sh")],
             capture_output=True,

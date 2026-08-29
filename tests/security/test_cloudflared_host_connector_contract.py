@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from .support import load_script
+from .support import load_script, required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +29,7 @@ UNIT = CLOUDFLARED_DIR / "pi-admin.service"
 README = CLOUDFLARED_DIR / "README.md"
 ROTATION = ROOT / "docs" / "runbooks" / "tunnel-token-rotation.md"
 BASH = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
+BASH_REQUIRED = "Bash is required to execute the connector installer"
 
 
 class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
@@ -70,7 +71,7 @@ class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
         for mode in ("--check", "--apply"):
             with self.subTest(mode=mode):
                 result = subprocess.run(
-                    [BASH, str(INSTALLER), mode],
+                    [required_tool(BASH, BASH_REQUIRED), str(INSTALLER), mode],
                     cwd=ROOT,
                     env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
                     text=True,
@@ -300,7 +301,7 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
         ):
             with self.subTest(script=script.name, arguments=arguments):
                 result = subprocess.run(
-                    [BASH, str(script), *arguments],
+                    [required_tool(BASH, BASH_REQUIRED), str(script), *arguments],
                     cwd=ROOT,
                     env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
                     text=True,
