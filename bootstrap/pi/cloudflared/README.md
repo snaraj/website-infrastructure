@@ -1,95 +1,177 @@
-# Host-level `pi-admin` connector — Draft / uninstalled
+# Host-level `pi-admin` connector
 
-The unit is independent of Kubernetes and accepts only a remotely managed tunnel token
-through a root-owned systemd credential file. It contains no account API token,
-`cert.pem`, Global API key, public hostname, or DNS record.
+Status: the fail-closed deployment machinery is implemented and reviewable. It
+is not evidence that the connector is installed or that remote access works;
+only the live acceptance record may make either claim.
 
-Before installation, verify the exact pinned cloudflared binary/checksum and its
-`--token-file` behavior, create a locked `cloudflared` system user, confirm LAN/
-physical recovery, and review existing firewall/VPN policy. Any eventual token
-installation must avoid printing it; the dedicated account must be non-root,
-password-locked,
-have `/nonexistent` as home, and use `nologin`/`false` as its shell.
+## Fixed security boundary
 
-Both `install-host-token.sh --check` and `--apply` are intentionally
-code-blocked before the token path is read. A mutable worktree script cannot
-establish stage-zero trust: malicious startup code or a replaced script could
-omit its self-check before reading or installing the bearer. Reopening either
-mode requires a separate root-owned reviewed-blob launcher that uses trusted
-absolute tools to extract the exact installer and validator blobs into a new
-root-private directory, verifies their object IDs and modes, and invokes the
-extracted installer with `/bin/bash` and a minimal environment. That transaction
-must be independently reviewed and tested for interruption, race, rollback, and
-cleanup. Until it exists, no manual copy, ad-hoc `sudo`, or permissions
-workaround is authorized. The token apply is intentionally blocked; deployment
-of the host token remains blocked.
+- The connector exposes one private host `/32` through Cloudflare Tunnel. It
+  creates no public hostname, DNS record, router forwarding, or Kubernetes API
+  (`6443`) allow.
+- Gateway must allow TCP 22 only for the exact owner identity on the enrolled
+  owner laptop, with the approved device-certificate posture check and a fresh
+  session. A later unconditional destination block denies every other L4 flow.
+- Cloudflare authorizes the transport. `sshd` independently requires the
+  laptop's dedicated, passphrase-protected owner key. The host does not trust a
+  Cloudflare SSH CA.
+- LAN and the existing private WireGuard path remain recovery transports. The
+  connector installers do not edit SSH, UFW, WireGuard, routing, or Kubernetes.
+- The service runs as the locked, non-login `cloudflared` system account with
+  no supplementary groups or Linux capabilities. systemd supplies the token as
+  a runtime credential and applies the hardening in `pi-admin.service`.
+- The Tunnel carries client-initiated private access only. Host DNS and egress
+  still follow the host routing table, VPN/WireGuard policy, and kill switch.
+  Loss of the reviewed privacy route must fail closed; physical/LAN recovery is
+  the availability fallback.
 
-The latent validator accepts Cloudflare's canonical standard-Base64 token
-encoding, requires the exact `{a,s,t}` payload, canonical UUID/account fields,
-and a minimum 32-byte Tunnel secret, and never prints a field. It is designed to
-bind exact local `main`, reject replacement refs/config injection, compare
-stable source snapshots with reviewed Git blobs, and execute only a private
-validator copy. Those are future defense-in-depth controls, not a reason to
-bypass the current guard.
+## Why source-tree scripts cannot run as root
 
-`verify-host-token-redaction.sh` is likewise code-blocked before token or
-runtime-metadata access. Only after the launcher blocker is resolved and a
-separately approved unit start may the future procedure invoke it with the same exact
-reviewed-main commit/owner binding, and a minimal environment. It compares
-through an unlinked root-private pattern-file descriptor and emits only
-PASS/FAIL. It binds `MainPID`, invocation ID, process start time, exact
-`/usr/local/bin/cloudflared` executable, and exact non-bearer argv; opens the
-active systemd credential through a stable handle; and proves those bytes equal
-the unchanged installed token before checking the process argv, environment,
-and complete unit journal. It also disables core dumps before opening any token,
-uses reviewed Git blobs for itself and `versions.env`, and closes the credential
-and pattern descriptors before success. A rotation without the required restart
-cannot silently scan the wrong token. Do not inspect logs by printing them before this
-canary passes.
-Then prove the service survives kubelet/containerd and the control plane
-stopping and restarting.
+Every installer and the runtime canary refuses before reading a staged binary,
+token, or privileged runtime state unless it was extracted by the installed
+root-owned launcher. The launcher never executes a mutable checkout. It:
 
-`LoadCredential=` copies the file into systemd’s protected runtime credential
-directory, but it does **not** encrypt `/etc/cloudflared/pi-admin.token` at rest.
-The current Pi design therefore makes an explicit, review-required
-rotate-on-device-loss choice:
-root compromise or offline storage theft can recover the bearer token, so force-
-disconnect connectors and rotate it immediately. TPM2-backed
-`LoadCredentialEncrypted=` or full-disk encryption requires a separately tested
-hardware/recovery design and must not be inferred from this unit.
-Production deployment must either accept this residual plaintext-at-rest risk
-in the merge/deployment record or first implement and restore-test one of those
-hardware-backed designs.
+- admits only a root-owned, mode-`0755` launcher at the fixed installed path;
+- validates a closed, ordered, root-only SHA-256 manifest for every absolute
+  executable it and its children can use;
+- accepts an owner-held Git bundle only through a stable descriptor, verifies
+  the bundle and full object database, enforces monotonic protected-main
+  ancestry, and requires the installed launcher blob to equal the approved
+  commit;
+- extracts only the exact operation's reviewed blobs into a fresh root-private
+  directory, verifies Git object IDs and modes, and launches with `env -i` and
+  `/usr/bin/bash`;
+- accepts fixed-order, fixed-key owner request files; and
+- serializes operations, disables core dumps, rejects shell/loader/tool
+  injection, cleans temporary custody, and fails closed on drift.
 
-`install-host-binary.sh --check` and `--apply` are also code-blocked by the
-missing reviewed-blob launcher. The latent design copies a locally staged ARM64
-binary into private custody, verifies that copy against fail-closed
-checksum/version pins, and proves `--token-file` support. It never executes the
-mutable staging path. Its future root apply transaction acquires an exclusive
-lock, performs re-verification and hardlink/capability/xattr/ACL rejection,
-creates a drift-safe backup, and commits with an atomic same-filesystem
-operation. Candidate execution is designed to be
-time-bounded, network-namespaced, and privilege-dropped. Those controls remain
-reviewable but non-actionable; no binary check or install is authorized until
-the launcher exists.
+Direct invocations are negative tests, not an alternate procedure.
 
-Do not harden SSH or change firewall rules until external WARP SSH/kubectl works,
-WARP-off/unauthorized tests fail, independent physical/LAN recovery works, and
-at least two working sessions have been proven immediately before mutation.
-Physical access is the independent recovery path if either session later drops.
-The
-Gateway L4 block is not a substitute for a host firewall and does not prove ICMP
-denial. Token rotation changes only `pi-admin`; never rotate the public tunnel in
-the same operation. Rotation prevents the old token from reconnecting but does
-not evict an already connected old-token connector. A compromise response must
-also force-disconnect every existing connection; physical/LAN access, never the
-old token, is the admin rollback path.
+## Owner-attended deployment order
 
-The initial SSH design retains self-managed host-trusted keys over the private
-WARP-to-Tunnel path. Do not add a public SSH hostname or make sshd trust a
-provider-managed SSH CA without a separate decision. `cloudflared` proxies
-client-initiated access; host-initiated DNS, updates, Git/registry access, and
-other egress continue to use the host routing table. Existing VPN/WireGuard and
-kill-switch behavior therefore remains an independent control. Route the
-connector through that reviewed privacy boundary and prefer loss of remote
-availability to an unreviewed direct-WAN bypass; retain physical/LAN recovery.
+Use an exact merged protected-main commit. Keep physical/LAN recovery and two
+independently proven SSH sessions until all mutations and rollback checks are
+complete. Use the short-lived sudo procedure; never put a password, token, or
+private key in a command line, environment dump, log, repository, or chat.
+
+1. Prove the current host/cluster baseline and the existing SSH/UFW/WireGuard
+   controls. Install the signed OS package that provides `getfattr` if absent.
+2. Obtain the pinned ARM64 `cloudflared` release out of band and verify the
+   version and SHA-256 in `versions.env`. Do not execute caller-staged bytes.
+3. From the exact merged commit, install
+   `reviewed-launcher.sh` at
+   `/usr/local/sbin/website-infrastructure-reviewed-launcher`, owned by root,
+   mode `0755`, one link. This is the only manual stage-zero code install.
+4. Run `tool-manifest-proposal`. Review the host package change context, then
+   pass its exact SHA-256 to `tool-manifest-commit` with confirmation
+   `commit-reviewed-tool-manifest-<SHA256>`. The commit is atomic and the
+   launcher immediately revalidates every entry.
+5. Create an owner-owned mode-`0600` Git bundle containing the exact merged
+   commit. Run `promote <bundle> <commit>
+   promote-reviewed-protected-main-<commit>`. Promotion is monotonic; a launcher
+   change requires a new owner-attended stage-zero install before promotion.
+6. Create owner-owned mode-`0600` request files with exactly the schemas below,
+   in the shown order. No blank, duplicate, or extra line is accepted.
+
+Binary check:
+
+```text
+CLOUDFLARED_HOST_BINARY_PATH=<absolute owner-staged path>
+```
+
+Binary apply adds:
+
+```text
+PHYSICAL_OR_LAN_RECOVERY_TESTED=yes
+TWO_WORKING_SESSIONS_PROVEN=yes
+CONFIRM_CLOUDFLARED_INSTALL=install-reviewed-cloudflared-<pinned version>
+```
+
+Invoke `binary-check <request>`, then `binary-apply <request>`. The installer
+copies into private custody, verifies checksum/version/`--token-file` behavior
+inside a network namespace as an unprivileged identity, rejects links,
+capabilities, xattrs, and extended ACLs, acquires an exclusive lock, preserves
+the prior state, and uses an atomic same-filesystem commit.
+
+Token check:
+
+```text
+CLOUDFLARED_TOKEN_WORKSPACE=<absolute owner-only mode-0700 directory>
+CLOUDFLARED_TUNNEL_TOKEN_FILE=<mode-0400-or-0600 file inside that directory>
+EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256=<lowercase SHA-256>
+EXPECTED_CLOUDFLARE_TUNNEL_ID_SHA256=<lowercase SHA-256>
+```
+
+Token apply adds:
+
+```text
+PHYSICAL_OR_LAN_RECOVERY_TESTED=yes
+TWO_WORKING_SESSIONS_PROVEN=yes
+CONFIRM_PI_ADMIN_TOKEN_INSTALL=install-reviewed-pi-admin-token
+```
+
+Invoke `token-check <request>`, then `token-apply <request>`. The validator
+accepts only Cloudflare's canonical standard-Base64 `{a,s,t}` token, exact
+independently supplied account/Tunnel hashes, and a minimum 32-byte secret. It
+never prints a field. The apply revalidates immediately before and after the
+atomic root-mode-`0600` install and rolls back exact prior bytes on failure.
+
+7. Before the service starts, prove the destination `/32`, exact owner/device
+   TCP-22 allow, and later unconditional destination block exist at safe
+   precedence. Then run `service-check` and create this exact apply request:
+
+```text
+PHYSICAL_OR_LAN_RECOVERY_TESTED=yes
+TWO_WORKING_SESSIONS_PROVEN=yes
+CONFIRM_PI_ADMIN_SERVICE_INSTALL=install-and-start-reviewed-pi-admin
+```
+
+Invoke `service-apply <request>`. It validates the pinned binary and token,
+creates or strictly validates the locked account/group, installs the exact unit
+atomically, reloads systemd, enables/restarts it, and proves the live process
+runs under the dedicated UID. Failure restores the prior unit enablement,
+activity, bytes, and newly created account/group state.
+
+8. Run `runtime-verify`. Success proves the exact installed unit has no
+   drop-ins or pending reload, the exact reviewed binary and locked account own
+   the live process, the active systemd credential equals the unchanged token,
+   the token is absent from complete argv/environment/journal records, no unit
+   coredump exists, and all identities remain stable throughout the scan.
+9. Prove connector egress uses the reviewed privacy route and that loss of that
+   route does not create direct-WAN fallback. Stop and restart Kubernetes host
+   services and prove `pi-admin` remains healthy independently, then restore and
+   prove the cluster baseline.
+10. From an external network, prove enrolled-owner WARP-on SSH succeeds. Prove
+    WARP-off, a different LAN device/key, an unenrolled device, wrong identity,
+    expired/revoked session, every non-22 port, and direct residential-origin
+    access fail. Re-prove LAN recovery and normal owner-key SSH last.
+
+## Package upgrades and launcher changes
+
+The executable manifest intentionally fails closed after a covered OS utility
+changes. Recovery is implemented: run `tool-manifest-proposal`, confirm the
+change came from an expected signed package transaction, then commit only the
+exact proposed digest with `tool-manifest-commit`. This route does not require
+the old tool hashes to match, so it requires fresh owner-authorized sudo and the
+exact digest confirmation.
+
+A change to `reviewed-launcher.sh` cannot self-promote. Review and merge it,
+install that exact protected-main blob again through the owner-attended
+stage-zero step, then promote the matching newer bundle. A non-descendant
+bundle is refused.
+
+## Recovery and residual risk
+
+- Never replace a failed private route with a public SSH hostname, router port
+  forward, broad source-CIDR rule, public `22`, or `6443` allow.
+- Preserve old sessions during mutation. On failure, use physical/LAN access;
+  never use an old or suspected token as rollback authority.
+- Routine rotation proves the old token cannot reconnect. Suspected compromise
+  additionally force-disconnects every existing Tunnel connection before the
+  replacement is trusted.
+- `LoadCredential=` protects runtime delivery but does not encrypt
+  `/etc/cloudflared/pi-admin.token` at rest. Root compromise or offline storage
+  theft can recover it. Rotate and force-disconnect on device loss. Full-disk or
+  TPM-backed credential encryption requires a separately restore-tested design.
+- Root and the owner laptop remain trust anchors. The manifest detects
+  unexpected executable drift; it cannot defend a host after root compromise.

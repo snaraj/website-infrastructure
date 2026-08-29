@@ -3,24 +3,55 @@ builtin set -Eeuo pipefail
 builtin set +x
 builtin set +o history
 
-# Release safety stop. Validation executes caller-staged bytes and apply mutates
-# a privileged host path. Neither may run from mutable checkout code before the
-# separately installed reviewed-blob launcher establishes stage-zero trust.
-readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no
-if [[ "${REVIEWED_BLOB_LAUNCHER_AVAILABLE}" != yes ]]; then
+# Validation executes caller-staged bytes and apply mutates a privileged host
+# path. Accept only the root-private extraction created by the installed
+# reviewed-blob launcher; a mutable checkout invocation fails before the staged
+# path is read.
+mode="${1:---check}"
+expected_operation='binary-check'
+[[ "${mode}" == --apply ]] && expected_operation='binary-apply'
+if [[ "${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes ||
+      "${REVIEWED_BLOB_OPERATION:-}" != "${expected_operation}" ||
+      ! "${REVIEWED_BLOB_ROOT:-}" =~ ^/run/website-infrastructure/reviewed-op\.[A-Za-z0-9]+$ ||
+      "${EUID}" -ne 0 || "${BASH}" != /usr/bin/bash ]]; then
   builtin printf 'BLOCKED cloudflared host-binary validation and installation require the trusted reviewed-blob launcher; no staged binary was executed and no host change was attempted.\n' >&2
   builtin exit 1
 fi
 
 # Root apply must not inherit a workstation or caller-controlled command path.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-umask 077
+builtin export PATH
+builtin umask 077
+
+die() {
+  builtin printf 'ERROR %s\n' "$*" >&2
+  builtin exit 1
+}
+
+while builtin read -r declaration flag inherited_name; do
+  [[ "${declaration}" == declare && "${flag}" == -f ]] || die 'unsafe shell function state'
+  [[ "${inherited_name}" == die ]] || die 'unsafe inherited shell function'
+done < <(builtin declare -F)
+for inherited_name in $(builtin compgen -e); do
+  case "${inherited_name}" in
+    BASH_ENV|ENV|BASHOPTS|SHELLOPTS|BASH_XTRACEFD|PS4|POSIXLY_CORRECT|\
+      CDPATH|GLOBIGNORE|BASH_FUNC_*|LD_*|PYTHON*|GIT_*|\
+      DBUS_*|SYSTEMD_*|SYSTEMCTL_*|JOURNAL_*|PAGER|LESS) \
+      die 'unsafe inherited environment' ;;
+  esac
+done
+builtin ulimit -S -c 0 || die 'could not disable soft core limit'
+builtin ulimit -H -c 0 || die 'could not disable hard core limit'
+[[ "$(builtin ulimit -S -c)" == 0 && "$(builtin ulimit -H -c)" == 0 ]] || \
+  die 'core dumps remain enabled'
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
+[[ "${repo_root}" == "${REVIEWED_BLOB_ROOT}" ]] || die 'reviewed extraction root mismatch'
+[[ "$(readlink -e -- "${BASH_SOURCE[0]}")" == \
+  "${repo_root}/bootstrap/pi/cloudflared/install-host-binary.sh" ]] || die 'reviewed entry path mismatch'
+[[ "$(stat -c '%u:%g:%a:%h' -- "${BASH_SOURCE[0]}")" == 0:0:500:1 ]] || die 'reviewed entry custody mismatch'
 versions_file="${repo_root}/versions.env"
 
-mode="${1:---check}"
 staged_binary="${CLOUDFLARED_HOST_BINARY_PATH:-${repo_root}/.artifacts/cloudflared-linux-arm64}"
 destination=/usr/local/bin/cloudflared
 destination_directory=/usr/local/bin
@@ -39,29 +70,24 @@ mutation_started=no
 installation_committed=no
 rollback_in_progress=no
 
-die() {
-  printf 'ERROR %s\n' "$*" >&2
-  exit 1
-}
-
 load_version_value() {
   local key="$1" count value
-  count="$(awk -F= -v expected="${key}" '$1 == expected { count += 1 } END { print count + 0 }' "${versions_file}")"
+  count="$(/usr/bin/mawk -F= -v expected="${key}" '$1 == expected { count += 1 } END { print count + 0 }' "${versions_file}")"
   [[ "${count}" == 1 ]] || die "versions.env must define ${key} exactly once"
-  value="$(awk -F= -v expected="${key}" '$1 == expected { sub(/^[^=]*=/, ""); print }' "${versions_file}")"
+  value="$(/usr/bin/mawk -F= -v expected="${key}" '$1 == expected { sub(/^[^=]*=/, ""); print }' "${versions_file}")"
   [[ -n "${value}" ]] || die "versions.env value is empty: ${key}"
   printf '%s\n' "${value}"
 }
 
 require_commands() {
   local command_name
-  for command_name in awk chmod chown cp date env flock getcap getfacl getfattr grep id install ln mktemp mv readlink rm rmdir setpriv sha256sum stat timeout unshare; do
+  for command_name in mawk chmod chown cp date env flock getcap getfacl getfattr grep id install ln mktemp mv readlink rm rmdir setpriv sha256sum stat timeout unshare; do
     command -v "${command_name}" >/dev/null 2>&1 || die "required command is absent: ${command_name}"
   done
 }
 
 sha256_file() {
-  sha256sum -- "$1" | awk '{print $1}'
+  sha256sum -- "$1" | /usr/bin/mawk '{print $1}'
 }
 
 file_state() {
@@ -159,9 +185,9 @@ assert_no_extended_file_authority() {
   if getfattr -d -m- -- "${path}" 2>/dev/null | grep -Eq '^[^#[:space:]][^=]*='; then
     die 'extended file attributes are unsupported'
   fi
-  acl="$(getfacl -cp -- "${path}" 2>/dev/null | awk 'NF {print}')" || die 'file ACL inventory is unavailable'
+  acl="$(getfacl -cp -- "${path}" 2>/dev/null | /usr/bin/mawk 'NF {print}')" || die 'file ACL inventory is unavailable'
   [[ "$(printf '%s\n' "${acl}" | grep -Ec '^(user::|group::|other::)')" == 3 ]] || die 'extended file ACL entries are unsupported'
-  [[ "$(printf '%s\n' "${acl}" | awk 'END {print NR + 0}')" == 3 ]] || die 'extended file ACL entries are unsupported'
+  [[ "$(printf '%s\n' "${acl}" | /usr/bin/mawk 'END {print NR + 0}')" == 3 ]] || die 'extended file ACL entries are unsupported'
 }
 
 prepare_candidate() {
@@ -304,6 +330,7 @@ trap 'exit 143' TERM
 
 require_commands
 [[ -f "${versions_file}" && ! -L "${versions_file}" ]] || die 'versions.env must be a regular, non-symlink file'
+[[ "$(stat -c '%u:%g:%a:%h' -- "${versions_file}")" == 0:0:400:1 ]] || die 'versions.env reviewed custody mismatch'
 CLOUDFLARED_HOST_VERSION="$(load_version_value CLOUDFLARED_HOST_VERSION)"
 CLOUDFLARED_HOST_ARM64_SHA256="$(load_version_value CLOUDFLARED_HOST_ARM64_SHA256)"
 [[ "${CLOUDFLARED_HOST_ARM64_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 'CLOUDFLARED_HOST_ARM64_SHA256 is unresolved or malformed'

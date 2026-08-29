@@ -23,6 +23,8 @@ CLOUDFLARED_DIR = ROOT / "bootstrap" / "pi" / "cloudflared"
 INSTALLER = CLOUDFLARED_DIR / "install-host-binary.sh"
 TOKEN_INSTALLER = CLOUDFLARED_DIR / "install-host-token.sh"
 TOKEN_CANARY = CLOUDFLARED_DIR / "verify-host-token-redaction.sh"
+SERVICE_INSTALLER = CLOUDFLARED_DIR / "install-host-service.sh"
+REVIEWED_LAUNCHER = CLOUDFLARED_DIR / "reviewed-launcher.sh"
 TOKEN_VALIDATOR = ROOT / "scripts" / "validate_cloudflared_tunnel_token.py"
 TOKEN_VALIDATOR_MODULE = load_script("validate_cloudflared_tunnel_token.py")
 UNIT = CLOUDFLARED_DIR / "pi-admin.service"
@@ -30,6 +32,111 @@ README = CLOUDFLARED_DIR / "README.md"
 ROTATION = ROOT / "docs" / "runbooks" / "tunnel-token-rotation.md"
 BASH = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
 BASH_REQUIRED = "Bash is required to execute the connector installer"
+
+
+class ReviewedLauncherContractTests(unittest.TestCase):
+    """Pin the root-owned exact-blob entry boundary."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.launcher = REVIEWED_LAUNCHER.read_text(encoding="utf-8")
+
+    def test_launcher_is_single_purpose_root_owned_and_checkout_independent(self):
+        for fragment in (
+            "/usr/local/sbin/website-infrastructure-reviewed-launcher",
+            "/etc/website-infrastructure/reviewed-tools.sha256",
+            "/var/lib/website-infrastructure/reviewed-source.git",
+            "/var/lib/website-infrastructure/approved-main",
+            "reviewed-op.XXXXXXXX",
+            "safe_root_file \"${installed_launcher}\" 755",
+            "safe_root_file \"${tool_manifest}\" 600",
+            "verify_installed_launcher_blob",
+            "GIT_CONFIG_NOSYSTEM=1",
+            "--no-replace-objects",
+            "fsck --full --strict",
+            'bundle verify "${private_bundle}"',
+            "merge-base --is-ancestor",
+            "promote-reviewed-protected-main-${commit}",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.launcher)
+        self.assertNotIn("git -C", self.launcher)
+        self.assertNotIn("\nsource ", self.launcher)
+        self.assertNotIn("\neval ", self.launcher)
+
+    def test_launcher_has_closed_operations_and_exact_blob_inventories(self):
+        for operation in (
+            "binary-check",
+            "binary-apply",
+            "token-check",
+            "token-apply",
+            "service-check",
+            "service-apply",
+            "runtime-verify",
+        ):
+            with self.subTest(operation=operation):
+                self.assertIn(operation, self.launcher)
+        for path in (
+            "bootstrap/pi/cloudflared/install-host-binary.sh",
+            "bootstrap/pi/cloudflared/install-host-token.sh",
+            "bootstrap/pi/cloudflared/install-host-service.sh",
+            "bootstrap/pi/cloudflared/verify-host-token-redaction.sh",
+            "bootstrap/pi/cloudflared/pi-admin.service",
+            "scripts/validate_cloudflared_tunnel_token.py",
+            "versions.env",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, self.launcher)
+        self.assertIn('actual_mode="$(trusted_git', self.launcher)
+        self.assertIn('object_from_file="$(trusted_git hash-object --no-filters', self.launcher)
+
+    def test_tool_manifest_and_request_are_closed_before_child_execution(self):
+        self.assertIn("readonly -a required_tools=(", self.launcher)
+        self.assertIn("validate_tool_manifest", self.launcher)
+        self.assertIn("safe_owner_input_file", self.launcher)
+        self.assertIn("copy_stable_owner_file", self.launcher)
+        self.assertIn("read_request", self.launcher)
+        self.assertIn("/usr/bin/env -i", self.launcher)
+        self.assertLess(
+            self.launcher.rindex("validate_tool_manifest"),
+            self.launcher.rindex("run_operation"),
+        )
+        self.assertIn("cleanup_on_exit", self.launcher)
+        self.assertIn("trap cleanup_on_exit EXIT", self.launcher)
+        self.assertIn("/usr/sbin/swapon", self.launcher)
+        self.assertNotIn("/usr/bin/swapon", self.launcher)
+
+    def test_tool_manifest_has_a_two_step_recovery_path_after_package_updates(self):
+        for fragment in (
+            "tool-manifest-proposal",
+            "tool-manifest-commit",
+            "render_tool_manifest",
+            "commit-reviewed-tool-manifest-${expected_digest}",
+            "REVIEWED_TOOL_MANIFEST_PROPOSAL_SHA256=",
+            "REVIEWED_TOOL_MANIFEST_COMMIT=PASS",
+            'mv -fT -- "${candidate}" "${tool_manifest}"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.launcher)
+        proposal_dispatch = self.launcher.rindex("tool-manifest-proposal)")
+        normal_validation = self.launcher.rindex("\nvalidate_tool_manifest_boundary\n")
+        self.assertLess(proposal_dispatch, normal_validation)
+        self.assertIn("/usr/bin/mawk", self.launcher)
+        self.assertNotIn("/usr/bin/awk", self.launcher)
+
+    @unittest.skipUnless(BASH, "Bash is required")
+    def test_mutable_source_copy_is_not_an_entrypoint(self):
+        result = subprocess.run(
+            [required_tool(BASH, BASH_REQUIRED), str(REVIEWED_LAUNCHER), "runtime-verify"],
+            cwd=ROOT,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "REVIEWED_LAUNCH=FAIL\n")
 
 
 class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
@@ -59,14 +166,16 @@ class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
             )
 
     @unittest.skipUnless(BASH, "Bash is required")
-    def test_all_binary_installer_modes_are_code_blocked_before_staging_access(self):
+    def test_all_binary_installer_modes_require_launcher_before_staging_access(self):
         blocker = (
             "BLOCKED cloudflared host-binary validation and installation require "
             "the trusted reviewed-blob launcher; no staged binary was executed "
             "and no host change was attempted.\n"
         )
         self.assertTrue(self.installer.startswith("#!/bin/bash\n"))
-        self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", self.installer)
+        self.assertIn('"${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes', self.installer)
+        self.assertIn('"${REVIEWED_BLOB_OPERATION:-}" != "${expected_operation}"', self.installer)
+        self.assertIn('"${EUID}" -ne 0 || "${BASH}" != /usr/bin/bash', self.installer)
         self.assertLess(self.installer.index("BLOCKED cloudflared host-binary"), self.installer.index("PATH="))
         for mode in ("--check", "--apply"):
             with self.subTest(mode=mode):
@@ -165,6 +274,18 @@ class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
         self.assertIn('PHYSICAL_OR_LAN_RECOVERY_TESTED:-}" == yes', self.installer)
         self.assertIn('TWO_WORKING_SESSIONS_PROVEN:-}" == yes', self.installer)
 
+    def test_binary_child_rejects_injection_and_disables_core_dumps(self):
+        for fragment in (
+            "builtin declare -F",
+            "builtin compgen -e",
+            "BASH_ENV|ENV|BASHOPTS|SHELLOPTS",
+            "BASH_FUNC_*|LD_*|PYTHON*|GIT_*",
+            "builtin ulimit -S -c 0",
+            "builtin ulimit -H -c 0",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.installer)
+
     def test_hardlinks_capabilities_xattrs_and_extended_acls_are_rejected(self):
         for fragment in (
             'stat -c %h',
@@ -172,6 +293,102 @@ class CloudflaredHostBinaryInstallerTests(unittest.TestCase):
             'getfattr -d -m-',
             'getfacl -cp',
             'extended file ACL entries are unsupported',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.installer)
+
+
+class PiAdminServiceInstallerTests(unittest.TestCase):
+    """Pin the transactional system-account and unit installation boundary."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.installer = SERVICE_INSTALLER.read_text(encoding="utf-8")
+
+    @unittest.skipUnless(BASH, "Bash is required")
+    def test_direct_service_modes_fail_before_host_inspection(self):
+        blocker = (
+            "BLOCKED pi-admin service installation requires the trusted "
+            "reviewed-blob launcher; no host change was attempted.\n"
+        )
+        self.assertLess(
+            self.installer.index("BLOCKED pi-admin service"),
+            self.installer.index("PATH="),
+        )
+        for mode in ("--check", "--apply"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [required_tool(BASH, BASH_REQUIRED), str(SERVICE_INSTALLER), mode],
+                    cwd=ROOT,
+                    env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, blocker)
+
+    def test_service_account_is_locked_static_and_supplementary_group_free(self):
+        for fragment in (
+            "getent passwd cloudflared",
+            "getent group cloudflared",
+            "passwd -S cloudflared",
+            "'cloudflared L '",
+            '"$(id -G cloudflared)" == "${account_gid}"',
+            "useradd --system --gid cloudflared --no-create-home --home-dir /nonexistent",
+            "--shell /usr/sbin/nologin cloudflared",
+            "passwd --lock cloudflared",
+            "userdel cloudflared",
+            "groupdel cloudflared",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.installer)
+
+    def test_service_install_is_pinned_locked_atomic_and_rollback_safe(self):
+        for fragment in (
+            "CLOUDFLARED_HOST_ARM64_SHA256",
+            'sha256sum -- "${binary}"',
+            'systemd-analyze verify "${unit_source}"',
+            'exec 9<>"${lock_path}"',
+            "flock -n 9",
+            '${destination_directory}/.pi-admin-service.XXXXXXXX',
+            'ln -- "${candidate}" "${destination}"',
+            'mv -fT -- "${candidate}" "${destination}"',
+            "trusted_systemctl daemon-reload",
+            "trusted_systemctl enable pi-admin.service",
+            "trusted_systemctl restart pi-admin.service",
+            "trusted_systemctl is-enabled --quiet pi-admin.service",
+            "trusted_systemctl is-active --quiet pi-admin.service",
+            "trap on_exit EXIT",
+            "ROLLBACK=INCOMPLETE",
+            "PI_ADMIN_SERVICE_INSTALL=PASS",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.installer)
+
+    def test_apply_requires_recovery_sessions_and_exact_confirmation(self):
+        for fragment in (
+            'PHYSICAL_OR_LAN_RECOVERY_TESTED:-}" == yes',
+            'TWO_WORKING_SESSIONS_PROVEN:-}" == yes',
+            "install-and-start-reviewed-pi-admin",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.installer)
+
+    def test_service_installer_does_not_change_remote_access_controls(self):
+        for forbidden in ("ufw ", "wg ", "sshd", "authorized_keys", "curl ", "wget "):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.installer)
+
+    def test_service_child_rejects_injection_and_disables_core_dumps(self):
+        for fragment in (
+            "builtin declare -F",
+            "builtin compgen -e",
+            "BASH_ENV|ENV|BASHOPTS|SHELLOPTS",
+            "BASH_FUNC_*|LD_*|PYTHON*|GIT_*",
+            "builtin ulimit -S -c 0",
+            "builtin ulimit -H -c 0",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.installer)
@@ -198,8 +415,10 @@ class PiAdminUnitTests(unittest.TestCase):
             "AmbientCapabilities=",
             "CapabilityBoundingSet=",
             "KeyringMode=private",
+            "LimitCORE=0",
             "NoNewPrivileges=yes",
             "ProtectProc=invisible",
+            "ProcSubset=pid",
             "ProtectSystem=strict",
             "RestrictAddressFamilies=AF_INET AF_INET6",
             "RestrictNamespaces=yes",
@@ -228,7 +447,7 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
         cls.installer = TOKEN_INSTALLER.read_text(encoding="utf-8")
         cls.canary = TOKEN_CANARY.read_text(encoding="utf-8")
 
-    def test_latent_token_check_uses_the_exact_reviewed_validator_without_mutation(self):
+    def test_launched_token_transaction_uses_exact_validator_and_atomic_commit(self):
         for fragment in (
             "CLOUDFLARED_TOKEN_WORKSPACE",
             "EXPECTED_CLOUDFLARE_ACCOUNT_ID_SHA256",
@@ -236,27 +455,24 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
             "validate_cloudflared_tunnel_token.py",
             "EXPECTED_REPOSITORY_HEAD",
             "EXPECTED_REPOSITORY_OWNER_UID",
-            "refs/heads/main",
-            '"${git_binary}" --no-replace-objects',
-            "GIT_CONFIG_NOSYSTEM=1",
-            '"${git_dir}/info/grafts"',
-            '"${git_dir}/objects/info/alternates"',
-            "refs/replace",
-            "hash-object --no-filters",
-            "cat-file blob",
-            "self_blob=",
-            "validator_worktree=",
-            'cmp -s -- "${validator_worktree}" "${token_validator}"',
-            'env -i PATH=/usr/bin:/bin',
-            '"${python3_binary}" -I -B "${token_validator}"',
-            "no host state changed",
+            "REVIEWED_BLOB_ROOT",
+            "REVIEWED_BLOB_OPERATION",
+            "canonical_existing_path \"${validator}\"",
+            'env -i PATH=/usr/bin HOME=/nonexistent LC_ALL=C',
+            '"${python3_binary}" -I -B "${validator}"',
+            "source_state=",
+            'exec {source_fd}<"${source_file}"',
+            "flock -n 9",
+            'mv -fT -- "${candidate}" "${destination}"',
+            "rollback()",
+            "PI_ADMIN_TOKEN_INSTALL=PASS",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.installer)
 
     def test_mutable_checkout_token_paths_are_explicitly_closed_before_secret_access(self):
         release_guard = "BLOCKED pi-admin token validation and installation require the trusted reviewed-blob launcher"
-        self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", self.installer)
+        self.assertIn('"${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes', self.installer)
         self.assertLess(
             self.installer.index(release_guard),
             self.installer.index("PATH=/usr/sbin:/usr/bin:/sbin:/bin"),
@@ -265,19 +481,16 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
             self.installer.index(release_guard),
             self.installer.index("CLOUDFLARED_TUNNEL_TOKEN_FILE"),
         )
-        guard = '[[ "${mode}" == --check ]] || die'
+        guard = 'if [[ "${mode}" == --apply ]]; then'
         self.assertIn(guard, self.installer)
         self.assertLess(
             self.installer.index(guard),
-            self.installer.index("CLOUDFLARED_TUNNEL_TOKEN_FILE"),
+            self.installer.index("source_state="),
         )
-        self.assertIn("root-owned immutable launcher", self.installer)
+        self.assertIn("destination_directory_created=yes", self.installer)
+        self.assertIn('rmdir -- "${destination_directory}"', self.installer)
+        self.assertIn("trusted reviewed-blob launcher", self.installer)
         for forbidden in (
-            "destination=/etc/cloudflared",
-            "install -o root",
-            "flock -n",
-            "mv -fT",
-            'ln -- "${candidate}"',
             "systemctl start",
             "systemctl restart",
         ):
@@ -297,7 +510,7 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
         for script, arguments, expected in (
             (TOKEN_INSTALLER, ["--check"], expected_installer),
             (TOKEN_INSTALLER, ["--apply"], expected_installer),
-            (TOKEN_CANARY, [], expected_canary),
+            (TOKEN_CANARY, ["--verify"], expected_canary),
         ):
             with self.subTest(script=script.name, arguments=arguments):
                 result = subprocess.run(
@@ -316,7 +529,7 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
         for text in (self.installer, self.canary):
             with self.subTest(source=text[:40]):
                 self.assertTrue(text.startswith("#!/bin/bash\n"))
-                self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", text)
+                self.assertIn('"${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes', text)
                 for fragment in (
                     "builtin set +o history",
                     "builtin declare -F",
@@ -326,7 +539,7 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
                     "BASH_FUNC_*|LD_*",
                     "builtin ulimit -S -c 0",
                     "builtin ulimit -H -c 0",
-                    '[[ "${BASH}" == /bin/bash ]]',
+                    '"${BASH}" != /usr/bin/bash',
                 ):
                     with self.subTest(fragment=fragment):
                         self.assertIn(fragment, text)
@@ -339,26 +552,46 @@ class PiAdminTokenCustodyTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.canary)
 
-    def test_canary_binds_itself_and_pins_to_reviewed_main_before_token_read(self):
+    def test_canary_binds_root_private_exact_blob_before_token_read(self):
         for fragment in (
             "EXPECTED_REPOSITORY_HEAD",
             "EXPECTED_REPOSITORY_OWNER_UID",
-            '"${git_binary}" --no-replace-objects',
-            "GIT_CONFIG_GLOBAL=/dev/null",
-            "refs/heads/main",
-            "refs/replace",
-            "cat-file blob",
-            "hash-object --no-filters",
-            "self_blob=",
-            'cmp -s -- "${self_worktree}" "${self_blob}"',
-            'cmp -s -- "${versions_worktree}" "${versions_file}"',
+            "REVIEWED_BLOB_ROOT",
+            "REVIEWED_BLOB_OPERATION",
+            "0:0:500:1",
+            "0:0:400:1",
+            "self_snapshot=",
+            'cmp -s -- "${self_source}" "${self_snapshot}"',
+            'cmp -s -- "${reviewed_unit_snapshot}" "${installed_unit_snapshot}"',
+            'cmp -s -- "${versions_source}" "${versions_file}"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.canary)
         self.assertLess(
-            self.canary.index('cmp -s -- "${self_worktree}" "${self_blob}"'),
+            self.canary.index('cmp -s -- "${self_source}" "${self_snapshot}"'),
             self.canary.index('exec {token_fd}<"${token_file}"'),
         )
+
+    def test_canary_rejects_unit_dropins_drift_and_service_account_drift(self):
+        for fragment in (
+            "installed_unit=/etc/systemd/system/pi-admin.service",
+            "--property=DropInPaths",
+            "--property=NeedDaemonReload",
+            "--property=UnitFileState",
+            '"$(property_value LoadState)" == loaded',
+            '"$(property_value FragmentPath)" == "${installed_unit}"',
+            '-z "$(property_value DropInPaths)"',
+            '"$(property_value NeedDaemonReload)" == no',
+            '"$(property_value UnitFileState)" == enabled',
+            "service_account_owner",
+            "getent passwd cloudflared",
+            "getent group cloudflared",
+            "id -G cloudflared",
+            "passwd -S cloudflared",
+            '"${process_owner}" == "${service_account}"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.canary)
 
     def test_runtime_canary_never_places_token_in_command_arguments(self):
         for fragment in (
@@ -652,15 +885,15 @@ class TunnelTokenRotationRunbookTests(unittest.TestCase):
 
     def test_connector_readme_records_the_safe_install_and_recovery_boundary(self):
         for fragment in (
-            "It never executes the mutable staging path",
+            "never executes a mutable checkout",
             "acquires an exclusive lock",
-            "atomic same-filesystem operation",
-            "token apply is intentionally blocked",
-            "root-owned reviewed-blob launcher",
-            "at least two working sessions have been proven immediately before mutation",
-            "Physical access is the independent recovery path if either session later drops",
-            "force-disconnect every existing connection",
-            "physical/LAN access, never the old token",
+            "atomic same-filesystem commit",
+            "Direct invocations are negative tests",
+            "installed root-owned launcher",
+            "two independently proven SSH sessions",
+            "physical/LAN recovery is the availability fallback",
+            "force-disconnects every existing Tunnel connection",
+            "never use an old or suspected token as rollback authority",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.readme)

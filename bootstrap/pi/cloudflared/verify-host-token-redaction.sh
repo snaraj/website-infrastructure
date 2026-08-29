@@ -5,11 +5,14 @@ builtin set -Eeuo pipefail
 builtin set +x
 builtin set +o history
 
-# Release safety stop. The canary opens the installed bearer and privileged
-# runtime metadata in its latent implementation. It must be entered only through
-# the future immutable stage-zero launcher.
-readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no
-if [[ "${REVIEWED_BLOB_LAUNCHER_AVAILABLE}" != yes ]]; then
+# The canary opens the installed bearer and privileged runtime metadata. It
+# accepts only a root-private exact-blob extraction created by the installed
+# stage-zero launcher.
+if [[ "${1:-}" != --verify || $# -ne 1 ||
+      "${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes ||
+      "${REVIEWED_BLOB_OPERATION:-}" != runtime-verify ||
+      ! "${REVIEWED_BLOB_ROOT:-}" =~ ^/run/website-infrastructure/reviewed-op\.[A-Za-z0-9]+$ ||
+      "${EUID}" -ne 0 || "${BASH}" != /usr/bin/bash ]]; then
   builtin printf 'BLOCKED pi-admin runtime token verification requires the trusted reviewed-blob launcher; no token or runtime metadata was read.\n' >&2
   builtin exit 1
 fi
@@ -23,7 +26,7 @@ fail() {
   builtin exit 1
 }
 
-# A minimal `env -i ... /bin/bash` invocation prevents pre-script BASH_ENV or
+# A minimal `env -i ... /usr/bin/bash` invocation prevents pre-script BASH_ENV or
 # loader execution; these builtin-only checks then fail closed on any residue.
 while builtin read -r function_declaration function_flag inherited_function_name; do
   [[ "${function_declaration}" == declare && "${function_flag}" == -f ]] || fail
@@ -39,7 +42,7 @@ done
 builtin ulimit -S -c 0 || fail
 builtin ulimit -H -c 0 || fail
 [[ "$(builtin ulimit -S -c)" == 0 && "$(builtin ulimit -H -c)" == 0 ]] || fail
-[[ "${BASH}" == /bin/bash ]] || fail
+[[ "${BASH}" == /usr/bin/bash ]] || fail
 [[ "${EUID}" -eq 0 ]] || fail
 
 : "${EXPECTED_REPOSITORY_HEAD:?Set the exact reviewed main commit}"
@@ -47,17 +50,11 @@ builtin ulimit -H -c 0 || fail
 [[ "${EXPECTED_REPOSITORY_HEAD}" =~ ^[0-9a-f]{40}$ ]] || fail
 [[ "${EXPECTED_REPOSITORY_OWNER_UID}" =~ ^[1-9][0-9]*$ ]] || fail
 
-for command_name in awk cat chmod cmp dirname env findmnt git grep id \
-  journalctl mktemp readlink rm sha256sum stat swapon systemctl uname; do
+for command_name in mawk cat chmod cmp dirname env findmnt grep id \
+  getent journalctl mktemp passwd readlink rm sha256sum stat swapon systemctl uname; do
   builtin command -v "${command_name}" >/dev/null 2>&1 || fail
 done
 [[ "$(uname -s)" == Linux ]] || fail
-
-git_binary="$(readlink -e -- /usr/bin/git)" || fail
-[[ "${git_binary}" == /usr/bin/git && -f "${git_binary}" && ! -L "${git_binary}" && -x "${git_binary}" ]] || fail
-[[ "$(stat -c '%u:%h' -- "${git_binary}")" == 0:1 ]] || fail
-git_mode="$(stat -c %a -- "${git_binary}")" || fail
-(( (8#${git_mode} & 0022) == 0 )) || fail
 
 canonical_existing_path() {
   local candidate="$1" resolved current
@@ -73,16 +70,16 @@ canonical_existing_path() {
 
 self_source="$(readlink -e -- "${BASH_SOURCE[0]}")" || fail
 repo_root="$(cd "$(dirname -- "${self_source}")/../../.." && pwd -P)" || fail
+reviewed_unit_source="${repo_root}/bootstrap/pi/cloudflared/pi-admin.service"
+installed_unit=/etc/systemd/system/pi-admin.service
 [[ "${self_source}" == "${repo_root}/bootstrap/pi/cloudflared/verify-host-token-redaction.sh" ]] || fail
+[[ "${repo_root}" == "${REVIEWED_BLOB_ROOT}" ]] || fail
 canonical_existing_path "${self_source}" || fail
-
-trusted_git() {
-  env -i PATH=/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-    "${git_binary}" --no-replace-objects -c safe.directory="${repo_root}" \
-      -c credential.helper= -c core.askPass= -c core.fsmonitor=false \
-      -c core.hooksPath=/dev/null -C "${repo_root}" "$@"
-}
+canonical_existing_path "${reviewed_unit_source}" || fail
+canonical_existing_path "${installed_unit}" || fail
+[[ "$(stat -c '%u:%g:%a:%h' -- "${self_source}")" == 0:0:500:1 ]] || fail
+[[ "$(stat -c '%u:%g:%a:%h' -- "${reviewed_unit_source}")" == 0:0:400:1 ]] || fail
+[[ "$(stat -c '%u:%g:%a:%h' -- "${installed_unit}")" == 0:0:644:1 ]] || fail
 
 trusted_systemctl() {
   env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C systemctl "$@"
@@ -91,21 +88,6 @@ trusted_systemctl() {
 trusted_journalctl() {
   env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C journalctl "$@"
 }
-
-[[ "$(trusted_git rev-parse --show-toplevel)" == "${repo_root}" ]] || fail
-git_dir="$(trusted_git rev-parse --absolute-git-dir)" || fail
-[[ "${git_dir}" == "${repo_root}/.git" && -d "${git_dir}" && ! -L "${git_dir}" ]] || fail
-[[ "$(stat -c %u -- "${repo_root}")" == "${EXPECTED_REPOSITORY_OWNER_UID}" ]] || fail
-[[ "$(stat -c %u -- "${git_dir}")" == "${EXPECTED_REPOSITORY_OWNER_UID}" ]] || fail
-repo_mode="$(stat -c %a -- "${repo_root}")" || fail
-git_dir_mode="$(stat -c %a -- "${git_dir}")" || fail
-(( (8#${repo_mode} & 0022) == 0 && (8#${git_dir_mode} & 0022) == 0 )) || fail
-[[ ! -e "${git_dir}/info/grafts" ]] || fail
-[[ ! -e "${git_dir}/objects/info/alternates" ]] || fail
-[[ -z "$(trusted_git for-each-ref --format='%(refname)' refs/replace)" ]] || fail
-[[ "$(trusted_git rev-parse --verify 'HEAD^{commit}')" == "${EXPECTED_REPOSITORY_HEAD}" ]] || fail
-[[ "$(trusted_git symbolic-ref -q HEAD)" == refs/heads/main ]] || fail
-[[ "$(trusted_git rev-parse --is-shallow-repository)" == false ]] || fail
 
 token_file=/etc/cloudflared/pi-admin.token
 credential_directory=/run/credentials/pi-admin.service
@@ -170,37 +152,58 @@ snapshot_regular_file() {
 }
 
 versions_source="${repo_root}/versions.env"
-self_worktree="${temporary_directory}/verify-token-redaction.worktree"
-self_blob="${temporary_directory}/verify-token-redaction.blob"
-versions_worktree="${temporary_directory}/versions.worktree"
+self_snapshot="${temporary_directory}/verify-token-redaction.snapshot"
+reviewed_unit_snapshot="${temporary_directory}/pi-admin.reviewed.service"
+installed_unit_snapshot="${temporary_directory}/pi-admin.installed.service"
 versions_file="${temporary_directory}/versions.blob"
-snapshot_regular_file "${self_source}" "${self_worktree}" \
-  "${EXPECTED_REPOSITORY_OWNER_UID}" || fail
-snapshot_regular_file "${versions_source}" "${versions_worktree}" \
-  "${EXPECTED_REPOSITORY_OWNER_UID}" || fail
+canonical_existing_path "${versions_source}" || fail
+[[ "$(stat -c '%u:%g:%a:%h' -- "${versions_source}")" == 0:0:400:1 ]] || fail
+snapshot_regular_file "${self_source}" "${self_snapshot}" 0 || fail
+snapshot_regular_file "${reviewed_unit_source}" "${reviewed_unit_snapshot}" 0 || fail
+snapshot_regular_file "${installed_unit}" "${installed_unit_snapshot}" 0 || fail
+snapshot_regular_file "${versions_source}" "${versions_file}" 0 || fail
+cmp -s -- "${self_source}" "${self_snapshot}" || fail
+cmp -s -- "${reviewed_unit_snapshot}" "${installed_unit_snapshot}" || fail
+cmp -s -- "${versions_source}" "${versions_file}" || fail
 
-critical_inventory='100755 bootstrap/pi/cloudflared/verify-host-token-redaction.sh
-100644 versions.env'
-actual_critical_inventory="$(trusted_git ls-tree "${EXPECTED_REPOSITORY_HEAD}" -- \
-  bootstrap/pi/cloudflared/verify-host-token-redaction.sh versions.env | \
-  awk '{ mode=$1; sub(/^[^\t]*\t/, ""); print mode " " $0 }')" || fail
-[[ "${actual_critical_inventory}" == "${critical_inventory}" ]] || fail
-trusted_git cat-file blob \
-  "${EXPECTED_REPOSITORY_HEAD}:bootstrap/pi/cloudflared/verify-host-token-redaction.sh" \
-  > "${self_blob}" || fail
-trusted_git cat-file blob "${EXPECTED_REPOSITORY_HEAD}:versions.env" \
-  > "${versions_file}" || fail
-chmod 600 "${self_blob}" "${versions_file}"
-[[ "$(trusted_git hash-object --no-filters "${self_blob}")" == \
-  "$(trusted_git rev-parse "${EXPECTED_REPOSITORY_HEAD}:bootstrap/pi/cloudflared/verify-host-token-redaction.sh")" ]] || fail
-[[ "$(trusted_git hash-object --no-filters "${versions_file}")" == \
-  "$(trusted_git rev-parse "${EXPECTED_REPOSITORY_HEAD}:versions.env")" ]] || fail
-cmp -s -- "${self_worktree}" "${self_blob}" || fail
-cmp -s -- "${versions_worktree}" "${versions_file}" || fail
+unit_properties="$(trusted_systemctl show --property=LoadState --property=FragmentPath \
+  --property=DropInPaths --property=NeedDaemonReload --property=UnitFileState \
+  pi-admin.service)" || fail
+property_value() {
+  local key="$1" count value
+  count="$(builtin printf '%s\n' "${unit_properties}" | \
+    /usr/bin/mawk -F= -v expected="${key}" '$1 == expected {count++} END {print count + 0}')" || return 1
+  [[ "${count}" == 1 ]] || return 1
+  value="$(builtin printf '%s\n' "${unit_properties}" | \
+    /usr/bin/mawk -F= -v expected="${key}" '$1 == expected {sub(/^[^=]*=/, ""); print}')" || return 1
+  builtin printf '%s' "${value}"
+}
+[[ "$(property_value LoadState)" == loaded ]] || fail
+[[ "$(property_value FragmentPath)" == "${installed_unit}" ]] || fail
+[[ -z "$(property_value DropInPaths)" ]] || fail
+[[ "$(property_value NeedDaemonReload)" == no ]] || fail
+[[ "$(property_value UnitFileState)" == enabled ]] || fail
+
+service_account_owner() {
+  local record name uid gid home shell group_record group_name group_gid members
+  record="$(getent passwd cloudflared)" || return 1
+  IFS=: read -r name _ uid gid _ home shell <<<"${record}"
+  [[ "${name}" == cloudflared && "${uid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${gid}" =~ ^[1-9][0-9]*$ && "${home}" == /nonexistent ]] || return 1
+  [[ "${shell}" == /usr/sbin/nologin || "${shell}" == /usr/bin/false ]] || return 1
+  group_record="$(getent group cloudflared)" || return 1
+  IFS=: read -r group_name _ group_gid members <<<"${group_record}"
+  [[ "${group_name}" == cloudflared && "${group_gid}" == "${gid}" && -z "${members}" ]] || \
+    return 1
+  [[ "$(id -G cloudflared)" == "${gid}" ]] || return 1
+  [[ "$(passwd -S cloudflared)" == 'cloudflared L '* ]] || return 1
+  builtin printf '%s:%s' "${uid}" "${gid}"
+}
+service_account="$(service_account_owner)" || fail
 
 load_version_value() {
   local key="$1"
-  awk -F= -v expected="${key}" '
+  /usr/bin/mawk -F= -v expected="${key}" '
     $1 == expected && $2 ~ /^[A-Za-z0-9._:+@/-]+$/ { count += 1; value = $2 }
     END { if (count == 1) print value }
   ' "${versions_file}"
@@ -216,12 +219,12 @@ runtime_identity() {
   local properties pid invocation start_time executable executable_state
   local executable_state_after executable_digest
   properties="$(trusted_systemctl show --property=MainPID --property=InvocationID pi-admin.service)" || return 1
-  pid="$(printf '%s\n' "${properties}" | awk -F= '$1 == "MainPID" {print $2}')"
-  invocation="$(printf '%s\n' "${properties}" | awk -F= '$1 == "InvocationID" {print $2}')"
+  pid="$(printf '%s\n' "${properties}" | /usr/bin/mawk -F= '$1 == "MainPID" {print $2}')"
+  invocation="$(printf '%s\n' "${properties}" | /usr/bin/mawk -F= '$1 == "InvocationID" {print $2}')"
   [[ "${pid}" =~ ^[1-9][0-9]*$ && "${invocation}" =~ ^[0-9a-f]{32}$ ]] || return 1
   [[ -r "/proc/${pid}/stat" && -r "/proc/${pid}/status" ]] || return 1
   [[ -r "/proc/${pid}/cmdline" && -r "/proc/${pid}/environ" ]] || return 1
-  start_time="$(awk '{print $22}' "/proc/${pid}/stat")" || return 1
+  start_time="$(/usr/bin/mawk '{print $22}' "/proc/${pid}/stat")" || return 1
   [[ "${start_time}" =~ ^[1-9][0-9]*$ ]] || return 1
   executable="$(readlink -e -- "/proc/${pid}/exe")" || return 1
   [[ "${executable}" == /usr/local/bin/cloudflared ]] || return 1
@@ -229,7 +232,7 @@ runtime_identity() {
   executable_state="$(stat -Lc '%d:%i:%f:%h:%s:%Y:%Z:%u:%g:%a' -- "/proc/${pid}/exe")" || return 1
   [[ "${executable_state##*:}" == 755 ]] || return 1
   [[ "${executable_state%:*}" == *:0:0 ]] || return 1
-  executable_digest="$(sha256sum -- "/proc/${pid}/exe" 2>/dev/null | awk '{print $1}')" || return 1
+  executable_digest="$(sha256sum -- "/proc/${pid}/exe" 2>/dev/null | /usr/bin/mawk '{print $1}')" || return 1
   [[ "${executable_digest}" == "${CLOUDFLARED_HOST_ARM64_SHA256}" ]] || return 1
   executable_state_after="$(stat -Lc '%d:%i:%f:%h:%s:%Y:%Z:%u:%g:%a' -- "/proc/${pid}/exe")" || return 1
   [[ "${executable_state_after}" == "${executable_state}" ]] || return 1
@@ -240,8 +243,8 @@ runtime_process_owner() {
   local process_id="$1" uid_values gid_values
   local uid_real uid_effective uid_saved uid_filesystem
   local gid_real gid_effective gid_saved gid_filesystem
-  uid_values="$(awk '$1 == "Uid:" {print $2, $3, $4, $5}' "/proc/${process_id}/status")" || return 1
-  gid_values="$(awk '$1 == "Gid:" {print $2, $3, $4, $5}' "/proc/${process_id}/status")" || return 1
+  uid_values="$(/usr/bin/mawk '$1 == "Uid:" {print $2, $3, $4, $5}' "/proc/${process_id}/status")" || return 1
+  gid_values="$(/usr/bin/mawk '$1 == "Gid:" {print $2, $3, $4, $5}' "/proc/${process_id}/status")" || return 1
   read -r uid_real uid_effective uid_saved uid_filesystem <<<"${uid_values}"
   read -r gid_real gid_effective gid_saved gid_filesystem <<<"${gid_values}"
   [[ "${uid_real}" =~ ^[1-9][0-9]*$ && "${gid_real}" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -309,6 +312,7 @@ identity_before="$(runtime_identity)" || fail
 pid="${identity_before%%:*}"
 trusted_systemctl is-active --quiet pi-admin.service || fail
 process_owner="$(runtime_process_owner "${pid}")" || fail
+[[ "${process_owner}" == "${service_account}" ]] || fail
 credential_file="$(runtime_credential_file "${pid}")" || fail
 [[ "${credential_file}" == "${expected_credential_file}" ]] || fail
 assert_runtime_credential_custody "${process_owner}" || fail
@@ -401,6 +405,7 @@ set -e
 
 [[ "$(runtime_identity)" == "${identity_before}" ]] || fail
 [[ "$(runtime_process_owner "${pid}")" == "${process_owner}" ]] || fail
+[[ "$(service_account_owner)" == "${service_account}" ]] || fail
 [[ "$(runtime_credential_file "${pid}")" == "${credential_file}" ]] || fail
 assert_runtime_credential_custody "${process_owner}" || fail
 [[ "$(stat -c '%d:%i:%f:%h:%s:%Y:%Z' -- "${credential_file}")" == "${credential_state}" ]] || fail
