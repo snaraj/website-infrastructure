@@ -52,8 +52,12 @@ while preserving the annotated tag, then publishes a complete `v0.1.43`; all
 other predecessor tags and Releases are revalidated before every mutation
 boundary.
 [`validate_review_receipt.py`](./validate_review_receipt.py)
-validates the portable exact-PR-head adversarial-review receipt and distinct
-bounded Main Worker Ready-receipt shapes and rejects issue resources, while
+validates the portable exact-PR-head adversarial-review receipt SHAPE and
+rejects issue resources; it never sees who posted a comment, so reviewer
+independence — which AGENTS.md binds to the posting actor — is read from the
+forge by the coordinator, and the contract-retired Main Worker Ready-receipt
+kind it still carries is transitional until issue #188 removes its call
+sites. Meanwhile
 [`validate_destructive_test_ledger.py`](./validate_destructive_test_ledger.py)
 validates the closed positive kind allowlist and bounded prestate-to-poststate
 evidence shape for a separately authorized disposable-workload experiment.

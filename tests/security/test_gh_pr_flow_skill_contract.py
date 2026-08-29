@@ -328,7 +328,10 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
         def doctrine_denial(skill_ready, repository_contract):
             required = (
                 "Ready means zero unresolved blockers",
-                "code, CI, review, sequencing, settings, Main Worker, "
+                # The Main Worker blocker left this enumeration when the owner
+                # retired that receipt (issue #218); the remaining gates are
+                # pinned in both documents exactly as before.
+                "code, CI, review, sequencing, settings, "
                 "metadata, or any other declared gate",
                 "Owner review or owner merge authority does not waive a blocker",
                 "a blocker-bearing PR stays Draft",
@@ -352,11 +355,18 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             normalized_ready.replace(
                 "a blocker-bearing PR stays Draft", "a blocker may leave Draft"
             ),
-            normalized_ready.replace("settings, Main Worker, ", ""),
+            normalized_ready.replace("sequencing, settings, ", ""),
         )
         for index, mutant in enumerate(mutants):
             with self.subTest(doctrine_mutant=index):
                 self.assertIsNotNone(doctrine_denial(mutant, agents))
+        # The enumeration is pinned on the repository side too, so dropping a
+        # blocker from AGENTS.md alone cannot pass while the skill still lists it.
+        self.assertIsNotNone(
+            doctrine_denial(
+                ready, agents.replace("sequencing, settings, ", "", 1)
+            )
+        )
 
         blocker_names = (
             "code",
@@ -364,7 +374,6 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "review",
             "sequencing",
             "settings",
-            "main_worker",
             "metadata",
             "declared_other",
         )

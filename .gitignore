@@ -95,6 +95,12 @@ results/
 __pycache__/
 *.py[cod]
 
+# Per-agent git worktrees. AGENTS.md mandates this layout for parallel lanes,
+# so a fresh clone that follows the contract must not see its own workspace as
+# untracked. Deliberately narrower than `.claude/`: `.claude/settings.json` is
+# tracked and stays tracked.
+.claude/worktrees/
+
 # Editors and operating systems
 .DS_Store
 Thumbs.db

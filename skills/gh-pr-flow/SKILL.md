@@ -74,14 +74,18 @@ audits status checks and coverage, and posts one signed normal-comment receipt.
 Any head change invalidates it. See
 [review receipts](references/reviews.md). Use
 `scripts/validate_review_receipt.py --resource-kind pull-request` for receipt
-shape; it rejects issue resources but cannot prove human or context
-independence, so the coordinator verifies that separately.
+shape; it rejects issue resources but proves SHAPE only. It never sees who
+posted the comment, so the coordinator reads the posting actor from the forge
+and never treats signature wording as independence.
 
-After `APPROVE`, require a distinct Main Worker/coordinator context to post the
-bounded architecture, merge-order, authority, settings, base-freshness, and
-required-check sanity receipt defined in the same reference. Validate its exact
-head, `ROLE: MAIN-WORKER`, and `VERDICT: PASS` with the executable receipt gate.
-This receipt neither repeats adversarial review nor grants Ready/merge authority.
+RETIRED WHEREVER THE REPOSITORY CONTRACT SAYS SO, and that contract always
+wins: after `APPROVE`, a distinct Main Worker/coordinator context used to post
+a bounded architecture, merge-order, authority, settings, base-freshness, and
+required-check sanity receipt (`ROLE: MAIN-WORKER`, `VERDICT: PASS`) defined in
+the same reference. It neither repeated adversarial review nor granted
+Ready/merge authority. Where it is retired, the coordinator flips Ready
+straight after `APPROVE` with every check green at the exact head; validate no
+second receipt and demand none.
 
 On `REQUEST-CHANGES`, the author reproduces findings, adds repairs without
 rewriting history, updates evidence, and re-applies `requires-review`. A fresh
@@ -94,7 +98,7 @@ follow-up issues.
 Keep Draft unless every condition is true at the same instant:
 
 Ready means zero unresolved blockers across code, CI, review, sequencing,
-settings, Main Worker, metadata, or any other declared gate. Owner review or
+settings, metadata, or any other declared gate. Owner review or
 owner merge authority does not waive a blocker; a blocker-bearing PR stays
 Draft.
 
@@ -106,7 +110,9 @@ Draft.
   `REQUEST-CHANGES` exists;
 - one fresh structurally valid `APPROVE` receipt from an independent context
   binds the exact head;
-- one fresh structurally valid Main Worker `PASS` receipt from a context
+- RETIRED wherever the repository contract says so — read that contract, which
+  always wins — one fresh structurally valid Main Worker `PASS` receipt from a
+  context
   distinct from both author and reviewer binds the exact head and closed scope;
 - labels, owner assignee, milestone, issue link, intended commit/file scope, and
   merge order remain correct;
@@ -186,12 +192,12 @@ different account credentials:
   worktree at the exact PR head, read-only toward the author's workspace and
   reverting every experiment. It independently derives the evidence and posts
   the verdict.
-- **Coordinator / Main Worker** — the coordinator/Main Worker context is
-  distinct from both author and reviewer. It performs the bounded Main Worker
-  sanity pass and the readiness flip only once review has cleared AND every
+- **Coordinator** — the coordinator context is
+  distinct from both author and reviewer. It performs the readiness flip only
+  once review has cleared AND every
   check is green at the exact head, with no peer or owner comment outstanding.
 - **Owner** — alone holds merge authority. Owner review and merge authority do
-  not replace the distinct coordinator/Main Worker gate.
+  not replace the distinct coordinator gate.
 
 Neither the author nor the reviewer performs the readiness flip. Flipping is
 an assertion that review is complete, never "let the owner take a look".
