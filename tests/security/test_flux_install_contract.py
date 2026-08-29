@@ -3358,6 +3358,24 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
                 with self.subTest(residue=entry):
                     self.assertIn(entry, errors)
 
+    # The marker this test synchronises on. It must name the manifest the stub
+    # is told to hold open (``FLUX_STUB_DELAY_ON``), because the stub logs the
+    # call BEFORE it sleeps: seeing this line means the installer is inside a
+    # foreground command that will not return for FLUX_STUB_DELAY seconds, and
+    # bash defers the signal to the end of that command.
+    #
+    # Issue #139: the marker used to be the bare ``--dry-run=client``, which the
+    # egress overlay and the API canary each log FIRST — so the signal landed
+    # one or two calls EARLIER, in the unsynchronised region between them
+    # (``cat``/``grep -cE`` command substitutions), and the run's behaviour
+    # depended on where the scheduler happened to put it. That is what produced
+    # the intermittent ``trap: line 2: unexpected EOF while looking for
+    # matching ')'`` in place of the handler's own message on main CI run
+    # 32208415511. The 4-second stub delay is unchanged: the repair is to point
+    # the wait at the call the delay actually covers, not to wait longer.
+    DELAYED_MANIFEST = "controllers.yaml"
+    DELAYED_CALL_MARKER = DELAYED_MANIFEST + " --dry-run=client"
+
     def test_a_signal_before_any_apply_exits_clean_and_says_so(self):
         # The other half of the handler's contract: interrupted during the
         # read-only gate there is nothing to undo, and a rollback attempt then
@@ -3366,10 +3384,10 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         returncode, errors, state = self._run_until_signalled(
             "--apply",
             scenario="fresh-ok",
-            wait_for="--dry-run=client",
+            wait_for=self.DELAYED_CALL_MARKER,
             wait_file="calls.log",
             extra_environment={
-                "FLUX_STUB_DELAY_ON": "controllers.yaml",
+                "FLUX_STUB_DELAY_ON": self.DELAYED_MANIFEST,
                 "FLUX_STUB_DELAY": "4",
             },
         )
@@ -3382,6 +3400,30 @@ class ApplyTransactionTests(InstallerBehaviourTestCase):
         self.assertNotIn("ROLLBACK INCOMPLETE", errors)
         self.assertEqual(read(state / "registry").strip(), "")
         self.assertEqual(read(state / "applied.log").strip(), "")
+
+        # The race, pinned rather than described. The old marker matched more
+        # than one logged call, so waiting on it could not say WHICH call the
+        # installer was in; the new one matches exactly the delayed call. If a
+        # future change makes the bare marker unambiguous again this assertion
+        # goes red and the comment above stops being a stale story.
+        calls = read(state / "calls.log").splitlines()
+        client_dry_runs = [line for line in calls if "--dry-run=client" in line]
+        self.assertGreater(
+            len(client_dry_runs),
+            1,
+            "the bare marker is only a race while several calls carry it; "
+            "recheck what this test synchronises on:\n" + "\n".join(calls),
+        )
+        self.assertEqual(
+            [line for line in client_dry_runs if self.DELAYED_CALL_MARKER in line],
+            [client_dry_runs[-1]],
+            "the marker must identify exactly the last, delayed call",
+        )
+        self.assertIn(
+            self.DELAYED_MANIFEST,
+            self.DELAYED_CALL_MARKER,
+            "the marker must name the manifest the stub is told to hold open",
+        )
 
     def test_a_foreign_owned_cluster_role_stops_the_install_before_any_apply(self):
         # --plan, because --apply now refuses an existing install outright and
