@@ -22,10 +22,13 @@ unset CLOUDFLARE_API_TOKEN CLOUDFLARE_API_KEY CLOUDFLARE_EMAIL \
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cloudflare_root="${repo_root}/infrastructure/cloudflare"
 phases=(
+  admin-certificate
+  admin-enrollment-policy
+  admin-enrollment-app
+  admin-device
   admin-tunnel
   admin-policies
   admin-route
-  admin-api
   site-naranjo-online
   site-lidersea-com
 )

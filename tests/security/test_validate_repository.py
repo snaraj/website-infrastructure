@@ -1416,6 +1416,26 @@ class RepositoryPolicyTests(unittest.TestCase):
             errors = MODULE.check_cloudflare(root)
             self.assertTrue(any("data source is forbidden" in error for error in errors))
 
+    def test_cloudflare_repository_allowlist_matches_reviewed_zero_cost_types(self):
+        """The integrated gate must recognize exactly the policy-reviewed set."""
+
+        self.assertEqual(
+            MODULE.ALLOWED_CLOUDFLARE_RESOURCES,
+            {
+                "cloudflare_mtls_certificate",
+                "cloudflare_dns_record",
+                "cloudflare_zero_trust_access_application",
+                "cloudflare_zero_trust_access_policy",
+                "cloudflare_zero_trust_device_custom_profile",
+                "cloudflare_zero_trust_device_posture_rule",
+                "cloudflare_zero_trust_gateway_policy",
+                "cloudflare_zero_trust_tunnel_cloudflared",
+                "cloudflare_zero_trust_tunnel_cloudflared_config",
+                "cloudflare_zero_trust_tunnel_cloudflared_route",
+                "cloudflare_zone_setting",
+            },
+        )
+
     def test_cloudflare_phase_contract_rejects_guard_bypass(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

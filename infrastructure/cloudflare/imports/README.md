@@ -5,9 +5,9 @@ running them, and no import is part of repository-only validation. Use an
 import only when read-only discovery proves the exact object already exists and
 an explicit operator checkpoint approves adding it to the correct state.
 
-The administrative imports below remain blocked: `scripts/cloudflare-plan-gate.sh`
-is initial-onboarding create-only, requiring exact `actions = ["create"]` and an
-absent prior object, so it cannot authorize import, refresh-only, no-op, update,
+Administrative imports remain blocked: the root-owned admin transaction and
+its plan policy require exact `actions = ["create"]` with an absent prior
+object. They cannot authorize import, refresh-only, no-op, update,
 reconciliation, replacement, or rollback for those roots.
 
 The two website roots are the adoption case and are governed by the committed
@@ -51,7 +51,7 @@ remain mandatory but do not reduce token reach.
 
 ## Non-negotiable state and secret custody
 
-- Initialize only one of the six directories under
+- Initialize only one of the nine directories under
   `infrastructure/cloudflare/phases/`.
 - Give every phase its own state path on a protected encrypted volume.
 - Keep the read-only audit token and both Tunnel runtime tokens separate from
@@ -71,15 +71,14 @@ fail; it must never express deletion.
 
 ## Required order
 
-The administrative dependency is strict:
+The administrative dependency is strict, but these are create-only phases and
+are not import candidates:
 
 ```text
-admin-tunnel import -> revoke write token -> exact account-wide Tunnel audit
-  -> admin-policies imports -> revoke write token -> exact relevant-policy audit
-  -> admin-route import (only if the exact /32 route already exists)
-  -> revoke write token -> route audit
-  -> independent recovery + two working SSH sessions
-  -> optional admin-api import
+admin-certificate -> admin-enrollment-policy -> admin-enrollment-app
+  -> admin-device + one attended owner-device enrollment -> admin-tunnel
+  -> admin-policies -> local console recovery + two working LAN SSH sessions
+  -> admin-route
 ```
 
 The website dependency is strict and per site:
@@ -105,66 +104,13 @@ identifiers through a protected mechanism. Avoid placing real identifiers in
 interactive shell history. Addresses intentionally have no `[0]` index:
 there is no global `count` gate.
 
-### `admin-tunnel`
+### Administrative roots
 
-Owning root: `infrastructure/cloudflare/phases/admin-tunnel`
-
-```powershell
-tofu -chdir=infrastructure/cloudflare/phases/admin-tunnel import 'cloudflare_zero_trust_tunnel_cloudflared.pi_admin' '<account_id>/<tunnel_id>'
-```
-
-The refresh-only plan must contain this one Tunnel and nothing else. Revoke and
-rejection-verify the account-scoped write token immediately after import. Then
-use the separate read-only token to audit the selected account's complete
-Tunnel inventory, prove that no unrelated Tunnel changed, emit the
-tunnel-contract hash, and record the receipt before proceeding.
-
-### `admin-policies`
-
-Owning root: `infrastructure/cloudflare/phases/admin-policies`
-
-```powershell
-tofu -chdir=infrastructure/cloudflare/phases/admin-policies import 'cloudflare_zero_trust_gateway_policy.pi_admin_block' '<account_id>/<rule_id>'
-tofu -chdir=infrastructure/cloudflare/phases/admin-policies import 'cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow' '<account_id>/<rule_id>'
-```
-
-This root requires the matching admin-tunnel contract. Import and verify the
-final block before the SSH allow. The future gated refresh-only plan must show
-exactly these two policies and no Tunnel or route. Revoke and rejection-verify
-the write token before using the separate read-only token to audit the complete
-relevant policy set, including exact TCP 22 traffic, identity, posture, session
-freshness, enabled state, Pi `/32`, and lower allow precedence. Only an exact
-post-revocation audit may emit the admin-policies contract.
-
-### `admin-route`
-
-Owning root: `infrastructure/cloudflare/phases/admin-route`
-
-```powershell
-tofu -chdir=infrastructure/cloudflare/phases/admin-route import 'cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin' '<account_id>/<route_id>'
-```
-
-This root requires the matching admin-policies contract. The imported network
-must be exactly one audited RFC1918 IPv4 `/32` through the audited `pi-admin`
-Tunnel. A broader prefix, different Tunnel, unrelated route change, or missing
-contract is a `NO-GO`. Revoke and rejection-verify the write token first, then
-audit every relevant account route with the separate read-only token.
-
-### `admin-api`
-
-Owning root: `infrastructure/cloudflare/phases/admin-api`
-
-```powershell
-tofu -chdir=infrastructure/cloudflare/phases/admin-api import 'cloudflare_zero_trust_gateway_policy.pi_admin_api_allow' '<account_id>/<rule_id>'
-```
-
-This phase stays default-off. Consider it only after exact route audit,
-independent physical recovery, two working administrative sessions, and a
-separate explicit approval. The policy must allow only TCP 6443 for the exact
-identity and posture, evaluate after the SSH allow and before the final block,
-and carry the matching route-contract hash. Its JIT token is new and distinct
-from the earlier admin-policies token even though both require an
-account-scoped policy permission.
+No administrative import command is reviewed or supported. If read-only
+discovery finds any object with one of the reserved `pi-admin` names before its
+own create phase, stop. Reconcile or remove it only through a separate reviewed
+incident/change operation; never adopt an unknown object into the owner SSH
+trust chain merely because its name resembles the intended resource.
 
 ### `site-naranjo-online`
 
@@ -231,8 +177,9 @@ trusting this file.
 ## Existing infrastructure only
 
 Do not import or manage zones, plans, subscriptions, Registrar objects, API
-token objects, device enrollment, WARP settings, Workers, storage, media,
-Cloudflare-managed HSTS, or any paid feature. The application owns
+token objects, any device/enrollment setting outside the seven named
+administrative roots, Workers, storage, media, Cloudflare-managed HSTS, or any
+paid feature. The application owns
 `Strict-Transport-Security`; adopting the zone HSTS setting would create a
 second writer for one header. Do not use import to adopt an object that merely resembles
 the target. Names, account/zone binding, Tunnel binding, route, policy
@@ -241,5 +188,5 @@ entitlement must all match exactly.
 
 For provider-v4 state, stop and use the official v5 migration procedure. Do not
 guess or rewrite state. A phase with no pre-existing exact object proceeds only
-through a separately gated future create plan, never through a fabricated
-import.
+  through the reviewed root-owned create transaction, never through a fabricated
+  import.

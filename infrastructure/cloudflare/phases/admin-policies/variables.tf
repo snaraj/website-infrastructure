@@ -34,13 +34,23 @@ variable "verified_admin_tunnel_contract_sha256" {
   }
 }
 
-variable "verified_admin_posture_contract_sha256" {
-  description = "Fresh audit hash proving the exact strong posture check and enrolled WARP device contract before policy creation."
+variable "verified_admin_device_contract_sha256" {
+  description = "Fresh audit hash proving the exact certificate posture and locked owner device profile before policy creation."
   type        = string
   sensitive   = true
   validation {
-    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_posture_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_posture_contract_sha256))
-    error_message = "verified_admin_posture_contract_sha256 must be one nonzero lowercase SHA-256."
+    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_device_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_device_contract_sha256))
+    error_message = "verified_admin_device_contract_sha256 must be one nonzero lowercase SHA-256."
+  }
+}
+
+variable "verified_admin_enrollment_contract_sha256" {
+  description = "Fresh audit hash proving the exact owner-only MFA enrollment application and policy."
+  type        = string
+  sensitive   = true
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_enrollment_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_enrollment_contract_sha256))
+    error_message = "verified_admin_enrollment_contract_sha256 must be one nonzero lowercase SHA-256."
   }
 }
 
@@ -89,6 +99,16 @@ variable "admin_device_posture_check_id" {
   validation {
     condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", var.admin_device_posture_check_id))
     error_message = "admin_device_posture_check_id must be one real lowercase rule UUID."
+  }
+}
+
+variable "admin_device_profile_id" {
+  description = "Exact locked owner device-profile UUID bound into the policy input contract."
+  type        = string
+  sensitive   = true
+  validation {
+    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", var.admin_device_profile_id))
+    error_message = "admin_device_profile_id must be one real lowercase UUID."
   }
 }
 

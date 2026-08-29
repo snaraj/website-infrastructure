@@ -151,7 +151,12 @@ OPAQUE_ARTIFACT_MAGIC_PREFIXES = (
     b"-----BEGIN PGP MESSAGE-----", b"U2FsdGVkX1",
 )
 ALLOWED_CLOUDFLARE_RESOURCES = {
+    "cloudflare_mtls_certificate",
     "cloudflare_dns_record",
+    "cloudflare_zero_trust_access_application",
+    "cloudflare_zero_trust_access_policy",
+    "cloudflare_zero_trust_device_custom_profile",
+    "cloudflare_zero_trust_device_posture_rule",
     "cloudflare_zero_trust_gateway_policy",
     "cloudflare_zero_trust_tunnel_cloudflared",
     "cloudflare_zero_trust_tunnel_cloudflared_config",

@@ -9,10 +9,13 @@ from pathlib import Path
 
 
 APPROVAL_VARIABLE = {
+    "admin-certificate": "approve_admin_certificate_phase",
+    "admin-enrollment-policy": "approve_admin_enrollment_policy_phase",
+    "admin-enrollment-app": "approve_admin_enrollment_app_phase",
+    "admin-device": "approve_admin_device_phase",
     "admin-tunnel": "approve_admin_tunnel_phase",
     "admin-policies": "approve_admin_policies_phase",
     "admin-route": "approve_admin_route_phase",
-    "admin-api": "enable_kubernetes_api_access",
     "site-naranjo-online": "approve_site_naranjo_online_phase",
     "site-lidersea-com": "approve_site_lidersea_com_phase",
 }
@@ -152,6 +155,114 @@ def mutate(plan, name):
         target = changes[0]["change"]
         field = "name" if "name" in target["after"] else next(iter(target["after"]))
         target.setdefault("after_unknown", {})[field] = True
+    elif name == "certificate-is-not-ca":
+        after("cloudflare_mtls_certificate.pi_admin_owner_ca")["ca"] = False
+    elif name == "certificate-private-key":
+        after("cloudflare_mtls_certificate.pi_admin_owner_ca")["private_key"] = (
+            "forbidden"
+        )
+    elif name == "certificate-hash-mismatch":
+        variables["owner_device_ca_certificate_sha256"]["value"] = "f" * 64
+    elif name == "wrong-certificate-variable":
+        config("cloudflare_mtls_certificate.pi_admin_owner_ca")["expressions"][
+            "certificates"
+        ] = {"references": ["var.unreviewed_certificate"]}
+    elif name == "enrollment-everyone":
+        selector = after(
+            "cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment"
+        )["include"][0]
+        selector.clear()
+        selector["everyone"] = {}
+    elif name == "enrollment-email-widened":
+        after("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")[
+            "include"
+        ].append({"email_domain": {"domain": "example.invalid"}})
+    elif name == "enrollment-mfa-disabled":
+        after("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")[
+            "mfa_config"
+        ]["mfa_disabled"] = True
+    elif name == "enrollment-weak-mfa":
+        after("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")[
+            "mfa_config"
+        ]["allowed_authenticators"] = ["otp"]
+    elif name == "enrollment-session-long":
+        after("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")[
+            "session_duration"
+        ] = "24h"
+    elif name == "wrong-enrollment-email-variable":
+        config("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")[
+            "expressions"
+        ]["include"] = {"references": ["var.unreviewed_identity"]}
+    elif name == "extra-identity-provider":
+        after("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")[
+            "allowed_idps"
+        ].append("00000000-0000-0000-0000-000000000000")
+    elif name == "enrollment-app-wrong-type":
+        after("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")[
+            "type"
+        ] = "self_hosted"
+    elif name == "enrollment-auto-redirect-off":
+        after("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")[
+            "auto_redirect_to_identity"
+        ] = False
+    elif name == "enrollment-policy-precedence":
+        after("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")[
+            "policies"
+        ][0]["precedence"] = 2
+    elif name == "missing-enrollment-policy-contract":
+        variables["verified_admin_enrollment_policy_contract_sha256"]["value"] = ""
+    elif name == "wrong-enrollment-policy-variable":
+        config("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")[
+            "expressions"
+        ]["policies"] = {"references": ["var.unreviewed_policy_id"]}
+    elif name == "device-match-widened":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "match"
+        ] += ' or identity.email == "other@example.invalid"'
+    elif name == "device-route-widened":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "include"
+        ][0]["address"] = "192.168.0.0/16"
+    elif name == "device-fallback-enabled":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "disable_auto_fallback"
+        ] = False
+    elif name == "device-dns-registration-enabled":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "register_interface_ip_with_dns"
+        ] = True
+    elif name == "device-wireguard-protocol":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "tunnel_protocol"
+        ] = "wireguard"
+    elif name == "device-can-leave":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "allowed_to_leave"
+        ] = True
+    elif name == "device-can-switch-mode":
+        after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")[
+            "allow_mode_switch"
+        ] = True
+    elif name == "device-private-key-check-off":
+        after(
+            "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate"
+        )["input"]["check_private_key"] = False
+    elif name == "device-certificate-cn-wildcard":
+        after(
+            "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate"
+        )["input"]["cn"] = "*"
+    elif name == "device-posture-expiration-long":
+        after(
+            "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate"
+        )["expiration"] = "24h"
+    elif name == "missing-certificate-contract":
+        variables["verified_admin_certificate_contract_sha256"]["value"] = ""
+    elif name == "missing-enrollment-contract":
+        variables["verified_admin_enrollment_contract_sha256"]["value"] = ""
+    elif name == "missing-device-contract":
+        variables["verified_admin_device_contract_sha256"]["value"] = ""
+    elif name == "opaque-device-profile-id":
+        variables["admin_device_profile_id"]["value"] = "opaque_profile"
     elif name == "disabled-block":
         after("cloudflare_zero_trust_gateway_policy.pi_admin_block")["enabled"] = False
     elif name == "widened-ssh-traffic":
@@ -184,16 +295,10 @@ def mutate(plan, name):
             "precedence"
         ] = 1100
     elif name == "no-session-enforcement":
-        address = {
-            "admin-policies": "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow",
-            "admin-api": "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow",
-        }[phase]
+        address = "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow"
         after(address)["rule_settings"]["check_session"]["enforce"] = False
     elif name == "extra-session-setting":
-        address = {
-            "admin-policies": "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow",
-            "admin-api": "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow",
-        }[phase]
+        address = "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow"
         after(address)["rule_settings"]["unreviewed"] = {"enabled": True}
     elif name == "widened-route":
         target = after("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin")
@@ -218,10 +323,8 @@ def mutate(plan, name):
         variables["verified_admin_tunnel_contract_sha256"]["value"] = ""
     elif name == "zero-tunnel-contract":
         variables["verified_admin_tunnel_contract_sha256"]["value"] = "0" * 64
-    elif name == "missing-posture-contract":
-        variables["verified_admin_posture_contract_sha256"]["value"] = ""
-    elif name == "zero-posture-contract":
-        variables["verified_admin_posture_contract_sha256"]["value"] = "0" * 64
+    elif name == "zero-device-contract":
+        variables["verified_admin_device_contract_sha256"]["value"] = "0" * 64
     elif name == "missing-policy-inputs-contract":
         variables["verified_admin_policy_inputs_contract_sha256"]["value"] = ""
     elif name == "zero-policy-inputs-contract":
@@ -242,25 +345,6 @@ def mutate(plan, name):
         ] = "2026-08-09T15:00:00Z"
     elif name == "opaque-posture-id":
         variables["admin_device_posture_check_id"]["value"] = "opaque_posture"
-    elif name == "wrong-api-port":
-        target = after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")
-        target["traffic"] = target["traffic"].replace("{6443}", "{443}")
-    elif name == "missing-route-contract":
-        variables["verified_admin_route_contract_sha256"]["value"] = ""
-    elif name == "zero-route-contract":
-        variables["verified_admin_route_contract_sha256"]["value"] = "0" * 64
-    elif name == "missing-api-inputs-contract":
-        variables["verified_admin_api_inputs_contract_sha256"]["value"] = ""
-    elif name == "zero-api-inputs-contract":
-        variables["verified_admin_api_inputs_contract_sha256"]["value"] = "0" * 64
-    elif name == "api-after-block":
-        after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")[
-            "precedence"
-        ] = 1100
-    elif name == "api-precedence-offset":
-        after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")[
-            "precedence"
-        ] += 1
     elif name == "nonterminal-catchall":
         rules = ingress()
         rules[0], rules[1] = rules[1], rules[0]

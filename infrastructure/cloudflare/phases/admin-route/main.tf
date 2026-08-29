@@ -13,10 +13,12 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_route" "pi_admin" {
     precondition {
       condition = (
         can(regex("[1-9a-f]", var.verified_admin_policies_contract_sha256)) &&
-        can(regex("[1-9a-f]", var.verified_admin_posture_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_device_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_enrollment_contract_sha256)) &&
+        var.admin_device_profile_id != "00000000-0000-0000-0000-000000000000" &&
         var.pi_admin_tunnel_id != "00000000-0000-0000-0000-000000000000"
       )
-      error_message = "A non-synthetic admin-policies hash bound to a real Tunnel is required."
+      error_message = "Non-synthetic policies, enrollment, and locked-device proofs bound to real IDs are required."
     }
   }
 }

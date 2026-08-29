@@ -34,7 +34,7 @@ phase_evidence_input="${9:-}"
 unexpected_input="${10:-}"
 
 case "${phase}" in
-  admin-tunnel|admin-policies|admin-route|admin-api|public-edge|public-dns-naranjo|public-dns-lidersea) ;;
+  admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge|public-dns-naranjo|public-dns-lidersea) ;;
   *)
     printf 'Usage: %s PHASE /protected/plan.tfplan /protected/audit.txt /protected/root /protected/pre-state.receipt /protected/state-path /protected/backend-metadata /protected/manual-attestation.json [/protected/phase-evidence]\n' "$0" >&2
     exit 2
@@ -46,7 +46,7 @@ esac
   exit 2
 }
 case "${phase}" in
-  admin-route|admin-api)
+  admin-route)
     [[ -n "${phase_evidence_input}" ]] || {
       printf '%s requires a protected recovery/session attestation\n' "${phase}" >&2
       exit 2
@@ -159,7 +159,7 @@ else
   state_mode=absent
 fi
 case "${phase}" in
-  admin-route|admin-api)
+  admin-route)
     recovery_evidence_path="$(canonical_file "${phase_evidence_input}")" || { printf 'A real, non-symlink recovery/session evidence file is required\n' >&2; exit 2; }
     assert_within_protected recovery-evidence "${recovery_evidence_path}"
     ;;
@@ -442,7 +442,7 @@ manual_attestation_snapshot="$(stable_handle_snapshot "${manual_attestation_path
 if [[ "${state_mode}" == present ]]; then
   state_snapshot="$(stable_handle_snapshot "${state_path}" cloudflare-current-state)" || exit 1
 fi
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   recovery_evidence_snapshot="$(stable_snapshot "${recovery_evidence_path}" cloudflare-recovery-evidence)" || exit 1
 fi
 if [[ "${phase}" == public-dns-lidersea ]]; then
@@ -509,7 +509,7 @@ protected_file_arguments=(
 if [[ "${state_mode}" == present ]]; then
   protected_file_arguments+=("${state_path}" "${state_snapshot}")
 fi
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   protected_file_arguments+=("${recovery_evidence_path}" "${recovery_evidence_snapshot}")
 fi
 if [[ "${phase}" == public-dns-lidersea ]]; then
@@ -658,7 +658,7 @@ require_sha256 manual_attestation_sha256 "${manual_attestation_hash}"
 
 expected_receipt_keys=$'backend_metadata_sha256\nmanual_attestation_sha256\nphase_lock_sha256\nphase_root\nplan_sha256\nplanned_utc\nrepo_commit\nstate_binding_sha256\nstate_evidence_sha256\nstate_mode\nstate_sha256\nworkspace_attestation_sha256'
 case "${phase}" in
-  admin-route|admin-api)
+  admin-route)
     expected_receipt_keys="$(printf '%s\nrecovery_evidence_sha256\n' "${expected_receipt_keys}" | LC_ALL=C sort)"
     ;;
   public-dns-lidersea)
@@ -719,7 +719,7 @@ workspace_validation_age=$((workspace_validation_now_epoch - workspace_validatio
 [[ "${receipt_manual_attestation_hash}" == "${manual_attestation_hash}" ]] || { printf 'Receipt manual-attestation hash mismatch\n' >&2; exit 1; }
 [[ "${receipt_workspace_attestation}" == "${CLOUDFLARE_WORKSPACE_ATTESTATION_SHA256}" ]] || { printf 'Receipt protected-workspace attestation mismatch\n' >&2; exit 1; }
 [[ "${receipt_workspace_attestation}" == "${fresh_workspace_attestation}" ]] || { printf 'Receipt does not match the current-session protected-workspace validation\n' >&2; exit 1; }
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   receipt_recovery_hash="$(unique_value "${receipt_path}" recovery_evidence_sha256)"
   recovery_evidence_hash="$(digest_file "${recovery_evidence_snapshot}")"
   require_sha256 recovery_evidence_sha256 "${receipt_recovery_hash}"
@@ -1084,10 +1084,13 @@ audit_result="$(unique_value "${audit_path}" audit_result)"
 [[ "${audit_result}" == pass ]] || { printf 'Audit evidence is not a completed pass\n' >&2; exit 1; }
 audit_phase="$(unique_value "${audit_path}" audit_phase)"
 case "${phase}" in
-  admin-tunnel) expected_audit_phase=preflight ;;
+  admin-certificate) expected_audit_phase=preflight ;;
+  admin-enrollment-policy) expected_audit_phase=admin-certificate ;;
+  admin-enrollment-app) expected_audit_phase=admin-enrollment-policy ;;
+  admin-device) expected_audit_phase=admin-enrollment-app ;;
+  admin-tunnel) expected_audit_phase=admin-device ;;
   admin-policies) expected_audit_phase=admin-tunnel ;;
   admin-route) expected_audit_phase=admin-policies ;;
-  admin-api) expected_audit_phase=admin-route ;;
   public-edge) expected_audit_phase=public-edge-preflight ;;
   public-dns-naranjo) expected_audit_phase=public-edge ;;
   public-dns-lidersea) expected_audit_phase=public-dns-naranjo ;;
@@ -1136,18 +1139,34 @@ admin_contract_fingerprint() {
   printf 'phase=%s\naccount=%s\ntunnel=%s\nnetwork=%s\n' "$1" "$2" "$3" "$4" | digest_stream
 }
 
-admin_policy_fingerprint() {
-  printf 'phase=%s\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nposture_sha256=%s\nsession=%s\nssh_precedence=%s\nblock_precedence=%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" | digest_stream
+admin_certificate_fingerprint() {
+  printf 'phase=admin-certificate\naccount=%s\ncertificate_id=%s\ncertificate_sha256=%s\n' \
+    "$1" "$2" "$3" | digest_stream
 }
 
-admin_api_inputs_fingerprint() {
-  printf 'phase=admin-api-inputs\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nposture_sha256=%s\nsession=%s\nssh_precedence=%s\napi_precedence=%s\nblock_precedence=%s\npolicies_sha256=%s\nroute_sha256=%s\n' \
+admin_enrollment_policy_fingerprint() {
+  printf 'phase=admin-enrollment-policy\naccount=%s\npolicy_id=%s\nidentity=%s\n' \
+    "$1" "$2" "$3" | digest_stream
+}
+
+admin_enrollment_fingerprint() {
+  printf 'phase=admin-enrollment\naccount=%s\npolicy_id=%s\napplication_id=%s\nidentity_provider_id=%s\nidentity=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" | digest_stream
+}
+
+admin_device_fingerprint() {
+  printf 'phase=admin-device\naccount=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nprofile_id=%s\ncertificate_sha256=%s\nenrollment_sha256=%s\nplatform_routes_sha256=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" | digest_stream
+}
+
+admin_policy_fingerprint() {
+  printf 'phase=%s\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nprofile_id=%s\ndevice_sha256=%s\nenrollment_sha256=%s\nsession=%s\nssh_precedence=%s\nblock_precedence=%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" | digest_stream
 }
 
 admin_tunnel_fingerprint() {
-  printf 'phase=admin-tunnel\naccount=%s\ntunnel=%s\n' "$1" "$2" | digest_stream
+  printf 'phase=admin-tunnel\naccount=%s\ntunnel=%s\nenrollment_sha256=%s\ndevice_sha256=%s\n' \
+    "$1" "$2" "$3" "$4" | digest_stream
 }
 
 public_edge_fingerprint() {
@@ -1191,26 +1210,18 @@ assert_audit_value() {
 }
 
 assert_public_admin_path() {
-  local gateway_count api_state
+  local gateway_count
+  require_audit_hash admin_certificate_contract_sha256
+  require_audit_hash admin_enrollment_policy_contract_sha256
+  require_audit_hash admin_enrollment_contract_sha256
+  require_audit_hash admin_device_contract_sha256
   require_audit_hash admin_tunnel_contract_sha256
-  require_audit_hash admin_posture_contract_sha256
   require_audit_hash admin_policies_contract_sha256
   require_audit_hash admin_route_contract_sha256
   assert_audit_value private_route_inventory_count 1
   gateway_count="$(unique_value "${audit_path}" gateway_policy_inventory_count)"
-  api_state="$(unique_value "${audit_path}" pi_admin_api_policy_activation_state)"
-  if [[ "${api_state}" == absent ]]; then
-    [[ "${gateway_count}" == 2 ]] || {
-      printf 'Public predecessor audit does not close the two-rule admin policy inventory\n' >&2
-      exit 1
-    }
-  elif [[ "${api_state}" == exact ]]; then
-    [[ "${gateway_count}" == 3 ]] || {
-      printf 'Public predecessor audit does not close the three-rule admin policy inventory\n' >&2
-      exit 1
-    }
-  else
-    printf 'Public predecessor audit has a conflicting admin API policy state\n' >&2
+  if [[ "${gateway_count}" != 2 ]]; then
+    printf 'Public predecessor audit does not close the exact two-rule SSH-only admin policy inventory\n' >&2
     exit 1
   fi
 }
@@ -1218,7 +1229,61 @@ assert_public_admin_path() {
 account_id="$(plan_variable cloudflare_account_id)"
 require_hex32 cloudflare_account_id "${account_id}"
 case "${phase}" in
+  admin-certificate)
+    assert_audit_hash account_binding_sha256 "$(account_binding_fingerprint "${account_id}")"
+    assert_audit_value pi_admin_certificate_activation_state absent
+    ;;
+  admin-enrollment-policy)
+    assert_audit_hash account_binding_sha256 "$(account_binding_fingerprint "${account_id}")"
+    require_audit_hash admin_certificate_contract_sha256
+    assert_audit_value pi_admin_enrollment_policy_activation_state absent
+    ;;
+  admin-enrollment-app)
+    policy_id="$(plan_variable owner_enrollment_policy_id)"
+    identity_provider_id="$(plan_variable admin_identity_provider_id)"
+    admin_email="$(plan_variable admin_email)"
+    policy_contract="$(plan_variable verified_admin_enrollment_policy_contract_sha256)"
+    require_uuid owner_enrollment_policy_id "${policy_id}"
+    require_uuid admin_identity_provider_id "${identity_provider_id}"
+    require_sha256 verified_admin_enrollment_policy_contract_sha256 "${policy_contract}"
+    expected_policy_contract="$(admin_enrollment_policy_fingerprint "${account_id}" "${policy_id}" "${admin_email}")"
+    [[ "${policy_contract}" == "${expected_policy_contract}" ]] || { printf 'Plan-carried enrollment-policy contract does not bind its owner identity\n' >&2; exit 1; }
+    assert_audit_hash admin_enrollment_policy_contract_sha256 "${expected_policy_contract}"
+    assert_audit_value admin_identity_provider_match_count 1
+    assert_audit_value pi_admin_enrollment_app_activation_state absent
+    ;;
+  admin-device)
+    certificate_id="$(plan_variable owner_device_ca_certificate_id)"
+    certificate_sha256="$(plan_variable owner_device_ca_certificate_sha256)"
+    policy_id="$(plan_variable owner_enrollment_policy_id)"
+    application_id="$(plan_variable owner_enrollment_application_id)"
+    identity_provider_id="$(plan_variable admin_identity_provider_id)"
+    admin_email="$(plan_variable admin_email)"
+    certificate_contract="$(plan_variable verified_admin_certificate_contract_sha256)"
+    enrollment_contract="$(plan_variable verified_admin_enrollment_contract_sha256)"
+    require_uuid owner_device_ca_certificate_id "${certificate_id}"
+    require_uuid owner_enrollment_policy_id "${policy_id}"
+    require_uuid owner_enrollment_application_id "${application_id}"
+    require_uuid admin_identity_provider_id "${identity_provider_id}"
+    require_sha256 owner_device_ca_certificate_sha256 "${certificate_sha256}"
+    require_sha256 verified_admin_certificate_contract_sha256 "${certificate_contract}"
+    require_sha256 verified_admin_enrollment_contract_sha256 "${enrollment_contract}"
+    expected_certificate_contract="$(admin_certificate_fingerprint "${account_id}" "${certificate_id}" "${certificate_sha256}")"
+    expected_enrollment_contract="$(admin_enrollment_fingerprint "${account_id}" "${policy_id}" "${application_id}" "${identity_provider_id}" "${admin_email}")"
+    [[ "${certificate_contract}" == "${expected_certificate_contract}" ]] || { printf 'Plan-carried certificate contract does not bind its public certificate\n' >&2; exit 1; }
+    [[ "${enrollment_contract}" == "${expected_enrollment_contract}" ]] || { printf 'Plan-carried enrollment contract does not bind its owner identity and sole provider\n' >&2; exit 1; }
+    assert_audit_hash admin_certificate_contract_sha256 "${expected_certificate_contract}"
+    assert_audit_hash admin_enrollment_contract_sha256 "${expected_enrollment_contract}"
+    assert_audit_value pi_admin_device_posture_activation_state absent
+    assert_audit_value pi_admin_device_profile_activation_state absent
+    ;;
   admin-tunnel)
+    enrollment_contract="$(plan_variable verified_admin_enrollment_contract_sha256)"
+    device_contract="$(plan_variable verified_admin_device_contract_sha256)"
+    require_sha256 verified_admin_enrollment_contract_sha256 "${enrollment_contract}"
+    require_sha256 verified_admin_device_contract_sha256 "${device_contract}"
+    assert_audit_hash admin_enrollment_contract_sha256 "${enrollment_contract}"
+    assert_audit_hash admin_device_contract_sha256 "${device_contract}"
     assert_audit_hash account_binding_sha256 "$(account_binding_fingerprint "${account_id}")"
     assert_audit_value pi_admin_tunnel_activation_state absent
     assert_audit_value cloudflare_tunnel_inventory_count 0
@@ -1239,23 +1304,28 @@ case "${phase}" in
     network="$(plan_variable pi_admin_cidr)"
     admin_email="$(plan_variable admin_email)"
     posture_id="$(plan_variable admin_device_posture_check_id)"
+    profile_id="$(plan_variable admin_device_profile_id)"
     plan_contract="$(plan_variable verified_admin_tunnel_contract_sha256)"
-    posture_contract="$(plan_variable verified_admin_posture_contract_sha256)"
+    device_contract="$(plan_variable verified_admin_device_contract_sha256)"
+    enrollment_contract="$(plan_variable verified_admin_enrollment_contract_sha256)"
     policy_inputs_contract="$(plan_variable verified_admin_policy_inputs_contract_sha256)"
     session_freshness="$(plan_variable admin_session_freshness)"
     ssh_precedence="$(plan_variable pi_admin_ssh_allow_precedence)"
     block_precedence="$(plan_variable pi_admin_block_precedence)"
     require_uuid pi_admin_tunnel_id "${tunnel_id}"
     require_uuid admin_device_posture_check_id "${posture_id}"
+    require_uuid admin_device_profile_id "${profile_id}"
     require_sha256 verified_admin_tunnel_contract_sha256 "${plan_contract}"
-    require_sha256 verified_admin_posture_contract_sha256 "${posture_contract}"
+    require_sha256 verified_admin_device_contract_sha256 "${device_contract}"
+    require_sha256 verified_admin_enrollment_contract_sha256 "${enrollment_contract}"
     require_sha256 verified_admin_policy_inputs_contract_sha256 "${policy_inputs_contract}"
-    expected_contract="$(admin_tunnel_fingerprint "${account_id}" "${tunnel_id}")"
+    expected_contract="$(admin_tunnel_fingerprint "${account_id}" "${tunnel_id}" "${enrollment_contract}" "${device_contract}")"
     [[ "${plan_contract}" == "${expected_contract}" ]] || { printf 'Plan-carried admin-tunnel contract does not bind its targets\n' >&2; exit 1; }
     assert_audit_hash admin_tunnel_contract_sha256 "${expected_contract}"
-    assert_audit_hash admin_posture_contract_sha256 "${posture_contract}"
-    expected_policy_inputs="$(admin_policy_fingerprint admin-policy-inputs "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${posture_contract}" "${session_freshness}" "${ssh_precedence}" "${block_precedence}")"
-    [[ "${policy_inputs_contract}" == "${expected_policy_inputs}" ]] || { printf 'Plan-carried admin policy-input contract does not bind identity, posture, session, and precedence\n' >&2; exit 1; }
+    assert_audit_hash admin_device_contract_sha256 "${device_contract}"
+    assert_audit_hash admin_enrollment_contract_sha256 "${enrollment_contract}"
+    expected_policy_inputs="$(admin_policy_fingerprint admin-policy-inputs "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${profile_id}" "${device_contract}" "${enrollment_contract}" "${session_freshness}" "${ssh_precedence}" "${block_precedence}")"
+    [[ "${policy_inputs_contract}" == "${expected_policy_inputs}" ]] || { printf 'Plan-carried admin policy-input contract does not bind identity, device, session, and precedence\n' >&2; exit 1; }
     assert_audit_hash admin_policy_inputs_contract_sha256 "${expected_policy_inputs}"
     assert_audit_value gateway_policy_inventory_count 0
     ;;
@@ -1264,53 +1334,25 @@ case "${phase}" in
     network="$(plan_variable pi_admin_cidr)"
     admin_email="$(plan_variable admin_email)"
     posture_id="$(plan_variable admin_device_posture_check_id)"
-    posture_contract="$(plan_variable verified_admin_posture_contract_sha256)"
+    profile_id="$(plan_variable admin_device_profile_id)"
+    device_contract="$(plan_variable verified_admin_device_contract_sha256)"
+    enrollment_contract="$(plan_variable verified_admin_enrollment_contract_sha256)"
     session_freshness="$(plan_variable admin_session_freshness)"
     ssh_precedence="$(plan_variable pi_admin_ssh_allow_precedence)"
     block_precedence="$(plan_variable pi_admin_block_precedence)"
     plan_contract="$(plan_variable verified_admin_policies_contract_sha256)"
     require_uuid pi_admin_tunnel_id "${tunnel_id}"
     require_uuid admin_device_posture_check_id "${posture_id}"
-    require_sha256 verified_admin_posture_contract_sha256 "${posture_contract}"
+    require_uuid admin_device_profile_id "${profile_id}"
+    require_sha256 verified_admin_device_contract_sha256 "${device_contract}"
+    require_sha256 verified_admin_enrollment_contract_sha256 "${enrollment_contract}"
     require_sha256 verified_admin_policies_contract_sha256 "${plan_contract}"
-    expected_contract="$(admin_policy_fingerprint admin-policies "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${posture_contract}" "${session_freshness}" "${ssh_precedence}" "${block_precedence}")"
+    expected_contract="$(admin_policy_fingerprint admin-policies "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${profile_id}" "${device_contract}" "${enrollment_contract}" "${session_freshness}" "${ssh_precedence}" "${block_precedence}")"
     [[ "${plan_contract}" == "${expected_contract}" ]] || { printf 'Plan-carried admin-policies contract does not bind its targets\n' >&2; exit 1; }
-    assert_audit_hash admin_posture_contract_sha256 "${posture_contract}"
+    assert_audit_hash admin_device_contract_sha256 "${device_contract}"
+    assert_audit_hash admin_enrollment_contract_sha256 "${enrollment_contract}"
     assert_audit_hash admin_policies_contract_sha256 "${expected_contract}"
     assert_audit_value gateway_policy_inventory_count 2
-    assert_audit_value pi_admin_api_policy_activation_state absent
-    ;;
-  admin-api)
-    tunnel_id="$(plan_variable pi_admin_tunnel_id)"
-    network="$(plan_variable pi_admin_cidr)"
-    admin_email="$(plan_variable admin_email)"
-    posture_id="$(plan_variable admin_device_posture_check_id)"
-    posture_contract="$(plan_variable verified_admin_posture_contract_sha256)"
-    policies_contract="$(plan_variable verified_admin_policies_contract_sha256)"
-    session_freshness="$(plan_variable admin_session_freshness)"
-    ssh_precedence="$(plan_variable pi_admin_ssh_allow_precedence)"
-    api_precedence="$(plan_variable pi_admin_api_allow_precedence)"
-    block_precedence="$(plan_variable pi_admin_block_precedence)"
-    plan_contract="$(plan_variable verified_admin_route_contract_sha256)"
-    api_inputs_contract="$(plan_variable verified_admin_api_inputs_contract_sha256)"
-    require_uuid pi_admin_tunnel_id "${tunnel_id}"
-    require_uuid admin_device_posture_check_id "${posture_id}"
-    require_sha256 verified_admin_posture_contract_sha256 "${posture_contract}"
-    require_sha256 verified_admin_policies_contract_sha256 "${policies_contract}"
-    require_sha256 verified_admin_route_contract_sha256 "${plan_contract}"
-    require_sha256 verified_admin_api_inputs_contract_sha256 "${api_inputs_contract}"
-    expected_policies_contract="$(admin_policy_fingerprint admin-policies "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${posture_contract}" "${session_freshness}" "${ssh_precedence}" "${block_precedence}")"
-    [[ "${policies_contract}" == "${expected_policies_contract}" ]] || { printf 'Plan-carried admin-policies contract does not bind API identity, posture, session, and precedence\n' >&2; exit 1; }
-    assert_audit_hash admin_posture_contract_sha256 "${posture_contract}"
-    assert_audit_hash admin_policies_contract_sha256 "${expected_policies_contract}"
-    expected_contract="$(admin_contract_fingerprint admin-route "${account_id}" "${tunnel_id}" "${network}")"
-    [[ "${plan_contract}" == "${expected_contract}" ]] || { printf 'Plan-carried admin-route contract does not bind its targets\n' >&2; exit 1; }
-    assert_audit_hash admin_route_contract_sha256 "${expected_contract}"
-    expected_api_inputs="$(admin_api_inputs_fingerprint "${account_id}" "${tunnel_id}" "${network}" "${admin_email}" "${posture_id}" "${posture_contract}" "${session_freshness}" "${ssh_precedence}" "${api_precedence}" "${block_precedence}" "${policies_contract}" "${plan_contract}")"
-    [[ "${api_inputs_contract}" == "${expected_api_inputs}" ]] || { printf 'Plan-carried API-input contract does not bind API precedence and predecessor security contracts\n' >&2; exit 1; }
-    assert_audit_hash admin_api_inputs_contract_sha256 "${expected_api_inputs}"
-    assert_audit_value gateway_policy_inventory_count 2
-    assert_audit_value pi_admin_api_policy_activation_state absent
     ;;
   public-dns-naranjo)
     tunnel_id="$(plan_variable pi_websites_tunnel_id)"
@@ -1365,7 +1407,7 @@ manual_validator_arguments=(
   --state-binding-sha256 "${state_binding_hash}"
   --scope-binding-sha256 "${manual_scope_binding}"
 )
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   manual_validator_arguments+=(--recovery-evidence-sha256 "${recovery_evidence_hash}")
 fi
 "${python_command}" "$(cygpath -w "${preapply_validator_snapshot}")" \
@@ -1441,7 +1483,7 @@ else
     exit 1
   }
 fi
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   assert_snapshot_still_matches recovery-session-evidence \
     "${recovery_evidence_path}" "${recovery_evidence_snapshot}" || exit 1
 fi
@@ -1503,7 +1545,7 @@ printf 'plan_age_seconds=%s\n' "${plan_age}"
 printf 'audit_sha256=%s\n' "${audit_file_hash}"
 printf 'audit_age_seconds=%s\n' "${audit_age}"
 printf 'pre_state_receipt_sha256=%s\n' "${receipt_file_hash}"
-if [[ "${phase}" == admin-route || "${phase}" == admin-api ]]; then
+if [[ "${phase}" == admin-route ]]; then
   printf 'recovery_evidence_sha256=%s\n' "${recovery_evidence_hash}"
   printf 'recovery_evidence_role=operator-attestation-not-connectivity-proof\n'
 fi

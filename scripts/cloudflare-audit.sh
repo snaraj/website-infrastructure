@@ -3,27 +3,41 @@ builtin set -Eeuo pipefail
 builtin set +x
 builtin set +o history
 
-# Release safety stop. This authenticated reader receives a broad account token
-# and cannot establish stage-zero trust from mutable checkout bytes. Keep the
-# aggregate-only audit implementation reviewable, but do not read a bearer or
-# contact Cloudflare until the separately installed reviewed-blob launcher
-# exists.
-readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no
-if [[ "${REVIEWED_BLOB_LAUNCHER_AVAILABLE}" != yes ]]; then
+# This authenticated reader is admitted only from the fixed root-owned
+# workstation launcher. The launcher extracts exact reviewed protected-main
+# blobs into a root-owned runtime directory and starts this file with a clean
+# environment; a mutable-checkout invocation stops before reading the bearer.
+if [[ "${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes ||
+      "${REVIEWED_BLOB_OPERATION:-}" != cloudflare-audit ||
+      ! "${REVIEWED_BLOB_ROOT:-}" =~ ^/private/var/db/website-infrastructure/runtime/cloudflare-reviewed-op\.[A-Za-z0-9]+$ ]]; then
   builtin printf 'BLOCKED authenticated Cloudflare audit requires the trusted reviewed-blob launcher; no API token was read and no network request was attempted.\n' >&2
+  builtin exit 1
+fi
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+readonly repo_root
+if [[ "${repo_root}" != "${REVIEWED_BLOB_ROOT}" ]]; then
+  builtin printf 'BLOCKED reviewed Cloudflare audit extraction root mismatch; no API token was read and no network request was attempted.\n' >&2
   builtin exit 1
 fi
 
 # This script reads Cloudflare's live control plane without changing it. Its
 # output is deliberately aggregate-only so audit evidence can be shared without
 # also turning logs into an inventory of account, zone, route, or token IDs.
-required=(awk curl jq sha256sum)
+required=(awk curl jq)
 for command_name in "${required[@]}"; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     printf '%s is required\n' "${command_name}" >&2
     exit 2
   }
 done
+if command -v sha256sum >/dev/null 2>&1; then
+  readonly sha256_program=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+  readonly sha256_program=shasum
+else
+  printf 'sha256sum or shasum is required\n' >&2
+  exit 2
+fi
 : "${CLOUDFLARE_API_TOKEN:?Set a read-only audit token in the environment}"
 : "${CLOUDFLARE_ACCOUNT_ID:?Set the account ID in the environment}"
 : "${CLOUDFLARE_NARANJO_ONLINE_ZONE_ID:?Set the naranjo.online zone ID in the environment}"
@@ -43,9 +57,9 @@ export -n CLOUDFLARE_API_TOKEN
 
 audit_phase="${CLOUDFLARE_AUDIT_PHASE:-preflight}"
 case "${audit_phase}" in
-  preflight|public-edge-preflight|admin-tunnel|admin-policies|admin-route|admin-api|public-edge|public-dns-naranjo|public-dns-lidersea|all) ;;
+  preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) ;;
   *)
-    printf 'CLOUDFLARE_AUDIT_PHASE must be preflight, public-edge-preflight, one of the seven apply phases, or all\n' >&2
+    printf 'CLOUDFLARE_AUDIT_PHASE is not one of the closed reviewed audit phases\n' >&2
     exit 2
     ;;
 esac
@@ -75,27 +89,78 @@ if [[ "${CLOUDFLARE_NARANJO_ONLINE_ZONE_ID}" == "${CLOUDFLARE_LIDERSEA_COM_ZONE_
   exit 2
 fi
 
+certificate_contract_requested=false
+enrollment_policy_contract_requested=false
+enrollment_contract_requested=false
 admin_device_contract_requested=false
 admin_policy_contract_requested=false
 case "${audit_phase}" in
-  admin-tunnel|admin-policies|admin-route|admin-api|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) admin_device_contract_requested=true ;;
+  admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) certificate_contract_requested=true ;;
 esac
 case "${audit_phase}" in
-  admin-policies|admin-route|admin-api|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) admin_policy_contract_requested=true ;;
+  admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) enrollment_policy_contract_requested=true ;;
 esac
+case "${audit_phase}" in
+  admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) enrollment_contract_requested=true ;;
+esac
+case "${audit_phase}" in
+  admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) admin_device_contract_requested=true ;;
+esac
+case "${audit_phase}" in
+  admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) admin_policy_contract_requested=true ;;
+esac
+
+require_uuid_value() {
+  local label="$1"
+  local value="$2"
+  [[ "${value}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
+    printf '%s must be one real lowercase UUID\n' "${label}" >&2
+    exit 2
+  }
+}
+
+require_sha256_value() {
+  local label="$1"
+  local value="$2"
+  [[ "${value}" =~ ^[0-9a-f]{64}$ && "${value}" =~ [1-9a-f] ]] || {
+    printf '%s must be one nonzero lowercase SHA-256\n' "${label}" >&2
+    exit 2
+  }
+}
+
+if [[ "${certificate_contract_requested}" == true ]]; then
+  : "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID:?Required for the selected certificate audit phase}"
+  : "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_SHA256:?Required for the selected certificate audit phase}"
+  require_uuid_value CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID}"
+  require_sha256_value CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_SHA256 "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_SHA256}"
+fi
+
+if [[ "${enrollment_policy_contract_requested}" == true ]]; then
+  : "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID:?Required for the selected enrollment audit phase}"
+  : "${CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID:?Required for the selected enrollment audit phase}"
+  : "${CLOUDFLARE_ADMIN_EMAIL:?Required for the selected enrollment audit phase}"
+  require_uuid_value CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID}"
+  require_uuid_value CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID "${CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID}"
+  [[ "${CLOUDFLARE_ADMIN_EMAIL}" =~ ^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$ ]] || {
+    printf 'CLOUDFLARE_ADMIN_EMAIL must be one exact email identity\n' >&2
+    exit 2
+  }
+fi
+
+if [[ "${enrollment_contract_requested}" == true ]]; then
+  : "${CLOUDFLARE_OWNER_ENROLLMENT_APPLICATION_ID:?Required for the selected enrollment audit phase}"
+  require_uuid_value CLOUDFLARE_OWNER_ENROLLMENT_APPLICATION_ID "${CLOUDFLARE_OWNER_ENROLLMENT_APPLICATION_ID}"
+fi
 
 if [[ "${admin_device_contract_requested}" == true ]]; then
   for variable_name in \
     CLOUDFLARE_PI_ADMIN_CIDR \
     CLOUDFLARE_ADMIN_EMAIL \
     CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID \
-    CLOUDFLARE_ADMIN_POSTURE_CERTIFICATE_ID \
-    CLOUDFLARE_ADMIN_POSTURE_PLATFORM \
-    CLOUDFLARE_EXPECTED_ADMIN_POSTURE_CONTRACT_SHA256 \
+    CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID \
     CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE \
     CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE \
-    CLOUDFLARE_ADMIN_SESSION_FRESHNESS \
-    CLOUDFLARE_WARP_DEVICE_POLICY_ID; do
+    CLOUDFLARE_ADMIN_SESSION_FRESHNESS; do
     [[ -n "${!variable_name:-}" ]] || { printf '%s is required for the selected admin audit phase\n' "${variable_name}" >&2; exit 2; }
   done
   if ! jq -en --arg cidr "${CLOUDFLARE_PI_ADMIN_CIDR}" '
@@ -119,27 +184,8 @@ if [[ "${admin_device_contract_requested}" == true ]]; then
     printf 'CLOUDFLARE_ADMIN_EMAIL must be one exact email identity\n' >&2
     exit 2
   }
-  [[ "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
-    printf 'CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID must be one lowercase rule UUID\n' >&2
-    exit 2
-  }
-  [[ "${CLOUDFLARE_ADMIN_POSTURE_CERTIFICATE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
-    printf 'CLOUDFLARE_ADMIN_POSTURE_CERTIFICATE_ID must be one lowercase managed-certificate UUID\n' >&2
-    exit 2
-  }
-  [[ "${CLOUDFLARE_ADMIN_POSTURE_PLATFORM}" =~ ^(windows|mac|linux)$ ]] || {
-    printf 'CLOUDFLARE_ADMIN_POSTURE_PLATFORM must be windows, mac, or linux\n' >&2
-    exit 2
-  }
-  [[ "${CLOUDFLARE_EXPECTED_ADMIN_POSTURE_CONTRACT_SHA256}" =~ ^[0-9a-f]{64}$ &&
-      "${CLOUDFLARE_EXPECTED_ADMIN_POSTURE_CONTRACT_SHA256}" =~ [1-9a-f] ]] || {
-    printf 'CLOUDFLARE_EXPECTED_ADMIN_POSTURE_CONTRACT_SHA256 must be an independently approved nonzero lowercase SHA-256\n' >&2
-    exit 2
-  }
-  [[ "${CLOUDFLARE_WARP_DEVICE_POLICY_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
-    printf 'CLOUDFLARE_WARP_DEVICE_POLICY_ID must be one lowercase profile UUID\n' >&2
-    exit 2
-  }
+  require_uuid_value CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}"
+  require_uuid_value CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}"
   [[ "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" =~ ^[0-9]+$ &&
       "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}" =~ ^[0-9]+$ &&
       "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" -lt "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}" ]] || {
@@ -154,19 +200,6 @@ if [[ "${admin_device_contract_requested}" == true ]]; then
   (( freshness_seconds <= 900 )) || { printf 'Admin session freshness exceeds 900 seconds\n' >&2; exit 2; }
 fi
 
-if [[ "${audit_phase}" == admin-route || "${audit_phase}" == admin-api ||
-      "${audit_phase}" == public-edge-preflight || "${audit_phase}" == public-edge ||
-      "${audit_phase}" == public-dns-naranjo || "${audit_phase}" == public-dns-lidersea ||
-      "${audit_phase}" == all ]]; then
-  : "${CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE:?Required for API precedence binding in the selected audit phase}"
-  [[ "${CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE}" =~ ^[0-9]+$ &&
-      "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" -lt "${CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE}" &&
-      "${CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE}" -lt "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}" ]] || {
-    printf 'Admin API precedence must be numeric, after SSH, and before block\n' >&2
-    exit 2
-  }
-fi
-
 # Keep this labelled byte sequence identical to cloudflare-plan-gate.sh. The
 # domain labels are lexicographically sorted so swapping two valid IDs changes
 # the digest and cannot be hidden by an unlabelled set.
@@ -175,11 +208,15 @@ binding_fingerprint() {
   local naranjo_online_zone_id="$2"
   local lidersea_com_zone_id="$3"
   printf 'account=%s\npublic_domain[lidersea.com]=%s\npublic_domain[naranjo.online]=%s\n' \
-    "${account_id}" "${lidersea_com_zone_id}" "${naranjo_online_zone_id}" | sha256sum
+    "${account_id}" "${lidersea_com_zone_id}" "${naranjo_online_zone_id}" | digest
 }
 
 digest() {
-  sha256sum | awk '{print $1}'
+  if [[ "${sha256_program}" == sha256sum ]]; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
 }
 
 account_binding_fingerprint() {
@@ -195,34 +232,39 @@ admin_contract_fingerprint() {
     "${contract_phase}" "${account_id}" "${tunnel_id}" "${network}" | digest
 }
 
-admin_policy_fingerprint() {
-  local contract_phase="$1"
-  local account_id="$2"
-  local tunnel_id="$3"
-  local network="$4"
-  local email="$5"
-  local posture_id="$6"
-  local posture_hash="$7"
-  local session_freshness="$8"
-  local ssh_precedence="$9"
-  local block_precedence="${10}"
-  printf 'phase=%s\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nposture_sha256=%s\nsession=%s\nssh_precedence=%s\nblock_precedence=%s\n' \
-    "${contract_phase}" "${account_id}" "${tunnel_id}" "${network}" "${email}" \
-    "${posture_id}" "${posture_hash}" "${session_freshness}" "${ssh_precedence}" \
-    "${block_precedence}" | digest
+admin_certificate_fingerprint() {
+  printf 'phase=admin-certificate\naccount=%s\ncertificate_id=%s\ncertificate_sha256=%s\n' \
+    "$1" "$2" "$3" | digest
 }
 
-admin_api_inputs_fingerprint() {
-  printf 'phase=admin-api-inputs\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nposture_sha256=%s\nsession=%s\nssh_precedence=%s\napi_precedence=%s\nblock_precedence=%s\npolicies_sha256=%s\nroute_sha256=%s\n' \
+admin_enrollment_policy_fingerprint() {
+  printf 'phase=admin-enrollment-policy\naccount=%s\npolicy_id=%s\nidentity=%s\n' \
+    "$1" "$2" "$3" | digest
+}
+
+admin_enrollment_fingerprint() {
+  printf 'phase=admin-enrollment\naccount=%s\npolicy_id=%s\napplication_id=%s\nidentity_provider_id=%s\nidentity=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" | digest
+}
+
+admin_device_fingerprint() {
+  printf 'phase=admin-device\naccount=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nprofile_id=%s\ncertificate_sha256=%s\nenrollment_sha256=%s\nplatform_routes_sha256=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" | digest
+}
+
+admin_policy_fingerprint() {
+  printf 'phase=%s\naccount=%s\ntunnel=%s\nnetwork=%s\nidentity=%s\nposture_id=%s\nprofile_id=%s\ndevice_sha256=%s\nenrollment_sha256=%s\nsession=%s\nssh_precedence=%s\nblock_precedence=%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" | digest
 }
 
 admin_tunnel_fingerprint() {
-  printf 'phase=admin-tunnel\naccount=%s\ntunnel=%s\n' "$1" "$2" | digest
+  printf 'phase=admin-tunnel\naccount=%s\ntunnel=%s\nenrollment_sha256=%s\ndevice_sha256=%s\n' \
+    "$1" "$2" "$3" "$4" | digest
 }
 
 public_edge_fingerprint() {
-  printf 'phase=public-edge\naccount=%s\ntunnel=%s\n' "$1" "$2" | digest
+  printf 'phase=public-edge\naccount=%s\npublic_domain[lidersea.com]=%s\npublic_domain[naranjo.online]=%s\n' \
+    "$1" "$3" "$2" | digest
 }
 
 public_dns_binding_fingerprint() {
@@ -338,6 +380,49 @@ api_get_complete() {
   [[ "${first_canonical}" == "${verification_canonical}" ]] || return 1
   jq -cn --argjson result "${combined}" --argjson total_count "${total_count}" \
     '{success: true, result: $result, result_info: {complete: true, total_count: $total_count}}'
+}
+
+# The physical-device API is cursor-paginated rather than page-paginated. The
+# reviewed admin contract permits exactly one active device, so a complete
+# response must fit in one 100-item page, advertise no next cursor, and remain
+# byte-for-byte identical (after canonical ID ordering) when fetched again.
+# This rejects both truncation and an enrollment/revocation race at the audit
+# boundary without ever printing device identifiers or attributes.
+api_get_cursor_complete_one_page() {
+  local api_path="$1"
+  local first verification first_canonical verification_canonical
+  first="$(api_get "${api_path}")" || return 1
+  jq -e '
+    .success == true and (.result | type == "array") and
+    (.result_info | type == "object") and
+    (.result_info.count | type) == "number" and
+    .result_info.count == (.result | length) and
+    (.result_info.total_count | type) == "number" and
+    .result_info.total_count == (.result | length) and
+    (.result_info.per_page | type) == "number" and
+    .result_info.per_page >= (.result | length) and
+    ((.result_info.cursor // "") == "") and
+    all(.result[]; (.id | type) == "string" and (.id | length) > 0) and
+    ((.result | map(.id) | unique | length) == (.result | length))
+  ' >/dev/null 2>&1 <<<"${first}" || return 1
+  verification="$(api_get "${api_path}")" || return 1
+  jq -e '
+    .success == true and (.result | type == "array") and
+    (.result_info | type == "object") and
+    (.result_info.count | type) == "number" and
+    .result_info.count == (.result | length) and
+    (.result_info.total_count | type) == "number" and
+    .result_info.total_count == (.result | length) and
+    (.result_info.per_page | type) == "number" and
+    .result_info.per_page >= (.result | length) and
+    ((.result_info.cursor // "") == "") and
+    all(.result[]; (.id | type) == "string" and (.id | length) > 0) and
+    ((.result | map(.id) | unique | length) == (.result | length))
+  ' >/dev/null 2>&1 <<<"${verification}" || return 1
+  first_canonical="$(jq -cS '{result: (.result | sort_by(.id)), result_info: {count: .result_info.count, total_count: .result_info.total_count}}' <<<"${first}")" || return 1
+  verification_canonical="$(jq -cS '{result: (.result | sort_by(.id)), result_info: {count: .result_info.count, total_count: .result_info.total_count}}' <<<"${verification}")" || return 1
+  [[ "${first_canonical}" == "${verification_canonical}" ]] || return 1
+  printf '%s\n' "${first}"
 }
 
 mark_unavailable() {
@@ -465,11 +550,157 @@ else
   done
 fi
 
+printf '\n## Owner device certificate\n'
+mtls_certificates="$(api_get_complete "/accounts/${CLOUDFLARE_ACCOUNT_ID}/mtls_certificates" 2>/dev/null || true)"
+admin_certificate_verified=false
+admin_certificate_contract_hash=''
+if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${mtls_certificates:-{}}"; then
+  mark_unavailable 'mTLS certificate inventory could not be completely audited.'
+else
+  mtls_inventory_count="$(jq -r '.result | length' <<<"${mtls_certificates}")"
+  admin_certificate_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-owner-device-ca")] | length' <<<"${mtls_certificates}")"
+  unrelated_mtls_hash="$(jq -cS '[.result[] | select(.name != "pi-admin-owner-device-ca")] | sort_by(.id)' <<<"${mtls_certificates}" | digest)"
+  printf 'mtls_certificate_inventory_count=%s\n' "${mtls_inventory_count}"
+  printf 'unrelated_mtls_inventory_sha256=%s\n' "${unrelated_mtls_hash}"
+  if [[ "${admin_certificate_named_count}" -eq 0 ]]; then
+    printf 'pi_admin_certificate_activation_state=absent\n'
+  elif [[ "${admin_certificate_named_count}" -eq 1 && "${certificate_contract_requested}" == true ]]; then
+    certificate_shape_match="$(jq -r --arg id "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID}" '[.result[] | select(
+      .id == $id and .name == "pi-admin-owner-device-ca" and .ca == true and
+      (.certificates | type) == "string" and (.certificates | contains("PRIVATE KEY") | not)
+    )] | length' <<<"${mtls_certificates}")"
+    observed_certificate_sha256="$(jq -j --arg id "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID}" '.result[] | select(.id == $id and .name == "pi-admin-owner-device-ca") | .certificates' <<<"${mtls_certificates}" | digest)"
+    if [[ "${certificate_shape_match}" -eq 1 && "${observed_certificate_sha256}" == "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_SHA256}" ]]; then
+      admin_certificate_verified=true
+      admin_certificate_contract_hash="$(admin_certificate_fingerprint \
+        "${CLOUDFLARE_ACCOUNT_ID}" "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID}" \
+        "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_SHA256}")"
+      printf 'pi_admin_certificate_activation_state=exact\n'
+      printf 'admin_certificate_contract_sha256=%s\n' "${admin_certificate_contract_hash}"
+    else
+      printf 'pi_admin_certificate_activation_state=conflict\n'
+    fi
+  else
+    printf 'pi_admin_certificate_activation_state=conflict\n'
+  fi
+fi
+case "${audit_phase}" in
+  preflight)
+    [[ "${admin_certificate_named_count:-0}" -eq 0 ]] || mark_unavailable 'the owner-device CA must be absent before its isolated phase.'
+    ;;
+  admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    [[ "${admin_certificate_verified}" == true ]] || mark_unavailable 'the exact public owner-device CA is not uniquely present.'
+    ;;
+esac
+
+printf '\n## Owner WARP enrollment\n'
+access_policies="$(api_get_complete "/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/policies" 2>/dev/null || true)"
+enrollment_policy_verified=false
+admin_enrollment_policy_contract_hash=''
+if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${access_policies:-{}}"; then
+  mark_unavailable 'Access reusable-policy inventory could not be completely audited; Access must be enabled on the Free plan.'
+else
+  enrollment_policy_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-owner-device-enrollment")] | length' <<<"${access_policies}")"
+  printf 'access_policy_inventory_count=%s\n' "$(jq -r '.result | length' <<<"${access_policies}")"
+  printf 'unrelated_access_policy_inventory_sha256=%s\n' "$(jq -cS '[.result[] | select(.name != "pi-admin-owner-device-enrollment")] | sort_by(.id)' <<<"${access_policies}" | digest)"
+  if [[ "${enrollment_policy_named_count}" -eq 0 ]]; then
+    printf 'pi_admin_enrollment_policy_activation_state=absent\n'
+  elif [[ "${enrollment_policy_named_count}" -eq 1 && "${enrollment_policy_contract_requested}" == true ]]; then
+    enrollment_policy_match_count="$(jq -r --arg id "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID}" --arg email "${CLOUDFLARE_ADMIN_EMAIL}" '[.result[] | select(
+      .id == $id and .name == "pi-admin-owner-device-enrollment" and
+      .decision == "allow" and .session_duration == "15m" and
+      .include == [{email: {email: $email}}] and
+      ((.exclude // []) | length) == 0 and ((.require // []) | length) == 0 and
+      .mfa_config == {allowed_authenticators: ["biometrics", "security_key"], mfa_disabled: false, session_duration: "5m"}
+    )] | length' <<<"${access_policies}")"
+    if [[ "${enrollment_policy_match_count}" -eq 1 ]]; then
+      enrollment_policy_verified=true
+      admin_enrollment_policy_contract_hash="$(admin_enrollment_policy_fingerprint \
+        "${CLOUDFLARE_ACCOUNT_ID}" "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID}" "${CLOUDFLARE_ADMIN_EMAIL}")"
+      printf 'pi_admin_enrollment_policy_activation_state=exact\n'
+      printf 'admin_enrollment_policy_contract_sha256=%s\n' "${admin_enrollment_policy_contract_hash}"
+    else
+      printf 'pi_admin_enrollment_policy_activation_state=conflict\n'
+    fi
+  else
+    printf 'pi_admin_enrollment_policy_activation_state=conflict\n'
+  fi
+fi
+
+access_apps="$(api_get_complete "/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/apps" 2>/dev/null || true)"
+enrollment_app_verified=false
+admin_enrollment_contract_hash=''
+if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${access_apps:-{}}"; then
+  mark_unavailable 'Access application inventory could not be completely audited; Access must be enabled on the Free plan.'
+else
+  enrollment_app_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-owner-device-enrollment")] | length' <<<"${access_apps}")"
+  printf 'access_application_inventory_count=%s\n' "$(jq -r '.result | length' <<<"${access_apps}")"
+  printf 'unrelated_access_application_inventory_sha256=%s\n' "$(jq -cS '[.result[] | select(.name != "pi-admin-owner-device-enrollment")] | sort_by(.id)' <<<"${access_apps}" | digest)"
+  if [[ "${enrollment_app_named_count}" -eq 0 ]]; then
+    printf 'pi_admin_enrollment_app_activation_state=absent\n'
+  elif [[ "${enrollment_app_named_count}" -eq 1 && "${enrollment_contract_requested}" == true ]]; then
+    enrollment_app_match_count="$(jq -r \
+      --arg app_id "${CLOUDFLARE_OWNER_ENROLLMENT_APPLICATION_ID}" \
+      --arg policy_id "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID}" \
+      --arg idp_id "${CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID}" '[.result[] | select(
+        .id == $app_id and .name == "pi-admin-owner-device-enrollment" and .type == "warp" and
+        .allowed_idps == [$idp_id] and .auto_redirect_to_identity == true and
+        .session_duration == "15m" and
+        .policies == [{id: $policy_id, precedence: 1}]
+      )] | length' <<<"${access_apps}")"
+    if [[ "${enrollment_app_match_count}" -eq 1 && "${enrollment_policy_verified}" == true ]]; then
+      enrollment_app_verified=true
+      admin_enrollment_contract_hash="$(admin_enrollment_fingerprint \
+        "${CLOUDFLARE_ACCOUNT_ID}" "${CLOUDFLARE_OWNER_ENROLLMENT_POLICY_ID}" \
+        "${CLOUDFLARE_OWNER_ENROLLMENT_APPLICATION_ID}" "${CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID}" \
+        "${CLOUDFLARE_ADMIN_EMAIL}")"
+      printf 'pi_admin_enrollment_app_activation_state=exact\n'
+      printf 'admin_enrollment_contract_sha256=%s\n' "${admin_enrollment_contract_hash}"
+    else
+      printf 'pi_admin_enrollment_app_activation_state=conflict\n'
+    fi
+  else
+    printf 'pi_admin_enrollment_app_activation_state=conflict\n'
+  fi
+fi
+
+identity_providers="$(api_get_complete "/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/identity_providers" 2>/dev/null || true)"
+admin_identity_provider_match_count=0
+if jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${identity_providers:-{}}"; then
+  if [[ "${enrollment_policy_contract_requested}" == true ]]; then
+    admin_identity_provider_match_count="$(jq -r --arg id "${CLOUDFLARE_ADMIN_IDENTITY_PROVIDER_ID:-}" '[.result[] | select(.id == $id)] | length' <<<"${identity_providers}")"
+  fi
+  identity_provider_inventory_count="$(jq -r '.result | length' <<<"${identity_providers}")"
+  printf 'identity_provider_inventory_count=%s\n' "${identity_provider_inventory_count}"
+  printf 'admin_identity_provider_match_count=%s\n' "${admin_identity_provider_match_count}"
+  printf 'identity_provider_inventory_sha256=%s\n' "$(jq -cS '.result | sort_by(.id)' <<<"${identity_providers}" | digest)"
+  if [[ "${enrollment_policy_contract_requested}" == true && ("${identity_provider_inventory_count}" -ne 1 || "${admin_identity_provider_match_count}" -ne 1) ]]; then
+    mark_unavailable 'the WARP enrollment application must bind the account sole identity provider.'
+  fi
+else
+  mark_unavailable 'Access identity-provider inventory could not be completely audited.'
+fi
+
+case "${audit_phase}" in
+  preflight|admin-certificate)
+    [[ "${enrollment_policy_named_count:-0}" -eq 0 && "${enrollment_app_named_count:-0}" -eq 0 ]] || mark_unavailable 'owner enrollment objects must be absent before their isolated phases.'
+    ;;
+  admin-enrollment-policy)
+    [[ "${enrollment_policy_verified}" == true && "${enrollment_app_named_count:-0}" -eq 0 ]] || mark_unavailable 'only the exact owner enrollment policy may exist at this phase.'
+    ;;
+  admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    [[ "${enrollment_policy_verified}" == true && "${enrollment_app_verified}" == true ]] || mark_unavailable 'the exact owner-only MFA WARP enrollment application and policy are not uniquely present.'
+    ;;
+esac
+
 printf '\n## Cloudflare Tunnels\n'
 tunnels="$(api_get_complete "/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel?is_deleted=false" 2>/dev/null || true)"
 pi_admin_tunnel_id=''
-pi_websites_tunnel_id=''
+naranjo_online_tunnel_id=''
+lidersea_com_tunnel_id=''
 pi_admin_tunnel_healthy=false
+naranjo_online_tunnel_healthy=false
+lidersea_com_tunnel_healthy=false
 if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${tunnels:-{}}"; then
   mark_unavailable 'Tunnel inventory could not be completely audited.'
 else
@@ -478,13 +709,18 @@ else
     mark_unavailable 'duplicate active Tunnel names exist.'
   fi
   admin_tunnel_count="$(jq -r '[.result[] | select(.name == "pi-admin")] | length' <<<"${tunnels}")"
-  public_tunnel_count="$(jq -r '[.result[] | select(.name == "pi-websites")] | length' <<<"${tunnels}")"
+  naranjo_online_tunnel_count="$(jq -r '[.result[] | select(.name == "naranjo-online")] | length' <<<"${tunnels}")"
+  lidersea_com_tunnel_count="$(jq -r '[.result[] | select(.name == "lidersea-com")] | length' <<<"${tunnels}")"
   tunnel_inventory_count="$(jq -r '.result | length' <<<"${tunnels}")"
   printf 'cloudflare_tunnel_inventory_count=%s\n' "${tunnel_inventory_count}"
   printf 'pi-admin exact_name_count=%s\n' "${admin_tunnel_count}"
-  printf 'pi-websites exact_name_count=%s\n' "${public_tunnel_count}"
+  printf 'naranjo-online exact_name_count=%s\n' "${naranjo_online_tunnel_count}"
+  printf 'lidersea-com exact_name_count=%s\n' "${lidersea_com_tunnel_count}"
+  printf 'stable_tunnel_inventory_sha256=%s\n' "$(jq -cS '[.result[] | {id, name, config_src, tun_type, deleted_at}] | sort_by(.name)' <<<"${tunnels}" | digest)"
+  printf 'unrelated_tunnel_inventory_sha256=%s\n' "$(jq -cS '[.result[] | select(.name != "pi-admin") | {id, name, config_src, tun_type, deleted_at}] | sort_by(.name)' <<<"${tunnels}" | digest)"
   [[ "${admin_tunnel_count}" -eq 0 ]] && printf 'pi_admin_tunnel_activation_state=absent\n' || printf 'pi_admin_tunnel_activation_state=present-or-conflict\n'
-  [[ "${public_tunnel_count}" -eq 0 ]] && printf 'pi_websites_tunnel_activation_state=absent\n' || printf 'pi_websites_tunnel_activation_state=present-or-conflict\n'
+  [[ "${naranjo_online_tunnel_count}" -eq 1 ]] && printf 'naranjo_online_tunnel_activation_state=present\n' || printf 'naranjo_online_tunnel_activation_state=absent-or-conflict\n'
+  [[ "${lidersea_com_tunnel_count}" -eq 1 ]] && printf 'lidersea_com_tunnel_activation_state=present\n' || printf 'lidersea_com_tunnel_activation_state=absent-or-conflict\n'
   if [[ "${admin_tunnel_count}" -eq 1 ]]; then
     pi_admin_tunnel_id="$(jq -er '.result[] | select(.name == "pi-admin") | .id' <<<"${tunnels}")"
     if ! [[ "${pi_admin_tunnel_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
@@ -494,39 +730,48 @@ else
       pi_admin_tunnel_healthy=true
     fi
   fi
-  if [[ "${public_tunnel_count}" -eq 1 ]]; then
-    pi_websites_tunnel_id="$(jq -er '.result[] | select(.name == "pi-websites") | .id' <<<"${tunnels}")"
-    if ! [[ "${pi_websites_tunnel_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-      mark_unavailable 'pi-websites Tunnel ID is missing or malformed.'
-      pi_websites_tunnel_id=''
+  if [[ "${naranjo_online_tunnel_count}" -eq 1 ]]; then
+    naranjo_online_tunnel_id="$(jq -er '.result[] | select(.name == "naranjo-online") | .id' <<<"${tunnels}")"
+    if ! [[ "${naranjo_online_tunnel_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+      mark_unavailable 'naranjo-online Tunnel ID is missing or malformed.'
+      naranjo_online_tunnel_id=''
+    elif [[ "$(jq -r '.result[] | select(.name == "naranjo-online") | (.status // "unknown")' <<<"${tunnels}")" == healthy ]]; then
+      naranjo_online_tunnel_healthy=true
     fi
   fi
-  if [[ -n "${pi_admin_tunnel_id}" && "${pi_admin_tunnel_id}" == "${pi_websites_tunnel_id}" ]]; then
-    mark_unavailable 'admin and public Tunnel identities are not separate.'
+  if [[ "${lidersea_com_tunnel_count}" -eq 1 ]]; then
+    lidersea_com_tunnel_id="$(jq -er '.result[] | select(.name == "lidersea-com") | .id' <<<"${tunnels}")"
+    if ! [[ "${lidersea_com_tunnel_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+      mark_unavailable 'lidersea-com Tunnel ID is missing or malformed.'
+      lidersea_com_tunnel_id=''
+    elif [[ "$(jq -r '.result[] | select(.name == "lidersea-com") | (.status // "unknown")' <<<"${tunnels}")" == healthy ]]; then
+      lidersea_com_tunnel_healthy=true
+    fi
+  fi
+  distinct_tunnel_id_count="$(jq -nr \
+    --arg admin "${pi_admin_tunnel_id}" \
+    --arg naranjo "${naranjo_online_tunnel_id}" \
+    --arg lidersea "${lidersea_com_tunnel_id}" \
+    '[$admin, $naranjo, $lidersea] | map(select(length > 0)) | unique | length')"
+  expected_distinct_tunnel_id_count=2
+  [[ -n "${pi_admin_tunnel_id}" ]] && expected_distinct_tunnel_id_count=3
+  if [[ "${distinct_tunnel_id_count}" -ne "${expected_distinct_tunnel_id_count}" ]]; then
+    mark_unavailable 'admin and per-site public Tunnel identities are not all separate.'
   fi
   case "${audit_phase}" in
-    admin-tunnel|admin-policies|admin-route|admin-api|public-edge-preflight)
-      if [[ "${tunnel_inventory_count}" -ne 1 || "${admin_tunnel_count}" -ne 1 || "${public_tunnel_count}" -ne 0 ]]; then
-        mark_unavailable 'admin staging requires the complete active Tunnel inventory to contain pi-admin only.'
+    preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device)
+      if [[ "${tunnel_inventory_count}" -ne 2 || "${admin_tunnel_count}" -ne 0 || "${naranjo_online_tunnel_count}" -ne 1 || "${lidersea_com_tunnel_count}" -ne 1 ]]; then
+        mark_unavailable 'pre-admin staging requires exactly the two separate public site Tunnels and no pi-admin Tunnel.'
       fi
       ;;
-    public-edge|public-dns-naranjo|public-dns-lidersea|all)
-      if [[ "${tunnel_inventory_count}" -ne 2 || "${admin_tunnel_count}" -ne 1 || "${public_tunnel_count}" -ne 1 ]]; then
-        mark_unavailable 'public staging requires the complete active Tunnel inventory to contain only pi-admin and pi-websites.'
+    admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+      if [[ "${tunnel_inventory_count}" -ne 3 || "${admin_tunnel_count}" -ne 1 || "${naranjo_online_tunnel_count}" -ne 1 || "${lidersea_com_tunnel_count}" -ne 1 ]]; then
+        mark_unavailable 'admin staging requires exactly pi-admin plus the two separate public site Tunnels.'
+      elif [[ "${pi_admin_tunnel_healthy}" != true ]]; then
+        mark_unavailable 'pi-admin Tunnel is not healthy after its isolated creation and connector-install phase.'
       fi
       ;;
   esac
-fi
-
-if [[ "${pi_admin_tunnel_healthy}" == true ]]; then
-  admin_tunnel_hash="$(admin_tunnel_fingerprint "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}")"
-  printf 'admin_tunnel_contract_sha256=%s\n' "${admin_tunnel_hash}"
-elif [[ "${audit_phase}" == admin-tunnel || "${audit_phase}" == admin-policies ||
-        "${audit_phase}" == admin-route || "${audit_phase}" == admin-api ||
-        "${audit_phase}" == public-edge-preflight || "${audit_phase}" == public-edge ||
-        "${audit_phase}" == public-dns-naranjo || "${audit_phase}" == public-dns-lidersea ||
-        "${audit_phase}" == all ]]; then
-  mark_unavailable 'the exact pi-admin Tunnel is not uniquely present and healthy.'
 fi
 
 printf '\n## Gateway policies\n'
@@ -548,41 +793,26 @@ else
     mark_unavailable 'duplicate Gateway policy name or precedence exists.'
   fi
 
-  if [[ "${audit_phase}" == admin-tunnel && "${gateway_policy_inventory_count}" -ne 0 ]]; then
-    mark_unavailable 'admin-tunnel post-audit requires no Gateway policy before the isolated admin-policies phase.'
-  fi
+  unrelated_gateway_hash="$(jq -cS '[.result[] | select(.name != "pi-admin-ssh-allow" and .name != "pi-admin-block")] | sort_by(.id)' <<<"${gateway_rules}" | digest)"
+  printf 'unrelated_gateway_policy_inventory_sha256=%s\n' "${unrelated_gateway_hash}"
+  case "${audit_phase}" in
+    preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel)
+      [[ "${gateway_policy_inventory_count}" -eq 0 ]] || mark_unavailable 'Gateway policies must remain absent before the isolated admin-policies phase.'
+      ;;
+    admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+      [[ "${gateway_policy_inventory_count}" -eq 2 ]] || mark_unavailable 'the complete Gateway inventory must contain the exact SSH allow and final Pi block only.'
+      ;;
+  esac
 
   if [[ "${admin_policy_contract_requested}" == true && -n "${pi_admin_tunnel_id}" ]]; then
-    api_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-api-allow")] | length' <<<"${gateway_rules}")"
-    if [[ "${audit_phase}" == admin-policies || "${audit_phase}" == admin-route ]]; then
-      if [[ "${api_named_count}" -eq 0 ]]; then
-        printf 'pi_admin_api_policy_activation_state=absent\n'
-      else
-        printf 'pi_admin_api_policy_activation_state=conflict\n'
-      fi
-    fi
-    if [[ "${audit_phase}" == admin-api || "${audit_phase}" == all ]]; then
-      expected_gateway_count=3
-    elif [[ "${audit_phase}" == public-edge-preflight || "${audit_phase}" == public-edge ||
-            "${audit_phase}" == public-dns-naranjo || "${audit_phase}" == public-dns-lidersea ]]; then
-      if [[ "${api_named_count}" -eq 0 ]]; then
-        expected_gateway_count=2
-      elif [[ "${api_named_count}" -eq 1 ]]; then
-        expected_gateway_count=3
-      else
-        expected_gateway_count=-1
-      fi
-    else
-      expected_gateway_count=2
-    fi
     unreviewed_gateway_count="$(jq -r '[.result[] | select(
-      .name != "pi-admin-ssh-allow" and .name != "pi-admin-api-allow" and .name != "pi-admin-block"
+      .name != "pi-admin-ssh-allow" and .name != "pi-admin-block"
     )] | length' <<<"${gateway_rules}")"
     reviewed_gateway_count="$(jq -r '[.result[] | select(
-      .name == "pi-admin-ssh-allow" or .name == "pi-admin-api-allow" or .name == "pi-admin-block"
+      .name == "pi-admin-ssh-allow" or .name == "pi-admin-block"
     )] | length' <<<"${gateway_rules}")"
-    if [[ "${unreviewed_gateway_count}" -eq 0 && "${reviewed_gateway_count}" -eq "${expected_gateway_count}" &&
-          "${gateway_policy_inventory_count}" -eq "${expected_gateway_count}" ]]; then
+    if [[ "${unreviewed_gateway_count}" -eq 0 && "${reviewed_gateway_count}" -eq 2 &&
+          "${gateway_policy_inventory_count}" -eq 2 ]]; then
       admin_l4_inventory_closed=true
     fi
     printf 'Gateway complete inventory closed=%s unreviewed_count=%s\n' "${admin_l4_inventory_closed}" "${unreviewed_gateway_count}"
@@ -616,135 +846,175 @@ else
       admin_policy_verified=true
     fi
   fi
-
-  if [[ "${audit_phase}" == admin-api || "${audit_phase}" == public-edge-preflight ||
-        "${audit_phase}" == public-edge || "${audit_phase}" == public-dns-naranjo ||
-        "${audit_phase}" == public-dns-lidersea || "${audit_phase}" == all ]]; then
-    api_match_count="$(jq -r '
-      def compact_settings:
-        walk(if type == "object" then with_entries(select(.value != null and .value != false and .value != "" and .value != [] and .value != {})) else . end);
-      [.result[] | select(
-      .name == "pi-admin-api-allow" and .action == "allow" and .enabled == true and
-      .filters == ["l4"] and .precedence == (env.CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE | tonumber) and
-      .traffic == ("net.dst.ip in {" + env.CLOUDFLARE_PI_ADMIN_CIDR + "} and net.protocol == \"tcp\" and net.dst.port in {6443}") and
-      .identity == ("identity.email == \"" + env.CLOUDFLARE_ADMIN_EMAIL + "\"") and
-      .device_posture == ("any(device_posture.checks.passed[*] in {\"" + env.CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID + "\"})") and
-      ((.expiration // "") == "") and ((.schedule // "") == "") and
-      ((.rule_settings // {}) | compact_settings) == {check_session: {enforce: true, duration: env.CLOUDFLARE_ADMIN_SESSION_FRESHNESS}}
-    )] | length' <<<"${gateway_rules}")"
-    printf 'pi-admin API-6443 policy exact_match_count=%s\n' "${api_match_count}"
-    if [[ "${audit_phase}" == admin-api || "${audit_phase}" == all || "${api_named_count}" -eq 1 ]]; then
-      [[ "${api_match_count}" -eq 1 ]] || mark_unavailable 'the later API policy is not exactly TCP 6443 with the required identity, posture, session, and precedence.'
-    else
-      [[ "${api_match_count}" -eq 0 ]] || mark_unavailable 'the optional API policy is neither absent nor exact.'
-    fi
-    [[ "${api_named_count}" -eq 0 ]] && printf 'pi_admin_api_policy_activation_state=absent\n' || true
-    [[ "${api_named_count}" -eq 1 && "${api_match_count}" -eq 1 ]] && printf 'pi_admin_api_policy_activation_state=exact\n' || true
-    [[ "${api_named_count}" -gt 1 || ("${api_named_count}" -eq 1 && "${api_match_count}" -ne 1) ]] && printf 'pi_admin_api_policy_activation_state=conflict\n' || true
-  fi
 fi
 
 admin_policies_verified=false
 admin_device_verified=false
 
-if [[ "${admin_device_contract_requested}" == true ]]; then
-  printf '\n## WARP enrollment, device policy, and posture\n'
-  posture_rules="$(api_get_single_page "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/posture" 2>/dev/null || true)"
-  posture_match_count=0
-  posture_contract_hash=''
-  posture_contract_verified=false
-  if jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${posture_rules:-{}}"; then
-    posture_match_count="$(jq -r '[.result[] | . as $rule | select(
-      .id == env.CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID and .enabled == true and
-      $rule.type == "client_certificate_v2" and
-      (.input | type) == "object" and
-      (.input | keys | sort) == ["certificate_id", "check_private_key", "cn", "extended_key_usage", "operating_system"] and
-      .input.certificate_id == env.CLOUDFLARE_ADMIN_POSTURE_CERTIFICATE_ID and
-      .input.check_private_key == true and
-      .input.operating_system == env.CLOUDFLARE_ADMIN_POSTURE_PLATFORM and
-      .input.cn == "${serial_number}" and
-      .input.extended_key_usage == ["clientAuth"] and
-      .match == [{"platform": env.CLOUDFLARE_ADMIN_POSTURE_PLATFORM}] and
-      .expiration == "5m" and .schedule == "5m"
-    )] | length' <<<"${posture_rules}")"
+printf '\n## WARP enrollment, device policy, and posture\n'
+posture_rules="$(api_get_single_page "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/posture" 2>/dev/null || true)"
+posture_named_count=0
+posture_match_count=0
+if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${posture_rules:-{}}"; then
+  mark_unavailable 'device-posture inventory could not be completely audited.'
+else
+  posture_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-owner-device-certificate")] | length' <<<"${posture_rules}")"
+  printf 'device_posture_inventory_count=%s\n' "$(jq -r '.result | length' <<<"${posture_rules}")"
+  printf 'unrelated_device_posture_inventory_sha256=%s\n' "$(jq -cS '[.result[] | select(.name != "pi-admin-owner-device-certificate")] | sort_by(.id)' <<<"${posture_rules}" | digest)"
+  if [[ "${posture_named_count}" -eq 0 ]]; then
+    printf 'pi_admin_device_posture_activation_state=absent\n'
+  elif [[ "${posture_named_count}" -eq 1 && "${admin_device_contract_requested}" == true ]]; then
+    posture_match_count="$(jq -r --arg id "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" \
+      --arg certificate_id "${CLOUDFLARE_OWNER_DEVICE_CA_CERTIFICATE_ID}" '[.result[] | select(
+        .id == $id and .name == "pi-admin-owner-device-certificate" and .enabled == true and
+        .description == "Require the one owner laptop certificate and its matching private key." and
+        .type == "client_certificate_v2" and
+        ((.input // {}) | with_entries(select(.value != null))) == {
+          certificate_id: $certificate_id,
+          check_private_key: true,
+          cn: "${serial_number}",
+          extended_key_usage: ["clientAuth"],
+          locations: {trust_stores: ["system"]},
+          operating_system: "mac"
+        } and
+        .match == [{platform: "mac"}] and .expiration == "10m" and .schedule == "5m"
+      )] | length' <<<"${posture_rules}")"
     if [[ "${posture_match_count}" -eq 1 ]]; then
-      posture_canonical="$(jq -cS '.result[] | . as $rule | select(.id == env.CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID) | {id, enabled, type, input, match, expiration, schedule}' <<<"${posture_rules}")"
-      posture_contract_hash="$(printf 'phase=admin-posture\nrule=%s\n' "${posture_canonical}" | digest)"
-      printf 'observed_admin_posture_contract_sha256=%s\n' "${posture_contract_hash}"
-      if [[ "${posture_contract_hash}" == "${CLOUDFLARE_EXPECTED_ADMIN_POSTURE_CONTRACT_SHA256}" ]]; then
-        posture_contract_verified=true
-        printf 'admin_posture_contract_sha256=%s\n' "${posture_contract_hash}"
-      fi
+      printf 'pi_admin_device_posture_activation_state=exact\n'
+    else
+      printf 'pi_admin_device_posture_activation_state=conflict\n'
     fi
-  fi
-  printf 'required_posture certificate_v2_exact_match_count=%s approved_hash_match=%s\n' "${posture_match_count}" "${posture_contract_verified}"
-
-  device_policies="$(api_get_single_page "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/policies" 2>/dev/null || true)"
-  warp_policy_match_count=0
-  if jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${device_policies:-{}}"; then
-    warp_policy_match_count="$(jq -r '[.result[] | select(
-      .policy_id == env.CLOUDFLARE_WARP_DEVICE_POLICY_ID and
-      .enabled == true and .service_mode_v2.mode == "warp" and
-      .switch_locked == true and .allowed_to_leave == false and .allow_mode_switch == false and
-      ([.include[]? | .address?] | sort) == [env.CLOUDFLARE_PI_ADMIN_CIDR] and
-      ([.include[]? | select(has("host"))] | length) == 0 and
-      ([.exclude[]?] | length) == 0
-    )] | length' <<<"${device_policies}")"
-  fi
-  printf 'required_WARP_profile exact_match_count=%s\n' "${warp_policy_match_count}"
-
-  enrolled_devices="$(api_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/physical-devices?active_registrations=only&include=last_seen_registration.policy&per_page=100" 2>/dev/null || true)"
-  enrolled_match_count=0
-  device_inventory_complete=false
-  if jq -e '
-    .success == true and (.result | type == "array") and
-    (.result_info | type == "object") and
-    ((.result_info.cursor // "") == "") and
-    ((.result_info | has("total_count") | not) or
-      ((.result_info.total_count | type) == "number" and .result_info.total_count == (.result | length))) and
-    (.result_info.count | type == "number") and
-    .result_info.count == (.result | length) and
-    (.result_info.per_page | type == "number") and
-    .result_info.per_page >= (.result | length)
-  ' >/dev/null 2>&1 <<<"${enrolled_devices:-{}}"; then
-    device_inventory_complete=true
-    enrolled_match_count="$(jq -r '[.result[] | select(
-      .last_seen_user.email == env.CLOUDFLARE_ADMIN_EMAIL and
-      (.active_registrations // 0) > 0 and
-      .last_seen_registration.policy.id == env.CLOUDFLARE_WARP_DEVICE_POLICY_ID and
-      .last_seen_registration.policy.deleted == false
-    )] | length' <<<"${enrolled_devices}")"
-  fi
-  printf 'required_admin_WARP_enrollment active_match_count=%s inventory_complete=%s\n' "${enrolled_match_count}" "${device_inventory_complete}"
-
-  if [[ "${posture_match_count}" -eq 1 && "${posture_contract_verified}" == true && "${warp_policy_match_count}" -eq 1 &&
-        "${device_inventory_complete}" == true && "${enrolled_match_count}" -ge 1 ]]; then
-    admin_device_verified=true
   else
-    mark_unavailable 'admin device contract requires a strong bound posture rule, locked WARP include-/32 with no exclusions, and active enrolled admin device.'
+    printf 'pi_admin_device_posture_activation_state=conflict\n'
   fi
+fi
+printf 'required_posture_certificate_v2_exact_match_count=%s\n' "${posture_match_count}"
 
-  if [[ "${pi_admin_tunnel_healthy}" == true && "${admin_device_verified}" == true ]]; then
-    admin_policy_inputs_hash="$(admin_policy_fingerprint admin-policy-inputs \
+device_policies="$(api_get_single_page "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/policies" 2>/dev/null || true)"
+profile_named_count=0
+warp_policy_match_count=0
+device_platform_routes_hash=''
+if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${device_policies:-{}}"; then
+  mark_unavailable 'device-profile inventory could not be completely audited.'
+else
+  profile_named_count="$(jq -r '[.result[] | select(.name == "pi-admin-owner-device")] | length' <<<"${device_policies}")"
+  printf 'device_profile_inventory_count=%s\n' "$(jq -r '.result | length' <<<"${device_policies}")"
+  printf 'unrelated_device_profile_inventory_sha256=%s\n' "$(jq -cS '[.result[] | select(.name != "pi-admin-owner-device")] | sort_by(.policy_id)' <<<"${device_policies}" | digest)"
+  if [[ "${profile_named_count}" -eq 0 ]]; then
+    printf 'pi_admin_device_profile_activation_state=absent\n'
+  elif [[ "${profile_named_count}" -eq 1 && "${admin_device_contract_requested}" == true ]]; then
+    warp_policy_match_count="$(jq -r --arg id "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" \
+      --arg cidr "${CLOUDFLARE_PI_ADMIN_CIDR}" --arg email "${CLOUDFLARE_ADMIN_EMAIL}" '[.result[] | select(
+        .policy_id == $id and .name == "pi-admin-owner-device" and .default == false and
+        .description == "Locked owner profile; only the single Pi host route enters Cloudflare." and
+        .enabled == true and .precedence == 100 and
+        .match == ("identity.email == " + ($email | @json)) and
+        .allow_mode_switch == false and .allow_updates == true and .allowed_to_leave == false and
+        .auto_connect == 0 and .captive_portal == 180 and .disable_auto_fallback == true and
+        .register_interface_ip_with_dns == false and .sccm_vpn_boundary_support == false and
+        (.support_url // "") == "" and .switch_locked == true and .exclude_office_ips == false and
+        .tunnel_protocol == "masque" and
+        ((.service_mode_v2 // {}) | with_entries(select(.value != null))) == {mode: "warp"} and
+        (.include // []) == [{address: $cidr, description: "Pi admin host only"}] and
+        ((.exclude // []) | length) == 0 and
+        ((.lan_allow_minutes // null) == null) and ((.lan_allow_subnet_size // null) == null)
+      )] | length' <<<"${device_policies}")"
+    device_platform_routes_hash="$(jq -cS --arg id "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" \
+      '.result[] | select(.policy_id == $id) | {always_include: (.always_include // []), always_exclude: (.always_exclude // [])}' \
+      <<<"${device_policies}" | digest)"
+    printf 'device_platform_managed_routes_sha256=%s\n' "${device_platform_routes_hash}"
+    if [[ "${warp_policy_match_count}" -eq 1 ]]; then
+      printf 'pi_admin_device_profile_activation_state=exact\n'
+    else
+      printf 'pi_admin_device_profile_activation_state=conflict\n'
+    fi
+  else
+    printf 'pi_admin_device_profile_activation_state=conflict\n'
+  fi
+fi
+printf 'required_WARP_profile_exact_match_count=%s\n' "${warp_policy_match_count}"
+
+device_inventory_required=false
+case "${audit_phase}" in
+  admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all) device_inventory_required=true ;;
+esac
+active_device_inventory_count=0
+enrolled_match_count=0
+device_inventory_complete=false
+if [[ "${device_inventory_required}" == true ]]; then
+  enrolled_devices="$(api_get_cursor_complete_one_page "/accounts/${CLOUDFLARE_ACCOUNT_ID}/devices/physical-devices?active_registrations=only&include=last_seen_registration.policy&per_page=100" 2>/dev/null || true)"
+  if jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${enrolled_devices:-{}}"; then
+    device_inventory_complete=true
+    active_device_inventory_count="$(jq -r '.result | length' <<<"${enrolled_devices}")"
+    if [[ "${admin_device_contract_requested}" == true ]]; then
+      enrolled_match_count="$(jq -r --arg email "${CLOUDFLARE_ADMIN_EMAIL}" --arg profile_id "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" '[.result[] | select(
+        .last_seen_user.email == $email and .active_registrations == 1 and
+        .last_seen_registration.policy.id == $profile_id and
+        .last_seen_registration.policy.name == "pi-admin-owner-device" and
+        .last_seen_registration.policy.default == false and
+        .last_seen_registration.policy.deleted == false
+      )] | length' <<<"${enrolled_devices}")"
+    fi
+    printf 'active_device_inventory_sha256=%s\n' "$(jq -cS '.result | sort_by(.id)' <<<"${enrolled_devices}" | digest)"
+  else
+    mark_unavailable 'active WARP device inventory was not one stable complete cursor page.'
+  fi
+fi
+printf 'active_device_inventory_count=%s\n' "${active_device_inventory_count}"
+printf 'required_admin_WARP_enrollment_active_match_count=%s\n' "${enrolled_match_count}"
+printf 'active_device_inventory_complete=%s\n' "${device_inventory_complete}"
+
+case "${audit_phase}" in
+  preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app)
+    [[ "${posture_named_count}" -eq 0 && "${profile_named_count}" -eq 0 ]] || mark_unavailable 'owner posture and device profile must remain absent before the isolated admin-device phase.'
+    if [[ "${audit_phase}" == admin-enrollment-app ]]; then
+      [[ "${device_inventory_complete}" == true && "${active_device_inventory_count}" -eq 0 ]] || mark_unavailable 'no WARP device may be enrolled before the one-device phase.'
+    fi
+    ;;
+  admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    if [[ "${posture_match_count}" -eq 1 && "${warp_policy_match_count}" -eq 1 &&
+          "${device_inventory_complete}" == true && "${active_device_inventory_count}" -eq 1 &&
+          "${enrolled_match_count}" -eq 1 && "${admin_certificate_verified}" == true &&
+          "${enrollment_app_verified}" == true ]]; then
+      admin_device_verified=true
+      admin_device_contract_hash="$(admin_device_fingerprint \
+        "${CLOUDFLARE_ACCOUNT_ID}" "${CLOUDFLARE_PI_ADMIN_CIDR}" "${CLOUDFLARE_ADMIN_EMAIL}" \
+        "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" \
+        "${admin_certificate_contract_hash}" "${admin_enrollment_contract_hash}" \
+        "${device_platform_routes_hash}")"
+      printf 'admin_device_contract_sha256=%s\n' "${admin_device_contract_hash}"
+    else
+      mark_unavailable 'admin device contract requires one exact certificate posture rule, one locked include-/32 profile, and exactly one active owner device assigned to it.'
+    fi
+    ;;
+esac
+
+if [[ "${pi_admin_tunnel_healthy}" == true && "${admin_device_verified}" == true ]]; then
+  admin_tunnel_hash="$(admin_tunnel_fingerprint \
+    "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}" \
+    "${admin_enrollment_contract_hash}" "${admin_device_contract_hash}")"
+  printf 'admin_tunnel_contract_sha256=%s\n' "${admin_tunnel_hash}"
+  admin_policy_inputs_hash="$(admin_policy_fingerprint admin-policy-inputs \
+    "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}" "${CLOUDFLARE_PI_ADMIN_CIDR}" \
+    "${CLOUDFLARE_ADMIN_EMAIL}" "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" \
+    "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" "${admin_device_contract_hash}" \
+    "${admin_enrollment_contract_hash}" "${CLOUDFLARE_ADMIN_SESSION_FRESHNESS}" \
+    "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}")"
+  printf 'admin_policy_inputs_contract_sha256=%s\n' "${admin_policy_inputs_hash}"
+fi
+
+if [[ "${admin_policy_contract_requested}" == true ]]; then
+  if [[ "${pi_admin_tunnel_healthy}" == true && "${admin_policy_verified}" == true && "${admin_device_verified}" == true ]]; then
+    admin_policies_verified=true
+    admin_policies_hash="$(admin_policy_fingerprint admin-policies \
       "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}" "${CLOUDFLARE_PI_ADMIN_CIDR}" \
       "${CLOUDFLARE_ADMIN_EMAIL}" "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" \
-      "${posture_contract_hash}" "${CLOUDFLARE_ADMIN_SESSION_FRESHNESS}" \
+      "${CLOUDFLARE_ADMIN_DEVICE_PROFILE_ID}" "${admin_device_contract_hash}" \
+      "${admin_enrollment_contract_hash}" "${CLOUDFLARE_ADMIN_SESSION_FRESHNESS}" \
       "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}")"
-    printf 'admin_policy_inputs_contract_sha256=%s\n' "${admin_policy_inputs_hash}"
-  fi
-
-  if [[ "${admin_policy_contract_requested}" == true ]]; then
-    if [[ "${pi_admin_tunnel_healthy}" == true && "${admin_policy_verified}" == true && "${admin_device_verified}" == true ]]; then
-      admin_policies_verified=true
-      admin_policies_hash="$(admin_policy_fingerprint admin-policies \
-        "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}" "${CLOUDFLARE_PI_ADMIN_CIDR}" \
-        "${CLOUDFLARE_ADMIN_EMAIL}" "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" \
-        "${posture_contract_hash}" "${CLOUDFLARE_ADMIN_SESSION_FRESHNESS}" \
-        "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}")"
-      printf 'admin_policies_contract_sha256=%s\n' "${admin_policies_hash}"
-    else
-      mark_unavailable 'admin-policies contract requires the healthy Tunnel, closed exact L4 policy inventory, and verified device contract.'
-    fi
+    printf 'admin_policies_contract_sha256=%s\n' "${admin_policies_hash}"
+  else
+    mark_unavailable 'admin-policies contract requires the healthy Tunnel, closed exact two-rule L4 inventory, and verified one-device contract.'
   fi
 fi
 
@@ -757,6 +1027,7 @@ else
   route_inventory_count="$(jq -r '.result | length' <<<"${routes}")"
   printf 'count=%s\n' "${route_inventory_count}"
   printf 'private_route_inventory_count=%s\n' "${route_inventory_count}"
+  printf 'unrelated_private_route_inventory_sha256=%s\n' "$(jq -cS --arg network "${CLOUDFLARE_PI_ADMIN_CIDR:-}" '[.result[] | select(.network != $network)] | sort_by(.id)' <<<"${routes}" | digest)"
   if ! jq -e '([.result | group_by(.network)[] | select(length > 1)] | length) == 0' >/dev/null <<<"${routes}"; then
     mark_unavailable 'duplicate or conflicting private route networks exist.'
   fi
@@ -774,59 +1045,103 @@ else
     fi
   fi
   case "${audit_phase}" in
-    admin-tunnel|admin-policies)
+    preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies)
       [[ "${route_inventory_count}" -eq 0 ]] || mark_unavailable 'private routes must remain absent before the isolated admin-route phase.'
       ;;
-    admin-route|admin-api|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
       [[ "${route_inventory_count}" -eq 1 ]] || mark_unavailable 'the complete private-route inventory must contain the exact Pi /32 only.'
       ;;
   esac
 fi
 
 case "${audit_phase}" in
-  admin-route|admin-api|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+  admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
     [[ "${admin_route_verified}" == true ]] || mark_unavailable 'admin-route contract is not exactly one /32 bound to the verified admin Tunnel.'
     ;;
 esac
 
-if [[ "${audit_phase}" == admin-route && "${admin_route_verified}" == true ]]; then
-  admin_api_inputs_hash="$(admin_api_inputs_fingerprint \
-    "${CLOUDFLARE_ACCOUNT_ID}" "${pi_admin_tunnel_id}" "${CLOUDFLARE_PI_ADMIN_CIDR}" \
-    "${CLOUDFLARE_ADMIN_EMAIL}" "${CLOUDFLARE_ADMIN_DEVICE_POSTURE_CHECK_ID}" \
-    "${posture_contract_hash}" "${CLOUDFLARE_ADMIN_SESSION_FRESHNESS}" \
-    "${CLOUDFLARE_PI_ADMIN_SSH_ALLOW_PRECEDENCE}" "${CLOUDFLARE_PI_ADMIN_API_ALLOW_PRECEDENCE}" \
-    "${CLOUDFLARE_PI_ADMIN_BLOCK_PRECEDENCE}" "${admin_policies_hash}" "${admin_route_hash}")"
-  printf 'admin_api_inputs_contract_sha256=%s\n' "${admin_api_inputs_hash}"
-fi
-
 printf '\n## Public edge contract\n'
 public_edge_verified=false
-if [[ -n "${pi_websites_tunnel_id}" ]]; then
-  public_tunnel_status="$(jq -r '.result[] | select(.name == "pi-websites") | (.status // "unknown")' <<<"${tunnels}")"
-  public_config="$(api_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${pi_websites_tunnel_id}/configurations" 2>/dev/null || true)"
-  if [[ "${public_tunnel_status}" == healthy ]] && jq -e '
-    .success == true and
-    (.result.config | keys | sort) == ["ingress"] and
-    .result.config.ingress == [
-      {"hostname": "naranjo.online", "service": "http://naranjo-online.naranjo-online.svc.cluster.local:8080"},
-      {"hostname": "lidersea.com", "service": "http://lidersea-com.lidersea-com.svc.cluster.local:8080"},
-      {"service": "http_status:404"}
-    ]
-  ' >/dev/null 2>&1 <<<"${public_config:-{}}"; then
+naranjo_online_config=''
+lidersea_com_config=''
+if [[ -n "${naranjo_online_tunnel_id}" && -n "${lidersea_com_tunnel_id}" ]]; then
+  naranjo_online_config="$(api_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${naranjo_online_tunnel_id}/configurations" 2>/dev/null || true)"
+  lidersea_com_config="$(api_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${lidersea_com_tunnel_id}/configurations" 2>/dev/null || true)"
+  if [[ "${naranjo_online_tunnel_healthy}" == true && "${lidersea_com_tunnel_healthy}" == true ]] &&
+    CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID="${naranjo_online_tunnel_id}" jq -e '
+      .success == true and .result.account_id == env.CLOUDFLARE_ACCOUNT_ID and
+      .result.tunnel_id == env.CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID and .result.source == "cloudflare" and
+      (.result.config | keys | sort) == ["ingress"] and
+      .result.config.ingress == [
+        {"hostname": "naranjo.online", "service": "http://naranjo-online.naranjo-online.svc.cluster.local:8080"},
+        {"service": "http_status:404"}
+      ]
+    ' >/dev/null 2>&1 <<<"${naranjo_online_config:-{}}" &&
+    CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID="${lidersea_com_tunnel_id}" jq -e '
+      .success == true and .result.account_id == env.CLOUDFLARE_ACCOUNT_ID and
+      .result.tunnel_id == env.CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID and .result.source == "cloudflare" and
+      (.result.config | keys | sort) == ["ingress"] and
+      .result.config.ingress == [
+        {"hostname": "lidersea.com", "service": "http://lidersea-com.lidersea-com.svc.cluster.local:8080"},
+        {"service": "http_status:404"}
+      ]
+    ' >/dev/null 2>&1 <<<"${lidersea_com_config:-{}}"; then
     public_edge_verified=true
-    public_edge_hash="$(public_edge_fingerprint "${CLOUDFLARE_ACCOUNT_ID}" "${pi_websites_tunnel_id}")"
-    printf 'pi-websites tunnel_status=healthy ingress=exact terminal_404=verified\n'
+    public_edge_hash="$(public_edge_fingerprint "${CLOUDFLARE_ACCOUNT_ID}" "${naranjo_online_tunnel_id}" "${lidersea_com_tunnel_id}")"
+    printf 'public_site_tunnels=two-separate-healthy ingress=one-exact-origin-each terminal_404=verified\n'
+    printf 'unrelated_tunnel_configuration_sha256=%s\n' "$(jq -cnS \
+      --argjson naranjo "$(jq -cS '.result.config' <<<"${naranjo_online_config}")" \
+      --argjson lidersea "$(jq -cS '.result.config' <<<"${lidersea_com_config}")" \
+      '{"lidersea.com": $lidersea, "naranjo.online": $naranjo}' | digest)"
     printf 'public_edge_contract_sha256=%s\n' "${public_edge_hash}"
   else
-    printf 'pi-websites tunnel/config=unverified\n'
+    printf 'public_site_tunnels/config=unverified\n'
   fi
 else
-  printf 'pi-websites tunnel/config=absent\n'
+  printf 'public_site_tunnels/config=absent-or-conflict\n'
 fi
 
 case "${audit_phase}" in
-  public-edge|public-dns-naranjo|public-dns-lidersea|all)
-    [[ "${public_edge_verified}" == true ]] || mark_unavailable 'public-edge contract is not one healthy separate Tunnel with two exact origins and terminal 404.'
+  preflight|admin-certificate|admin-enrollment-policy|admin-enrollment-app|admin-device|admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    [[ "${public_edge_verified}" == true ]] || mark_unavailable 'public-edge contract is not two healthy separate per-site Tunnels with one exact origin and terminal 404 each.'
+    ;;
+esac
+
+printf '\n## Admin Tunnel public-exposure negative\n'
+admin_tunnel_public_exposure_verified=false
+if [[ -z "${pi_admin_tunnel_id}" ]]; then
+  printf 'pi_admin_remote_config=absent-with-tunnel\n'
+  admin_tunnel_public_exposure_verified=true
+else
+  pi_admin_config="$(api_get "/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${pi_admin_tunnel_id}/configurations" 2>/dev/null || true)"
+  admin_public_dns_reference_count=0
+  admin_dns_inventory_complete=true
+  for zone_id in "${CLOUDFLARE_LIDERSEA_COM_ZONE_ID}" "${CLOUDFLARE_NARANJO_ONLINE_ZONE_ID}"; do
+    admin_dns_records="$(api_get_complete "/zones/${zone_id}/dns_records" 2>/dev/null || true)"
+    if ! jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${admin_dns_records:-{}}"; then
+      admin_dns_inventory_complete=false
+      continue
+    fi
+    current_admin_dns_reference_count="$(CLOUDFLARE_AUDIT_ADMIN_TUNNEL_ID="${pi_admin_tunnel_id}" jq -r \
+      '[.result[] | select(.type == "CNAME" and .content == (env.CLOUDFLARE_AUDIT_ADMIN_TUNNEL_ID + ".cfargotunnel.com"))] | length' \
+      <<<"${admin_dns_records}")"
+    admin_public_dns_reference_count=$((admin_public_dns_reference_count + current_admin_dns_reference_count))
+  done
+  if [[ "${admin_dns_inventory_complete}" == true && "${admin_public_dns_reference_count}" -eq 0 ]] &&
+    CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID="${pi_admin_tunnel_id}" jq -e '
+      .success == true and .result.account_id == env.CLOUDFLARE_ACCOUNT_ID and
+      .result.tunnel_id == env.CLOUDFLARE_AUDIT_EXPECTED_TUNNEL_ID and .result.source == "cloudflare" and
+      ((.result.config // null) == null or .result.config == {})
+    ' >/dev/null 2>&1 <<<"${pi_admin_config:-{}}"; then
+    admin_tunnel_public_exposure_verified=true
+    printf 'pi_admin_remote_config=no-public-ingress dns_references=0\n'
+  else
+    printf 'pi_admin_remote_config_or_dns_negative=unverified\n'
+  fi
+fi
+case "${audit_phase}" in
+  admin-tunnel|admin-policies|admin-route|public-edge-preflight|public-edge|public-dns-naranjo|public-dns-lidersea|all)
+    [[ "${admin_tunnel_public_exposure_verified}" == true ]] || mark_unavailable 'pi-admin has a public ingress configuration, public DNS reference, or an incomplete negative audit.'
     ;;
 esac
 
@@ -836,6 +1151,11 @@ zone_ids=("${CLOUDFLARE_LIDERSEA_COM_ZONE_ID}" "${CLOUDFLARE_NARANJO_ONLINE_ZONE
 for index in "${!zone_names[@]}"; do
   zone_name="${zone_names[$index]}"
   zone_id="${zone_ids[$index]}"
+  if [[ "${zone_name}" == naranjo.online ]]; then
+    public_tunnel_id="${naranjo_online_tunnel_id}"
+  else
+    public_tunnel_id="${lidersea_com_tunnel_id}"
+  fi
   apex_state=unavailable
   apex_records="$(api_get_complete "/zones/${zone_id}/dns_records?name=${zone_name}" 2>/dev/null || true)"
   if jq -e '.success == true and (.result | type == "array")' >/dev/null 2>&1 <<<"${apex_records:-{}}"; then
@@ -843,7 +1163,7 @@ for index in "${!zone_names[@]}"; do
     if [[ "${address_record_count}" -eq 0 ]]; then
       apex_state=absent
     elif [[ "${public_edge_verified}" == true ]] &&
-      CLOUDFLARE_AUDIT_PUBLIC_TUNNEL_ID="${pi_websites_tunnel_id}" jq -e --arg hostname "${zone_name}" '
+      CLOUDFLARE_AUDIT_PUBLIC_TUNNEL_ID="${public_tunnel_id}" jq -e --arg hostname "${zone_name}" '
         [.result[] | select(.name == $hostname and (.type == "A" or .type == "AAAA" or .type == "CNAME"))] as $address_records |
         ($address_records | length) == 1 and
         $address_records[0].type == "CNAME" and
@@ -869,11 +1189,12 @@ for index in "${!zone_names[@]}"; do
   printf '%s=%s\n' "${apex_label}" "${apex_state}"
 
   if [[ "${public_edge_verified}" == true && ("${apex_state}" == absent || "${apex_state}" == exact) ]]; then
-    printf '%s=%s\n' "${binding_label}" "$(public_dns_binding_fingerprint "${binding_phase}" "${CLOUDFLARE_ACCOUNT_ID}" "${pi_websites_tunnel_id}" "${zone_id}" "${zone_name}")"
+    printf '%s=%s\n' "${binding_label}" "$(public_dns_binding_fingerprint "${binding_phase}" "${CLOUDFLARE_ACCOUNT_ID}" "${public_tunnel_id}" "${zone_id}" "${zone_name}")"
   fi
 
   expected_apex_state=''
   case "${audit_phase}:${zone_name}" in
+    preflight:*|admin-certificate:*|admin-enrollment-policy:*|admin-enrollment-app:*|admin-device:*|admin-tunnel:*|admin-policies:*|admin-route:*) expected_apex_state=exact ;;
     public-edge-preflight:*|public-edge:*) expected_apex_state=absent ;;
     public-dns-naranjo:naranjo.online) expected_apex_state=exact ;;
     public-dns-naranjo:lidersea.com) expected_apex_state=absent ;;

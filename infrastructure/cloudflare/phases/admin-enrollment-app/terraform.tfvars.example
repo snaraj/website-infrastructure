@@ -1,0 +1,6 @@
+approve_admin_enrollment_app_phase                  = false
+cloudflare_account_id                               = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+owner_enrollment_policy_id                          = "REPLACE_WITH_OWNER_ENROLLMENT_POLICY_UUID"
+admin_identity_provider_id                          = "REPLACE_WITH_SOLE_AUDITED_IDP_UUID"
+admin_email                                         = "REPLACE_WITH_EXACT_OWNER_IDENTITY"
+verified_admin_enrollment_policy_contract_sha256    = "REPLACE_WITH_POLICY_POST_AUDIT_SHA256"

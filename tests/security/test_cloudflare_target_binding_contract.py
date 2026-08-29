@@ -52,10 +52,13 @@ if BASH is None and os.name == "nt":
         BASH = str(candidate)
 
 PHASES = (
+    "admin-certificate",
+    "admin-enrollment-policy",
+    "admin-enrollment-app",
+    "admin-device",
     "admin-tunnel",
     "admin-policies",
     "admin-route",
-    "admin-api",
     "site-naranjo-online",
     "site-lidersea-com",
 )
@@ -89,13 +92,23 @@ SITE_IDENTITY = {
 }
 
 EXPECTED_RESOURCES = {
+    "admin-certificate": {"cloudflare_mtls_certificate.pi_admin_owner_ca"},
+    "admin-enrollment-policy": {
+        "cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment"
+    },
+    "admin-enrollment-app": {
+        "cloudflare_zero_trust_access_application.pi_admin_owner_enrollment"
+    },
+    "admin-device": {
+        "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate",
+        "cloudflare_zero_trust_device_custom_profile.pi_admin_owner",
+    },
     "admin-tunnel": {"cloudflare_zero_trust_tunnel_cloudflared.pi_admin"},
     "admin-policies": {
         "cloudflare_zero_trust_gateway_policy.pi_admin_block",
         "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow",
     },
     "admin-route": {"cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin"},
-    "admin-api": {"cloudflare_zero_trust_gateway_policy.pi_admin_api_allow"},
 }
 for _phase, _identity in SITE_IDENTITY.items():
     _slug = _identity["slug"]
@@ -123,7 +136,7 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             for phase in PHASES
         }
 
-    def test_exactly_six_nonempty_phase_roots_exist(self):
+    def test_exactly_nine_nonempty_phase_roots_exist(self):
         observed = {
             path.name
             for path in PHASE_ROOT.iterdir()
@@ -175,7 +188,9 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             "was attempted.\n"
         )
         self.assertTrue(AUDIT.startswith("#!/bin/bash\n"))
-        self.assertIn("readonly REVIEWED_BLOB_LAUNCHER_AVAILABLE=no", AUDIT)
+        self.assertIn('"${REVIEWED_BLOB_LAUNCHER_AVAILABLE:-}" != yes', AUDIT)
+        self.assertIn('"${REVIEWED_BLOB_OPERATION:-}" != cloudflare-audit', AUDIT)
+        self.assertIn("cloudflare-reviewed-op", AUDIT)
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("required=("))
         self.assertLess(AUDIT.index("BLOCKED authenticated Cloudflare audit"), AUDIT.index("CLOUDFLARE_API_TOKEN:?"))
         # The shared fail-closed floor rather than a local re-implementation
@@ -219,25 +234,23 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
                 )
                 self.assertNotIn("cloudflare_zero_trust_gateway_policy", text)
 
-    def test_admin_policies_precede_route_and_api_is_separate(self):
+    def test_admin_policies_precede_route_and_kubernetes_api_stays_closed(self):
         policies = (PHASE_ROOT / "admin-policies" / "main.tf").read_text(
             encoding="utf-8"
         )
         route = (PHASE_ROOT / "admin-route" / "main.tf").read_text(
             encoding="utf-8"
         )
-        api = (PHASE_ROOT / "admin-api" / "main.tf").read_text(
-            encoding="utf-8"
-        )
         self.assertIn("net.dst.port in {22}", policies)
         self.assertNotIn("6443", policies)
         self.assertIn("verified_admin_policies_contract_sha256", route)
-        self.assertIn("verified_admin_posture_contract_sha256", policies)
+        self.assertIn("verified_admin_device_contract_sha256", policies)
+        self.assertIn("verified_admin_enrollment_contract_sha256", policies)
+        self.assertIn("admin_device_profile_id", policies)
         self.assertIn("verified block and SSH-only allow required", route)
-        self.assertIn("net.dst.port in {6443}", api)
-        self.assertIn("enable_kubernetes_api_access", api)
-        self.assertIn("verified_admin_route_contract_sha256", api)
-        self.assertIn("verified_admin_api_inputs_contract_sha256", api)
+        self.assertFalse((PHASE_ROOT / "admin-api").exists())
+        self.assertNotIn("admin-api", README)
+        self.assertNotIn("net.dst.port in {6443}", POLICY)
 
     def test_each_site_root_is_one_tunnel_one_apex_and_no_other_site(self):
         """One website per root: its own Tunnel, its own apex, nothing shared.
@@ -402,7 +415,9 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             "cross-site reference is forbidden in",
             "zone setting %s must equal %v in %s",
             'valid_contract_hash(variable_value("verified_admin_policy_inputs_contract_sha256"))',
-            'valid_contract_hash(variable_value("verified_admin_api_inputs_contract_sha256"))',
+            'valid_contract_hash(variable_value("verified_admin_certificate_contract_sha256"))',
+            'valid_contract_hash(variable_value("verified_admin_enrollment_contract_sha256"))',
+            'valid_contract_hash(variable_value("verified_admin_device_contract_sha256"))',
             'change.change.actions != ["create"]',
             'count(configured_module_calls) != 0',
             'count(object.get(resource, "provisioners", [])) != 0',
@@ -456,7 +471,10 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             "validate-windows-credential-workspace.ps1",
             "powershell.exe",
             "admin_policy_inputs_contract_sha256",
-            "admin_api_inputs_contract_sha256",
+            "admin_certificate_contract_sha256",
+            "admin_enrollment_contract_sha256",
+            "admin_device_contract_sha256",
+            "admin_tunnel_contract_sha256",
             "admin-recovery-session-v1",
             "operator-attestation-plus-independent-challenges",
             "recovery_evidence_sha256",
@@ -517,27 +535,31 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
             "admin_route_verified=true",
             "public_edge_verified=true",
             "net.dst.port in {22}",
-            "net.dst.port in {6443}",
             "devices/posture",
             "devices/policies",
             "devices/physical-devices",
             "api_get_single_page",
-            "service_mode_v2.mode == \"warp\"",
+            "api_get_cursor_complete_one_page",
+            '{mode: "warp"}',
             "apex_state=conflict",
             "admin_policies_contract_sha256",
             "admin_policy_inputs_contract_sha256",
-            "admin_posture_contract_sha256",
+            "admin_certificate_contract_sha256",
+            "admin_enrollment_policy_contract_sha256",
+            "admin_enrollment_contract_sha256",
+            "admin_device_contract_sha256",
+            "admin_tunnel_contract_sha256",
             "admin_route_contract_sha256",
-            "admin_api_inputs_contract_sha256",
             "public_edge_contract_sha256",
             "pi_admin_tunnel_activation_state",
             "gateway_l4_inventory_count",
             "gateway_policy_inventory_count",
-            "pi_admin_api_policy_activation_state",
+            "pi_admin_device_posture_activation_state",
+            "pi_admin_device_profile_activation_state",
             "public-edge-preflight",
             '(map(.id) | unique | length) == length',
             'verification_canonical',
-            '.expiration == "5m" and .schedule == "5m"',
+            '.expiration == "10m" and .schedule == "5m"',
             "public_dns_naranjo_activation_state",
             "public_dns_lidersea_activation_state",
             'client_certificate_v2',
@@ -550,13 +572,41 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         ):
             self.assertIn(fragment, AUDIT)
 
+    def test_audit_closes_the_exact_three_tunnel_topology(self):
+        """Admin work must preserve both independent live website Tunnels."""
+
+        self.assertNotIn("pi-websites", AUDIT)
+        for fragment in (
+            'select(.name == "naranjo-online")',
+            'select(.name == "lidersea-com")',
+            "unrelated_tunnel_inventory_sha256",
+            "unrelated_tunnel_configuration_sha256",
+            "stable_tunnel_inventory_sha256",
+            '"${tunnel_inventory_count}" -ne 2',
+            '"${tunnel_inventory_count}" -ne 3',
+            "two separate public site Tunnels",
+            "admin and per-site public Tunnel identities are not all separate",
+            "pi_admin_remote_config=no-public-ingress dns_references=0",
+            ".result.config == {}",
+        ):
+            self.assertIn(fragment, AUDIT)
+
+        fingerprint = re.search(
+            r"public_edge_fingerprint\(\) \{(?P<body>.*?)\n\}",
+            AUDIT,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(fingerprint)
+        self.assertIn("public_domain[lidersea.com]", fingerprint.group("body"))
+        self.assertIn("public_domain[naranjo.online]", fingerprint.group("body"))
+
     def test_docs_admit_provider_permission_reach_and_require_jit_compensation(self):
         for fragment in (
             "cannot be restricted",
             "JIT",
             "source-IP",
             "revocation",
-            "six",
+            "nine",
             "site-naranjo-online",
             "site-lidersea-com",
         ):

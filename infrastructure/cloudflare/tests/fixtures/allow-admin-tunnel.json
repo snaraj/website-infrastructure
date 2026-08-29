@@ -2,7 +2,9 @@
   "codex_contract": {"phase": "admin-tunnel"},
   "variables": {
     "approve_admin_tunnel_phase": {"value": true},
-    "cloudflare_account_id": {"value": "11111111111111111111111111111111"}
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "verified_admin_enrollment_contract_sha256": {"value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "verified_admin_device_contract_sha256": {"value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
   },
   "resource_changes": [{
     "address": "cloudflare_zero_trust_tunnel_cloudflared.pi_admin",

@@ -62,13 +62,33 @@ variable "admin_device_posture_check_id" {
   }
 }
 
-variable "verified_admin_posture_contract_sha256" {
-  description = "Exact independently approved certificate-v2 posture contract used by the audited policies."
+variable "admin_device_profile_id" {
+  description = "Exact audited locked owner device-profile UUID carried only to bind the policy contract."
   type        = string
   sensitive   = true
   validation {
-    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_posture_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_posture_contract_sha256))
-    error_message = "verified_admin_posture_contract_sha256 must be one nonzero lowercase SHA-256."
+    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", var.admin_device_profile_id))
+    error_message = "admin_device_profile_id must be one real lowercase UUID."
+  }
+}
+
+variable "verified_admin_device_contract_sha256" {
+  description = "Exact independently approved certificate posture and locked owner-profile contract used by the audited policies."
+  type        = string
+  sensitive   = true
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_device_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_device_contract_sha256))
+    error_message = "verified_admin_device_contract_sha256 must be one nonzero lowercase SHA-256."
+  }
+}
+
+variable "verified_admin_enrollment_contract_sha256" {
+  description = "Exact independently approved owner-only MFA enrollment contract."
+  type        = string
+  sensitive   = true
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.verified_admin_enrollment_contract_sha256)) && can(regex("[1-9a-f]", var.verified_admin_enrollment_contract_sha256))
+    error_message = "verified_admin_enrollment_contract_sha256 must be one nonzero lowercase SHA-256."
   }
 }
 

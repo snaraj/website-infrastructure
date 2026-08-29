@@ -279,7 +279,7 @@ def cost_policy_violations(cost_policy_text):
     pins = (
         ("defaultDecision", "defaultDecision: deny"),
         ("infrastructureCostUsd", "infrastructureCostUsd: 0"),
-        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 23"),
+        ("maximumManagedResourceCount", "  maximumManagedResourceCount: 27"),
     )
     lines = cost_policy_text.splitlines()
     violations = []
@@ -375,16 +375,16 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
         cls.cost_policy = COST_POLICY_PATH.read_text(encoding="utf-8")
         cls.allowed_types = rego_allowed_resource_types(cls.rego)
 
-    def test_rego_extraction_yields_the_closed_six_type_allowlist(self):
+    def test_rego_extraction_yields_the_closed_eleven_type_allowlist(self):
         """The extraction must produce the documented closed set shape.
 
-        Six, not five: the two website roots carry ``cloudflare_zone_setting``
-        for the zone security target state. It is a free zone-level control on
-        every Cloudflare plan, so the zero-cost boundary is unchanged; the
-        count is pinned here so a seventh type cannot arrive unnoticed.
+        Eleven types cover the two website roots plus the owner certificate,
+        WARP enrollment, and one-device posture/profile controls. Every type
+        remains in Cloudflare's zero-cost contract; the count is pinned so a
+        twelfth type cannot arrive unnoticed.
         """
 
-        self.assertEqual(len(self.allowed_types), 6)
+        self.assertEqual(len(self.allowed_types), 11)
         for resource_type in self.allowed_types:
             with self.subTest(resource_type=resource_type):
                 self.assertRegex(resource_type, r"^cloudflare_[a-z0-9_]+$")
@@ -432,13 +432,18 @@ class CloudflareZeroSpendAllowlistTests(unittest.TestCase):
 
         self.assertEqual(cost_policy_violations(self.cost_policy), [])
 
-    def test_the_zone_setting_type_is_the_only_allowlist_growth(self):
+    def test_closed_resource_type_set_is_exact(self):
         """Name the exact closed set so a silent widening fails here."""
 
         self.assertEqual(
             self.allowed_types,
             frozenset({
+                "cloudflare_mtls_certificate",
                 "cloudflare_dns_record",
+                "cloudflare_zero_trust_access_application",
+                "cloudflare_zero_trust_access_policy",
+                "cloudflare_zero_trust_device_custom_profile",
+                "cloudflare_zero_trust_device_posture_rule",
                 "cloudflare_zero_trust_gateway_policy",
                 "cloudflare_zero_trust_tunnel_cloudflared",
                 "cloudflare_zero_trust_tunnel_cloudflared_config",
@@ -703,8 +708,8 @@ class CloudflareZeroSpendDenyPathTests(unittest.TestCase):
             ("defaultDecision: deny", "defaultDecision: allow"),
             ("infrastructureCostUsd: 0", "infrastructureCostUsd: 1"),
             (
-                "  maximumManagedResourceCount: 23",
-                "  maximumManagedResourceCount: 24",
+                "  maximumManagedResourceCount: 27",
+                "  maximumManagedResourceCount: 28",
             ),
             ("defaultDecision: deny", ""),
             (

@@ -1,21 +1,22 @@
 schemaVersion: 1
-architectureContractVersion: 4
+architectureContractVersion: 5
 defaultDecision: deny
 infrastructureCostUsd: 0
 
 phaseArchitecture:
-  requiredIndependentRootCount: 6
+  requiredIndependentRootCount: 9
   requiredRootsInCeremonyOrder:
+    - admin-certificate
+    - admin-enrollment-policy
+    - admin-enrollment-app
+    - admin-device
     - admin-tunnel
     - admin-policies
     - admin-route
-    - admin-api
     - site-naranjo-online
     - site-lidersea-com
   finalActivationPhase: site-lidersea-com
-  baseManagedResourceCount: 22
-  optionalAdminApiResourceCount: 1
-  maximumManagedResourceCount: 23
+  maximumManagedResourceCount: 27
   combinedRoot: forbidden
   sharedState: forbidden
   sharedApplyToken: forbidden
@@ -29,10 +30,13 @@ phaseArchitecture:
   initialOnboardingAction: create-only
   initialOnboardingPriorObject: absent
   administrativeOnboardingPhases:
+    - admin-certificate
+    - admin-enrollment-policy
+    - admin-enrollment-app
+    - admin-device
     - admin-tunnel
     - admin-policies
     - admin-route
-    - admin-api
   websiteAdoptionPhases:
     - site-naranjo-online
     - site-lidersea-com
@@ -56,6 +60,9 @@ phaseArchitecture:
 credentialReach:
   planIntentIsTokenBoundary: false
   exactTunnelApiTokenScope: unsupported
+  exactCertificateApiTokenScope: unsupported
+  exactAccessPolicyApiTokenScope: unsupported
+  exactDeviceConfigurationApiTokenScope: unsupported
   exactGatewayPolicyApiTokenScope: unsupported
   exactPrivateRouteApiTokenScope: unsupported
   exactDnsRecordApiTokenScope: unsupported
@@ -80,6 +87,98 @@ credentialReach:
     - redacted-revocation-receipt
 
 phaseContracts:
+  admin-certificate:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_mtls_certificate.pi_admin_owner_ca
+    privateKeyUpload: forbidden
+    exactCertificateRole: owner-device-signing-ca
+    requiredBeforeExit:
+      - complete-account-mtls-certificate-audit
+      - exact-public-certificate-sha256
+      - no-unrelated-certificate-change
+      - admin-certificate-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: all-account-mtls-certificates
+    exactPlanIntent: one-owner-device-signing-ca
+
+  admin-enrollment-policy:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment
+    exactIdentityCount: 1
+    exactMfaAuthenticators:
+      - biometrics
+      - security-key
+    maximumMfaSessionMinutes: 5
+    maximumEnrollmentSessionMinutes: 15
+    requiredBeforeExit:
+      - complete-account-access-policy-audit
+      - no-unrelated-access-policy-change
+      - admin-enrollment-policy-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: all-access-policies-in-account
+    exactPlanIntent: owner-only-mfa-enrollment-policy
+
+  admin-enrollment-app:
+    required: true
+    exactResourceCount: 1
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_access_application.pi_admin_owner_enrollment
+    requiredInputContracts:
+      - admin-enrollment-policy-contract-sha256
+    exactApplicationType: warp
+    exactIdentityProviderCount: 1
+    exactPolicyCount: 1
+    automaticIdentityRedirect: required
+    requiredBeforeExit:
+      - complete-account-access-application-audit
+      - no-unrelated-access-application-change
+      - admin-enrollment-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: all-access-applications-in-account
+    exactPlanIntent: one-owner-warp-enrollment-application
+
+  admin-device:
+    required: true
+    exactResourceCount: 2
+    allowedResourceAddresses:
+      - cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate
+      - cloudflare_zero_trust_device_custom_profile.pi_admin_owner
+    requiredInputContracts:
+      - admin-certificate-contract-sha256
+      - admin-enrollment-contract-sha256
+    exactPosture:
+      type: client-certificate-v2
+      operatingSystem: mac
+      privateKeyPresence: required
+      trustStore: system
+      extendedKeyUsage: client-auth
+      scheduleMinutes: 5
+      expirationMinutes: 10
+    exactProfile:
+      identityCount: 1
+      mode: warp
+      tunnelProtocol: masque
+      includedRoutes: one-rfc1918-ipv4-32
+      fallback: disabled
+      interfaceIpDnsRegistration: disabled
+      modeSwitch: locked
+      organizationLeave: forbidden
+    requiredBeforeExit:
+      - complete-posture-and-device-profile-audit
+      - no-unrelated-device-configuration-change
+      - admin-device-contract-sha256
+      - verified-token-revocation-receipt
+    cloudflareTokenResourceSelector: selected-account
+    unavoidableWriteReach: all-zero-trust-device-configuration-in-account
+    exactPlanIntent: owner-certificate-posture-and-locked-pi-only-profile
+
   admin-tunnel:
     required: true
     exactResourceCount: 1
@@ -90,6 +189,9 @@ phaseContracts:
       - cloudflare_zero_trust_tunnel_cloudflared_route
       - cloudflare_zero_trust_tunnel_cloudflared_config
       - cloudflare_dns_record
+    requiredInputContracts:
+      - admin-enrollment-contract-sha256
+      - admin-device-contract-sha256
     requiredBeforeExit:
       - complete-selected-account-tunnel-audit
       - no-unrelated-tunnel-change
@@ -112,7 +214,8 @@ phaseContracts:
       - cloudflare_dns_record
     requiredInputContracts:
       - admin-tunnel-contract-sha256
-      - independently-approved-admin-posture-contract-sha256
+      - admin-enrollment-contract-sha256
+      - admin-device-contract-sha256
       - admin-policy-inputs-contract-sha256
     requiredBeforeExit:
       - exact-pi-catch-all-block-enabled
@@ -134,7 +237,8 @@ phaseContracts:
     allowedResourceAddresses:
       - cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin
     requiredInputContracts:
-      - admin-posture-contract-sha256
+      - admin-enrollment-contract-sha256
+      - admin-device-contract-sha256
       - admin-policies-contract-sha256
     exactNetworkShape: one-rfc1918-ipv4-32
     exactTunnel: pi-admin
@@ -149,45 +253,10 @@ phaseContracts:
       - complete-relevant-route-audit
       - no-unrelated-route-change
       - admin-route-contract-sha256
-      - admin-api-inputs-contract-sha256
       - verified-token-revocation-receipt
     cloudflareTokenResourceSelector: selected-account
     unavoidableWriteReach: applicable-private-routes-across-selected-account
     exactPlanIntent: one-pi-32-through-pi-admin
-
-  admin-api:
-    required: false
-    defaultOff: true
-    separateApproval: required
-    exactResourceCount: 1
-    allowedResourceAddresses:
-      - cloudflare_zero_trust_gateway_policy.pi_admin_api_allow
-    requiredInputContracts:
-      - admin-posture-contract-sha256
-      - admin-policies-contract-sha256
-      - admin-route-contract-sha256
-      - admin-api-inputs-contract-sha256
-    requiredRecoveryEvidence:
-      schema: admin-recovery-session-v1
-      maximumAgeSeconds: 300
-      physicalConsoleChallenge: required
-      simultaneousDistinctRetainedSessions: 2
-      separateFreshLoginChallenge: required
-      gateEvidenceRole: operator-attestation-not-connectivity-proof
-    exactTraffic:
-      protocol: tcp
-      destinationPorts:
-        - 6443
-    requiredPrecedence:
-      after: pi-admin-ssh-allow
-      before: pi-admin-block
-    requiredBeforeExit:
-      - complete-relevant-policy-audit
-      - no-unrelated-policy-change
-      - verified-token-revocation-receipt
-    cloudflareTokenResourceSelector: selected-account
-    unavoidableWriteReach: applicable-gateway-policies-across-selected-account
-    exactPlanIntent: pi-admin-api-allow-only
 
   site-naranjo-online:
     required: true
@@ -300,7 +369,7 @@ phaseContracts:
 phaseCustody:
   state:
     oneEncryptedProtectedPathPerRoot: required
-    expectedIndependentStateCount: 6
+    expectedIndependentStateCount: 9
     parsedLocalBackendMetadataAndExactPath: required
     currentPhaseStateStableHandleAndSha256: required-when-present
     unchangedParentAndAbsentLeafProof: required-for-first-create-absence
@@ -333,7 +402,7 @@ phaseCustody:
     applyAuthorization: false
   credentials:
     oneShortLivedApplyTokenPerPhase: required
-    expectedDistinctWriteTokenCountForAllSixPhases: 6
+    expectedDistinctWriteTokenCountForAllNinePhases: 9
     applyTokenReuseAcrossPhases: forbidden
     simultaneousWriteTokens: forbidden
     readOnlyAuditTokenSeparate: required
@@ -393,7 +462,8 @@ tunnelSeparation:
 
 hostSafetyBoundary:
   cloudflarePhaseMayMutateUfw: false
-  cloudflarePhaseMayMutateWireGuardOrWarpEnrollment: false
+  cloudflarePhaseMayMutateWireGuard: false
+  cloudflarePhaseMayMutateWarpEnrollment: reviewed-admin-enrollment-phases-only
   cloudflarePhaseMayMutateSsh: false
   cloudflarePhaseMayMutateTor: false
   recoveryAndTwoSessionsRequiredBeforeRouteOrHostNetworkMutation: true
@@ -433,8 +503,13 @@ authorizedCharges:
     classification: separate-from-infrastructure
 
 allowedResourceTypes:
+  - cloudflare_mtls_certificate
   - cloudflare_dns_record
   - cloudflare_zone_setting
+  - cloudflare_zero_trust_access_application
+  - cloudflare_zero_trust_access_policy
+  - cloudflare_zero_trust_device_custom_profile
+  - cloudflare_zero_trust_device_posture_rule
   - cloudflare_zero_trust_gateway_policy
   - cloudflare_zero_trust_tunnel_cloudflared
   - cloudflare_zero_trust_tunnel_cloudflared_config

@@ -16,23 +16,26 @@ source-IP restriction, token ID, and active status. After apply, revoke the
 write token and prove that same bearer is rejected using a separate credential;
 then run the post-apply audit with the separate read-only audit token before
 completing this receipt and running this validator. A postflight
-PASS never retroactively approves an operation. The offline plan gate now
-requires a protected five-minute `cloudflare-preapply-manual-v1` record covering
-the reviewed Free/zero-paid entitlement, account MFA/inventory, phase-exact JIT
+PASS never retroactively approves an operation. The offline plan gate requires
+a protected five-minute `cloudflare-preapply-manual-v1` record covering the
+reviewed Free/zero-paid entitlement, account MFA/inventory, phase-exact JIT
 scope, source-IP policy, maximum 30-minute lifetime, and recovery gates. Its
-`active_status_verified` field is explicitly an operator assertion; it cannot
-replace the separately machine-produced live preflight. That strict live
-preflight gate and a child-process-only OpenTofu credential launcher are not
-implemented yet, so live apply remains `NO-GO`.
+`active_status_verified` field is explicitly an operator assertion.
 
-The current checkout scripts are not a trusted launcher.
-`scripts/cloudflare-audit.sh` is deliberately code-blocked before token or
-network access until an exact reviewed blob can be launched from a trusted,
-immutable source with a clean environment. `scripts/cloudflare-plan-gate.sh`
-remains useful for credential-free offline tests, but executing it from a
-mutable worktree cannot produce authoritative live-custody evidence. The same
-trusted reviewed-blob launcher is a deployment prerequisite for both
-ceremonies; a local PASS before it exists does not lift the `NO-GO`.
+The seven administrative roots now use the separate fixed root-owned macOS
+launcher and `cloudflare_root_transaction.py`, not this manually authored
+receipt. That transaction machine-validates live token policy, journals the
+credential before planning, executes one exact create-only saved plan, proves
+revocation through both bearer and metadata views, and closes complete V2 audit
+logs from issuance onward. This receipt remains the postflight schema for the
+two website-adoption roots. Their authenticated import/apply transaction is not
+implemented, so they remain `NO-GO`.
+
+Current checkout scripts are never trusted launchers. `cloudflare-audit.sh`
+reads a token or contacts Cloudflare only when extracted as an exact
+protected-main blob by the installed launcher with a clean environment. The
+offline plan gate remains useful for credential-free review, but a PASS from a
+mutable worktree is non-authoritative for live custody.
 
 Run the ceremony only inside the protected workspace described in
 `windows-credential-ceremony.md`. The receipt path must be absolute, outside the
@@ -63,10 +66,13 @@ Write` in addition to `DNS Write`, and a token missing it fails mid-ceremony.
 
 | Phase | Token permission | Cloudflare resource selector | Unavoidable permission reach |
 |---|---|---|---|
+| `admin-certificate` | `SSL and Certificates Write` | exact account | all mTLS certificates in the account |
+| `admin-enrollment-policy` | `Access: Apps and Policies Write` | exact account | all Access policies in the account |
+| `admin-enrollment-app` | `Access: Apps and Policies Write` | exact account | all Access applications in the account |
+| `admin-device` | `Zero Trust Write` | exact account | all Zero Trust device posture and profile configuration in the account |
 | `admin-tunnel` | `Cloudflare One Connector: cloudflared Write` | exact account | all Cloudflared connectors and Tunnels in the account |
 | `admin-policies` | `Zero Trust Write` | exact account | all Zero Trust resources in the account |
 | `admin-route` | `Cloudflare One Networks Write` | exact account | all private routes and virtual networks in the account |
-| `admin-api` | `Zero Trust Write` | exact account | all Zero Trust resources in the account |
 | `site-naranjo-online` | `Cloudflare One Connector: cloudflared Write` **and** `DNS Write` **and** `Zone Settings Write` | exact account for the connector permission; the `naranjo.online` zone for both zone permissions | all Cloudflared connectors and Tunnels in the account; every DNS record and every zone setting in that one zone |
 | `site-lidersea-com` | `Cloudflare One Connector: cloudflared Write` **and** `DNS Write` **and** `Zone Settings Write` | exact account for the connector permission; the `lidersea.com` zone for both zone permissions | all Cloudflared connectors and Tunnels in the account; every DNS record and every zone setting in that one zone |
 | `audit` | the exact read set below | exact account and all account zones | all listed read surfaces |
@@ -78,13 +84,21 @@ Cloudflare authorization that the API does not offer. This unavoidable reach is
 why every token is source-IP restricted, just in time, MFA reviewed, and revoked
 immediately after one phase.
 
-The audit token's exact ordered permission set is `Billing Read`, `Zone Read`,
-`DNS Read`, `Cloudflare One Connector: cloudflared Read`, `Cloudflare One
-Networks Read`, `Zero Trust Read`, `Access: Apps and Policies Read`, and `Access:
-Audit Logs Read`. It has no write permission. Apply tokens live for no more than **30
-minutes**; the audit token lives for no more than **60 minutes**. Both user-owned
-and account-owned tokens are permitted, but the preflight endpoint kind must
-match ownership: `user-token-verify` or `account-token-verify`.
+The audit token's exact ordered permission set is `API Tokens Read`, `Account
+Settings Read`, `Billing Read`, `Account: SSL and Certificates Read`,
+`Cloudflare One Connector: cloudflared Read`, `Cloudflare One Networks Read`,
+`Zero Trust Read`, `Access: Apps and Policies Read`, `Access: Audit Logs Read`,
+`Access: Organizations, Identity Providers, and Groups Read`, `Zone Read`, and
+`DNS Read`. It has no write permission. `API Tokens Read` is user-scoped and is
+required to inspect and later prove revocation of the exact JIT token; `Account
+Settings Read` is required by Cloudflare's V2 account-audit-log endpoint. The
+zone permissions cover all zones in the exact account so an unexpected third
+zone cannot be hidden by authorization filtering. Apply tokens live for no more
+than **30 minutes**; the audit token lives for no more than **60 minutes**. The
+trusted macOS transaction uses a user-owned audit token so it can inspect the
+user-owned JIT tokens; an account-owned token is not accepted by that launcher.
+Its User resource must also equal the protected owner-user ID; another account
+member's otherwise equivalent token is rejected.
 
 No phase token may include Billing Write, Registrar Write, or API Tokens Write.
 It has no Git write, cluster, or Tunnel-runtime connection authority. Connector
@@ -107,7 +121,7 @@ or raw Cloudflare responses.
 
 The top-level object contains exactly:
 
-- `schema`, `phase`, and `operation` (`apply` for the seven write phases,
+- `schema`, `phase`, and `operation` (`apply` for the nine write phases,
   `audit` for the read phase);
 - `token_policy` with owner and endpoint kinds, exact scope/permission/reach
   arrays, canonical UTC-second issue/expiry times, `token_id_sha256`,

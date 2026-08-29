@@ -37,10 +37,13 @@ MAX_RECOVERY_AGE_SECONDS = 300
 MAX_WRITE_TOKEN_TTL_SECONDS = 1800
 
 PHASES = (
+    "admin-certificate",
+    "admin-enrollment-policy",
+    "admin-enrollment-app",
+    "admin-device",
     "admin-tunnel",
     "admin-policies",
     "admin-route",
-    "admin-api",
     "public-edge",
     "public-dns-naranjo",
     "public-dns-lidersea",
@@ -50,6 +53,26 @@ PHASES = (
 # validate_cloudflare_token_receipt.py. It describes unavoidable Cloudflare
 # authorization reach, not the narrower object intent enforced by the plan.
 PHASE_POLICY = {
+    "admin-certificate": {
+        "resource_scope": "exact-account",
+        "permissions": ("SSL and Certificates Write",),
+        "unavoidable_reach": ("all-mtls-certificates-in-account",),
+    },
+    "admin-enrollment-policy": {
+        "resource_scope": "exact-account",
+        "permissions": ("Access: Apps and Policies Write",),
+        "unavoidable_reach": ("all-access-policies-in-account",),
+    },
+    "admin-enrollment-app": {
+        "resource_scope": "exact-account",
+        "permissions": ("Access: Apps and Policies Write",),
+        "unavoidable_reach": ("all-access-applications-in-account",),
+    },
+    "admin-device": {
+        "resource_scope": "exact-account",
+        "permissions": ("Zero Trust Write",),
+        "unavoidable_reach": ("all-zero-trust-device-configuration-in-account",),
+    },
     "admin-tunnel": {
         "resource_scope": "exact-account",
         "permissions": ("Cloudflare One Connector: cloudflared Write",),
@@ -68,11 +91,6 @@ PHASE_POLICY = {
         "unavoidable_reach": (
             "all-private-routes-and-virtual-networks-in-account",
         ),
-    },
-    "admin-api": {
-        "resource_scope": "exact-account",
-        "permissions": ("Zero Trust Write",),
-        "unavoidable_reach": ("all-zero-trust-resources-in-account",),
     },
     "public-edge": {
         "resource_scope": "exact-account",

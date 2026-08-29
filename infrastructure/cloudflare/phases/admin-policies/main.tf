@@ -17,11 +17,13 @@ resource "cloudflare_zero_trust_gateway_policy" "pi_admin_block" {
     precondition {
       condition = (
         can(regex("[1-9a-f]", var.verified_admin_tunnel_contract_sha256)) &&
-        can(regex("[1-9a-f]", var.verified_admin_posture_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_device_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_enrollment_contract_sha256)) &&
         can(regex("[1-9a-f]", var.verified_admin_policy_inputs_contract_sha256)) &&
+        var.admin_device_profile_id != "00000000-0000-0000-0000-000000000000" &&
         var.pi_admin_tunnel_id != "00000000-0000-0000-0000-000000000000"
       )
-      error_message = "Non-synthetic admin-tunnel and posture hashes bound to a real Tunnel are required."
+      error_message = "Non-synthetic Tunnel, enrollment, and locked-device proofs bound to real IDs are required."
     }
   }
 }
@@ -59,11 +61,13 @@ resource "cloudflare_zero_trust_gateway_policy" "pi_admin_ssh_allow" {
     precondition {
       condition = (
         can(regex("[1-9a-f]", var.verified_admin_tunnel_contract_sha256)) &&
-        can(regex("[1-9a-f]", var.verified_admin_posture_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_device_contract_sha256)) &&
+        can(regex("[1-9a-f]", var.verified_admin_enrollment_contract_sha256)) &&
         can(regex("[1-9a-f]", var.verified_admin_policy_inputs_contract_sha256)) &&
+        var.admin_device_profile_id != "00000000-0000-0000-0000-000000000000" &&
         var.pi_admin_tunnel_id != "00000000-0000-0000-0000-000000000000"
       )
-      error_message = "Non-synthetic admin-tunnel and posture hashes bound to a real Tunnel are required."
+      error_message = "Non-synthetic Tunnel, enrollment, and locked-device proofs bound to real IDs are required."
     }
   }
 }

@@ -5,10 +5,13 @@ import rego.v1
 # Every state root has one exact graph. The phase is injected by
 # scripts/cloudflare-plan-gate.sh; it is not an operator-controlled tfvar.
 valid_phases := {
+  "admin-certificate",
+  "admin-enrollment-policy",
+  "admin-enrollment-app",
+  "admin-device",
   "admin-tunnel",
   "admin-policies",
   "admin-route",
-  "admin-api",
   "site-naranjo-online",
   "site-lidersea-com",
 }
@@ -17,10 +20,13 @@ valid_phases := {
 # live objects that already serve traffic: a plan that would create, delete, or
 # replace one of them is a hard stop, never an activation.
 create_only_phases := {
+  "admin-certificate",
+  "admin-enrollment-policy",
+  "admin-enrollment-app",
+  "admin-device",
   "admin-tunnel",
   "admin-policies",
   "admin-route",
-  "admin-api",
 }
 
 # One site, one root, one state, one token, one blast radius. `foreign_marker`
@@ -85,6 +91,19 @@ forbidden_dns_record_types := {"A", "AAAA"}
 cloudflared_tunnel_resource_type := "cloudflare_zero_trust_tunnel_cloudflared"
 
 expected_types := {
+  "admin-certificate": {
+    "cloudflare_mtls_certificate.pi_admin_owner_ca": "cloudflare_mtls_certificate",
+  },
+  "admin-enrollment-policy": {
+    "cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment": "cloudflare_zero_trust_access_policy",
+  },
+  "admin-enrollment-app": {
+    "cloudflare_zero_trust_access_application.pi_admin_owner_enrollment": "cloudflare_zero_trust_access_application",
+  },
+  "admin-device": {
+    "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate": "cloudflare_zero_trust_device_posture_rule",
+    "cloudflare_zero_trust_device_custom_profile.pi_admin_owner": "cloudflare_zero_trust_device_custom_profile",
+  },
   "admin-tunnel": {
     "cloudflare_zero_trust_tunnel_cloudflared.pi_admin": cloudflared_tunnel_resource_type,
   },
@@ -94,9 +113,6 @@ expected_types := {
   },
   "admin-route": {
     "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin": "cloudflare_zero_trust_tunnel_cloudflared_route",
-  },
-  "admin-api": {
-    "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": "cloudflare_zero_trust_gateway_policy",
   },
   "site-naranjo-online": {
     "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online": cloudflared_tunnel_resource_type,
@@ -123,20 +139,27 @@ expected_types := {
 }
 
 approval_variables := {
+  "admin-certificate": "approve_admin_certificate_phase",
+  "admin-enrollment-policy": "approve_admin_enrollment_policy_phase",
+  "admin-enrollment-app": "approve_admin_enrollment_app_phase",
+  "admin-device": "approve_admin_device_phase",
   "admin-tunnel": "approve_admin_tunnel_phase",
   "admin-policies": "approve_admin_policies_phase",
   "admin-route": "approve_admin_route_phase",
-  "admin-api": "enable_kubernetes_api_access",
   "site-naranjo-online": "approve_site_naranjo_online_phase",
   "site-lidersea-com": "approve_site_lidersea_com_phase",
 }
 
 expected_expression_fields := {
+  "cloudflare_mtls_certificate.pi_admin_owner_ca": {"account_id", "name", "ca", "certificates"},
+  "cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment": {"account_id", "name", "decision", "session_duration", "include", "mfa_config"},
+  "cloudflare_zero_trust_access_application.pi_admin_owner_enrollment": {"account_id", "name", "type", "allowed_idps", "auto_redirect_to_identity", "session_duration", "policies"},
+  "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate": {"account_id", "name", "description", "type", "schedule", "expiration", "input", "match"},
+  "cloudflare_zero_trust_device_custom_profile.pi_admin_owner": {"account_id", "name", "description", "enabled", "precedence", "match", "allow_mode_switch", "allow_updates", "allowed_to_leave", "auto_connect", "captive_portal", "disable_auto_fallback", "register_interface_ip_with_dns", "sccm_vpn_boundary_support", "support_url", "switch_locked", "exclude_office_ips", "tunnel_protocol", "service_mode_v2", "include"},
   "cloudflare_zero_trust_tunnel_cloudflared.pi_admin": {"account_id", "name", "config_src"},
   "cloudflare_zero_trust_gateway_policy.pi_admin_block": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic"},
   "cloudflare_zero_trust_gateway_policy.pi_admin_ssh_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
   "cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin": {"account_id", "tunnel_id", "network", "comment"},
-  "cloudflare_zero_trust_gateway_policy.pi_admin_api_allow": {"account_id", "name", "description", "action", "enabled", "filters", "precedence", "traffic", "identity", "device_posture", "rule_settings"},
   "cloudflare_zero_trust_tunnel_cloudflared.naranjo_online": {"account_id", "name", "config_src"},
   "cloudflare_zero_trust_tunnel_cloudflared_config.naranjo_online": {"account_id", "tunnel_id", "source", "config"},
   "cloudflare_dns_record.naranjo_online_apex": {"zone_id", "name", "type", "content", "proxied", "ttl"},
@@ -158,6 +181,18 @@ expected_expression_fields := {
 }
 
 critical_fields := {
+  "cloudflare_mtls_certificate": {"account_id", "name", "ca", "certificates", "private_key"},
+  "cloudflare_zero_trust_access_policy": {"account_id", "name", "decision", "session_duration"},
+  "cloudflare_zero_trust_access_application": {"account_id", "name", "type", "auto_redirect_to_identity", "session_duration"},
+  "cloudflare_zero_trust_device_posture_rule": {"account_id", "name", "description", "type", "schedule", "expiration"},
+  "cloudflare_zero_trust_device_custom_profile": {
+    "account_id", "name", "description", "enabled", "precedence", "match",
+    "allow_mode_switch", "allow_updates", "allowed_to_leave",
+    "auto_connect", "captive_portal",
+    "disable_auto_fallback", "register_interface_ip_with_dns",
+    "sccm_vpn_boundary_support", "support_url", "switch_locked",
+    "exclude_office_ips", "tunnel_protocol",
+  },
   "cloudflare_zero_trust_tunnel_cloudflared": {"account_id", "name", "config_src"},
   "cloudflare_zero_trust_tunnel_cloudflared_route": {"account_id", "tunnel_id", "network", "comment"},
   "cloudflare_zero_trust_tunnel_cloudflared_config": {"account_id", "source", "config"},
@@ -342,12 +377,152 @@ account_matches(after) if {
   after.account_id == account_id
 }
 
+non_null_keys(value) := keys if {
+  keys := {key | some key, nested in value; nested != null}
+}
+
+admin_certificate_exact if {
+  certificate := change_after("cloudflare_mtls_certificate.pi_admin_owner_ca")
+  account_matches(certificate)
+  certificate.name == "pi-admin-owner-device-ca"
+  certificate.ca == true
+  public_pem := variable_value("owner_device_ca_certificate_pem")
+  startswith(public_pem, "-----BEGIN CERTIFICATE-----\n")
+  endswith(public_pem, "-----END CERTIFICATE-----")
+  count(public_pem) >= 512
+  count(public_pem) <= 16384
+  not contains(public_pem, "PRIVATE KEY")
+  certificate.certificates == public_pem
+  object.get(certificate, "private_key", null) == null
+  crypto.sha256(public_pem) == variable_value("owner_device_ca_certificate_sha256")
+  valid_contract_hash(variable_value("owner_device_ca_certificate_sha256"))
+  has_exact_reference("cloudflare_mtls_certificate.pi_admin_owner_ca", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_mtls_certificate.pi_admin_owner_ca", "certificates", "var.owner_device_ca_certificate_pem")
+}
+
+admin_enrollment_policy_exact if {
+  policy := change_after("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment")
+  account_matches(policy)
+  email := variable_value("admin_email")
+  regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, email)
+  policy.name == "pi-admin-owner-device-enrollment"
+  policy.decision == "allow"
+  policy.session_duration == "15m"
+  count(policy.include) == 1
+  non_null_keys(policy.include[0]) == {"email"}
+  policy.include[0].email == {"email": email}
+  policy.mfa_config == {
+    "allowed_authenticators": ["biometrics", "security_key"],
+    "mfa_disabled": false,
+    "session_duration": "5m",
+  }
+  object.get(policy, "exclude", null) == null
+  object.get(policy, "require", null) == null
+  object.get(policy, "approval_required", null) == null
+  object.get(policy, "purpose_justification_required", null) == null
+  has_exact_reference("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_access_policy.pi_admin_owner_enrollment", "include", "var.admin_email")
+}
+
+admin_enrollment_app_exact if {
+  app := change_after("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment")
+  account_matches(app)
+  identity_provider_id := variable_value("admin_identity_provider_id")
+  policy_id := variable_value("owner_enrollment_policy_id")
+  regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, variable_value("admin_email"))
+  valid_uuid(identity_provider_id)
+  valid_uuid(policy_id)
+  valid_contract_hash(variable_value("verified_admin_enrollment_policy_contract_sha256"))
+  app.name == "pi-admin-owner-device-enrollment"
+  app.type == "warp"
+  app.allowed_idps == [identity_provider_id]
+  app.auto_redirect_to_identity == true
+  app.session_duration == "15m"
+  count(app.policies) == 1
+  non_null_keys(app.policies[0]) == {"id", "precedence"}
+  app.policies[0].id == policy_id
+  app.policies[0].precedence == 1
+  object.get(app, "mfa_config", null) == null
+  object.get(app, "target_criteria", null) == null
+  has_exact_reference("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment", "allowed_idps", "var.admin_identity_provider_id")
+  has_exact_reference("cloudflare_zero_trust_access_application.pi_admin_owner_enrollment", "policies", "var.owner_enrollment_policy_id")
+}
+
+admin_device_exact if {
+  posture := change_after("cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate")
+  account_matches(posture)
+  certificate_id := variable_value("owner_device_ca_certificate_id")
+  valid_uuid(certificate_id)
+  valid_contract_hash(variable_value("owner_device_ca_certificate_sha256"))
+  valid_uuid(variable_value("owner_enrollment_policy_id"))
+  valid_uuid(variable_value("owner_enrollment_application_id"))
+  valid_uuid(variable_value("admin_identity_provider_id"))
+  valid_contract_hash(variable_value("verified_admin_certificate_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_enrollment_contract_sha256"))
+  posture.name == "pi-admin-owner-device-certificate"
+  posture.description == "Require the one owner laptop certificate and its matching private key."
+  posture.type == "client_certificate_v2"
+  posture.schedule == "5m"
+  posture.expiration == "10m"
+  posture.match == [{"platform": "mac"}]
+  non_null_keys(posture.input) == {
+    "certificate_id", "check_private_key", "cn", "extended_key_usage",
+    "locations", "operating_system",
+  }
+  posture.input.certificate_id == certificate_id
+  posture.input.check_private_key == true
+  posture.input.cn == "${serial_number}"
+  posture.input.extended_key_usage == ["clientAuth"]
+  posture.input.operating_system == "mac"
+  non_null_keys(posture.input.locations) == {"trust_stores"}
+  posture.input.locations.trust_stores == ["system"]
+  has_exact_reference("cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate", "input", "var.owner_device_ca_certificate_id")
+
+  profile := change_after("cloudflare_zero_trust_device_custom_profile.pi_admin_owner")
+  account_matches(profile)
+  network := variable_value("pi_admin_cidr")
+  email := variable_value("admin_email")
+  private_ipv4_32(network)
+  regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, email)
+  profile.name == "pi-admin-owner-device"
+  profile.description == "Locked owner profile; only the single Pi host route enters Cloudflare."
+  profile.enabled == true
+  profile.precedence == 100
+  profile.match == sprintf(`identity.email == "%s"`, [email])
+  profile.allow_mode_switch == false
+  profile.allow_updates == true
+  profile.allowed_to_leave == false
+  profile.auto_connect == 0
+  profile.captive_portal == 180
+  profile.disable_auto_fallback == true
+  profile.register_interface_ip_with_dns == false
+  profile.sccm_vpn_boundary_support == false
+  profile.support_url == ""
+  profile.switch_locked == true
+  profile.exclude_office_ips == false
+  profile.tunnel_protocol == "masque"
+  profile.service_mode_v2.mode == "warp"
+  count(profile.include) == 1
+  profile.include[0].address == network
+  profile.include[0].description == "Pi admin host only"
+  object.get(profile, "lan_allow_minutes", null) == null
+  object.get(profile, "lan_allow_subnet_size", null) == null
+  object.get(profile, "virtual_networks", null) == null
+  has_exact_reference("cloudflare_zero_trust_device_custom_profile.pi_admin_owner", "account_id", "var.cloudflare_account_id")
+  has_exact_reference("cloudflare_zero_trust_device_custom_profile.pi_admin_owner", "match", "var.admin_email")
+  has_exact_reference("cloudflare_zero_trust_device_custom_profile.pi_admin_owner", "include", "var.pi_admin_cidr")
+}
+
 admin_tunnel_exact if {
   tunnel := change_after("cloudflare_zero_trust_tunnel_cloudflared.pi_admin")
   account_matches(tunnel)
   tunnel.name == "pi-admin"
   tunnel.config_src == "cloudflare"
   object.get(tunnel, "tunnel_secret", null) == null
+  valid_contract_hash(variable_value("verified_admin_enrollment_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_device_contract_sha256"))
   has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared.pi_admin", "account_id", "var.cloudflare_account_id")
 }
 
@@ -359,8 +534,10 @@ admin_policies_exact if {
   private_ipv4_32(network)
   valid_uuid(variable_value("pi_admin_tunnel_id"))
   valid_contract_hash(variable_value("verified_admin_tunnel_contract_sha256"))
-  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_device_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_enrollment_contract_sha256"))
   valid_contract_hash(variable_value("verified_admin_policy_inputs_contract_sha256"))
+  valid_uuid(variable_value("admin_device_profile_id"))
 
   block := change_after("cloudflare_zero_trust_gateway_policy.pi_admin_block")
   account_matches(block)
@@ -403,7 +580,9 @@ admin_route_exact if {
   valid_uuid(tunnel_id)
   regex.match(`^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$`, variable_value("admin_email"))
   valid_uuid(variable_value("admin_device_posture_check_id"))
-  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_device_contract_sha256"))
+  valid_contract_hash(variable_value("verified_admin_enrollment_contract_sha256"))
+  valid_uuid(variable_value("admin_device_profile_id"))
   valid_session_duration(variable_value("admin_session_freshness"))
   variable_value("pi_admin_ssh_allow_precedence") < variable_value("pi_admin_block_precedence")
   route.network == network
@@ -413,32 +592,6 @@ admin_route_exact if {
   has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "account_id", "var.cloudflare_account_id")
   has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "network", "var.pi_admin_cidr")
   has_exact_reference("cloudflare_zero_trust_tunnel_cloudflared_route.pi_admin", "tunnel_id", "var.pi_admin_tunnel_id")
-}
-
-admin_api_exact if {
-  policy := change_after("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow")
-  account_matches(policy)
-  network := variable_value("pi_admin_cidr")
-  email := variable_value("admin_email")
-  posture_id := variable_value("admin_device_posture_check_id")
-  duration := variable_value("admin_session_freshness")
-  private_ipv4_32(network)
-  valid_uuid(variable_value("pi_admin_tunnel_id"))
-  valid_contract_hash(variable_value("verified_admin_posture_contract_sha256"))
-  valid_contract_hash(variable_value("verified_admin_policies_contract_sha256"))
-  valid_contract_hash(variable_value("verified_admin_route_contract_sha256"))
-  valid_contract_hash(variable_value("verified_admin_api_inputs_contract_sha256"))
-  policy.name == "pi-admin-api-allow"
-  exact_identity_policy(policy, network, 6443, email, posture_id, duration)
-  policy.precedence == variable_value("pi_admin_api_allow_precedence")
-  variable_value("pi_admin_ssh_allow_precedence") < policy.precedence
-  policy.precedence < variable_value("pi_admin_block_precedence")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "account_id", "var.cloudflare_account_id")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "precedence", "var.pi_admin_api_allow_precedence")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "traffic", "var.pi_admin_cidr")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "identity", "var.admin_email")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "device_posture", "var.admin_device_posture_check_id")
-  has_exact_reference("cloudflare_zero_trust_gateway_policy.pi_admin_api_allow", "rule_settings", "var.admin_session_freshness")
 }
 
 # One site root, proved whole: the adopted Tunnel identity, its exact single
@@ -546,6 +699,26 @@ ingress_rules(change) := rules if {
 }
 
 phase_contract_exact if {
+  phase == "admin-certificate"
+  admin_certificate_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-enrollment-policy"
+  admin_enrollment_policy_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-enrollment-app"
+  admin_enrollment_app_exact
+}
+
+phase_contract_exact if {
+  phase == "admin-device"
+  admin_device_exact
+}
+
+phase_contract_exact if {
   phase == "admin-tunnel"
   admin_tunnel_exact
 }
@@ -558,11 +731,6 @@ phase_contract_exact if {
 phase_contract_exact if {
   phase == "admin-route"
   admin_route_exact
-}
-
-phase_contract_exact if {
-  phase == "admin-api"
-  admin_api_exact
 }
 
 phase_contract_exact if {

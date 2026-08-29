@@ -27,6 +27,43 @@ CLOUDFLARE_TUNNEL_SECRET = Path(
 )
 CLOUDFLARE_PHASES_ROOT = Path("infrastructure/cloudflare/phases")
 CLOUDFLARE_PHASE_CONTRACTS = {
+    "admin-certificate": {
+        "guard": "approve_admin_certificate_phase",
+        "resources": frozenset({
+            ("cloudflare_mtls_certificate", "pi_admin_owner_ca"),
+        }),
+        "source_files": frozenset({
+            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+        }),
+    },
+    "admin-enrollment-policy": {
+        "guard": "approve_admin_enrollment_policy_phase",
+        "resources": frozenset({
+            ("cloudflare_zero_trust_access_policy", "pi_admin_owner_enrollment"),
+        }),
+        "source_files": frozenset({
+            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+        }),
+    },
+    "admin-enrollment-app": {
+        "guard": "approve_admin_enrollment_app_phase",
+        "resources": frozenset({
+            ("cloudflare_zero_trust_access_application", "pi_admin_owner_enrollment"),
+        }),
+        "source_files": frozenset({
+            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+        }),
+    },
+    "admin-device": {
+        "guard": "approve_admin_device_phase",
+        "resources": frozenset({
+            ("cloudflare_zero_trust_device_custom_profile", "pi_admin_owner"),
+            ("cloudflare_zero_trust_device_posture_rule", "pi_admin_owner_certificate"),
+        }),
+        "source_files": frozenset({
+            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
+        }),
+    },
     "admin-tunnel": {
         "guard": "approve_admin_tunnel_phase",
         "resources": frozenset({
@@ -50,15 +87,6 @@ CLOUDFLARE_PHASE_CONTRACTS = {
         "guard": "approve_admin_route_phase",
         "resources": frozenset({
             ("cloudflare_zero_trust_tunnel_cloudflared_route", "pi_admin"),
-        }),
-        "source_files": frozenset({
-            "main.tf", "outputs.tf", "variables.tf", "versions.tf",
-        }),
-    },
-    "admin-api": {
-        "guard": "enable_kubernetes_api_access",
-        "resources": frozenset({
-            ("cloudflare_zero_trust_gateway_policy", "pi_admin_api_allow"),
         }),
         "source_files": frozenset({
             "main.tf", "outputs.tf", "variables.tf", "versions.tf",

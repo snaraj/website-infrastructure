@@ -8,7 +8,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERSIONS_FILE = REPO_ROOT / "versions.env"
 CLOUDFLARE_PHASES = (
-    "admin-api",
+    "admin-certificate",
+    "admin-device",
+    "admin-enrollment-app",
+    "admin-enrollment-policy",
     "admin-policies",
     "admin-route",
     "admin-tunnel",

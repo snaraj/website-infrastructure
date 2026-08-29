@@ -1,2 +1,4 @@
 approve_admin_tunnel_phase = false
 cloudflare_account_id      = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+verified_admin_enrollment_contract_sha256 = "REPLACE_WITH_FRESH_ENROLLMENT_AUDIT_SHA256"
+verified_admin_device_contract_sha256     = "REPLACE_WITH_FRESH_DEVICE_AUDIT_SHA256"

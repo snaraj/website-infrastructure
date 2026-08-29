@@ -1,0 +1,21 @@
+{
+  "codex_contract": {"phase": "admin-certificate"},
+  "variables": {
+    "approve_admin_certificate_phase": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "owner_device_ca_certificate_pem": {"value": "-----BEGIN CERTIFICATE-----\nMIIDGzCCAgOgAwIBAgIUc4zIFePJNqsH0Zr+pTnYhVLXhPYwDQYJKoZIhvcNAQEL\nBQAwHTEbMBkGA1UEAwwSZml4dHVyZS1jYS5pbnZhbGlkMB4XDTI2MDgyOTIwMDg1\nMFoXDTI2MDgzMTIwMDg1MFowHTEbMBkGA1UEAwwSZml4dHVyZS1jYS5pbnZhbGlk\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvDfsAt1g1ANfEwsfuYEA\nZVaXHaDW5PZPjWVV14MyUM5dFww3+02tnLnGhh8OxW4sqG6AuInrEtFWRyoeXS/K\nLWopfEQaT548AxZlyNANBjQlL8znV/g8y3ewW4lWH2XAefJKGuA8KBlRKgElcetr\n+L5D/VvrAboXxqOVo4LfqO2m9SNUtIX4aZ3zClaMomEJaHxMjwe02lU7UMfqsAV/\nKRpvB7bLGxrFcVzGoTnJK6E+qhuJmN8mVCjk0OjlfkNAL1O01mMxUpy/V/69qF+x\nlZKdos31viUzmIuyKpuArryY0e4n5BqYbrmD6egbR0Wjk2GannxCFbZcMEe/7bem\niwIDAQABo1MwUTAdBgNVHQ4EFgQUjNlLCW0AYobuMF0qOshT6bN/drAwHwYDVR0j\nBBgwFoAUjNlLCW0AYobuMF0qOshT6bN/drAwDwYDVR0TAQH/BAUwAwEB/zANBgkq\nhkiG9w0BAQsFAAOCAQEADsgfzvjEQf4THrFn9Upq8UDoM0fL3n00iHoX14jjkIPC\nj8FhsaI0KXYT/ZnQq1pVxMP/3thlr9pGwOd6oAitP5U6tXIWBrDE7E5MjtK6Qdku\neEkgzzaYzYBWCjfnpiKQnAR/+dkYZE5nL+wBlLLvyqFzKODZQl0x8DHyJ/7lzk6X\njmyDfwBt+nEJtD6Y+zotBNa62UJElvsCh5qKQHlGvSjTKnGil/0CbgPKayCpFdop\nDi1qL9NW6+MmeD+xkVDn08IYZMsmQ2Q6OPp1fBGsjt8aiqzvmTbxzm1digr4k4V8\n2oxsSGNHK/p6JioJPC+Nj+HGzDYPTL6Q6BnBKuEL4Q==\n-----END CERTIFICATE-----"},
+    "owner_device_ca_certificate_sha256": {"value": "0e6fd72458933bd5659dab6de42740a98a3d60c42a0645a16b4f3623fa306aa0"}
+  },
+  "resource_changes": [{
+    "address": "cloudflare_mtls_certificate.pi_admin_owner_ca",
+    "mode": "managed",
+    "type": "cloudflare_mtls_certificate",
+    "change": {"actions": ["create"], "after": {"account_id": "11111111111111111111111111111111", "name": "pi-admin-owner-device-ca", "ca": true, "certificates": "-----BEGIN CERTIFICATE-----\nMIIDGzCCAgOgAwIBAgIUc4zIFePJNqsH0Zr+pTnYhVLXhPYwDQYJKoZIhvcNAQEL\nBQAwHTEbMBkGA1UEAwwSZml4dHVyZS1jYS5pbnZhbGlkMB4XDTI2MDgyOTIwMDg1\nMFoXDTI2MDgzMTIwMDg1MFowHTEbMBkGA1UEAwwSZml4dHVyZS1jYS5pbnZhbGlk\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvDfsAt1g1ANfEwsfuYEA\nZVaXHaDW5PZPjWVV14MyUM5dFww3+02tnLnGhh8OxW4sqG6AuInrEtFWRyoeXS/K\nLWopfEQaT548AxZlyNANBjQlL8znV/g8y3ewW4lWH2XAefJKGuA8KBlRKgElcetr\n+L5D/VvrAboXxqOVo4LfqO2m9SNUtIX4aZ3zClaMomEJaHxMjwe02lU7UMfqsAV/\nKRpvB7bLGxrFcVzGoTnJK6E+qhuJmN8mVCjk0OjlfkNAL1O01mMxUpy/V/69qF+x\nlZKdos31viUzmIuyKpuArryY0e4n5BqYbrmD6egbR0Wjk2GannxCFbZcMEe/7bem\niwIDAQABo1MwUTAdBgNVHQ4EFgQUjNlLCW0AYobuMF0qOshT6bN/drAwHwYDVR0j\nBBgwFoAUjNlLCW0AYobuMF0qOshT6bN/drAwDwYDVR0TAQH/BAUwAwEB/zANBgkq\nhkiG9w0BAQsFAAOCAQEADsgfzvjEQf4THrFn9Upq8UDoM0fL3n00iHoX14jjkIPC\nj8FhsaI0KXYT/ZnQq1pVxMP/3thlr9pGwOd6oAitP5U6tXIWBrDE7E5MjtK6Qdku\neEkgzzaYzYBWCjfnpiKQnAR/+dkYZE5nL+wBlLLvyqFzKODZQl0x8DHyJ/7lzk6X\njmyDfwBt+nEJtD6Y+zotBNa62UJElvsCh5qKQHlGvSjTKnGil/0CbgPKayCpFdop\nDi1qL9NW6+MmeD+xkVDn08IYZMsmQ2Q6OPp1fBGsjt8aiqzvmTbxzm1digr4k4V8\n2oxsSGNHK/p6JioJPC+Nj+HGzDYPTL6Q6BnBKuEL4Q==\n-----END CERTIFICATE-----", "private_key": null}, "after_unknown": {}}
+  }],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [{
+    "address": "cloudflare_mtls_certificate.pi_admin_owner_ca",
+    "mode": "managed",
+    "type": "cloudflare_mtls_certificate",
+    "expressions": {"account_id": {"references": ["var.cloudflare_account_id"]}, "name": {}, "ca": {}, "certificates": {"references": ["var.owner_device_ca_certificate_pem"]}}
+  }]}}
+}

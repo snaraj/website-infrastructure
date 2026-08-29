@@ -91,6 +91,30 @@ EXTRA_EXPECTED_ARGUMENTS = {
 }
 
 PHASE_POLICY = {
+    "admin-certificate": {
+        "operation": "apply",
+        "resource_scope": "exact-account",
+        "permissions": ("SSL and Certificates Write",),
+        "unavoidable_reach": ("all-mtls-certificates-in-account",),
+    },
+    "admin-enrollment-policy": {
+        "operation": "apply",
+        "resource_scope": "exact-account",
+        "permissions": ("Access: Apps and Policies Write",),
+        "unavoidable_reach": ("all-access-policies-in-account",),
+    },
+    "admin-enrollment-app": {
+        "operation": "apply",
+        "resource_scope": "exact-account",
+        "permissions": ("Access: Apps and Policies Write",),
+        "unavoidable_reach": ("all-access-applications-in-account",),
+    },
+    "admin-device": {
+        "operation": "apply",
+        "resource_scope": "exact-account",
+        "permissions": ("Zero Trust Write",),
+        "unavoidable_reach": ("all-zero-trust-device-configuration-in-account",),
+    },
     "admin-tunnel": {
         "operation": "apply",
         "resource_scope": "exact-account",
@@ -112,12 +136,6 @@ PHASE_POLICY = {
         "unavoidable_reach": (
             "all-private-routes-and-virtual-networks-in-account",
         ),
-    },
-    "admin-api": {
-        "operation": "apply",
-        "resource_scope": "exact-account",
-        "permissions": ("Zero Trust Write",),
-        "unavoidable_reach": ("all-zero-trust-resources-in-account",),
     },
     "public-edge": {
         "operation": "apply",
@@ -141,24 +159,31 @@ PHASE_POLICY = {
     },
     "audit": {
         "operation": "audit",
-        "resource_scope": "exact-account-and-all-account-zones",
+        "resource_scope": "exact-user-account-and-all-account-zones",
         "permissions": (
+            "API Tokens Read",
+            "Account Settings Read",
             "Billing Read",
-            "Zone Read",
-            "DNS Read",
+            "Account: SSL and Certificates Read",
             "Cloudflare One Connector: cloudflared Read",
             "Cloudflare One Networks Read",
             "Zero Trust Read",
             "Access: Apps and Policies Read",
             "Access: Audit Logs Read",
+            "Access: Organizations, Identity Providers, and Groups Read",
+            "Zone Read",
+            "DNS Read",
         ),
         "unavoidable_reach": (
+            "own-api-token-definitions",
+            "account-settings-and-audit-logs-in-account",
             "billing-metadata-in-account",
+            "all-mtls-certificates-in-account",
             "all-zones-and-dns-records-in-account",
             "all-cloudflared-connectors-and-tunnels-in-account",
             "all-private-routes-and-virtual-networks-in-account",
             "all-zero-trust-resources-in-account",
-            "all-access-apps-policies-and-audit-logs-in-account",
+            "all-access-apps-policies-users-and-identity-providers-in-account",
         ),
     },
 }

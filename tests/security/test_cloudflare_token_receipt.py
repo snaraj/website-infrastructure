@@ -171,14 +171,17 @@ def validate(
 class CloudflareTokenReceiptTests(unittest.TestCase):
     """Reject over-scoped, unbound, stale, or credential-bearing receipts."""
 
-    def test_all_eight_phase_policies_accept_only_their_exact_contract(self):
+    def test_all_eleven_phase_policies_accept_only_their_exact_contract(self):
         self.assertEqual(
             set(MODULE.PHASE_POLICY),
             {
+                "admin-certificate",
+                "admin-enrollment-policy",
+                "admin-enrollment-app",
+                "admin-device",
                 "admin-tunnel",
                 "admin-policies",
                 "admin-route",
-                "admin-api",
                 "public-edge",
                 "public-dns-naranjo",
                 "public-dns-lidersea",
@@ -216,14 +219,18 @@ class CloudflareTokenReceiptTests(unittest.TestCase):
         self.assertEqual(
             MODULE.PHASE_POLICY["audit"]["permissions"],
             (
+                "API Tokens Read",
+                "Account Settings Read",
                 "Billing Read",
-                "Zone Read",
-                "DNS Read",
+                "Account: SSL and Certificates Read",
                 "Cloudflare One Connector: cloudflared Read",
                 "Cloudflare One Networks Read",
                 "Zero Trust Read",
                 "Access: Apps and Policies Read",
                 "Access: Audit Logs Read",
+                "Access: Organizations, Identity Providers, and Groups Read",
+                "Zone Read",
+                "DNS Read",
             ),
         )
         validate(document, "audit")

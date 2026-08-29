@@ -1,0 +1,3 @@
+### Security
+
+- Add the owner-only Cloudflare WARP-to-Tunnel administrative plane as seven create-only roots: exact owner and phishing-resistant-MFA enrollment, one Mac certificate posture check, one locked Pi-host route profile, a private admin Tunnel, TCP 22 identity/device allow followed by an all-port block, and one private `/32` route. Execute it only through a fixed root-owned protected-main launcher with pinned tools, complete live audits, source-bound phase-specific JIT credentials, pre-plan crash journaling, typed saved plans, immediate revocation proof, actor-bound audit-log closure, and fail-closed partial-state recovery.

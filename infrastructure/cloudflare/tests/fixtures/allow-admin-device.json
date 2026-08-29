@@ -1,0 +1,44 @@
+{
+  "codex_contract": {"phase": "admin-device"},
+  "variables": {
+    "approve_admin_device_phase": {"value": true},
+    "cloudflare_account_id": {"value": "11111111111111111111111111111111"},
+    "owner_device_ca_certificate_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "owner_device_ca_certificate_sha256": {"value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "owner_enrollment_policy_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "owner_enrollment_application_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "admin_identity_provider_id": {"value": "00000000-0000-0000-0000-000000000000"},
+    "verified_admin_certificate_contract_sha256": {"value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "verified_admin_enrollment_contract_sha256": {"value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "pi_admin_cidr": {"value": "192.168.50.10/32"},
+    "admin_email": {"value": "admin@example.invalid"}
+  },
+  "resource_changes": [
+    {
+      "address": "cloudflare_zero_trust_device_custom_profile.pi_admin_owner",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_device_custom_profile",
+      "change": {"actions": ["create"], "after": {"account_id": "11111111111111111111111111111111", "name": "pi-admin-owner-device", "description": "Locked owner profile; only the single Pi host route enters Cloudflare.", "enabled": true, "precedence": 100, "match": "identity.email == \"admin@example.invalid\"", "allow_mode_switch": false, "allow_updates": true, "allowed_to_leave": false, "auto_connect": 0, "captive_portal": 180, "disable_auto_fallback": true, "register_interface_ip_with_dns": false, "sccm_vpn_boundary_support": false, "support_url": "", "switch_locked": true, "exclude_office_ips": false, "tunnel_protocol": "masque", "service_mode_v2": {"mode": "warp"}, "include": [{"address": "192.168.50.10/32", "description": "Pi admin host only"}], "lan_allow_minutes": null, "lan_allow_subnet_size": null, "virtual_networks": null}, "after_unknown": {}}
+    },
+    {
+      "address": "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_device_posture_rule",
+      "change": {"actions": ["create"], "after": {"account_id": "11111111111111111111111111111111", "name": "pi-admin-owner-device-certificate", "description": "Require the one owner laptop certificate and its matching private key.", "type": "client_certificate_v2", "schedule": "5m", "expiration": "10m", "input": {"certificate_id": "00000000-0000-0000-0000-000000000000", "check_private_key": true, "cn": "${serial_number}", "extended_key_usage": ["clientAuth"], "locations": {"trust_stores": ["system"]}, "operating_system": "mac"}, "match": [{"platform": "mac"}]}, "after_unknown": {}}
+    }
+  ],
+  "configuration": {"provider_config": {"cloudflare": {"name": "cloudflare", "full_name": "registry.opentofu.org/cloudflare/cloudflare", "expressions": {}}}, "root_module": {"resources": [
+    {
+      "address": "cloudflare_zero_trust_device_custom_profile.pi_admin_owner",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_device_custom_profile",
+      "expressions": {"account_id": {"references": ["var.cloudflare_account_id"]}, "name": {}, "description": {}, "enabled": {}, "precedence": {}, "match": {"references": ["var.admin_email"]}, "allow_mode_switch": {}, "allow_updates": {}, "allowed_to_leave": {}, "auto_connect": {}, "captive_portal": {}, "disable_auto_fallback": {}, "register_interface_ip_with_dns": {}, "sccm_vpn_boundary_support": {}, "support_url": {}, "switch_locked": {}, "exclude_office_ips": {}, "tunnel_protocol": {}, "service_mode_v2": {}, "include": {"references": ["var.pi_admin_cidr"]}}
+    },
+    {
+      "address": "cloudflare_zero_trust_device_posture_rule.pi_admin_owner_certificate",
+      "mode": "managed",
+      "type": "cloudflare_zero_trust_device_posture_rule",
+      "expressions": {"account_id": {"references": ["var.cloudflare_account_id"]}, "name": {}, "description": {}, "type": {}, "schedule": {}, "expiration": {}, "input": {"references": ["var.owner_device_ca_certificate_id"]}, "match": {}}
+    }
+  ]}}
+}

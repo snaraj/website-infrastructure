@@ -1,0 +1,4 @@
+approve_admin_certificate_phase      = false
+cloudflare_account_id                = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+owner_device_ca_certificate_pem      = "REPLACE_WITH_PUBLIC_CA_CERTIFICATE_ONLY"
+owner_device_ca_certificate_sha256   = "REPLACE_WITH_EXACT_PUBLIC_CA_BYTES_SHA256"

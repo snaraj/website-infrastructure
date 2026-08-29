@@ -1,0 +1,3 @@
+approve_admin_enrollment_policy_phase = false
+cloudflare_account_id                 = "REPLACE_WITH_DISCOVERED_32_HEX_ACCOUNT_ID"
+admin_email                           = "REPLACE_WITH_EXACT_OWNER_IDENTITY"
