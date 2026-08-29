@@ -5,9 +5,12 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "bootstrap" / "pi" / "init-control-plane.sh"
 BASH = shutil.which("bash")
+BASH_REQUIRED = "bash is required for init-script helper tests"
 if BASH is None and os.name == "nt":
     git_bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
     if git_bash.is_file():
@@ -25,7 +28,13 @@ def bash_path(path):
 class BootstrapTokenCleanupTests(unittest.TestCase):
     def run_bash(self, body):
         result = subprocess.run(
-            [BASH, "-c", 'source "$1"\n' + body, "token-cleanup-test", bash_path(SCRIPT)],
+            [
+                required_tool(BASH, BASH_REQUIRED),
+                "-c",
+                'source "$1"\n' + body,
+                "token-cleanup-test",
+                bash_path(SCRIPT),
+            ],
             check=False,
             capture_output=True,
             text=True,

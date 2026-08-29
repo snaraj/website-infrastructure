@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFTEST = shutil.which("conftest")
 CONFTEST_POLICY = ROOT / "policies/conftest"
 HELM = shutil.which("helm")
+HELM_REQUIRED = "helm is required to render the chart"
 CHART = ROOT / "kubernetes/platform/cloudflare-public/chart"
 CONNECTORS = {
     "naranjo-online": ("naranjo-online-tunnel", "naranjo-online-tunnel-token"),
@@ -27,7 +28,7 @@ def render(*overrides):
     """Render the real connector chart with only synthetic public values."""
 
     command = [
-        str(HELM),
+        required_tool(HELM, HELM_REQUIRED),
         "template",
         "cloudflare-public",
         str(CHART),

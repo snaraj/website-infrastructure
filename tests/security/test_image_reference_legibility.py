@@ -26,11 +26,14 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFTEST_POLICY = REPO_ROOT / "policies" / "conftest"
 FIXTURES = REPO_ROOT / "tests" / "kubernetes" / "fixtures"
 CONFTEST = shutil.which("conftest")
+CONFTEST_REQUIRED = "conftest is required to exercise the policy"
 
 DIGEST = "sha256:" + "11" * 32
 
@@ -92,7 +95,7 @@ def conftest_denials(path):
 
     completed = subprocess.run(
         [
-            CONFTEST,
+            required_tool(CONFTEST, CONFTEST_REQUIRED),
             "test",
             "--policy",
             str(CONFTEST_POLICY),

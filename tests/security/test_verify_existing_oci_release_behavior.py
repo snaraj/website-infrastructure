@@ -7,10 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts/ci/verify-existing-oci-release.sh"
 DIGEST = "sha256:" + ("a" * 64)
+
+
+BASH_REQUIRED = "Bash is required for OCI release behavior tests"
 
 
 def bash_executable():
@@ -98,7 +103,7 @@ printf '%s\n' "$*" > "${FAKE_COSIGN_LOG}"
                 }
             )
             result = subprocess.run(
-                [bash_executable(), str(SCRIPT)],
+                [required_tool(bash_executable(), BASH_REQUIRED), str(SCRIPT)],
                 cwd=str(REPO_ROOT),
                 env=environment,
                 text=True,

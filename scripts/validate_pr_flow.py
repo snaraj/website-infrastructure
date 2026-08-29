@@ -16,11 +16,30 @@ import sys
 
 PROTECTED_BRANCHES = frozenset({"main", "master", "HEAD"})
 
-# Branch namespaces reviewed for agent work. A single flat name such as
-# "fix-typo" is rejected: namespacing keeps ownership and cleanup auditable.
-ALLOWED_NAMESPACES = (
-    "5.6-sol/",
-    "fable5/",
+# The agent lanes, spelled exactly as the repository's agent labels are. This
+# tuple is the ONE place a new model lane is added, and the contract test binds
+# it to the agent-label roster written into AGENTS.md, so a lane documented
+# there but missing here fails loudly instead of silently denying real work.
+#
+# Before issue #137 this file listed only two lanes, so `opus5/...`,
+# `opus4.8/...`, `sonnet5/...` and `daybreak-blue/...` all returned DENY —
+# every lane the label taxonomy gained after the file was written.
+AGENT_LANES = (
+    "5.6-sol",
+    "daybreak-blue",
+    "fable5",
+    "opus4.8",
+    "opus5",
+    "sonnet5",
+)
+
+# The dispatched reasoning effort carried by the newer branch grammar,
+# `<lane>-<effort>/<issue#>-<topic>`. The effort lives inside the FIRST
+# segment, which is why lane matching must be longest-first (see parse_lane).
+REASONING_EFFORTS = ("low", "med", "high", "max")
+
+# Work namespaces that belong to no particular lane.
+GENERIC_NAMESPACES = (
     "deploy/",
     "import/",
     "ci/",
@@ -31,7 +50,50 @@ ALLOWED_NAMESPACES = (
     "media/",
 )
 
+# Every accepted first segment, as prefixes. A single flat name such as
+# "fix-typo" is rejected: namespacing keeps ownership and cleanup auditable.
+ALLOWED_NAMESPACES = (
+    tuple(lane + "/" for lane in AGENT_LANES)
+    + tuple(
+        "{}-{}/".format(lane, effort)
+        for lane in AGENT_LANES
+        for effort in REASONING_EFFORTS
+    )
+    + GENERIC_NAMESPACES
+)
+
 _BRANCH_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
+# `<issue#>-<topic>`: the remainder the newer grammar requires, so a branch
+# that advertises a dispatched effort still says which issue it is working.
+_ISSUE_TOPIC = re.compile(r"^[0-9]+-[a-z0-9]")
+
+
+def parse_lane(name, lanes=AGENT_LANES):
+    """Split a branch name into ``(lane, effort, remainder)``, or None.
+
+    ``lanes`` is injectable so the longest-match rule can be exercised against
+    a registry that actually contains an ambiguous pair: the live registry may
+    not always have one, and a rule that no input can violate is a rule
+    nothing proves.
+
+    Longest match first is load-bearing. When a shorter lane is a prefix of a
+    longer one and the leftover spells a valid effort, shortest-first parsing
+    assigns the branch to the WRONG lane — and lane ownership is exactly what
+    the one-writer-per-branch and cleanup rules are keyed on. `daybreak-blue`
+    is the live hyphenated lane that makes this shape realistic.
+    """
+
+    head, separator, remainder = name.partition("/")
+    if not separator:
+        return None
+    for lane in sorted(lanes, key=len, reverse=True):
+        if head == lane:
+            return lane, None, remainder
+        if head.startswith(lane + "-"):
+            effort = head[len(lane) + 1:]
+            if effort in REASONING_EFFORTS:
+                return lane, effort, remainder
+    return None
 
 FORBIDDEN_AGENT_OPERATIONS = frozenset(
     {
@@ -59,11 +121,19 @@ def branch_denial(name):
         return "branch name has unsafe shape"
     if name.endswith("/") or "//" in name or ".." in name or name.endswith(".lock"):
         return "branch name has unsafe shape"
-    if not name.startswith(ALLOWED_NAMESPACES):
-        return "branch name is outside the reviewed namespaces"
-    for namespace in ALLOWED_NAMESPACES:
-        if name == namespace.rstrip("/"):
-            return "branch name is a bare namespace"
+    parsed = parse_lane(name)
+    if parsed is None:
+        if not name.startswith(GENERIC_NAMESPACES):
+            return "branch name is outside the reviewed namespaces"
+        for namespace in GENERIC_NAMESPACES:
+            if name == namespace.rstrip("/"):
+                return "branch name is a bare namespace"
+        return None
+    _lane, effort, remainder = parsed
+    if not remainder:
+        return "branch name is a bare namespace"
+    if effort is not None and not _ISSUE_TOPIC.match(remainder):
+        return "effort-tagged branch must be <lane>-<effort>/<issue#>-<topic>"
     return None
 
 

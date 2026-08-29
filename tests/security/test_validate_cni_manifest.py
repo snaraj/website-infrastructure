@@ -385,5 +385,29 @@ metadata:
         self.assertEqual(MODULE.validate(commented, decisions(commented)), [])
 
 
+class DirectMappingRedactionTests(unittest.TestCase):
+    """Issue #175: the CNI parser's duplicate-key diagnostic stays redacted.
+
+    ``_direct_mapping`` reads operator-supplied ConfigMap data, so a key here
+    is an unrestricted scalar out of the inspected manifest. The refusal names
+    the mapping — a reviewed constant at every call site — and the exact
+    source line, which is what makes it actionable, and nothing else.
+    """
+
+    MARKER = "zz" + "cniduplicatekeymarker" + "zz"
+
+    def test_a_duplicate_key_is_reported_by_line_not_by_name(self):
+        document = "data:\n  {m}: one\n  {m}: two\n".format(m=self.MARKER)
+        errors = []
+        MODULE._direct_mapping(document, "data", errors)
+        self.assertEqual(errors, ["data contains a duplicate key at line 3"])
+
+    def test_the_probe_would_see_an_echo(self):
+        """Vacuity probe: the marker is findable when it IS present."""
+
+        echoing = ["data contains duplicate key " + self.MARKER]
+        self.assertTrue(any(self.MARKER in error for error in echoing))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,10 +15,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .support import required_tool
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "bootstrap" / "flux" / "bootstrap.sh"
 BASH = shutil.which("bash")
+BASH_REQUIRED = "Bash is required for startup-environment rejection"
 if BASH is None and os.name == "nt":
     candidate = Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "bash.exe"
     if candidate.is_file():
@@ -174,7 +177,7 @@ class FluxLiveStateStaticContractTests(unittest.TestCase):
             startup.write_text("inherited_hook() { :; }\n", encoding="utf-8")
             environment = {**os.environ, "BASH_ENV": str(startup)}
             result = subprocess.run(
-                [BASH, str(BOOTSTRAP), "--generate"],
+                [required_tool(BASH, BASH_REQUIRED), str(BOOTSTRAP), "--generate"],
                 check=False,
                 capture_output=True,
                 text=True,

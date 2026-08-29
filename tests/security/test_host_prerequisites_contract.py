@@ -108,6 +108,40 @@ class HostPrerequisitesPlanTests(unittest.TestCase):
         values["SYSCTL_TARGET"] = "/etc/sysctl.conf"
         self.assertNotEqual(self.run_validator(values).returncode, 0)
 
+    def test_plan_diagnostics_never_echo_a_key_read_from_the_plan(self):
+        """Issue #175: an operator plan is file-derived input like any other.
+
+        The duplicate-key and unknown-key diagnostics reproduced the plan's own
+        key names into stderr, outside issue #112's encryption sink. Both now
+        report a position (the line) or a count, so the refusal stays
+        actionable without echoing what it read.
+        """
+
+        marker = "ZZ" + "PLANKEYMARKER" + "ZZ"
+
+        unknown = self.run_validator(valid_plan(), "{}=value".format(marker))
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertNotIn(marker, unknown.stdout + unknown.stderr)
+        self.assertIn("unknown keys: 1", unknown.stderr)
+
+        duplicated = self.run_validator(valid_plan(), "PLAN_VERSION=1")
+        self.assertNotEqual(duplicated.returncode, 0)
+        self.assertNotIn("PLAN_VERSION", duplicated.stdout + duplicated.stderr)
+        self.assertIn("duplicate key", duplicated.stderr)
+
+    def test_the_plan_probe_would_see_an_echo(self):
+        """Vacuity probe for the assertions above.
+
+        A reviewed expectation IS still named — that is the deliberate half of
+        the contract — so the same stream demonstrably can carry a key name.
+        """
+
+        values = valid_plan()
+        del values["PLAN_VERSION"]
+        result = self.run_validator(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PLAN_VERSION", result.stderr)
+
     def test_rejects_unbounded_current_sysctl(self):
         values = valid_plan()
         values["CURRENT_NET_IPV4_IP_FORWARD"] = "2"

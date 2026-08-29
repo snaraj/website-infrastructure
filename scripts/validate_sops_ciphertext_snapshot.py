@@ -55,15 +55,57 @@ def _is_link_or_reparse(metadata: os.stat_result) -> bool:
     )
 
 
+def _ancestor_state(metadata: os.stat_result) -> tuple[int, ...]:
+    """Bind an ancestor DIRECTORY to the fields that identify that directory.
+
+    A directory's st_nlink, st_size, st_mtime_ns and st_ctime_ns describe its
+    CONTENTS, not this path: every one of them changes when an unrelated
+    process creates or removes some other entry inside it. Snapshotting them
+    made the walk refuse a completely stable path whenever a sibling process
+    touched a shared ancestor -- and the per-user temporary root is a shared
+    ancestor of every private file staged under it, so one concurrent
+    ``mkdtemp`` anywhere on the machine turned a valid read into a fail-closed
+    refusal. That is issue #158's transient class, measured on an untouched
+    path as st_nlink 5372 -> 5373 with st_dev/st_ino/st_mode/st_uid/st_gid
+    unchanged.
+
+    Nothing a path-substitution attack must do is dropped. st_dev and st_ino
+    identify the directory itself, so replacing it fails; st_mode carries the
+    type bits, so swapping it for a file or a symlink fails (and
+    ``_is_link_or_reparse`` refuses the symlink outright before this runs);
+    st_uid/st_gid catch a concurrent chown; the Windows attribute and reparse
+    fields keep the reparse-point decision intact. The FINAL component keeps
+    the complete ``_path_state`` tuple, and the read window is separately
+    bound to the open descriptor and to its own parent directory handle, so
+    no field removed here was the only witness to anything.
+    """
+
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        getattr(metadata, "st_uid", -1),
+        getattr(metadata, "st_gid", -1),
+        getattr(metadata, "st_file_attributes", 0),
+        getattr(metadata, "st_reparse_tag", 0),
+    )
+
+
 def _path_chain(path: Path) -> tuple[tuple[str, tuple[int, ...]], ...]:
     """Snapshot every ancestor so directory replacement cannot pass silently."""
 
     result: list[tuple[str, tuple[int, ...]]] = []
-    for component in reversed((path, *path.parents)):
+    components = (*reversed(path.parents), path)
+    for position, component in enumerate(components):
         metadata = component.lstat()
         if _is_link_or_reparse(metadata):
             raise _WALK_ERROR()
-        result.append((os.path.normcase(str(component)), _path_state(metadata)))
+        state = (
+            _path_state(metadata)
+            if position == len(components) - 1
+            else _ancestor_state(metadata)
+        )
+        result.append((os.path.normcase(str(component)), state))
     return tuple(result)
 
 

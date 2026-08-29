@@ -33,13 +33,15 @@ fixtures faithful to the three-row surface so the shipped-pattern pins can
 never silently lock the two-row shape in as "the healthy table".
 """
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
-from .support import required_tool
+from .support import canonicalize_probe_spellings, required_tool
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +63,20 @@ RUNTIME_PATTERN = (
 # conscious conversion — the moment the platform lane ships a third probe.
 SHIPPED_PATTERN = re.compile(r"'(\^io\[\.\]containerd\[\.\](?:cri|grpc)\[\.\]v1[^']*)'")
 GREP = shutil.which("grep")
+
+
+def script_text(path):
+    """Read a bootstrap script in this repository's reviewed spelling.
+
+    Canonical spelling, not raw bytes. ``SHIPPED_PATTERN`` and the stale-row
+    tripwire each key on ONE spelling — single-quoted, dots written ``[.]`` —
+    so an equivalent probe written with escaped dots inside double quotes
+    evaded both (issue #51). Every read in this battery goes through here, and
+    ``ProbeSpellingCanonicalisationTests`` pins that today's scripts
+    canonicalise to themselves, so nothing is being rewritten silently.
+    """
+
+    return canonicalize_probe_spellings(path.read_text(encoding="utf-8"))
 
 
 def table(rows):
@@ -135,9 +151,7 @@ class SplitRowContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.texts = {
-            name: path.read_text(encoding="utf-8") for name, path in SCRIPTS.items()
-        }
+        cls.texts = {name: script_text(path) for name, path in SCRIPTS.items()}
 
     def test_every_script_ships_exactly_the_two_split_row_patterns(self):
         for name, text in self.texts.items():
@@ -172,6 +186,145 @@ class SplitRowContractTests(unittest.TestCase):
                 self.assertNotIn("grpc.v1", code)
 
 
+class ProbeSpellingCanonicalisationTests(unittest.TestCase):
+    """Issue #51: an equivalent probe in another spelling is not invisible.
+
+    Every check in this battery, the health matrix, and the regression
+    battery keys on ONE spelling: ``grep -Eq`` followed by a single-quoted
+    pattern whose dots are written ``[.]``. A functionally equivalent probe
+    written ``grep -Eq "^io\\.containerd\\.grpc\\.v1..."`` therefore shipped
+    while all five checks — three extractions and both stale-row tripwires —
+    stayed green. The dangerous direction is the retired 1.x row returning
+    under a spelling the tripwire whose whole job is "in any spelling" could
+    not see.
+
+    ``support.canonicalize_probe_spellings`` normalises the SOURCE instead of
+    teaching five patterns four spellings. These tests are its deny proofs.
+    """
+
+    EVASIVE = {
+        "escaped dots in double quotes": (
+            'ctr plugins ls | grep -Eq "^io\\.containerd\\.grpc\\.v1'
+            '[[:space:]]+cri[[:space:]].*[[:space:]]ok[[:space:]]*$"'
+        ),
+        "escaped dots in ANSI-C quotes": (
+            "ctr plugins ls | grep -Eq $'^io\\\\.containerd\\\\.grpc\\\\.v1'"
+        ),
+        "bracket dots in double quotes": (
+            'ctr plugins ls | grep -Eq "^io[.]containerd[.]grpc[.]v1"'
+        ),
+        "long option words": (
+            "ctr plugins ls | grep --extended-regexp --quiet "
+            '"^io\\.containerd\\.grpc\\.v1"'
+        ),
+        "separated option words": (
+            'ctr plugins ls | grep -E -q "^io\\.containerd\\.grpc\\.v1"'
+        ),
+    }
+
+    def test_todays_scripts_canonicalise_to_themselves(self):
+        """The identity pin: normalisation invents nothing.
+
+        Every read in these batteries now goes through the canonicaliser, so
+        it must be a no-op on the committed tree — otherwise it would be
+        quietly asserting against bytes no script contains.
+        """
+
+        for name, path in sorted(SCRIPTS.items()):
+            with self.subTest(script=name):
+                raw = path.read_text(encoding="utf-8")
+                self.assertEqual(canonicalize_probe_spellings(raw), raw)
+
+    def test_every_evasive_spelling_becomes_the_reviewed_spelling(self):
+        for label, line in sorted(self.EVASIVE.items()):
+            with self.subTest(spelling=label):
+                canonical = canonicalize_probe_spellings(line)
+                self.assertIn("grep -Eq '^io[.]containerd[.]grpc[.]v1", canonical)
+
+    # The subset that ALSO defeats both stale-row tripwires, because neither
+    # `grpc[.]v1` nor `grpc.v1` appears anywhere in the raw line. The
+    # bracket-in-double-quotes spelling is deliberately not here: the tripwire
+    # already saw it, only the extraction did not.
+    TRIPWIRE_EVASIVE = (
+        "escaped dots in double quotes",
+        "escaped dots in ANSI-C quotes",
+        "long option words",
+        "separated option words",
+    )
+
+    def test_each_evasive_spelling_trips_the_stale_row_tripwire(self):
+        """The deny proof, against the tripwire's own two spellings."""
+
+        for label in self.TRIPWIRE_EVASIVE:
+            with self.subTest(spelling=label):
+                raw = self.EVASIVE[label]
+                self.assertNotIn(
+                    "grpc[.]v1", raw, "the raw spelling must evade the tripwire"
+                )
+                self.assertNotIn("grpc.v1", raw, "and evade its second spelling")
+                self.assertIn("grpc[.]v1", canonicalize_probe_spellings(raw))
+
+    def test_a_pattern_the_shell_computes_is_left_exactly_as_written(self):
+        """Fail-safe, not fail-open: an unresolvable token is not invented.
+
+        Several legitimate probes interpolate a version or an address. Their
+        value is not knowable from the text, so the canonicaliser must leave
+        them untouched rather than guess — a guessed pattern would be an
+        assertion about a probe nobody wrote.
+        """
+
+        for line in (
+            'grep -Eq "^etcdctl version: ${ETCD_VERSION}([[:space:]]|$)"',
+            'grep -Eq "(^|:)${port}$"',
+            'grep -Fq "v${CONTAINERD_VERSION}"',
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(canonicalize_probe_spellings(line), line)
+
+    def test_a_fixed_string_search_is_never_rewritten_as_an_ere(self):
+        """``-Fq`` is not ``-Eq``; normalising it would assert a lie."""
+
+        line = 'grep -Fq "io\\.containerd\\.grpc\\.v1"'
+        self.assertEqual(canonicalize_probe_spellings(line), line)
+
+    def test_this_batterys_own_read_path_sees_the_evasive_probe(self):
+        """The wiring, driven rather than asserted.
+
+        A canonicaliser that works in isolation proves nothing about THIS
+        battery unless its reads go through it. Each evasive spelling is
+        written into a real script and read back with ``script_text`` — the
+        one function ``setUpClass`` and the pattern battery both use — and the
+        battery's own extraction and the tripwire spelling must then see it.
+        Reverting that wiring turns this red; nothing else does, because
+        today's committed scripts canonicalise to themselves.
+        """
+
+        for label, line in sorted(self.EVASIVE.items()):
+            with self.subTest(spelling=label):
+                directory = Path(
+                    tempfile.mkdtemp(
+                        prefix="cri-spelling.", dir=os.environ.get("TMPDIR")
+                    )
+                )
+                self.addCleanup(shutil.rmtree, directory, True)
+                script = directory / "verify.sh"
+                script.write_text(
+                    "#!/usr/bin/env bash\n" + line + "\n", encoding="utf-8"
+                )
+
+                self.assertEqual(
+                    SHIPPED_PATTERN.findall(script.read_text(encoding="utf-8")),
+                    [],
+                    "the raw spelling must be invisible to the extraction, or "
+                    "this case is not the evasion it claims to be",
+                )
+                self.assertIn(
+                    "^io[.]containerd[.]grpc[.]v1",
+                    "".join(SHIPPED_PATTERN.findall(script_text(script))),
+                )
+                self.assertIn("grpc[.]v1", script_text(script))
+
+
 @unittest.skipUnless(GREP, "an extended-regexp grep is required for pattern battery")
 class SplitRowPatternBatteryTests(unittest.TestCase):
     """Exercise the shipped patterns against faithful and broken plugin tables."""
@@ -179,7 +332,7 @@ class SplitRowPatternBatteryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         shipped = {
-            tuple(sorted(SHIPPED_PATTERN.findall(path.read_text(encoding="utf-8"))))
+            tuple(sorted(SHIPPED_PATTERN.findall(script_text(path))))
             for path in SCRIPTS.values()
         }
         if shipped != {tuple(sorted((IMAGES_PATTERN, RUNTIME_PATTERN)))}:

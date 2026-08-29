@@ -118,6 +118,18 @@ class KubeadmConfigTests(unittest.TestCase):
         errors = MODULE.validate(config)
         self.assertTrue(any(fragment in error for error in errors), errors)
 
+    def assert_not_reported(self, config, fragment):
+        """No diagnostic may reproduce a scalar read out of the config.
+
+        Issue #175's half of the issue #112 contract: a refusal names the
+        structural failure and its position, never the file's own content.
+        """
+
+        errors = MODULE.validate(config)
+        self.assertTrue(errors, "the config must still be rejected")
+        for error in errors:
+            self.assertNotIn(fragment, error, errors)
+
     def test_accepts_exact_reviewed_contract(self):
         self.assertEqual(MODULE.validate(VALID_CONFIG), [])
 
@@ -190,7 +202,12 @@ class KubeadmConfigTests(unittest.TestCase):
             "controllerManager:\n  extraArgs:\n"
             "    - name: bind-address\n      value: 0.0.0.0\napiServer:\n",
         )
-        self.assert_rejected(exposed_controller, "unexpected controllerManager")
+        # The diagnostic reports HOW MANY unexpected fields the reviewed
+        # mapping carried, never which: an unexpected key is an unrestricted
+        # scalar read out of the inspected file (issue #175). What this
+        # asserts is the refusal, which is what the test is for.
+        self.assert_rejected(exposed_controller, "1 unexpected field(s)")
+        self.assert_not_reported(exposed_controller, "controllerManager")
 
     def test_rejects_sentinels_ignored_preflights_and_duplicate_documents(self):
         self.assert_rejected(VALID_CONFIG.replace("pi-control", "REPLACE_PI_NODE"), "sentinel")
@@ -257,6 +274,57 @@ class KubeadmConfigTests(unittest.TestCase):
                 self.assertIn(
                     "{} at line {}".format(structural_label, expected_line), errors
                 )
+
+    def test_validate_diagnostics_never_echo_an_unexpected_scalar(self):
+        """Issue #175: the residual sites OUTSIDE the issue #112 sink.
+
+        ``validate()`` and ``_require_keys`` are reached by every kubeadm
+        consumer and never by the encryption path, so issue #112's clean
+        232-input probe said nothing about them. Both echoed unexpected
+        names — a document ``kind`` and a mapping field — straight out of the
+        inspected file.
+        """
+
+        marker = "zz" + "unexpectedscalarmarker" + "zz"
+        unexpected_document = VALID_CONFIG.rstrip() + (
+            "\n---\napiVersion: kubeadm.k8s.io/v1beta4\nkind: {}\n".format(marker)
+        )
+        unexpected_field = VALID_CONFIG.replace(
+            "kind: InitConfiguration", "kind: InitConfiguration\n{}: x".format(marker), 1
+        )
+
+        for label, config, structural_fragment in (
+            ("unexpected-document-kind", unexpected_document, "unexpected document kind(s)"),
+            ("unexpected-mapping-field", unexpected_field, "unexpected field(s)"),
+        ):
+            with self.subTest(shape=label):
+                errors = MODULE.validate(config)
+                self.assertNotEqual(errors, [], "the config must still be refused")
+                self.assertFalse(
+                    any(marker in error for error in errors),
+                    "a file-derived scalar reached the diagnostic: {}".format(errors),
+                )
+                self.assertTrue(
+                    any(structural_fragment in error for error in errors),
+                    "the refusal must still say what was wrong: {}".format(errors),
+                )
+
+    def test_the_marker_probe_would_notice_an_echo(self):
+        """Vacuity probe for the two redaction tests above.
+
+        A probe that cannot see an echo passes on a validator that echoes
+        everything. The reviewed EXPECTATION side is still printed by design —
+        missing field names come from the contract, not the file — so a
+        document that omits a reviewed key must still name it, which proves
+        the same assertion style is capable of finding a name in an error.
+        """
+
+        without_networking = VALID_CONFIG.replace("networking:\n", "removed:\n", 1)
+        errors = MODULE.validate(without_networking)
+        self.assertTrue(
+            any("networking" in error for error in errors),
+            "the reviewed expectation must still be named: {}".format(errors),
+        )
 
 
 if __name__ == "__main__":

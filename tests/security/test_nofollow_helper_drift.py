@@ -40,10 +40,18 @@ FAMILY_CARRIERS = {
 }
 FAMILY_FUNCTIONS = (
     "_path_state",
+    "_ancestor_state",
     "_is_link_or_reparse",
     "_path_chain",
     "_open_posix_no_follow",
 )
+# The ancestor tuple's fields, by index, so the pin below names what each
+# position is for instead of asserting an opaque length.
+ANCESTOR_IDENTITY_FIELDS = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+# Fields deliberately NOT in the ancestor tuple: each one describes a
+# directory's CONTENTS, so an unrelated process creating or removing some
+# other entry changes it (issue #158).
+ANCESTOR_CONTENT_FIELDS = ("st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
 # A fifth and sixth copy of the same opener exists under a different name in
 # the protected-host pair; pin those two to each other as well so they also
 # cannot drift apart.
@@ -155,6 +163,105 @@ class NoFollowHelperDriftTests(unittest.TestCase):
                     self.assertIn(metadata.st_gid, state)
                     self.assertEqual(state[4], metadata.st_uid)
                     self.assertEqual(state[5], metadata.st_gid)
+
+    def test_ancestor_state_keeps_identity_and_drops_content_churn(self):
+        """Issue #158: a shared ancestor's content fields are not custody.
+
+        ``_path_chain`` used the full ``_path_state`` tuple for every
+        component, so the per-user temporary root — a shared ancestor of every
+        private file staged under it — carried st_nlink/st_size/st_mtime_ns/
+        st_ctime_ns into the before/after comparison. Any other process
+        creating or removing its own temp entry flipped those fields and the
+        read failed closed on a path nothing had touched. The narrowing must
+        drop exactly those four and keep every identity field.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory).resolve()
+            metadata = os.lstat(probe)
+            for relative in FAMILY_CARRIERS:
+                module = self.modules[relative]
+                state = module._ancestor_state(metadata)
+                with self.subTest(carrier=relative):
+                    for position, field in enumerate(ANCESTOR_IDENTITY_FIELDS):
+                        self.assertEqual(
+                            state[position],
+                            getattr(metadata, field),
+                            "the ancestor tuple must still bind " + field,
+                        )
+                    for field in ANCESTOR_CONTENT_FIELDS:
+                        self.assertNotIn(
+                            getattr(metadata, field),
+                            state,
+                            "{} describes the directory's contents, not this "
+                            "path; keeping it re-opens issue #158".format(field),
+                        )
+
+    def test_path_chain_survives_sibling_churn_but_not_substitution(self):
+        """The behavioural half: benign churn passes, every attack still fails.
+
+        Each mutation is applied to a fresh chain and reverted by construction
+        (a new temporary tree per case), so no case can mask another.
+        """
+
+        for relative in FAMILY_CARRIERS:
+            module = self.modules[relative]
+            with tempfile.TemporaryDirectory() as directory:
+                shared = Path(directory).resolve()
+                middle = shared / "middle"
+                middle.mkdir()
+                target = middle / "private.bin"
+                target.write_bytes(b"payload\n")
+                os.chmod(target, 0o600)
+                baseline = module._path_chain(target)
+
+                with self.subTest(carrier=relative, case="sibling-created"):
+                    sibling = tempfile.mkdtemp(dir=str(shared))
+                    self.assertEqual(
+                        baseline,
+                        module._path_chain(target),
+                        "a sibling entry in a shared ancestor is not a change "
+                        "to this path",
+                    )
+                with self.subTest(carrier=relative, case="sibling-removed"):
+                    os.rmdir(sibling)
+                    self.assertEqual(baseline, module._path_chain(target))
+
+                with self.subTest(carrier=relative, case="ancestor-replaced"):
+                    payload = target.read_bytes()
+                    for entry in middle.iterdir():
+                        entry.unlink()
+                    middle.rmdir()
+                    middle.mkdir()
+                    target.write_bytes(payload)
+                    os.chmod(target, 0o600)
+                    self.assertNotEqual(
+                        baseline,
+                        module._path_chain(target),
+                        "a replaced ancestor directory must still be caught",
+                    )
+
+                replaced = module._path_chain(target)
+                with self.subTest(carrier=relative, case="ancestor-chmod"):
+                    # Pick a mode that genuinely differs from the current one:
+                    # chmod to the mode a directory already has is a no-op, and
+                    # a mutation that mutates nothing proves nothing.
+                    original = stat.S_IMODE(os.lstat(middle).st_mode)
+                    os.chmod(middle, 0o700 if original != 0o700 else 0o750)
+                    self.assertNotEqual(replaced, module._path_chain(target))
+                    os.chmod(middle, original)
+
+                restored = module._path_chain(target)
+                self.assertEqual(
+                    replaced, restored, "the chmod mutation must be reverted"
+                )
+                with self.subTest(carrier=relative, case="final-file-rewritten"):
+                    target.write_bytes(b"payload-two\n")
+                    self.assertNotEqual(
+                        restored,
+                        module._path_chain(target),
+                        "the final component keeps the full custody tuple",
+                    )
 
     @unittest.skipUnless(os.name == "posix", "no-follow walking is POSIX-only")
     def test_open_posix_no_follow_agrees_on_accept_and_reject(self):
