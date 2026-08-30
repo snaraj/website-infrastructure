@@ -120,23 +120,22 @@ def desired_flux_object(kind, api_version, namespace, name):
     return desired
 
 
+# The live Kustomization inventory is exactly what the synced tree creates:
+# kubernetes/flux-system/gotk-sync.yaml.in defines the two site reconcilers
+# and nothing else (the #232 activation retired every other reconciler
+# identity), so any additional name — the pre-activation suffixless names
+# included — is a finding, not a variant spelling.
 kustomization_identities = {
-    ("flux-system", "flux-system"),
-    ("flux-system", "platform-prerequisites"),
-    ("flux-system", "platform-services"),
-    ("flux-system", "naranjo-online"),
-    ("flux-system", "lidersea-com"),
+    ("flux-system", "naranjo-online-reconciler"),
+    ("flux-system", "lidersea-com-reconciler"),
 }
 kustomizations = load_items("kustomizations.json")
 exact_namespaced_inventory(
     kustomizations, kustomization_identities, "Kustomization"
 )
 for name in (
-    "flux-system",
-    "platform-prerequisites",
-    "platform-services",
-    "naranjo-online",
-    "lidersea-com",
+    "naranjo-online-reconciler",
+    "lidersea-com-reconciler",
 ):
     identity = "flux-system/" + name
     item = by_identity(kustomizations, "flux-system", name, "Kustomization")

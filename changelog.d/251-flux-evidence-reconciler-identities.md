@@ -1,0 +1,3 @@
+### Fixed
+
+- Correct `scripts/validate_flux_release_evidence.py` to expect the exact live Kustomization inventory the synced tree creates — `flux-system/naranjo-online-reconciler` and `flux-system/lidersea-com-reconciler` per `kubernetes/flux-system/gotk-sync.yaml.in` — instead of the five pre-activation suffixless identities the #232 GitOps activation retired. The contract suite now pins those names as literal strings, cross-binds them against the Kustomization objects `gotk-sync.yaml.in` actually defines, and adds a fail-closed case proving evidence carrying a retired suffixless name is refused on the exact-inventory gate.
