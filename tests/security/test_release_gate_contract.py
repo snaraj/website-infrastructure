@@ -1,5 +1,6 @@
 import json
 import copy
+import re
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_GATE = REPO_ROOT / "scripts" / "release-gate.sh"
+GOTK_SYNC = REPO_ROOT / "kubernetes" / "flux-system" / "gotk-sync.yaml.in"
 FLUX_EVIDENCE_VALIDATOR = REPO_ROOT / "scripts" / "validate_flux_release_evidence.py"
 INVENTORY_VALIDATOR = REPO_ROOT / "scripts" / "validate_runtime_inventory_evidence.py"
 COMMIT = "a" * 40
@@ -25,12 +27,14 @@ ETCD_IMAGE = "registry.k8s.io/etcd:3.6.8-0"
 CILIUM_OPERATOR_IMAGE = "quay.io/cilium/operator-generic:v1.0.0@sha256:" + "8" * 64
 CILIUM_IMAGE = "quay.io/cilium/cilium:v1.0.0@sha256:" + "9" * 64
 
+# Pinned as literal strings on purpose (issue #251): these are the exact
+# Kustomization names the synced tree creates in gotk-sync.yaml.in, NOT a
+# value derived from the validator under test, so inventory drift in either
+# the validator or this suite turns the suite red instead of staying
+# self-consistently green.
 KUSTOMIZATION_NAMES = (
-    "flux-system",
-    "platform-prerequisites",
-    "platform-services",
-    "naranjo-online",
-    "lidersea-com",
+    "naranjo-online-reconciler",
+    "lidersea-com-reconciler",
 )
 SOURCE_IDENTITIES = (
     ("flux-system", "flux-system"),
@@ -189,10 +193,11 @@ class ReleaseGateContractTests(unittest.TestCase):
     def _write_valid_evidence(self):
         kustomizations = []
         for name in KUSTOMIZATION_NAMES:
+            site = name[: -len("-reconciler")]
             spec = {
-                "path": "./" + name,
-                "prune": True,
-                "serviceAccountName": name + "-reconciler",
+                "path": "./kubernetes/websites/" + site,
+                "prune": False,
+                "serviceAccountName": name,
                 "sourceRef": {"kind": "GitRepository", "name": "flux-system"},
             }
             item = {
@@ -807,6 +812,45 @@ class ReleaseGateContractTests(unittest.TestCase):
         result = self._run_validator()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("bound to exact local HEAD", result.stdout)
+
+    def test_kustomization_inventory_matches_the_synced_tree(self):
+        """Cross-bind the pinned identities to what the tree actually creates.
+
+        gotk-sync.yaml.in is the reviewed source of the live Kustomization
+        objects, so the literal names this suite feeds the validator must
+        equal the names that file defines — a rename or an added object in
+        either place turns this red instead of leaving the validator and its
+        fixtures agreeing on a name the cluster never carries (issue #251).
+        """
+
+        tree_names = set()
+        for document in GOTK_SYNC.read_text(encoding="utf-8").split("\n---\n"):
+            if not re.search(r"^kind: Kustomization$", document, re.MULTILINE):
+                continue
+            match = re.search(r"^  name: (\S+)$", document, re.MULTILINE)
+            self.assertIsNotNone(match, document)
+            tree_names.add(match.group(1))
+        self.assertEqual(tree_names, set(KUSTOMIZATION_NAMES))
+
+    def test_pre_activation_suffixless_kustomization_name_fails_closed(self):
+        """The retired suffixless identities must be refused, not tolerated.
+
+        Before the #232 activation the validator expected names without the
+        -reconciler suffix; evidence carrying such a name is either stale or
+        forged and must die on the exact-inventory gate.
+        """
+
+        for name in KUSTOMIZATION_NAMES:
+            with self.subTest(name=name):
+                self._write_valid_evidence()
+                value = self._read("kustomizations.json")
+                for item in value["items"]:
+                    if item["metadata"]["name"] == name:
+                        item["metadata"]["name"] = name[: -len("-reconciler")]
+                self._write("kustomizations.json", value)
+                self._assert_rejected_with(
+                    "live Kustomization inventory differs from the exact release set"
+                )
 
     def test_first_activation_creates_exactly_the_two_site_default_denies(self):
         self.assertEqual(
