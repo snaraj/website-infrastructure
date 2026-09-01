@@ -1,43 +1,41 @@
 # Issue 195 chart acquisition receipt
 
-Captured 2026-09-01 for the issue #285 drift remediation, which advances
-naranjo.online to its current published release `0.1.71` and re-verified
-lidersea.com unchanged at `0.1.41` in the same capture — superseding the
-issues #280/#281 capture of earlier that day. The canonical,
-machine-checked record is `195-chart-acquisition-receipt.json`; this Markdown
-is its explanatory view and must not be used as an independent source of
-release pins. This receipt is
-public, credential-free evidence for the exact two chart artifacts committed
+Captured 2026-09-01 for issues #285, which kept lidersea.com at `0.1.41` and
+advanced naranjo.online to `0.1.71`; it supersedes the issues #280/#281
+capture of 2026-09-01. The canonical, machine-checked record is
+`195-chart-acquisition-receipt.json`; this Markdown is its explanatory view
+and must not be used as an independent source of release pins. This receipt
+is public, credential-free evidence for the exact chart artifacts committed
 by this repository. It is acquisition evidence, not proof of Flux or live
 cluster convergence.
 
-The operator used Cosign 3.1.3, the exact `versions.env` pin; registry reads
-for the 2026-09-01 capture of both sites were direct anonymous OCI API
+The acquisition was run by `scripts/promote_releases.py` with Cosign 3.1.3,
+the exact `versions.env` pin; registry reads were direct anonymous OCI API
 resolutions whose `docker-content-digest` answers were required to agree with
 the fetched manifest bytes' own hashes (the technique reviewed in PRs #255 and
 #259), with ORAS 1.3.3 remaining the pinned acquisition tool of record.
 Each human tag was resolved, the resulting repository-at-digest was
-verified against the exact site publisher identity and GitHub Actions issuer,
-the Helm layer was fetched by its own digest and inspected, and both chart and
+verified against the exact publisher identity and GitHub Actions issuer, the
+Helm layer was fetched by its own digest and inspected, and both chart and
 embedded workload tags were resolved a second time. Both pairs of resolutions
-agreed. The immutable site Release asset and protected-main source commit were
+agreed. The immutable Release asset and protected-main source commit were
 also bound for each acquisition. Public SLSA v1 attestations bound the exact
 workload indexes; chart trust remains each chart's exact Cosign signature.
 
-| site and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |
+| workload and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |
 | --- | --- | --- | --- | --- | --- |
-| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.71` | `sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3` / `sha256:edf0881bb6ee872ae744905fd57a3c10d53d2b039aaf561b82e802a3a8e2d0a2` / `sha256:419e5b6ae64969ace4e090ca5f9550495e7655dfa7c529d81a15a2d06d3b6e95` | name/version/appVersion `naranjo-online` / `0.1.71` / `0.1.71` | `ghcr.io/snaraj/naranjo-online:v0.1.71@sha256:3e6057bce0a81fdefb50f563715d50b84d5eb008abae5cd5265c1c64d2b5ba99` | `sha256:773b2d8c50f6369ed5597ed3bc474fe81885ff55d93803892ba5b350a04e934e` |
 | lidersea.com — `ghcr.io/snaraj/charts/lidersea-com` | `0.1.41` | `sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6` / `sha256:ae045bde722060e04ae5f8b6c3fc4135386068026d787692c055852ade98f289` / `sha256:2c2b92acd6488afe16b1deb034e445ce3064256c1971415f8600eb601fdd09cc` | name/version/appVersion `lidersea-com` / `0.1.41` / `0.1.41` | `ghcr.io/snaraj/lidersea-com:v0.1.41@sha256:f661cdf9e33e8b36389b7f2d130a6fff6cbc1bbcb1c460968de416a831fdd86d` | `sha256:39929c6aaf5cc3c4feca57a7eac12858e83cc84505b99fdf0e0b57d6752d88e9` |
+| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.71` | `sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3` / `sha256:edf0881bb6ee872ae744905fd57a3c10d53d2b039aaf561b82e802a3a8e2d0a2` / `sha256:419e5b6ae64969ace4e090ca5f9550495e7655dfa7c529d81a15a2d06d3b6e95` | name/version/appVersion `naranjo-online` / `0.1.71` / `0.1.71` | `ghcr.io/snaraj/naranjo-online:v0.1.71@sha256:3e6057bce0a81fdefb50f563715d50b84d5eb008abae5cd5265c1c64d2b5ba99` | `sha256:773b2d8c50f6369ed5597ed3bc474fe81885ff55d93803892ba5b350a04e934e` |
 
 Publisher Release bindings:
 
-- naranjo.online: protected-main source `62e1572c1b443f388e82da0d6bc0043b54ddd38f`; immutable Release asset `sha256:cced275fe71a95c0a953123974589bea3a69134c7f5937207e6c3b9ef28875c6`.
 - lidersea.com: protected-main source `382272756fafe6b7e7f52602fd6263299b5c2589`; immutable Release asset `sha256:34404bf9c348f50c0f4d0ff0a3a6efbe8b41eedf40d9ab58b1b3fa3eb4ff26d9`.
+- naranjo.online: protected-main source `62e1572c1b443f388e82da0d6bc0043b54ddd38f`; immutable Release asset `sha256:cced275fe71a95c0a953123974589bea3a69134c7f5937207e6c3b9ef28875c6`.
 
-Each site's `vX.Y.Z` annotated tag was dereferenced to the commit above, and
-that same commit is what the Release asset's own `source_sha` field reports —
-two independent statements of the source binding that had to agree. Each
-manifest also states the chart and image digests independently of the registry
+Each `vX.Y.Z` annotated tag was dereferenced to the commit above, and that
+same commit is what the Release asset's own `source_sha` field reports — two
+independent statements of the source binding that had to agree. Each manifest
+also states the chart and image digests independently of the registry
 resolution, and both agreed.
 
 Each signed OCI manifest contained exactly one layer with
@@ -47,15 +45,15 @@ copies exactly that single matching layer.
 Cosign accepted only these certificate subjects, with issuer
 `https://token.actions.githubusercontent.com`:
 
-- `https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main`
 - `https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/heads/main`
+- `https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main`
 
 Exact-layer inspection hashes provide a reproducible custody check:
 
-- naranjo `Chart.yaml`: `sha256:1e8708c34244925e72da1e0bd97d3ee86ecb495d4279d848d33fa2fad286cd71`
-- naranjo `values.yaml`: `sha256:4cf32b9cab3ae7964eb7a80ceda6368f00c8024ae518adb90f9b2be59c1dbff2`
 - lidersea `Chart.yaml`: `sha256:5e1727720c3277fbb9d0e9be0b5994c15b1d7b1eba20cb7ae1f4e2c19c49c341`
 - lidersea `values.yaml`: `sha256:c93a729c03094830ea161404ffefaeab8947f90cd0fe7568ea79506183f713b9`
+- naranjo `Chart.yaml`: `sha256:1e8708c34244925e72da1e0bd97d3ee86ecb495d4279d848d33fa2fad286cd71`
+- naranjo `values.yaml`: `sha256:4cf32b9cab3ae7964eb7a80ceda6368f00c8024ae518adb90f9b2be59c1dbff2`
 
 Future updates repeat this exact sequence: resolve the reviewed tag, verify the
 exact manifest, config, sole layer and signer, inspect chart identity and
