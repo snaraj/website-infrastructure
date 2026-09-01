@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -511,6 +512,11 @@ class CeremonyTests(unittest.TestCase):
         def expansion_bomb(f):
             archive(f, [(f"{f.slug}/pad", b"\0" * (MODULE.ARCHIVE_EXPANSION_CEILING + 1024 * 1024), tarfile.REGTYPE)] + good(f))
 
+        def truncated_archive(f):
+            raw = gzip.decompress(hostile_tar(good(f)))
+            f.overrides["layer_bytes"] = gzip.compress(raw[: 512 + 40])
+            f.build()
+
         def not_a_gzip_tar(f):
             f.overrides["layer_bytes"] = b"\x1f\x8b" + b"not really" * 8
             f.build()
@@ -555,6 +561,7 @@ class CeremonyTests(unittest.TestCase):
             "oversized Chart.yaml": (oversized_chart_yaml, f"exceeds {MODULE.CHART_FILE_CEILING} bytes"),
             "expansion bomb": (expansion_bomb, "expands past"),
             "not a gzip tar": (not_a_gzip_tar, "not a readable gzip tar"),
+            "truncated archive": (truncated_archive, "not a readable gzip tar"),
         }
         for name, (mutate, message) in cases.items():
             with self.subTest(case=name):
@@ -1056,6 +1063,7 @@ class TickTests(unittest.TestCase):
         self.mutations = []
         self.fail_gates = set()
         self.fail_ready = False
+        self.fail_undo = False
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -1091,6 +1099,8 @@ class TickTests(unittest.TestCase):
             return "https://github.com/snaraj/website-infrastructure/pull/300\n"
         if argv[:3] == ["gh", "pr", "ready"]:
             self.mutations.append(("pr-ready-undo" if "--undo" in argv else "pr-ready", tuple(argv)))
+            if "--undo" in argv and self.fail_undo:
+                raise MODULE.Refusal("`gh pr` exited 1: undo response lost")
             if "--undo" not in argv and self.fail_ready:
                 raise MODULE.Refusal("`gh pr` exited 1: transport failure")
             return ""
@@ -1141,11 +1151,14 @@ class TickTests(unittest.TestCase):
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pr_record(300, branch, live)
         self.assertFalse(MODULE.consider_ready(github, 300, False))
         self.assertEqual([m for m in self.mutations if m[0] != "gate"], [], "a replacement head is never flipped on stale receipts")
-        self.assertTrue(any("stays Draft" in line and "0 distinct" in line for line in self.log_lines))
+        self.assertTrue(any("not flipped" in line and "0 distinct" in line for line in self.log_lines))
         # The head moves between the fresh read and the flip: the flip is
-        # undone and both lanes re-armed.
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([pr_record(300, branch, stale), pr_record(300, branch, live)])
-        with self.assertRaisesRegex(MODULE.Refusal, "head moved while it was being flipped"):
+        # undone, both lanes re-armed, and the restore is claimed from the
+        # read that shows Draft with both lanes at the head that replaced it.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque(
+            [pr_record(300, branch, stale), pr_record(300, branch, live), pr_record(300, branch, live, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)]
+        )
+        with self.assertRaisesRegex(MODULE.Refusal, "returned to Draft \\(proven at head " + live + ", moved from " + stale + "\\).*head moved while it was being flipped"):
             MODULE.consider_ready(github, 300, False)
         kinds = [m[0] for m in self.mutations]
         self.assertEqual(kinds.count("pr-ready"), 1)
@@ -1315,12 +1328,15 @@ class TickTests(unittest.TestCase):
         self.fleet.gh[path] = [[{"user": {"login": "mallory", "id": 4242}, "body": body}]]
         report()
         self.assertEqual(len(self.writes("/issues/285/comments")), 2, "an outsider's preseed never suppresses the alert")
+        self.fleet.gh[path] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID + 1}, "body": body}]]
+        report()
+        self.assertEqual(len(self.writes("/issues/285/comments")), 3, "a reused owner login with another immutable actor id never suppresses the alert")
         self.fleet.gh[path] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID}, "body": "quoting " + marker + " in prose"}]]
         report()
-        self.assertEqual(len(self.writes("/issues/285/comments")), 3, "a lookalike never suppresses the alert")
+        self.assertEqual(len(self.writes("/issues/285/comments")), 4, "a lookalike never suppresses the alert")
         self.fleet.gh[path] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID}, "body": body}]]
         report()
-        self.assertEqual(len(self.writes("/issues/285/comments")), 3, "the promoter's own exact report is reported once")
+        self.assertEqual(len(self.writes("/issues/285/comments")), 4, "the promoter's own exact report is reported once")
 
     def test_ready_transition_compensates_every_failure_path(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
@@ -1333,9 +1349,10 @@ class TickTests(unittest.TestCase):
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
         armed = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
         # (a) The Ready call fails in transport: nothing was deleted first,
         # Draft is restored and both lanes are re-armed.
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, dict(armed, draft=False)])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, restored])
         self.fail_ready = True
         with self.assertRaisesRegex(MODULE.Refusal, "compensated.*transport failure"):
             MODULE.consider_ready(github, 300, False)
@@ -1346,7 +1363,7 @@ class TickTests(unittest.TestCase):
         # (b) The flip is not effective: GitHub still reports Draft.
         self.fail_ready = False
         self.mutations.clear()
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, armed])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, armed, restored])
         with self.assertRaisesRegex(MODULE.Refusal, "still reports Draft"):
             MODULE.consider_ready(github, 300, False)
         self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
@@ -1360,6 +1377,172 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(cleared), 1)
         self.assertGreater(self.mutations.index(cleared[0]), kinds.index("pr-ready"))
         self.assertEqual(len(self.writes("/issues/300/comments")), 1)
+
+    def test_ready_revalidates_every_authorization_input_after_the_flip(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head = "d" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        good_comments = [
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]
+        blocking = bot_comment(
+            f"HEAD: {head}\nVERDICT: REQUEST-CHANGES\n\nmutation claim\n\n- Daybreak (adversarial reviewer)\n"
+        )
+        good_checks = [
+            {
+                "name": name,
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"slug": MODULE.REQUIRED_CHECK_APP},
+            }
+            for name in MODULE.REQUIRED_CHECKS
+        ]
+        armed = pr_record(
+            300,
+            branch,
+            head,
+            labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",),
+        )
+        ready = dict(armed, draft=False)
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        cases = {
+            "same-head blocking receipt": {
+                "post_comments": good_comments + [blocking],
+                "reason": "REQUEST-CHANGES",
+            },
+            "renewed requires-review": {
+                "post_pr": pr_record(
+                    300,
+                    branch,
+                    head,
+                    draft=False,
+                    labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS,
+                ),
+                "reason": "requires-review is still armed",
+            },
+            "required check regression": {
+                "post_checks": [dict(good_checks[0], conclusion="failure")] + good_checks[1:],
+                "reason": "has not succeeded",
+            },
+            "required check duplicate": {
+                "post_checks": good_checks
+                + [dict(good_checks[0], app={"slug": "mallory-ci"})],
+                "reason": "appears 2 times",
+            },
+            "new base drift": {
+                "post_behind": 1,
+                "reason": "behind main",
+            },
+        }
+        pull_path = f"repos/{MODULE.REPOSITORY}/pulls/300"
+        comment_path = f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"
+        compare_path = f"repos/{MODULE.REPOSITORY}/compare/main...{head}"
+        check_path = f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                self.mutations.clear()
+                self.fleet.gh[pull_path] = collections.deque(
+                    [armed, case.get("post_pr", ready), restored]
+                )
+                self.fleet.gh[comment_path] = collections.deque(
+                    [[list(good_comments)], [list(case.get("post_comments", good_comments))]]
+                )
+                self.fleet.gh[compare_path] = collections.deque(
+                    [{"behind_by": 0}, {"behind_by": case.get("post_behind", 0)}]
+                )
+                post_checks = case.get("post_checks", good_checks)
+                self.fleet.gh[check_path] = collections.deque(
+                    [
+                        {"total_count": len(good_checks), "check_runs": good_checks},
+                        {"total_count": len(post_checks), "check_runs": post_checks},
+                    ]
+                )
+                with self.assertRaisesRegex(
+                    MODULE.Refusal,
+                    "Ready authorization changed after the flip.*" + case["reason"],
+                ):
+                    MODULE.consider_ready(github, 300, False)
+                self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
+                self.assertEqual(
+                    [m[0] for m in self.mutations if m[0].startswith("pr-ready")],
+                    ["pr-ready", "pr-ready-undo"],
+                )
+                self.assertEqual(len(self.writes("/issues/300/labels")), 1)
+
+    def test_ready_undo_response_loss_never_claims_unproven_restoration(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head = "e" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        comments = [
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]
+        blocking = bot_comment(
+            f"HEAD: {head}\nVERDICT: REQUEST-CHANGES\n\nmutation claim\n\n- Daybreak (adversarial reviewer)\n"
+        )
+        armed = pr_record(
+            300,
+            branch,
+            head,
+            labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",),
+        )
+        still_ready = dict(armed, draft=False)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque(
+            [armed, still_ready, still_ready]
+        )
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque(
+            [[comments], [comments + [blocking]]]
+        )
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        checks = [
+            {
+                "name": name,
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"slug": MODULE.REQUIRED_CHECK_APP},
+            }
+            for name in MODULE.REQUIRED_CHECKS
+        ]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {
+            "total_count": len(checks),
+            "check_runs": checks,
+        }
+        self.fail_undo = True
+        with self.assertRaisesRegex(
+            MODULE.Refusal,
+            "OPERATOR ACTION REQUIRED.*did not prove head.*undo response lost",
+        ):
+            MODULE.consider_ready(github, 300, False)
+        self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
+        self.assertEqual(len(self.writes("/issues/300/labels")), 1)
+        alerts = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
+        self.assertEqual(len(alerts), 1, "the unresolved state is surfaced on the pull request itself")
+        self.assertTrue(alerts[0].startswith(f"`promoter-alert unresolved-ready head={head}`"))
+        self.assertIn("DO NOT MERGE", alerts[0])
+        self.assertTrue(alerts[0].rstrip().endswith(MODULE.SIGNATURE.strip()))
+        # The undo response is lost but the proof read shows Draft with both
+        # lanes: restoration is claimed from the read alone, no alert.
+        self.mutations.clear()
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, still_ready, restored])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque(
+            [[comments], [comments + [blocking]]]
+        )
+        with self.assertRaisesRegex(MODULE.Refusal, "returned to Draft \\(proven at head " + head + "\\)"):
+            MODULE.consider_ready(github, 300, False)
+        self.assertEqual(self.writes("/issues/300/comments"), [])
+        self.assertTrue(any("transport was ambiguous" in line for line in self.log_lines))
+        # Draft proven but a lane missing is NOT a proven restore.
+        self.mutations.clear()
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, still_ready, armed])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque(
+            [[comments], [comments + [blocking]]]
+        )
+        with self.assertRaisesRegex(MODULE.Refusal, "OPERATOR ACTION REQUIRED"):
+            MODULE.consider_ready(github, 300, False)
+        self.assertEqual(len(self.writes("/issues/300/comments")), 1)
+        self.fail_undo = False
 
     def test_lock_and_dirty_clone_guards(self):
         lock = self.repo / ".git" / "promoter.lock"
