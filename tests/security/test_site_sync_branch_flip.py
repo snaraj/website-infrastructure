@@ -801,18 +801,41 @@ class VerifyLiveTests(unittest.TestCase):
             flip.verify_live("nothing here", "https://naranjo.online")
 
 
+def indent_columns(line):
+    """CommonMark indentation is COLUMN-based, not character-based
+    (round-8 convergent finding, both lanes): a leading tab advances to
+    the next four-column tab stop, so ``\\t``, ``  \\t``, and ``   \\t``
+    all open an indented code block exactly as four spaces do — GitHub's
+    own renderer turns each into ``<pre><code>``. Measure columns the
+    way the spec does; a literal-prefix check refuses only one spelling
+    of the block."""
+
+    columns = 0
+    for char in line:
+        if char == " ":
+            columns += 1
+        elif char == "\t":
+            columns += 4 - (columns % 4)
+        else:
+            break
+        if columns >= 4:
+            break
+    return columns
+
+
 def canon_residue_violations(text):
     """Everything outside the canonical fences that a Markdown renderer
     could present as an unreviewed command block (round-7 review
-    finding): indented code blocks; block quotes ENTIRELY, because a
-    quoted fence or quoted indented block renders as an ordinary
-    copyable code block while its marker is invisible to both a
-    column-anchored fence inventory and a four-space indent check; any
-    three-plus backtick or tilde run anywhere in a line, which every
-    container-nested fence of any form needs to open; and CommonMark's
-    four type-1 raw-HTML starts plus code/comment markers. Returns the
-    violations so the battery can prove hostile shapes non-empty and
-    the honest document empty."""
+    finding): indented code blocks at four COLUMNS under CommonMark tab
+    stops (round-8: tab and space-then-tab spellings included); block
+    quotes ENTIRELY, because a quoted fence or quoted indented block
+    renders as an ordinary copyable code block while its marker is
+    invisible to both a column-anchored fence inventory and an indent
+    check; any three-plus backtick or tilde run anywhere in a line,
+    which every container-nested fence of any form needs to open; and
+    CommonMark's four type-1 raw-HTML starts plus code/comment markers.
+    Returns the violations so the battery can prove hostile shapes
+    non-empty and the honest document empty."""
 
     violations = []
     inside = False
@@ -822,7 +845,7 @@ def canon_residue_violations(text):
             continue
         if inside:
             continue
-        if line.startswith("    "):
+        if indent_columns(line) >= 4:
             violations.append("{}: indented code block".format(number))
         if line.lstrip().startswith(">"):
             violations.append("{}: block quote".format(number))
@@ -896,14 +919,19 @@ class RunbookCanonTests(unittest.TestCase):
         )
 
     def test_container_nested_blocks_are_refused(self):
-        """The round-7 survivors, pinned as named regressions: a
-        block-quoted ```sh fence (GitHub renders it as an ordinary
-        copyable code block inside a callout), a block-quoted indented
-        code block, a <textarea> block (a CommonMark type-1 raw-HTML
-        start the earlier enumeration missed, with <style> its sibling),
-        and a list-marker-prefixed fence — each carrying a verb OUTSIDE
-        the five counted tokens, so the residue sweep alone must catch
-        them. The honest document stays clean."""
+        """The round-7 and round-8 survivors, pinned as named
+        regressions: a block-quoted ```sh fence (GitHub renders it as an
+        ordinary copyable code block inside a callout), a block-quoted
+        indented code block, a <textarea> block (a CommonMark type-1
+        raw-HTML start the earlier enumeration missed, with <style> its
+        sibling), a list-marker-prefixed fence, and every indented-code
+        spelling the column rule owns — four spaces, tab-only,
+        space-then-tab, and a list-child block, each measured by
+        GitHub's renderer as a real <pre><code> block. Each shape
+        carries a verb OUTSIDE the five counted tokens, so the residue
+        sweep alone must catch it, and the pins are what make the
+        indented-code clause undeletable. The honest document stays
+        clean."""
 
         text = RUNBOOK.read_text()
         self.assertEqual(canon_residue_violations(text), [])
@@ -913,6 +941,13 @@ class RunbookCanonTests(unittest.TestCase):
             "textarea block": "<textarea>\nhelm rollback site 1\n</textarea>\n",
             "style block": "<style>\nbody { display: none }\n</style>\n",
             "list-marker fence": "- ```sh\n  helm rollback site 1\n  ```\n",
+            "four-space indented code": "    helm rollback site 1\n",
+            "tab-indented code": "\thelm rollback site 1\n",
+            "space-then-tab indented code": "  \thelm rollback site 1\n",
+            "three-space-tab indented code": "   \thelm rollback site 1\n",
+            "list-child indented code": (
+                "- item\n\n      helm rollback site 1\n"
+            ),
         }.items():
             with self.subTest(shape=label):
                 violations = canon_residue_violations(text + "\n" + block)
