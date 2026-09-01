@@ -24,6 +24,7 @@ import json
 import re
 import unittest
 import urllib.error
+from collections import deque
 from contextlib import contextmanager
 from unittest import mock
 
@@ -154,28 +155,38 @@ class PublishVerdictTests(unittest.TestCase):
 
 class IssueReconciliationTests(unittest.TestCase):
     class RecordingGitHub:
-        def __init__(self, open_titles):
-            self.opened, self.closed = [], []
-            self._open = open_titles
+        def __init__(self, open_entries):
+            self.opened, self.closed, self.updated = [], [], []
+            self._open = open_entries
 
         def open_assurance_issues(self):
-            return dict(self._open)
+            return {
+                title: {"numbers": list(entry["numbers"]), "body": entry["body"]}
+                for title, entry in self._open.items()
+            }
 
         def open_issue(self, title, body):
             self.opened.append(title)
+
+        def update_issue_body(self, number, body):
+            self.updated.append((number, body))
 
         def close_issue(self, number, comment):
             self.closed.append(number)
 
     def test_new_condition_opens_existing_stays_cleared_closes(self):
+        drift = assurance.condition_title("site-drift/naranjo-online")
         github = self.RecordingGitHub(
             {
-                assurance.condition_title("site-drift/naranjo-online"): 41,
-                assurance.condition_title("publish-integrity"): 42,
+                drift: {"numbers": [41], "body": "still behind\n\n- Fable5"},
+                assurance.condition_title("publish-integrity"): {
+                    "numbers": [42],
+                    "body": "x",
+                },
             }
         )
         conditions = {
-            assurance.condition_title("site-drift/naranjo-online"): "still behind",
+            drift: "still behind",
             assurance.condition_title("site-drift/lidersea-com"): "now behind",
         }
         actions = assurance.reconcile_issues(github, conditions, apply=True)
@@ -183,19 +194,46 @@ class IssueReconciliationTests(unittest.TestCase):
             github.opened, [assurance.condition_title("site-drift/lidersea-com")]
         )
         self.assertEqual(github.closed, [42])
+        self.assertEqual(github.updated, [])
         self.assertEqual(len(actions), 3)
 
-    def test_without_apply_nothing_mutates(self):
+    def test_changed_evidence_updates_the_surviving_issue_in_place(self):
+        drift = assurance.condition_title("site-drift/naranjo-online")
         github = self.RecordingGitHub(
-            {assurance.condition_title("publish-integrity"): 42}
+            {drift: {"numbers": [41], "body": "stale evidence\n\n- Fable5"}}
         )
-        assurance.reconcile_issues(
-            github,
-            {assurance.condition_title("site-drift/naranjo-online"): "behind"},
-            apply=False,
+        actions = assurance.reconcile_issues(
+            github, {drift: "fresh evidence"}, apply=True
         )
+        self.assertEqual(github.updated, [(41, "fresh evidence\n\n- Fable5")])
         self.assertEqual(github.opened, [])
         self.assertEqual(github.closed, [])
+        self.assertTrue(any(action.startswith("update:") for action in actions))
+
+    def test_duplicate_trackers_converge_on_the_lowest_number(self):
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        github = self.RecordingGitHub(
+            {drift: {"numbers": [41, 55, 90], "body": "behind\n\n- Fable5"}}
+        )
+        assurance.reconcile_issues(github, {drift: "behind"}, apply=True)
+        self.assertEqual(github.closed, [55, 90])
+        self.assertEqual(github.opened, [])
+        self.assertEqual(github.updated, [])
+
+    def test_without_apply_nothing_mutates(self):
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        github = self.RecordingGitHub(
+            {
+                assurance.condition_title("publish-integrity"): {
+                    "numbers": [42, 43],
+                    "body": "x",
+                }
+            }
+        )
+        assurance.reconcile_issues(github, {drift: "behind"}, apply=False)
+        self.assertEqual(github.opened, [])
+        self.assertEqual(github.closed, [])
+        self.assertEqual(github.updated, [])
 
 
 class _CannedResponse:
@@ -225,8 +263,13 @@ def canned_api(routes):
 
     def fake_urlopen(request, timeout=None):
         path = request.full_url.replace(assurance.API_ROOT, "")
-        calls.append((request.get_method(), path, request.data))
+        calls.append(
+            (request.get_method(), path, request.data, dict(request.header_items()))
+        )
         outcome = routes[(request.get_method(), path.split("?")[0])]
+        if isinstance(outcome, deque):
+            # A deque is a queue of per-call payloads (pagination fakes).
+            outcome = outcome.popleft()
         if isinstance(outcome, Exception):
             raise outcome
         return _CannedResponse(json.dumps(outcome).encode() if outcome is not None else b"")
@@ -243,26 +286,36 @@ class GitHubLayerTests(unittest.TestCase):
     def setUp(self):
         self.github = assurance.GitHub("t0ken", "snaraj/website-infrastructure")
 
-    def test_request_sends_bearer_auth_and_decodes_empty_bodies(self):
+    def test_every_request_carries_bearer_authorization(self):
+        """Removing the Authorization header must turn this red — the REST
+        layer is useless (rate-limited, permission-blind) without it."""
+
         with canned_api({("PATCH", "/repos/x"): None}) as calls:
             self.assertEqual(self.github.request("PATCH", "/repos/x", {"a": 1}), {})
-        method, path, body = calls[0]
+        method, path, body, headers = calls[0]
         self.assertEqual((method, path), ("PATCH", "/repos/x"))
         self.assertEqual(json.loads(body), {"a": 1})
+        self.assertEqual(headers.get("Authorization"), "Bearer t0ken")
+        self.assertEqual(headers.get("X-github-api-version"), assurance.API_VERSION)
 
-    def test_latest_release_tag_returns_none_only_for_404(self):
+    def test_latest_release_returns_none_pair_only_for_404(self):
         route = ("GET", "/repos/snaraj/naranjo.online/releases/latest")
-        with canned_api({route: {"tag_name": "v0.1.67"}}):
+        with canned_api(
+            {route: {"tag_name": "v0.1.67", "published_at": "2026-09-01T00:07:43Z"}}
+        ):
             self.assertEqual(
-                self.github.latest_release_tag("snaraj/naranjo.online"), "v0.1.67"
+                self.github.latest_release("snaraj/naranjo.online"),
+                ("v0.1.67", "2026-09-01T00:07:43Z"),
             )
         with canned_api({route: http_error(404)}):
-            self.assertIsNone(self.github.latest_release_tag("snaraj/naranjo.online"))
+            self.assertEqual(
+                self.github.latest_release("snaraj/naranjo.online"), (None, None)
+            )
         with canned_api({route: http_error(500)}):
             with self.assertRaises(urllib.error.HTTPError):
-                self.github.latest_release_tag("snaraj/naranjo.online")
+                self.github.latest_release("snaraj/naranjo.online")
 
-    def test_run_lookups_and_the_bounded_rerun_call(self):
+    def test_run_lookups_pin_protected_main_and_the_bounded_rerun_call(self):
         runs_path = (
             "/repos/snaraj/website-infrastructure/actions/workflows/{}/runs"
         )
@@ -288,28 +341,56 @@ class GitHubLayerTests(unittest.TestCase):
             )
             self.assertIsNone(self.github.publish_run_for("c" * 40))
             self.github.rerun_failed_jobs(2)
+        # The gate question is only answerable about protected main pushes:
+        # a query drifted to another branch or event answers about attacker
+        # state, so the exact query string is contract, not implementation.
+        gate_query = calls[0][1]
+        self.assertIn("branch=main", gate_query)
+        self.assertIn("event=push", gate_query)
+        self.assertIn("status=completed", gate_query)
         self.assertEqual(calls[-1][0], "POST")
 
-    def test_issue_listing_filters_marker_titles_and_pull_requests(self):
+    def test_issue_listing_filters_paginates_and_repairs_duplicates(self):
+        page_one = [
+            {"title": "deploy-assurance[publish-integrity]", "number": 9, "body": "b9"},
+            {"title": "unrelated issue", "number": 10, "body": "x"},
+            {
+                "title": "deploy-assurance[site-drift/x]",
+                "number": 11,
+                "body": "pr",
+                "pull_request": {},
+            },
+        ]
+        # Force real pagination: page one full at exactly 100 rows, the
+        # duplicate marker title arriving only on page two.
+        page_one += [
+            {"title": "filler {}".format(i), "number": 100 + i, "body": ""}
+            for i in range(100 - len(page_one))
+        ]
+        page_two = [
+            {"title": "deploy-assurance[publish-integrity]", "number": 300, "body": "b300"},
+        ]
         with canned_api(
             {
-                ("GET", "/repos/snaraj/website-infrastructure/issues"): [
-                    {"title": "deploy-assurance[publish-integrity]", "number": 9},
-                    {"title": "unrelated issue", "number": 10},
-                    {
-                        "title": "deploy-assurance[site-drift/x]",
-                        "number": 11,
-                        "pull_request": {},
-                    },
-                ]
+                ("GET", "/repos/snaraj/website-infrastructure/issues"): deque(
+                    [page_one, page_two]
+                )
             }
-        ):
-            self.assertEqual(
-                self.github.open_assurance_issues(),
-                {"deploy-assurance[publish-integrity]": 9},
-            )
+        ) as calls:
+            listing = self.github.open_assurance_issues()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("page=2", calls[1][1])
+        self.assertEqual(
+            listing,
+            {
+                "deploy-assurance[publish-integrity]": {
+                    "numbers": [9, 300],
+                    "body": "b9",
+                }
+            },
+        )
 
-    def test_issue_open_and_close_mutations(self):
+    def test_issue_open_update_and_close_mutations(self):
         base = "/repos/snaraj/website-infrastructure/issues"
         with canned_api(
             {
@@ -319,10 +400,14 @@ class GitHubLayerTests(unittest.TestCase):
             }
         ) as calls:
             self.github.open_issue("t", "b")
+            self.github.update_issue_body(9, "fresher evidence")
             self.github.close_issue(9, "resolved")
         opened = json.loads(calls[0][2])
         self.assertEqual(opened["labels"], assurance.ISSUE_LABELS)
-        self.assertEqual([c[0] for c in calls], ["POST", "POST", "PATCH"])
+        self.assertEqual(
+            [c[0] for c in calls], ["POST", "PATCH", "POST", "PATCH"]
+        )
+        self.assertEqual(json.loads(calls[1][2]), {"body": "fresher evidence"})
         self.assertEqual(json.loads(calls[-1][2]), {"state": "closed"})
 
 
@@ -331,10 +416,22 @@ class _ScriptedGitHub:
 
     def __init__(self, tags, gate, publish):
         self._tags, self._gate, self._publish = tags, gate, publish
-        self.reruns = []
+        self.reruns, self.opened, self.closed, self.updated = [], [], [], []
 
-    def latest_release_tag(self, repository):
-        return self._tags[repository]
+    def open_issue(self, title, body):
+        self.opened.append(title)
+
+    def update_issue_body(self, number, body):
+        self.updated.append(number)
+
+    def close_issue(self, number, comment):
+        self.closed.append(number)
+
+    def latest_release(self, repository):
+        tag = self._tags[repository]
+        if tag is None:
+            return None, None
+        return tag, "2026-08-30T00:00:00Z"
 
     def newest_main_gate_run(self):
         return self._gate
@@ -406,7 +503,10 @@ class GatherConditionsTests(unittest.TestCase):
             list(conditions), ["deploy-assurance[unpublished-selection/lidersea-com]"]
         )
 
-    def test_site_with_no_release_yet_is_skipped_not_failed(self):
+    def test_site_with_no_release_at_all_fails_closed(self):
+        """A committed selection whose repository publishes nothing is the
+        unpublished-selection condition, never a silent skip."""
+
         tags = self.current_tags()
         tags["snaraj/lidersea.com"] = None
         github = _ScriptedGitHub(
@@ -415,17 +515,42 @@ class GatherConditionsTests(unittest.TestCase):
             {"status": "completed", "conclusion": "success", "run_attempt": 1, "id": 5},
         )
         conditions, log = assurance.gather_conditions(github, REPO_ROOT)
-        self.assertEqual(conditions, {})
-        self.assertTrue(any("no published release" in line for line in log))
+        self.assertEqual(
+            list(conditions), ["deploy-assurance[unpublished-selection/lidersea-com]"]
+        )
+        self.assertIn(
+            "NO published release",
+            conditions["deploy-assurance[unpublished-selection/lidersea-com]"],
+        )
+        self.assertTrue(any("unpublished-selection" in line for line in log))
 
-    def test_first_publish_failure_dispatches_the_single_rerun(self):
+    def test_drift_condition_names_the_release_age(self):
+        tags = self.current_tags()
+        tags["snaraj/naranjo.online"] = "v9.9.9"
         github = _ScriptedGitHub(
-            self.current_tags(),
+            tags,
             _fresh_gate(),
-            {"status": "completed", "conclusion": "failure", "run_attempt": 1, "id": 7},
+            {"status": "completed", "conclusion": "success", "run_attempt": 1, "id": 5},
         )
         conditions, _ = assurance.gather_conditions(github, REPO_ROOT)
-        self.assertEqual(github.reruns, [7])
+        body = conditions["deploy-assurance[site-drift/naranjo-online]"]
+        self.assertIn("2026-08-30T00:00:00Z", body)
+        self.assertIn("day(s) ago", body)
+        self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
+
+    def test_first_publish_failure_reruns_only_under_apply(self):
+        """The one mutation gather can reach obeys --apply: a dry run decides
+        and reports identically but dispatches nothing."""
+
+        publish = {"status": "completed", "conclusion": "failure", "run_attempt": 1, "id": 7}
+        dry = _ScriptedGitHub(self.current_tags(), _fresh_gate(), dict(publish))
+        conditions, log = assurance.gather_conditions(dry, REPO_ROOT, apply=False)
+        self.assertEqual(dry.reruns, [])
+        self.assertIn("deploy-assurance[publish-integrity]", conditions)
+        self.assertTrue(any("WOULD be dispatched" in line for line in log))
+        wet = _ScriptedGitHub(self.current_tags(), _fresh_gate(), dict(publish))
+        conditions, _ = assurance.gather_conditions(wet, REPO_ROOT, apply=True)
+        self.assertEqual(wet.reruns, [7])
         self.assertIn("deploy-assurance[publish-integrity]", conditions)
 
     def test_repeated_publish_failure_is_terminal_without_rerun(self):
@@ -447,32 +572,84 @@ class GatherConditionsTests(unittest.TestCase):
         self.assertEqual(conditions, {})
         self.assertTrue(any("publish check skipped" in line for line in log))
 
+    def test_malformed_source_is_a_condition_naming_the_relative_path(self):
+        """A source.yaml the checker cannot parse is a blindness condition,
+        and its public tracking body carries the repo-relative path — never
+        a runner-local absolute one."""
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            site = root / "kubernetes" / "websites" / "broken-site"
+            site.mkdir(parents=True)
+            (site / "source.yaml").write_text("not: [the, expected, shape]\n")
+            github = _ScriptedGitHub({}, None, None)
+            conditions, _ = assurance.gather_conditions(github, root)
+        self.assertEqual(list(conditions), ["deploy-assurance[unparseable/broken-site]"])
+        body = conditions["deploy-assurance[unparseable/broken-site]"]
+        self.assertIn("kubernetes/websites/broken-site/source.yaml", body)
+        self.assertNotIn(scratch, body)
+
 
 class MainWiringTests(unittest.TestCase):
     def test_missing_token_or_repository_is_a_hard_error(self):
         with mock.patch.dict(assurance.os.environ, {}, clear=True):
             self.assertEqual(assurance.main([]), 2)
 
-    def test_conditions_exit_red_and_all_clear_exits_zero(self):
-        fake = _ScriptedGitHub(
-            {
-                repository: "v" + version
-                for source in SITES.glob("*/source.yaml")
-                for version, repository in [
-                    assurance.parse_site_selection(source.read_text())
-                ]
-            },
-            None,
-            None,
-        )
+    def current_fake(self, gate=None, publish=None, drifted=False):
+        tags = {
+            repository: "v" + version
+            for source in SITES.glob("*/source.yaml")
+            for version, repository in [
+                assurance.parse_site_selection(source.read_text())
+            ]
+        }
+        if drifted:
+            tags["snaraj/naranjo.online"] = "v9.9.9"
+        return _ScriptedGitHub(tags, gate, publish)
+
+    def run_main(self, fake, argv):
         environment = {"GITHUB_TOKEN": "t", "GITHUB_REPOSITORY": "snaraj/x"}
         with mock.patch.dict(assurance.os.environ, environment, clear=True):
             with mock.patch.object(assurance, "GitHub", lambda token, repo: fake):
-                self.assertEqual(assurance.main([]), 0)
-        fake._tags["snaraj/naranjo.online"] = "v9.9.9"
-        with mock.patch.dict(assurance.os.environ, environment, clear=True):
-            with mock.patch.object(assurance, "GitHub", lambda token, repo: fake):
-                self.assertEqual(assurance.main([]), 1)
+                return assurance.main(argv)
+
+    FAILED_FIRST_ATTEMPT = {
+        "status": "completed",
+        "conclusion": "failure",
+        "run_attempt": 1,
+        "id": 7,
+    }
+
+    def test_conditions_exit_red_and_all_clear_exits_zero(self):
+        self.assertEqual(self.run_main(self.current_fake(), []), 0)
+        self.assertEqual(self.run_main(self.current_fake(drifted=True), []), 1)
+
+    def test_cli_without_apply_performs_no_mutation_at_all(self):
+        """The CLI-level negative control the round-1 review demanded: a
+        first-attempt publish failure plus an active drift, run without
+        --apply, must exit red having dispatched no rerun and written no
+        issue."""
+
+        fake = self.current_fake(
+            gate=_fresh_gate(),
+            publish=dict(self.FAILED_FIRST_ATTEMPT),
+            drifted=True,
+        )
+        self.assertEqual(self.run_main(fake, []), 1)
+        self.assertEqual(fake.reruns, [])
+        self.assertEqual(fake.opened, [])
+        self.assertEqual(fake.closed, [])
+        self.assertEqual(fake.updated, [])
+
+    def test_cli_with_apply_dispatches_the_bounded_rerun(self):
+        fake = self.current_fake(
+            gate=_fresh_gate(), publish=dict(self.FAILED_FIRST_ATTEMPT)
+        )
+        self.assertEqual(self.run_main(fake, ["--apply"]), 1)
+        self.assertEqual(fake.reruns, [7])
 
 
 class WorkflowSurfaceTests(unittest.TestCase):
@@ -502,6 +679,15 @@ class WorkflowSurfaceTests(unittest.TestCase):
             "python3 -B scripts/ci/deploy_assurance.py --apply",
             WORKFLOW.read_text(),
         )
+
+    def test_no_step_or_job_is_conditional(self):
+        """The watchdog must be unconditional for every declared trigger: an
+        `if:` guard anywhere in this workflow can silence the evaluator while
+        every shape check stays green (the round-1 surviving mutant was
+        exactly `if: github.event_name == 'pull_request'` on a workflow with
+        no pull_request trigger — green forever, never executing)."""
+
+        self.assertIsNone(re.search(r"(?m)^\s*if:", WORKFLOW.read_text()))
 
 
 if __name__ == "__main__":

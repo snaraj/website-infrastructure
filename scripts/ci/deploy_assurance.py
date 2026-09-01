@@ -19,8 +19,8 @@ platform-release run had died on a transient token-mint 422 with no retry):
    concluded successfully (a no-artifact merge still concludes success: it
    logs its verdict and publishes nothing, so this check needs no
    classification knowledge). A first-attempt failure is retried exactly
-   once via ``rerun-failed-jobs``; absence after the grace window or a
-   repeated failure is a condition.
+   once via ``rerun-failed-jobs`` — under ``--apply`` only; absence after
+   the grace window or a repeated failure is a condition.
 
 Any active condition exits 1 (a red scheduled run) and, with ``--apply``,
 maintains exactly one open tracking issue per condition key — opened when
@@ -148,14 +148,16 @@ class GitHub:
         # paths fail loudly on a missing key instead of a None subscript.
         return json.loads(payload) if payload else {}
 
-    def latest_release_tag(self, repository):
+    def latest_release(self, repository):
+        """Return ``(tag_name, published_at)`` or ``(None, None)`` on 404."""
+
         try:
             release = self.request("GET", "/repos/{}/releases/latest".format(repository))
         except urllib.error.HTTPError as error:
             if error.code == 404:
-                return None
+                return None, None
             raise
-        return release["tag_name"]
+        return release["tag_name"], release.get("published_at")
 
     def newest_main_gate_run(self):
         runs = self.request(
@@ -187,16 +189,38 @@ class GitHub:
         )
 
     def open_assurance_issues(self):
-        issues = self.request(
-            "GET",
-            "/repos/{}/issues?state=open&labels=delivery-lane&per_page=100".format(
-                self.repository
-            ),
-        )
+        """Every open marker issue, paginated to exhaustion.
+
+        Returns ``{title: {"numbers": [ascending], "body": body_of_lowest}}``
+        so the reconciler can repair duplicates deterministically and detect
+        a stale body. A single-page read would make any matching issue past
+        page one invisible and mint a duplicate.
+        """
+
+        found = {}
+        page = 1
+        while True:
+            issues = self.request(
+                "GET",
+                "/repos/{}/issues?state=open&labels=delivery-lane"
+                "&per_page=100&page={}".format(self.repository, page),
+            )
+            for issue in issues:
+                if "pull_request" in issue or not issue["title"].startswith(
+                    ISSUE_MARKER
+                ):
+                    continue
+                entry = found.setdefault(issue["title"], {})
+                entry[issue["number"]] = issue.get("body") or ""
+            if len(issues) < 100:
+                break
+            page += 1
         return {
-            issue["title"]: issue["number"]
-            for issue in issues
-            if issue["title"].startswith(ISSUE_MARKER) and "pull_request" not in issue
+            title: {
+                "numbers": sorted(bodies),
+                "body": bodies[min(bodies)],
+            }
+            for title, bodies in found.items()
         }
 
     def open_issue(self, title, body):
@@ -204,6 +228,13 @@ class GitHub:
             "POST",
             "/repos/{}/issues".format(self.repository),
             {"title": title, "body": body, "labels": ISSUE_LABELS},
+        )
+
+    def update_issue_body(self, number, body):
+        self.request(
+            "PATCH",
+            "/repos/{}/issues/{}".format(self.repository, number),
+            {"body": body},
         )
 
     def close_issue(self, number, comment):
@@ -219,24 +250,49 @@ class GitHub:
         )
 
 
-def gather_conditions(github, root):
-    """Evaluate both checks; return ``{condition_title: body}`` plus log lines."""
+def release_lag(published_at):
+    """Days since the latest release published — the drift condition's age."""
+
+    if not published_at:
+        return None
+    published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    return (datetime.now(timezone.utc) - published).days
+
+
+def gather_conditions(github, root, apply=False):
+    """Evaluate both checks; return ``{condition_title: body}`` plus log lines.
+
+    ``apply`` gates the ONE mutation this function can reach — the bounded
+    ``rerun-failed-jobs`` dispatch. Without it every decision still prints
+    and exits red, but nothing on GitHub moves.
+    """
 
     conditions, log = {}, []
     for source in sorted((root / SITES_DIR).glob("*/source.yaml")):
         site = source.parent.name
+        relative = source.relative_to(root)
         parsed = parse_site_selection(source.read_text())
         if parsed is None:
             conditions[condition_title("unparseable/" + site)] = (
                 "`{}` no longer carries a parseable chart-release annotation "
                 "and cosign subject; deploy assurance is blind to this site "
-                "until that is repaired.".format(source)
+                "until that is repaired.".format(relative)
             )
             continue
         committed, repository = parsed
-        latest_tag = github.latest_release_tag(repository)
+        latest_tag, published_at = github.latest_release(repository)
         if latest_tag is None:
-            log.append("{}: {} has no published release; skipping".format(site, repository))
+            conditions[condition_title("unpublished-selection/" + site)] = (
+                "The committed selection in `{}` names `{}` but {} has NO "
+                "published release at all — the desired state references an "
+                "artifact whose repository publishes nothing. Fail closed: "
+                "repair the selection or the release before anything "
+                "else.".format(relative, committed, repository)
+            )
+            log.append(
+                "{}: committed {} but {} has no published release -> "
+                "unpublished-selection".format(site, committed, repository)
+            )
             continue
         verdict = drift_verdict(committed, latest_tag.lstrip("v"))
         log.append(
@@ -245,11 +301,18 @@ def gather_conditions(github, root):
             )
         )
         if verdict == "behind":
+            lag = release_lag(published_at)
             conditions[condition_title("site-drift/" + site)] = (
-                "{} has published release `{}` but the committed selection in "
-                "`{}` still names `{}`. A promotion PR is owed; until it "
-                "merges the domain cannot receive the newer release.".format(
-                    repository, latest_tag, SITES_DIR / site / "source.yaml", committed
+                "{} has published release `{}` (published {}{}) but the "
+                "committed selection in `{}` still names `{}`. A promotion PR "
+                "is owed; until it merges the domain cannot receive the newer "
+                "release.".format(
+                    repository,
+                    latest_tag,
+                    published_at or "date unreported",
+                    "" if lag is None else ", {} day(s) ago".format(lag),
+                    relative,
+                    committed,
                 )
             )
         elif verdict == "ahead":
@@ -258,7 +321,7 @@ def gather_conditions(github, root):
                 "than {}'s latest published release `{}`. The desired state "
                 "references an artifact the site never published — repair the "
                 "selection or the release before anything else.".format(
-                    SITES_DIR / site / "source.yaml", committed, repository, latest_tag
+                    relative, committed, repository, latest_tag
                 )
             )
 
@@ -278,18 +341,28 @@ def gather_conditions(github, root):
         )
     )
     if verdict == "retry":
-        github.rerun_failed_jobs(publish_run["id"])
-        log.append(
-            "platform-release run {} failed on attempt 1; "
-            "rerun-failed-jobs dispatched (the one bounded retry)".format(
-                publish_run["id"]
+        if apply:
+            github.rerun_failed_jobs(publish_run["id"])
+            log.append(
+                "platform-release run {} failed on attempt 1; "
+                "rerun-failed-jobs dispatched (the one bounded retry)".format(
+                    publish_run["id"]
+                )
             )
-        )
+        else:
+            log.append(
+                "platform-release run {} failed on attempt 1; a bounded "
+                "rerun WOULD be dispatched (dry run — no --apply)".format(
+                    publish_run["id"]
+                )
+            )
         conditions[condition_title("publish-integrity")] = (
             "Platform release run {} for main SHA `{}` failed on its first "
-            "attempt; one bounded rerun was dispatched. If the next "
-            "assurance pass still finds it failing, no further automatic "
-            "retry will happen.".format(publish_run["id"], gate["head_sha"])
+            "attempt; one bounded rerun is dispatched under --apply. If the "
+            "next assurance pass still finds it failing, no further "
+            "automatic retry will happen.".format(
+                publish_run["id"], gate["head_sha"]
+            )
         )
     elif verdict in {"absent", "failing"}:
         conditions[condition_title("publish-integrity")] = (
@@ -306,26 +379,53 @@ def gather_conditions(github, root):
 
 
 def reconcile_issues(github, conditions, apply):
-    """Open one issue per new condition; close issues whose condition cleared."""
+    """Converge the tracking issues on the active conditions.
+
+    One issue per condition title: created when the condition appears,
+    its BODY updated in place when the evidence changes, duplicates
+    (same title, higher numbers) closed toward the lowest survivor, and
+    everything closed with a comment when the condition clears.
+    """
 
     actions = []
     open_issues = github.open_assurance_issues()
     for title, body in conditions.items():
-        if title in open_issues:
-            actions.append("still-open: " + title)
-        else:
+        desired = body + "\n\n- Fable5"
+        entry = open_issues.get(title)
+        if entry is None:
             actions.append("open: " + title)
             if apply:
-                github.open_issue(title, body + "\n\n- Fable5")
-    for title, number in open_issues.items():
-        if title not in conditions:
-            actions.append("close: {} (#{})".format(title, number))
+                github.open_issue(title, desired)
+            continue
+        keep = entry["numbers"][0]
+        for duplicate in entry["numbers"][1:]:
+            actions.append(
+                "close-duplicate: {} (#{} duplicates #{})".format(
+                    title, duplicate, keep
+                )
+            )
             if apply:
                 github.close_issue(
-                    number,
-                    "Deploy assurance no longer observes this condition; "
-                    "closing.\n\n- Fable5",
+                    duplicate,
+                    "Duplicate deploy-assurance tracker; #{} is the "
+                    "survivor.\n\n- Fable5".format(keep),
                 )
+        if entry["body"] != desired:
+            actions.append("update: {} (#{})".format(title, keep))
+            if apply:
+                github.update_issue_body(keep, desired)
+        else:
+            actions.append("still-open: {} (#{})".format(title, keep))
+    for title, entry in open_issues.items():
+        if title not in conditions:
+            for number in entry["numbers"]:
+                actions.append("close: {} (#{})".format(title, number))
+                if apply:
+                    github.close_issue(
+                        number,
+                        "Deploy assurance no longer observes this condition; "
+                        "closing.\n\n- Fable5",
+                    )
     return actions
 
 
@@ -334,7 +434,9 @@ def main(argv=None):
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="maintain tracking issues (without it, decisions print only)",
+        help="perform the mutations: the bounded publish rerun and the "
+        "tracking-issue maintenance (without it, decisions print only "
+        "and NOTHING on GitHub moves)",
     )
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"))
     arguments = parser.parse_args(argv)
@@ -343,7 +445,9 @@ def main(argv=None):
         print("GITHUB_TOKEN and a repository are required", file=sys.stderr)
         return 2
     github = GitHub(token, arguments.repository)
-    conditions, log = gather_conditions(github, Path(__file__).resolve().parents[2])
+    conditions, log = gather_conditions(
+        github, Path(__file__).resolve().parents[2], apply=arguments.apply
+    )
     for line in log:
         print(line)
     for line in reconcile_issues(github, conditions, arguments.apply):
