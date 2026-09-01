@@ -1,1 +1,3 @@
+### Security
+
 - Assess the proposed Actions-hosted release promoter as NOT-YET: document the new App credential and merge/tag/Release authority, the missing App commit-identity profile, reviewer-principal separation, runner egress and tool-provenance conditions, and the residual risks the owner must explicitly accept before implementation.
