@@ -823,6 +823,9 @@ def indent_columns(line):
     return columns
 
 
+_LIST_MARKER = re.compile(r"^(?:[-+*]|\d{1,9}[.)])([ \t]+)")
+
+
 def canon_residue_violations(text):
     """Everything outside the canonical fences that a Markdown renderer
     could present as an unreviewed command block (round-7 review
@@ -847,7 +850,26 @@ def canon_residue_violations(text):
             continue
         if indent_columns(line) >= 4:
             violations.append("{}: indented code block".format(number))
-        if line.lstrip().startswith(">"):
+        # Container-relative indentation (round-9 finding): a list marker
+        # padded with more than one space or any tab shifts its content
+        # column, and enough padding turns the SAME line into indented
+        # code inside the item — invisible to the absolute measure above.
+        # Canonical padding here is exactly one space; walk marker chains
+        # so nesting cannot hide the padding, and refuse quote content at
+        # any depth (a quoted block inside a list evades the bare-line
+        # quote check the same way).
+        content = line.lstrip(" ")
+        while True:
+            marker = _LIST_MARKER.match(content)
+            if marker is None:
+                break
+            if marker.group(1) != " ":
+                violations.append(
+                    "{}: noncanonical list-marker padding".format(number)
+                )
+                break
+            content = content[marker.end():]
+        if content.lstrip().startswith(">"):
             violations.append("{}: block quote".format(number))
         if re.search(r"`{3,}|~{3,}", line):
             violations.append(
@@ -919,19 +941,21 @@ class RunbookCanonTests(unittest.TestCase):
         )
 
     def test_container_nested_blocks_are_refused(self):
-        """The round-7 and round-8 survivors, pinned as named
+        """The round-7 through round-9 survivors, pinned as named
         regressions: a block-quoted ```sh fence (GitHub renders it as an
         ordinary copyable code block inside a callout), a block-quoted
         indented code block, a <textarea> block (a CommonMark type-1
         raw-HTML start the earlier enumeration missed, with <style> its
-        sibling), a list-marker-prefixed fence, and every indented-code
+        sibling), a list-marker-prefixed fence, every indented-code
         spelling the column rule owns — four spaces, tab-only,
-        space-then-tab, and a list-child block, each measured by
-        GitHub's renderer as a real <pre><code> block. Each shape
-        carries a verb OUTSIDE the five counted tokens, so the residue
-        sweep alone must catch it, and the pins are what make the
-        indented-code clause undeletable. The honest document stays
-        clean."""
+        space-then-tab, and a list-child block — and the
+        container-RELATIVE forms: same-line list indented code (bullet
+        and ordered), a tab-padded marker, and a quote nested in a list
+        item, each measured by GitHub's renderer as a real command
+        block. Each shape carries a verb OUTSIDE the five counted
+        tokens, so the residue sweep alone must catch it, and the pins
+        are what make each sweep clause undeletable. The honest
+        document stays clean."""
 
         text = RUNBOOK.read_text()
         self.assertEqual(canon_residue_violations(text), [])
@@ -948,6 +972,10 @@ class RunbookCanonTests(unittest.TestCase):
             "list-child indented code": (
                 "- item\n\n      helm rollback site 1\n"
             ),
+            "same-line list indented code": "-      helm rollback site 1\n",
+            "tab-padded list marker": "-\thelm rollback site 1\n",
+            "ordered same-line list code": "1.      helm rollback site 1\n",
+            "list-nested block quote": "- >     helm rollback site 1\n",
         }.items():
             with self.subTest(shape=label):
                 violations = canon_residue_violations(text + "\n" + block)
