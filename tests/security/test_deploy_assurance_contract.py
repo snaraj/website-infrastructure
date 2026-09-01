@@ -212,14 +212,18 @@ def workflow_semantic_map(text):
     return _resolve(root)
 
 
-def workflow_text():
-    """The live workflow's RAW bytes, decoded without newline
-    translation. `read_text()` performs universal-newline decoding, so
-    an on-disk CRLF file reached both guards already normalized to LF
-    and passed them (round-5 review finding); every live assertion goes
-    through this reader so the bytes judged are the bytes committed."""
+def workflow_text(path=WORKFLOW):
+    """The workflow's RAW bytes, decoded without newline translation.
+    `read_text()` performs universal-newline decoding, so an on-disk
+    CRLF file reached both guards already normalized to LF and passed
+    them (round-5 review finding); every live assertion goes through
+    this reader so the bytes judged are the bytes committed. The path
+    parameter exists so the CRLF regression exercises THIS reader
+    against a hostile file rather than duplicating the raw read inline
+    (round-6 finding: an inline duplicate left the helper itself free
+    to regress to a normalizing read with every test green)."""
 
-    return WORKFLOW.read_bytes().decode("utf-8")
+    return path.read_bytes().decode("utf-8")
 
 
 def validated_workflow(text):
@@ -1261,10 +1265,13 @@ class WorkflowSurfaceTests(unittest.TestCase):
         """Round-5 review finding: `read_text()` universal-newline
         decoding converted on-disk CRLF to LF before either guard saw
         it, so a CRLF-converted workflow passed the byte twin AND the
-        semantic contract while carrying 35 CRLF pairs on disk. The
-        raw-bytes reader is what every live assertion now uses; this
-        regression proves that same reader surfaces on-disk CRLF to
-        both guards."""
+        semantic contract while carrying 35 CRLF pairs on disk. This
+        regression drives `workflow_text` ITSELF — the reader every
+        live assertion uses — against a CRLF file (round-6 finding: an
+        inline duplicate of the raw read proved nothing about the
+        helper, which could regress to a normalizing read with every
+        test green). If the helper ever normalizes newlines again, the
+        CRLF pairs vanish here and this test fails."""
 
         import tempfile
         from pathlib import Path
@@ -1273,7 +1280,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "deploy-assurance.yml"
             path.write_bytes(crlf.encode("utf-8"))
-            raw = path.read_bytes().decode("utf-8")
+            raw = workflow_text(path)
         self.assertIn("\r\n", raw)
         self.assertNotEqual(raw, EXPECTED_WORKFLOW)
         with self.assertRaises(ValueError):
