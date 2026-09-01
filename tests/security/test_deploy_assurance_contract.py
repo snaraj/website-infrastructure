@@ -37,8 +37,11 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-assurance.yml"
 
 # The workflow's byte-exact lockstep twin (round-3 review finding 1): every
 # per-key assertion admitted SOME GitHub-valid key that changed execution
-# while the asserted bytes stayed intact, so the reviewed file IS the
-# contract, whole. Edit the workflow and this constant in the same commit.
+# while the asserted bytes stayed intact. The twin makes every workflow edit
+# a same-commit reviewed edit — a drift tripwire, not a semantics oracle:
+# file and twin are both author-controlled, so a coordinated edit moves them
+# together (round-4 finding). The closed grammar and contract below are what
+# refuse the coordinated edit itself.
 EXPECTED_WORKFLOW = """\
 name: Deploy assurance
 
@@ -76,6 +79,216 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -I -B scripts/ci/deploy_assurance.py --apply
 """
+
+
+class WorkflowEncodingError(ValueError):
+    """A workflow byte sequence outside the closed reviewed grammar."""
+
+
+class WorkflowContractError(ValueError):
+    """A parsed workflow outside the closed reviewed semantics."""
+
+
+# The closed workflow contract (round-4 review finding): whole-file equality
+# proves two author-controlled byte strings match — it is not an independent
+# definition of safe workflow semantics, because a hostile edit moves file
+# and twin in lockstep. `validated_workflow` judges the LIVE text alone: a
+# deliberately closed grammar (ASCII, two-space indentation, lowercase block
+# keys, no flow collections, anchors, aliases, tags, quoted or explicit
+# keys, block scalars, document markers, or duplicate keys) parsed into
+# semantic maps whose every key set and load-bearing value is pinned by
+# equality. A job or step condition — in ANY GitHub-valid spelling — has no
+# representation that parses, so updating the twin rescues nothing. Inert
+# display strings stay covered by the byte twin alone.
+
+_WORKFLOW_LINE = re.compile(
+    r"^(?P<indent> *)(?P<dash>- )?"
+    r"(?P<key>[a-z][a-z0-9_-]*|[A-Z][A-Z0-9_]*):"
+    r"(?: (?P<value>.+))?$"
+)
+_WORKFLOW_EXPRESSION = re.compile(r"^\$\{\{ secrets\.[A-Z_]+ \}\}$")
+_WORKFLOW_PLAIN_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/@-]*$")
+_CHECKOUT_PIN = re.compile(r"^actions/checkout@[0-9a-f]{40}$")
+
+
+class _Block:
+    def __init__(self):
+        self.kind = None  # None until the first child names "map" or "seq"
+        self.map = {}
+        self.seq = []
+
+
+def _workflow_leaf(number, raw):
+    value = raw.split(" #", 1)[0].rstrip() if " #" in raw else raw
+    if value == "{}":
+        return {}
+    if _WORKFLOW_EXPRESSION.fullmatch(value):
+        return value
+    if (
+        len(value) >= 2
+        and value.startswith("'")
+        and value.endswith("'")
+        and "'" not in value[1:-1]
+    ):
+        return value[1:-1]
+    if _WORKFLOW_PLAIN_VALUE.fullmatch(value):
+        return value
+    raise WorkflowEncodingError(
+        "line %d: value outside the closed grammar" % number
+    )
+
+
+def _resolve(block):
+    if block.kind == "seq":
+        return [_resolve(item) for item in block.seq]
+    return {
+        key: _resolve(value) if isinstance(value, _Block) else value
+        for key, value in block.map.items()
+    }
+
+
+def workflow_semantic_map(text):
+    """Parse under the closed grammar, refusing every alternate encoding."""
+
+    if not text.isascii():
+        raise WorkflowEncodingError("non-ASCII byte")
+    if "\t" in text or "\r" in text:
+        raise WorkflowEncodingError("tab or carriage return")
+    if not text.endswith("\n"):
+        raise WorkflowEncodingError("unterminated final line")
+    root = _Block()
+    stack = [(0, root)]
+    for number, line in enumerate(text.split("\n")[:-1], start=1):
+        if line != line.rstrip():
+            raise WorkflowEncodingError("line %d: trailing whitespace" % number)
+        if line == "" or line.lstrip().startswith("#"):
+            continue
+        match = _WORKFLOW_LINE.fullmatch(line)
+        if match is None:
+            raise WorkflowEncodingError(
+                "line %d: outside the closed grammar" % number
+            )
+        indent = len(match.group("indent"))
+        if indent % 2:
+            raise WorkflowEncodingError("line %d: odd indentation" % number)
+        while stack and stack[-1][0] > indent:
+            stack.pop()
+        if not stack or stack[-1][0] != indent:
+            raise WorkflowEncodingError(
+                "line %d: indentation outside any open block" % number
+            )
+        block = stack[-1][1]
+        if match.group("dash"):
+            if block.kind not in (None, "seq"):
+                raise WorkflowEncodingError(
+                    "line %d: mixed collection" % number
+                )
+            block.kind = "seq"
+            item = _Block()
+            item.kind = "map"
+            block.seq.append(item)
+            stack.append((indent + 2, item))
+            block = item
+        else:
+            if block.kind not in (None, "map"):
+                raise WorkflowEncodingError(
+                    "line %d: mixed collection" % number
+                )
+            block.kind = "map"
+        key = match.group("key")
+        if key in block.map:
+            raise WorkflowEncodingError(
+                "line %d: duplicate key %s" % (number, key)
+            )
+        raw = match.group("value")
+        if raw is None:
+            child = _Block()
+            block.map[key] = child
+            stack.append(
+                (indent + (4 if match.group("dash") else 2), child)
+            )
+        else:
+            block.map[key] = _workflow_leaf(number, raw)
+    return _resolve(root)
+
+
+def validated_workflow(text):
+    """The closed semantic contract over the live workflow text."""
+
+    document = workflow_semantic_map(text)
+
+    def pin(condition, what):
+        if not condition:
+            raise WorkflowContractError(what)
+
+    pin(
+        set(document) == {"name", "on", "permissions", "concurrency", "jobs"},
+        "exactly the five reviewed top-level keys",
+    )
+    pin(document["permissions"] == {}, "workflow permissions must be empty")
+    triggers = document["on"]
+    pin(
+        set(triggers) == {"schedule", "workflow_dispatch"},
+        "exactly the two reviewed triggers",
+    )
+    pin(
+        triggers["workflow_dispatch"] == {},
+        "workflow_dispatch carries no inputs",
+    )
+    pin(
+        triggers["schedule"] == [{"cron": "23 * * * *"}],
+        "the reviewed schedule",
+    )
+    pin(
+        document["concurrency"]
+        == {"group": "deploy-assurance", "cancel-in-progress": "false"},
+        "the reviewed non-cancelling concurrency group",
+    )
+    jobs = document["jobs"]
+    pin(set(jobs) == {"assure"}, "exactly the one reviewed job")
+    job = jobs["assure"]
+    pin(
+        set(job) == {"runs-on", "timeout-minutes", "permissions", "steps"},
+        "job keys: no condition, suppression, or extra surface "
+        "in any spelling",
+    )
+    pin(job["runs-on"] == "ubuntu-24.04", "the pinned runner")
+    pin(job["timeout-minutes"] == "10", "the reviewed timeout")
+    pin(
+        job["permissions"]
+        == {"contents": "read", "actions": "write", "issues": "write"},
+        "exactly the three reviewed grants",
+    )
+    steps = job["steps"]
+    pin(isinstance(steps, list) and len(steps) == 2, "exactly two steps")
+    checkout, evaluate = steps
+    pin(
+        set(checkout) == {"name", "uses", "with"},
+        "checkout step keys: no condition or override in any spelling",
+    )
+    pin(
+        isinstance(checkout.get("uses"), str)
+        and _CHECKOUT_PIN.fullmatch(checkout["uses"]) is not None,
+        "the checkout action pinned to a full commit SHA",
+    )
+    pin(
+        checkout["with"] == {"persist-credentials": "false", "fetch-depth": "1"},
+        "the reviewed checkout inputs",
+    )
+    pin(
+        set(evaluate) == {"name", "env", "run"},
+        "evaluate step keys: no condition or override in any spelling",
+    )
+    pin(
+        evaluate["env"] == {"GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"},
+        "exactly the one reviewed secret",
+    )
+    pin(
+        evaluate["run"]
+        == "python3 -I -B scripts/ci/deploy_assurance.py --apply",
+        "the exact reviewed invocation",
+    )
+    return document
 
 
 class SiteSelectionParsingTests(unittest.TestCase):
@@ -908,11 +1121,12 @@ class WorkflowSurfaceTests(unittest.TestCase):
         surviving mutant kept the asserted evaluator block intact while a
         key elsewhere changed execution (round 3 demonstrated `shell:`
         appended AFTER the run line: a GitHub-valid custom template that
-        discards the generated script), which is why no per-block or
-        per-key assertion closes this surface — only whole-file equality
-        does. Changing the workflow therefore requires changing this twin
-        in the same commit, which is the point: every workflow edit is a
-        reviewed edit."""
+        discards the generated script), so no per-block or per-key
+        assertion closes the DRIFT surface — this twin makes every
+        workflow edit a same-commit reviewed edit. It is a tripwire, not
+        the closure: a coordinated edit moves file and twin together
+        (round-4 finding), which is what the closed semantic contract
+        below refuses."""
 
         self.assertEqual(WORKFLOW.read_text(), EXPECTED_WORKFLOW)
 
@@ -927,8 +1141,9 @@ class WorkflowSurfaceTests(unittest.TestCase):
         """No `if:` (the round-1 surviving mutant), no `continue-on-error`,
         no shell-level failure swallowing, and exactly the two reviewed
         steps with one `run:` between them — a third step or second run
-        line is an unreviewed execution surface. Subsumed by the byte-exact
-        twin above; kept for focused failure messages."""
+        line is an unreviewed execution surface. Subsumed by the byte twin
+        and the closed semantic contract; kept for focused failure
+        messages."""
 
         text = WORKFLOW.read_text()
         self.assertIsNone(re.search(r"(?m)^\s*if:", text))
@@ -937,6 +1152,99 @@ class WorkflowSurfaceTests(unittest.TestCase):
         self.assertNotIn("exit 0", text)
         self.assertEqual(text.count("      - name: "), 2)
         self.assertEqual(text.count("        run: "), 1)
+
+    def test_the_workflow_satisfies_the_closed_semantic_contract(self):
+        """The round-4 closure, positive direction: the live file parses
+        under the closed grammar and every pinned key set and value holds,
+        and the returned semantic map is real — the reviewed invocation
+        and grants are readable back out of it."""
+
+        document = validated_workflow(WORKFLOW.read_text())
+        self.assertEqual(
+            document["jobs"]["assure"]["steps"][1]["run"],
+            "python3 -I -B scripts/ci/deploy_assurance.py --apply",
+        )
+        self.assertEqual(
+            document["jobs"]["assure"]["permissions"],
+            {"contents": "read", "actions": "write", "issues": "write"},
+        )
+        self.assertEqual(
+            document["on"],
+            {"schedule": [{"cron": "23 * * * *"}], "workflow_dispatch": {}},
+        )
+
+    def test_no_encoding_of_a_job_condition_survives_the_contract(self):
+        """The round-4 survivor CLASS pinned as a regression: a job or step
+        condition in ANY encoding must refuse — the canonical spelling,
+        the case variants a lowercase `if:` recognizer misses, quoted and
+        explicit keys, a homoglyph, a tab, and a flow-mapped job body. The
+        byte twin is deliberately not consulted: the contract judges the
+        hostile text directly, so updating the twin in lockstep rescues
+        none of these."""
+
+        text = WORKFLOW.read_text()
+        anchor = "    runs-on: ubuntu-24.04\n"
+        self.assertIn(anchor, text)
+        for line in [
+            "    if: ${{ always() }}\n",
+            "    If: false\n",
+            "    IF: false\n",
+            "    iF: false\n",
+            '    "if": false\n',
+            "    ? if\n",
+            "\tif: false\n",
+            "    іf: false\n",  # Cyrillic i homoglyph
+        ]:
+            mutated = text.replace(anchor, anchor + line)
+            self.assertNotEqual(mutated, text)
+            with self.assertRaises(ValueError, msg=repr(line)):
+                validated_workflow(mutated)
+        step_conditional = text.replace(
+            "        env:\n", "        if: false\n        env:\n"
+        )
+        self.assertNotEqual(step_conditional, text)
+        with self.assertRaises(ValueError):
+            validated_workflow(step_conditional)
+        flow_job = text.replace("  assure:\n", "  assure: {if: false}\n")
+        self.assertNotEqual(flow_job, text)
+        with self.assertRaises(ValueError):
+            validated_workflow(flow_job)
+
+    def test_every_yaml_escape_hatch_refuses(self):
+        """Encoding closure beyond the condition class: each YAML mechanism
+        that could re-spell, shadow, or restructure a reviewed key or value
+        dies in the parser or the closed key pins, before any comparison
+        with the twin."""
+
+        text = WORKFLOW.read_text()
+        anchor = "    runs-on: ubuntu-24.04\n"
+        run_line = (
+            "        run: python3 -I -B scripts/ci/deploy_assurance.py"
+            " --apply\n"
+        )
+        for mutated in [
+            text.replace(anchor, "    runs-on: &pin ubuntu-24.04\n"),
+            text.replace(anchor, "    runs-on: *pin\n"),
+            text.replace(anchor, "    runs-on: !!str ubuntu-24.04\n"),
+            "---\n" + text,
+            text.replace(anchor, anchor + anchor),
+            text.replace(
+                run_line,
+                "        run: |\n          python3 -I -B"
+                " scripts/ci/deploy_assurance.py --apply\n",
+            ),
+            text.replace(anchor, "    runs-on: ubuntu-24.04 \n"),
+            text.replace("\n", "\r\n", 1),
+            text.replace(anchor, anchor + "    continue-on-error: true\n"),
+            text.replace(anchor, anchor + "    shell: bash\n"),
+            text.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n  pull_request_target:\n",
+            ),
+        ]:
+            self.assertNotEqual(mutated, text)
+            with self.assertRaises(ValueError):
+                validated_workflow(mutated)
 
     def test_a_nonzero_checker_exit_fails_the_workflow_command(self):
         """Behavioral proof that the checker's exit code IS the job result:
