@@ -264,7 +264,7 @@ and dependency-governed Draft capacity is recorded durably in
   without touching a fail-closed property, a signature contract, or
   `release.yaml`. It is a worked precedent for the shape, not a ruling — the
   row above stays PENDING, and the next selection declares its crossing too.
-  The owner's 2026-09-01 decoupling ruling (issue #270) rebinds only the
+  The owner's 2026-09-01 decoupling ruling (issue #275) rebinds only the
   CONSUMPTION side: the `flux-system` GitRepository follows protected `main`
   rather than a selector-advanced platform tag, so a merged forward
   selection deploys with no platform release involved. The selection
