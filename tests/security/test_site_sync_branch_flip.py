@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -284,26 +285,48 @@ class PrestateAndPatchTests(unittest.TestCase):
             flip.state_matches(flipped, document, {"tag": "v0.1.54"})
 
 
-SOURCE_TEXT = (
-    "  url: oci://ghcr.io/snaraj/charts/naranjo-online\n"
-    "    digest: sha256:" + "a" * 64 + "\n"
-)
-
-
 class VerifyLiveTests(unittest.TestCase):
-    """The probe's singleton expectations, over faked transports."""
+    """The probe's singleton and digest expectations, over faked transports.
 
-    def probe(self, page="x assets/index-AAAA.css x", layers=None, bundles_layer=True):
-        chart_digest = "sha256:" + "a" * 64
-        image_digest = "sha256:" + "b" * 64
+    Every fixture digest is COMPUTED from the bytes it names — manifests
+    included — because the probe hash-verifies each document it fetches by
+    digest. A fixture that only computed blob digests would itself be the
+    witness that manifests went unverified.
+    """
+
+    def probe(
+        self,
+        page="x assets/index-AAAA.css x",
+        content_layer_count=1,
+        bundles_layer=True,
+        manifest_lie=False,
+    ):
+        import gzip
+        import hashlib
+        import io
+        import tarfile
+
+        def digest_of(data):
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+
+        layer_blob = gzip.compress(
+            b"binary " + (b"assets/index-AAAA.css" if bundles_layer else b"nothing")
+        )
+        image_layer_digest = digest_of(layer_blob)
+        child_body = json.dumps({"layers": [{"digest": image_layer_digest}]}).encode()
+        arm64_digest = digest_of(child_body)
+        index_body = json.dumps(
+            {
+                "manifests": [
+                    {"digest": arm64_digest, "platform": {"architecture": "arm64"}}
+                ]
+            }
+        ).encode()
+        image_digest = digest_of(index_body)
         values = (
             "image:\n  repository: ghcr.io/snaraj/naranjo-online\n"
             "  digest: " + image_digest + "\n"
         )
-        import gzip
-        import io
-        import tarfile
-
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             data = values.encode()
@@ -311,12 +334,28 @@ class VerifyLiveTests(unittest.TestCase):
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
         chart_blob = buffer.getvalue()
-        layer_blob = gzip.compress(
-            b"binary " + (b"assets/index-AAAA.css" if bundles_layer else b"nothing")
+        chart_layer_digest = digest_of(chart_blob)
+        chart_manifest_body = json.dumps(
+            {
+                "layers": [
+                    {"mediaType": flip.HELM_CONTENT_TYPE, "digest": chart_layer_digest}
+                ]
+                * content_layer_count
+            }
+        ).encode()
+        chart_digest = digest_of(chart_manifest_body)
+        if manifest_lie:
+            chart_digest = "sha256:" + "0" * 64
+        source_text = (
+            "  url: oci://ghcr.io/snaraj/charts/naranjo-online\n"
+            "    digest: " + chart_digest + "\n"
         )
-        chart_layer_digest = "sha256:" + __import__("hashlib").sha256(chart_blob).hexdigest()
-        image_layer_digest = "sha256:" + __import__("hashlib").sha256(layer_blob).hexdigest()
-        arm64_digest = "sha256:" + "c" * 64
+        manifests = {
+            chart_digest: chart_manifest_body,
+            image_digest: index_body,
+            arm64_digest: child_body,
+        }
+        blobs = {chart_layer_digest: chart_blob, image_layer_digest: layer_blob}
 
         def fake_http_get(url, headers=None, limit=0):
             if url.endswith("naranjo.online/"):
@@ -325,47 +364,21 @@ class VerifyLiveTests(unittest.TestCase):
                 return b"ok"
             if "token?scope" in url:
                 return json.dumps({"token": "t"}).encode()
-            if url.endswith("/manifests/" + chart_digest):
-                return json.dumps(
-                    {
-                        "layers": layers
-                        if layers is not None
-                        else [
-                            {
-                                "mediaType": flip.HELM_CONTENT_TYPE,
-                                "digest": chart_layer_digest,
-                            }
-                        ]
-                    }
-                ).encode()
-            if url.endswith("/blobs/" + chart_layer_digest):
-                return chart_blob
-            if url.endswith("/manifests/" + image_digest):
-                return json.dumps(
-                    {
-                        "manifests": [
-                            {
-                                "digest": arm64_digest,
-                                "platform": {"architecture": "arm64"},
-                            }
-                        ]
-                    }
-                ).encode()
-            if url.endswith("/manifests/" + arm64_digest):
-                return json.dumps(
-                    {"layers": [{"digest": image_layer_digest}]}
-                ).encode()
-            if url.endswith("/blobs/" + image_layer_digest):
-                return layer_blob
+            for digest, body in manifests.items():
+                if url.endswith("/manifests/" + digest):
+                    return body
+            for digest, body in blobs.items():
+                if url.endswith("/blobs/" + digest):
+                    return body
             raise AssertionError("unexpected URL " + url)
 
         with mock.patch.object(flip, "http_get", fake_http_get):
-            return flip.verify_live(SOURCE_TEXT, "https://naranjo.online")
+            return flip.verify_live(source_text, "https://naranjo.online")
 
     def test_happy_path_names_bundle_chart_and_image(self):
         receipt = self.probe()
         self.assertIn("index-AAAA.css", receipt)
-        self.assertIn("sha256:" + "a" * 64, receipt)
+        self.assertIn("(chart sha256:", receipt)
 
     def test_two_live_bundles_are_refused(self):
         with self.assertRaises(SystemExit):
@@ -373,16 +386,20 @@ class VerifyLiveTests(unittest.TestCase):
 
     def test_multiple_chart_content_layers_are_refused(self):
         with self.assertRaises(SystemExit):
-            self.probe(
-                layers=[
-                    {"mediaType": flip.HELM_CONTENT_TYPE, "digest": "sha256:" + "d" * 64},
-                    {"mediaType": flip.HELM_CONTENT_TYPE, "digest": "sha256:" + "e" * 64},
-                ]
-            )
+            self.probe(content_layer_count=2)
 
     def test_bundle_absent_from_every_layer_is_refused(self):
         with self.assertRaises(SystemExit):
             self.probe(bundles_layer=False)
+
+    def test_manifest_that_lies_about_its_digest_is_refused(self):
+        """A hostile registry serving a substitute manifest at the committed
+        digest must be caught at the MANIFEST, because every downstream blob
+        digest is read out of that document — a substitute names its own
+        blobs' true digests and every blob check passes."""
+
+        with self.assertRaises(SystemExit):
+            self.probe(manifest_lie=True)
 
     def test_source_without_chart_coordinates_is_refused(self):
         with self.assertRaises(SystemExit):
@@ -395,17 +412,36 @@ class RunbookBindingTests(unittest.TestCase):
 
     def test_every_tool_mode_is_invoked_by_the_runbook(self):
         text = RUNBOOK.read_text()
-        for command in (
-            "site_sync_branch_flip.py ruleset-receipt",
-            "site_sync_branch_flip.py quiescence",
-            "site_sync_branch_flip.py prestate",
-            "site_sync_branch_flip.py flip-patch",
-            "site_sync_branch_flip.py poststate",
-            "site_sync_branch_flip.py rollback-patch",
-            "site_sync_branch_flip.py rollback-verify",
-            "site_sync_branch_flip.py verify-live",
+        for mode in (
+            "ruleset-receipt",
+            "quiescence",
+            "prestate",
+            "flip-patch",
+            "poststate",
+            "rollback-patch",
+            "rollback-verify",
+            "verify-live",
         ):
-            self.assertIn(command, text, command)
+            # Whitespace lookahead so a corrupted mode token ("verify-liveX")
+            # cannot satisfy the pin by containing the real one.
+            pattern = r"site_sync_branch_flip\.py " + re.escape(mode) + r"(?=\s)"
+            self.assertIsNotNone(re.search(pattern, text), mode)
+
+    def test_the_outside_in_probe_covers_both_sites_exactly(self):
+        """verify-live appears twice on purpose — one invocation per site —
+        so each complete command is pinned individually: corrupting either
+        occurrence, or dropping a site, goes red."""
+
+        text = RUNBOOK.read_text()
+        for block in (
+            "site_sync_branch_flip.py verify-live \\\n"
+            "        kubernetes/websites/naranjo-online/source.yaml"
+            " https://naranjo.online",
+            "site_sync_branch_flip.py verify-live \\\n"
+            "        kubernetes/websites/lidersea-com/source.yaml"
+            " https://lidersea.com",
+        ):
+            self.assertIn(block, text, block)
 
     def test_captures_are_full_json_inventories_never_label_filtered(self):
         text = RUNBOOK.read_text()

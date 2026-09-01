@@ -332,12 +332,23 @@ def ghcr_token(repository):
 
 
 def ghcr_json(repository, reference, accept, token):
-    return json.loads(
-        http_get(
-            "https://ghcr.io/v2/{}/manifests/{}".format(repository, reference),
-            {"Authorization": "Bearer " + token, "Accept": accept},
-        )
+    payload = http_get(
+        "https://ghcr.io/v2/{}/manifests/{}".format(repository, reference),
+        {"Authorization": "Bearer " + token, "Accept": accept},
     )
+    # Every manifest this probe fetches is addressed by digest, and the blob
+    # checks downstream validate against digests read out of THIS document —
+    # so an unverified manifest would let a hostile registry substitute the
+    # whole tree while every blob check passes.
+    if reference.startswith("sha256:"):
+        observed = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if observed != reference:
+            fail(
+                "manifest {} hashed to {} — registry content lied".format(
+                    reference, observed
+                )
+            )
+    return json.loads(payload)
 
 
 def ghcr_blob(repository, digest, token):
