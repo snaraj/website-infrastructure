@@ -109,11 +109,18 @@ def rendered_sync_template() -> tuple[Path, str]:
 class PlatformReleaseSelectorContractTests(unittest.TestCase):
     maxDiff = None
 
-    def test_direct_source_topology_is_tagged_narrow_and_non_pruning(self):
+    def test_direct_source_topology_is_branch_pinned_narrow_and_non_pruning(self):
         source_path, sync = rendered_sync_template()
         self.assertFalse(source_path.with_suffix("").exists())
-        self.assertIn("  ref:\n    tag: v0.1.43\n", sync)
-        self.assertNotIn("branch: main", sync)
+        # The full interval->ref->sparseCheckout neighborhood, so a sibling
+        # key smuggled under ref: in a lockstep twin edit (which byte-equality
+        # is structurally blind to, and which Flux would resolve AHEAD of
+        # branch for semver) has nowhere to hide on either side of the line.
+        self.assertIn(
+            "  interval: 1m0s\n  ref:\n    branch: main\n  sparseCheckout:\n",
+            sync,
+        )
+        self.assertNotIn("  ref:\n    tag:", sync)
         documents = sync.rstrip("\n").split("\n---\n")
         self.assertEqual(
             sum("\nkind: GitRepository\n" in "\n" + item for item in documents), 1

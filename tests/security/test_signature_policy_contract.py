@@ -431,6 +431,19 @@ class FluxTopologyContractTests(unittest.TestCase):
                 "  timeout: 5m0s\n",
                 1,
             ),
+            # Issue #275 decoupling: `main` is the ONE ref the no-bypass
+            # ruleset gates. Any other branch, and any reintroduced tag
+            # selector, is outside the reviewed sync contract.
+            "hostile branch": canonical.replace(
+                "  ref:\n    branch: main\n",
+                "  ref:\n    branch: attacker-staging\n",
+                1,
+            ),
+            "tag selector reintroduced": canonical.replace(
+                "  ref:\n    branch: main\n",
+                "  ref:\n    tag: v0.1.43\n",
+                1,
+            ),
         }
         for label, candidate in mutations.items():
             with self.subTest(label=label):

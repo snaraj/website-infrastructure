@@ -1,5 +1,13 @@
 # Bootstrap-owned platform release selector
 
+**RUNTIME RETIREMENT PENDING (owner ruling 2026-09-01, issue #275).** Site
+desired-state consumption moves to the protected-main-branch GitRepository
+per `docs/runbooks/site-sync-branch-flip.md`; that ceremony suspends this
+CronJob, after which nothing consumes platform releases for site delivery.
+Everything below stays accurate until the ceremony runs, and the repo-side
+artifacts (image inputs, schema, contracts) remain platform-lane custody
+pending their own decommission decision.
+
 This directory is the permanent #189 boundary. None of its objects is selected
 by the `flux-system` GitRepository or either site Kustomization. Installation is
 an owner-attended bootstrap operation from an exact immutable platform release.
