@@ -1,0 +1,35 @@
+name: Deploy assurance
+
+# Owns the promise that published site releases reach the committed desired
+# state and that the platform publish path is healthy (issue #273). Red run +
+# one idempotent tracking issue per condition; closes them when clear. The
+# checker's decisions are pinned by tests/security/test_deploy_assurance_contract.py.
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-assurance
+  cancel-in-progress: false
+
+jobs:
+  assure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # read gate/publish runs; the one bounded rerun-failed-jobs
+      issues: write # open/close the per-condition tracking issues
+    steps:
+      - name: Check out desired state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Evaluate drift and publish integrity
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -B scripts/ci/deploy_assurance.py --apply
