@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -1057,6 +1058,44 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
         self.assertLess(
             workflow.index("Install checksum-verified release tools"),
             workflow.index("Select the immutable selector image lineage"),
+        )
+
+
+class AcquisitionReceiptViewCoherenceTests(unittest.TestCase):
+    """The Markdown receipt is an explanatory view of the canonical JSON
+    record, and nothing checked it: a digest edited in the .md alone
+    left every gate green (PR #283 round-1 review carry-forward). The
+    JSON schema is closed by the release contract, so the layer
+    inspection hashes the .md legitimately adds are pinned here by
+    value instead of widening that schema."""
+
+    RECEIPT_DIR = ROOT / "docs" / "assurance"
+    LAYER_INSPECTION_HASHES = {
+        # naranjo-online Chart.yaml / values.yaml
+        "69e3abc46d0da16013729905f2d7095c406aee6ea5bc90f74c988bccbb926b13",
+        "29578fe38d8e23158099d822462c2591b80bcb8a522df086862f39dde3b8cfdd",
+        # lidersea-com Chart.yaml / values.yaml
+        "5e1727720c3277fbb9d0e9be0b5994c15b1d7b1eba20cb7ae1f4e2c19c49c341",
+        "c93a729c03094830ea161404ffefaeab8947f90cd0fe7568ea79506183f713b9",
+    }
+
+    @classmethod
+    def hex_tokens(cls, text: str, width: int) -> set[str]:
+        return set(re.findall(r"\b[0-9a-f]{%d}\b" % width, text))
+
+    def test_markdown_view_agrees_with_the_canonical_record(self) -> None:
+        markdown = (
+            self.RECEIPT_DIR / "195-chart-acquisition-receipt.md"
+        ).read_text(encoding="utf-8")
+        canonical = (
+            self.RECEIPT_DIR / "195-chart-acquisition-receipt.json"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            self.hex_tokens(markdown, 64),
+            self.hex_tokens(canonical, 64) | self.LAYER_INSPECTION_HASHES,
+        )
+        self.assertEqual(
+            self.hex_tokens(markdown, 40), self.hex_tokens(canonical, 40)
         )
 
 
