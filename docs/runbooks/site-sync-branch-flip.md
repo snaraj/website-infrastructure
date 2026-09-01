@@ -11,148 +11,209 @@ Authority: the repository owner, at the cluster, or the Daybreak validation
 lane operating under its cluster-validation grant with the owner watching.
 Nothing here is CI-driven and no agent executes it unattended.
 
-Every judgment in this ceremony — the trust-anchor receipt, quiescence,
-prestate custody, both mutations, both verifications — is made by
+Every judgment in this ceremony is made by
 `scripts/site_sync_branch_flip.py`, whose battery is
-`tests/security/test_site_sync_branch_flip.py`. The operator captures live
-state with read-only `kubectl get ... -o json`, feeds the captures to the
-tool, and applies only the patches the tool emits. Any `DENY:` exit stops
-the ceremony; prose in this runbook never overrides the tool.
+`tests/security/test_site_sync_branch_flip.py`. The command blocks below are
+the CANONICAL ceremony: the battery compares them byte for byte, in order,
+against `CEREMONY_BLOCKS` in the tool, and admits no other
+kubectl/python3/flux/gh invocation anywhere in this document — so a
+neutralized invocation, a narrowed capture, or a retargeted patch is a red
+test, never a silent prose drift. The operator captures live state
+read-only, feeds the captures to the tool, and applies only the patches the
+tool emits. Any `DENY:` exit stops the ceremony; prose never overrides the
+tool. Every mutation patch leads with JSON-Patch `test` operations binding
+the captured object UID and the contested field, so a moved, replaced, or
+concurrently edited object refuses the patch instead of absorbing it.
 
 ## Preconditions
 
 - The pull request that moved `kubernetes/flux-system/gotk-sync.yaml.in` and
   `EXPECTED_FLUX_SYNC` to `ref.branch: main` is merged, and `main` CI is
   green at that merge.
-- The trust anchor is receipted against the FULL ruleset document — the
-  branch-tracking model is only as strong as protected `main`, so target,
-  enforcement, empty bypass actors, the exact include ref, signatures,
-  linear history, and the strict required checks are all compared, and one
-  weakened field stops the ceremony exactly as an inexact release-control
-  receipt stops a Ready flip:
-
-      gh api repos/snaraj/website-infrastructure/rulesets > rulesets.json
-      gh api repos/snaraj/website-infrastructure/rulesets/20601016 > ruleset.json
-      python3 -I -B scripts/site_sync_branch_flip.py ruleset-receipt \
-        rulesets.json ruleset.json
-
 - Both site Kustomizations report `Ready=True` and both sites answer 200 on
   `/readyz` (do not flip a broken cluster; fix first).
+- A fresh private scratch directory holds every capture and receipt; the
+  tool refuses any group/world-accessible custody:
+
+```sh
+scratch="$(mktemp -d)"
+```
+
+- The trust anchor is receipted against the FULL ruleset document — id,
+  name, target, source, enforcement, the exact `refs/heads/main` include,
+  empty bypass actors, `current_user_can_bypass: never`, and every rule
+  with its complete parameters (signatures, linear history,
+  creation/deletion/non-fast-forward, the pull-request controls, strict
+  required checks with `do_not_enforce_on_create` and both integration
+  IDs). The branch-tracking model is only as strong as this ruleset, so one
+  weakened field — or a listing long enough to be a truncated page, or any
+  second branch-target ruleset — stops the ceremony:
+
+```sh
+gh api 'repos/snaraj/website-infrastructure/rulesets?per_page=100' > "$scratch/rulesets.json"
+gh api repos/snaraj/website-infrastructure/rulesets/20601016 > "$scratch/ruleset.json"
+python3 -I -B scripts/site_sync_branch_flip.py ruleset-receipt "$scratch/rulesets.json" "$scratch/ruleset.json"
+```
 
 ## Ceremony
 
-Work from a fresh private scratch directory; the tool refuses any other
-custody for the rollback receipt:
+1. Capture the selector CronJob and record its pre-ceremony state. The tool
+   validates the reviewed selector identity — batch/v1, name, namespace,
+   the exact schedule, `concurrencyPolicy: Forbid`, the reviewed service
+   account, exactly one container running the digest-pinned selector image —
+   and writes a private atomic receipt recording whether it was ALREADY
+   suspended, because a rollback must never resume an object this ceremony
+   did not suspend:
 
-    scratch="$(mktemp -d)"
+```sh
+kubectl get cronjob -n flux-system platform-release-selector -o json > "$scratch/cronjob.json"
+python3 -I -B scripts/site_sync_branch_flip.py selector-prestate "$scratch/cronjob.json" --receipt-dir "$scratch"
+```
 
-1. Suspend the selector so no new advance can start (its compare-and-swap
-   assumes a tag ref and would fail red every tick after the flip anyway):
-   `kubectl patch cronjob -n flux-system platform-release-selector
-   --type=merge -p '{"spec":{"suspend":true}}'`
-2. Prove quiescence. Suspension stops future schedules, not Jobs already
+2. Suspend the selector with the emitted compare-and-swap patch (its `test`
+   operations bind the captured UID, the digest-pinned image, and the
+   captured `suspend: false`; the tool refuses to emit a patch for an
+   already-suspended selector — investigate that state with the owner
+   before continuing):
+
+```sh
+python3 -I -B scripts/site_sync_branch_flip.py suspend-patch "$scratch/selector-prestate.json" > "$scratch/suspend.json"
+kubectl patch cronjob -n flux-system platform-release-selector --type=json --patch-file "$scratch/suspend.json"
+```
+
+3. Prove quiescence. Suspension stops future schedules, not Jobs already
    running, and selector Jobs carry NO labels — only their Pods do — so a
-   label-filtered listing can report an empty drain while a live Job races
-   the capture. Capture the FULL inventories and let the tool match
-   ownership by UID lineage and terminal state:
+   filtered listing can report an empty drain while a live Job races the
+   capture. The tool re-proves the selector identity, requires every Job
+   the CronJob's own status still names to be present in the supplied
+   inventory (an incomplete capture is refused, not trusted), and matches
+   ownership by UID lineage and terminal state over the FULL namespace
+   inventories:
 
-       kubectl get cronjob -n flux-system platform-release-selector -o json \
-         > "$scratch/cronjob.json"
-       kubectl get jobs -n flux-system -o json > "$scratch/jobs.json"
-       kubectl get pods -n flux-system -o json > "$scratch/pods.json"
-       python3 -I -B scripts/site_sync_branch_flip.py quiescence \
-         "$scratch/cronjob.json" "$scratch/jobs.json" "$scratch/pods.json"
+```sh
+kubectl get cronjob -n flux-system platform-release-selector -o json > "$scratch/cronjob-now.json"
+kubectl get jobs -n flux-system -o json > "$scratch/jobs.json"
+kubectl get pods -n flux-system -o json > "$scratch/pods.json"
+python3 -I -B scripts/site_sync_branch_flip.py quiescence "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json"
+```
 
    Re-capture and re-run until it prints its receipt; a running Job is
    waited out, never raced.
-3. Record the rollback state, now that nothing can move it. The tool
-   validates kind, name, namespace, UID, a `{tag}`-only ref, and all nine
+
+4. Record the rollback state, now that nothing can move it. The tool
+   validates the CLOSED GitRepository shape — exactly the reviewed spec
+   keys, the reviewed url/interval/timeout/ignore values, exactly the two
+   site sparse-checkout directories, and therefore the structural absence
+   of secretRef, proxySecretRef, serviceAccountName, recurseSubmodules,
+   include, verify, and suspend — plus kind, name, namespace, UID, a
+   `{tag}`-only ref, and all nine
    `release-selector.platform.snaraj.dev/*` annotations, then writes the
-   bounded prestate document atomically (0600, no overwrite) into the
-   private directory:
+   bounded prestate document (including that full bounded spec) atomically
+   into the private directory:
 
-       kubectl get gitrepository -n flux-system flux-system -o json \
-         > "$scratch/gitrepository.json"
-       python3 -I -B scripts/site_sync_branch_flip.py prestate \
-         "$scratch/gitrepository.json" --receipt-dir "$scratch"
+```sh
+kubectl get gitrepository -n flux-system flux-system -o json > "$scratch/gitrepository.json"
+python3 -I -B scripts/site_sync_branch_flip.py prestate "$scratch/gitrepository.json" --receipt-dir "$scratch"
+```
 
-4. Flip the source ref with the emitted compare-and-swap patch — its
-   leading `test` operations bind the exact captured UID and tag, so a
-   moved or replaced object refuses the patch instead of absorbing it (the
+5. Flip the source ref with the emitted compare-and-swap patch (the
    admission policy that bounds the selector ServiceAccount does not match
    an owner/admin principal):
 
-       python3 -I -B scripts/site_sync_branch_flip.py flip-patch \
-         "$scratch/flip-prestate.json" > "$scratch/flip.json"
-       kubectl patch gitrepository -n flux-system flux-system \
-         --type=json --patch-file "$scratch/flip.json"
+```sh
+python3 -I -B scripts/site_sync_branch_flip.py flip-patch "$scratch/flip-prestate.json" > "$scratch/flip.json"
+kubectl patch gitrepository -n flux-system flux-system --type=json --patch-file "$scratch/flip.json"
+```
 
-5. Verify the poststate — same UID, ref exactly `{branch: main}`, all nine
-   evidence annotations byte-equal to the capture. The annotations stay
-   untouched on purpose: the suspended selector's `ValidateCurrent`
-   requires them to reactivate on rollback, and their removal belongs to
-   the selector's platform-lane decommission, not to this ceremony:
+6. Verify the poststate — same UID, ref exactly `{branch: main}`, every
+   other spec field byte-equal to the capture (the flip must never bless
+   concurrent source drift), and all nine evidence annotations intact. The
+   annotations stay untouched on purpose: the suspended selector's
+   `ValidateCurrent` requires them to reactivate on rollback, and their
+   removal belongs to the selector's platform-lane decommission, not to
+   this ceremony:
 
-       kubectl get gitrepository -n flux-system flux-system -o json \
-         > "$scratch/post.json"
-       python3 -I -B scripts/site_sync_branch_flip.py poststate \
-         "$scratch/post.json" "$scratch/flip-prestate.json"
+```sh
+kubectl get gitrepository -n flux-system flux-system -o json > "$scratch/post.json"
+python3 -I -B scripts/site_sync_branch_flip.py poststate "$scratch/post.json" "$scratch/flip-prestate.json"
+```
 
-6. Force a reconcile rather than waiting an interval:
-   `flux reconcile source git flux-system -n flux-system` then
-   `flux reconcile kustomization naranjo-online-reconciler -n flux-system`
-   and the lidersea twin.
+7. Force a reconcile rather than waiting an interval:
+
+```sh
+flux reconcile source git flux-system -n flux-system
+flux reconcile kustomization naranjo-online-reconciler -n flux-system
+flux reconcile kustomization lidersea-com-reconciler -n flux-system
+```
 
 ## Verification (all three, not any one)
 
-- `kubectl get gitrepository -n flux-system flux-system -o
-  jsonpath='{.status.artifact.revision}'` reports `main@sha1:<current WI main
-  head>`.
+- The source reports the branch revision:
+
+```sh
+kubectl get gitrepository -n flux-system flux-system -o jsonpath='{.status.artifact.revision}'
+```
+
+  must print `main@sha1:<current WI main head>`.
+
 - Both site Kustomizations reconcile `Ready=True` at that revision and the
   site OCIRepositories still hold their exact reviewed digests (the flip
   changes WHERE desired state is read from, never WHICH chart is selected).
-- Outside-in, with no cluster access — the executable form of the probe
-  that proved the `0.1.66` deploy on 2026-08-31. For each site, the tool
-  reads the committed `source.yaml`, requires the live page to name exactly
-  one fingerprinted bundle, walks ghcr anonymously (chart manifest at the
-  committed digest → sole Helm content layer → `values.yaml` image digest →
-  sole arm64 child → hash-verified layer blobs), and requires the live
-  bundle inside those exact bytes:
+- Outside-in, with no cluster access — the executable descendant of the
+  probe that proved the `0.1.66` deploy on 2026-08-31. For each site, the
+  tool reads the committed `source.yaml`, requires the live page to name
+  exactly one fingerprinted bundle, fetches that asset's exact BYTES from
+  the live site, walks ghcr anonymously with every digest-addressed
+  manifest and blob hash-verified (chart manifest → sole Helm content
+  layer → `values.yaml` image digest → sole arm64 child), and requires the
+  served bytes verbatim inside the committed image layers. Honest boundary:
+  this proves the exact content the site serves exists in the committed
+  image; no outside probe can name the digest the running workload was
+  started from:
 
-      python3 -I -B scripts/site_sync_branch_flip.py verify-live \
-        kubernetes/websites/naranjo-online/source.yaml https://naranjo.online
-      python3 -I -B scripts/site_sync_branch_flip.py verify-live \
-        kubernetes/websites/lidersea-com/source.yaml https://lidersea.com
+```sh
+python3 -I -B scripts/site_sync_branch_flip.py verify-live kubernetes/websites/naranjo-online/source.yaml https://naranjo.online
+python3 -I -B scripts/site_sync_branch_flip.py verify-live kubernetes/websites/lidersea-com/source.yaml https://lidersea.com
+```
 
   Keep both printed receipts beside `flip-prestate.json` as the ceremony
   record.
 
 ## Rollback
 
-Reverse order. The ref move MUST be the emitted JSON patch — a merge patch
-would leave `branch` and `tag` set together on the one ref, which is not
-the prior state and not a valid selector — and its `test` operations bind
-the same captured UID and the flipped ref:
+Reverse order. Both patches are tool-emitted: the ref move MUST be the
+emitted JSON patch — a merge patch would leave `branch` and `tag` set
+together on the one ref, which is not the prior state and not a valid
+selector — and the rollback verification requires the full captured spec
+and annotations byte-equal, not just the ref:
 
-1.     python3 -I -B scripts/site_sync_branch_flip.py rollback-patch \
-         "$scratch/flip-prestate.json" > "$scratch/rollback.json"
-       kubectl patch gitrepository -n flux-system flux-system \
-         --type=json --patch-file "$scratch/rollback.json"
-       kubectl get gitrepository -n flux-system flux-system -o json \
-         > "$scratch/rolled-back.json"
-       python3 -I -B scripts/site_sync_branch_flip.py rollback-verify \
-         "$scratch/rolled-back.json" "$scratch/flip-prestate.json"
+```sh
+python3 -I -B scripts/site_sync_branch_flip.py rollback-patch "$scratch/flip-prestate.json" > "$scratch/rollback.json"
+kubectl patch gitrepository -n flux-system flux-system --type=json --patch-file "$scratch/rollback.json"
+kubectl get gitrepository -n flux-system flux-system -o json > "$scratch/rolled-back.json"
+python3 -I -B scripts/site_sync_branch_flip.py rollback-verify "$scratch/rolled-back.json" "$scratch/flip-prestate.json"
+```
 
-2. Resume the CronJob: `kubectl patch cronjob -n flux-system
-   platform-release-selector --type=merge -p '{"spec":{"suspend":false}}'`
-   (its nine evidence annotations were never touched, so its
-   compare-and-swap and `ValidateCurrent` resume from exactly the state
-   they last recorded).
-3. `flux reconcile source git flux-system -n flux-system` and confirm
-   `status.artifact.revision` names the recorded tag again.
+Then restore the selector to exactly its captured pre-ceremony state. The
+resume patch binds the same UID, image, and current suspension; the tool
+refuses to emit one if the selector was suspended BEFORE the ceremony
+(resuming it then would activate a state this ceremony never changed — an
+owner decision, not a rollback), and the final verification re-proves the
+full selector identity against the capture before the source reconciles
+back to the recorded tag:
 
-The reviewed-model change in git stays merged either way; rolling the model
-itself back is an ordinary reviewed pull request.
+```sh
+python3 -I -B scripts/site_sync_branch_flip.py resume-patch "$scratch/selector-prestate.json" > "$scratch/resume.json"
+kubectl patch cronjob -n flux-system platform-release-selector --type=json --patch-file "$scratch/resume.json"
+kubectl get cronjob -n flux-system platform-release-selector -o json > "$scratch/cronjob-final.json"
+python3 -I -B scripts/site_sync_branch_flip.py resume-verify "$scratch/cronjob-final.json" "$scratch/selector-prestate.json"
+flux reconcile source git flux-system -n flux-system
+```
+
+Confirm `status.artifact.revision` names the recorded tag again (the
+revision command in Verification above). The reviewed-model change in git
+stays merged either way; rolling the model itself back is an ordinary
+reviewed pull request.
 
 ## After the flip
 
