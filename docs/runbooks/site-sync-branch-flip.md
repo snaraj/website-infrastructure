@@ -22,8 +22,11 @@ test, never a silent prose drift. The operator captures live state
 read-only, feeds the captures to the tool, and applies only the patches the
 tool emits. Any `DENY:` exit stops the ceremony; prose never overrides the
 tool. Every mutation patch leads with JSON-Patch `test` operations binding
-the captured object UID and the contested field, so a moved, replaced, or
-concurrently edited object refuses the patch instead of absorbing it.
+the captured object UID and the COMPLETE captured boundary — the source's
+full bounded spec and reserved annotations, the selector's entire spec —
+so a moved, replaced, or concurrently edited object refuses the patch at
+the API server itself, with no window between a check and the mutation it
+guards.
 
 ## Preconditions
 
@@ -71,10 +74,10 @@ python3 -I -B scripts/site_sync_branch_flip.py selector-prestate "$scratch/cronj
 ```
 
 2. Suspend the selector with the emitted compare-and-swap patch (its `test`
-   operations bind the captured UID, the digest-pinned image, and the
-   captured `suspend: false`; the tool refuses to emit a patch for an
-   already-suspended selector — investigate that state with the owner
-   before continuing):
+   operations bind the captured UID and the ENTIRE captured spec, so any
+   template drift since capture refuses the patch; the tool refuses to
+   emit one for an already-suspended selector — investigate that state
+   with the owner before continuing):
 
 ```sh
 python3 -I -B scripts/site_sync_branch_flip.py suspend-patch "$scratch/selector-prestate.json" > "$scratch/suspend.json"
@@ -84,17 +87,19 @@ kubectl patch cronjob -n flux-system platform-release-selector --type=json --pat
 3. Prove quiescence. Suspension stops future schedules, not Jobs already
    running, and selector Jobs carry NO labels — only their Pods do — so a
    filtered listing can report an empty drain while a live Job races the
-   capture. The tool re-proves the selector identity, requires every Job
-   the CronJob's own status still names to be present in the supplied
-   inventory (an incomplete capture is refused, not trusted), and matches
-   ownership by UID lineage and terminal state over the FULL namespace
-   inventories:
+   capture. The tool requires the live selector's COMPLETE spec to equal
+   the prestate capture except for the suspension this ceremony applied
+   (an execution template the ceremony did not review is refused, never
+   receipted), requires every Job the CronJob's own status still names to
+   be present in the supplied inventory (an incomplete capture is
+   refused, not trusted), and matches ownership by UID lineage and
+   terminal state over the FULL namespace inventories:
 
 ```sh
 kubectl get cronjob -n flux-system platform-release-selector -o json > "$scratch/cronjob-now.json"
 kubectl get jobs -n flux-system -o json > "$scratch/jobs.json"
 kubectl get pods -n flux-system -o json > "$scratch/pods.json"
-python3 -I -B scripts/site_sync_branch_flip.py quiescence "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json"
+python3 -I -B scripts/site_sync_branch_flip.py quiescence "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json" "$scratch/selector-prestate.json"
 ```
 
    Re-capture and re-run until it prints its receipt; a running Job is
@@ -116,9 +121,12 @@ kubectl get gitrepository -n flux-system flux-system -o json > "$scratch/gitrepo
 python3 -I -B scripts/site_sync_branch_flip.py prestate "$scratch/gitrepository.json" --receipt-dir "$scratch"
 ```
 
-5. Flip the source ref with the emitted compare-and-swap patch (the
-   admission policy that bounds the selector ServiceAccount does not match
-   an owner/admin principal):
+5. Flip the source ref with the emitted compare-and-swap patch. Its `test`
+   operations bind the captured UID, every bounded non-ref spec field, all
+   nine reserved annotations, and the old tag, so a contested field that
+   moved after capture refuses the whole patch atomically (the admission
+   policy that bounds the selector ServiceAccount does not match an
+   owner/admin principal):
 
 ```sh
 python3 -I -B scripts/site_sync_branch_flip.py flip-patch "$scratch/flip-prestate.json" > "$scratch/flip.json"
@@ -195,8 +203,10 @@ python3 -I -B scripts/site_sync_branch_flip.py rollback-verify "$scratch/rolled-
 ```
 
 Then restore the selector to exactly its captured pre-ceremony state. The
-resume patch binds the same UID, image, and current suspension; the tool
-refuses to emit one if the selector was suspended BEFORE the ceremony
+resume patch binds the same UID and the ENTIRE captured spec (with the
+ceremony's suspension), so it can never activate a template the ceremony
+did not review; the tool refuses to emit one if the selector was
+suspended BEFORE the ceremony
 (resuming it then would activate a state this ceremony never changed — an
 owner decision, not a rollback), and the final verification re-proves the
 full selector identity against the capture before the source reconciles
