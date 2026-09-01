@@ -192,7 +192,8 @@ CEREMONY_BLOCKS = (
     'kubectl get jobs -n flux-system -o json > "$scratch/jobs.json"\n'
     'kubectl get pods -n flux-system -o json > "$scratch/pods.json"\n'
     "python3 -I -B scripts/site_sync_branch_flip.py quiescence"
-    ' "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json"\n',
+    ' "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json"'
+    ' "$scratch/selector-prestate.json"\n',
     "kubectl get gitrepository -n flux-system flux-system -o json"
     ' > "$scratch/gitrepository.json"\n'
     "python3 -I -B scripts/site_sync_branch_flip.py prestate"
@@ -378,15 +379,33 @@ def selector_identity(cronjob):
     return uid, resource_version, image, suspend
 
 
-def quiescence(cronjob, jobs, pods):
-    """Suspension of the PROVEN selector, zero live executions by lineage,
-    and capture-completeness: every Job the CronJob's own status still
-    names as active must appear in the supplied inventory, so a narrowed
-    jobs capture cannot hide a running execution behind an empty list."""
+def captured_spec(document, suspend):
+    """The captured complete selector spec with the stated suspension."""
+
+    spec = json.loads(json.dumps(document["spec"]))
+    spec["suspend"] = suspend
+    return spec
+
+
+def quiescence(cronjob, jobs, pods, document):
+    """Suspension of the CAPTURED selector — the complete live spec must
+    equal the prestate capture except for the suspension this ceremony
+    itself applied — zero live executions by lineage, and
+    capture-completeness: every Job the CronJob's own status still names
+    as active must appear in the supplied inventory, so a narrowed jobs
+    capture cannot hide a running execution behind an empty list."""
 
     uid, _, _, suspend = selector_identity(cronjob)
+    if uid != document["uid"]:
+        fail("live CronJob UID changed — this is not the captured selector")
     if suspend is not True:
         fail("selector CronJob is not suspended")
+    if cronjob.get("spec") != captured_spec(document, True):
+        fail(
+            "the live selector spec drifted from the prestate capture — an "
+            "execution template this ceremony did not review must never be "
+            "receipted, let alone resumed"
+        )
     supplied = {
         item.get("metadata", {}).get("uid")
         for item in jobs.get("items", [])
@@ -401,25 +420,29 @@ def quiescence(cronjob, jobs, pods):
             )
     bootstrap.selector_quiescent(cronjob, jobs, pods)
     return (
-        "RECEIPT selector {} suspended and quiescent (closed identity, "
+        "RECEIPT selector {} suspended and quiescent (captured full spec, "
         "owner-UID lineage, terminal states, status-complete "
         "inventory)".format(uid)
     )
 
 
 def selector_prestate(cronjob, receipt_dir):
-    """Private, atomic capture of the selector's pre-ceremony state — the
-    rollback authority for suspend/resume. Records whether the selector
-    was ALREADY suspended: a rollback never resumes an object the
-    ceremony did not suspend."""
+    """Private, atomic capture of the selector's COMPLETE pre-ceremony
+    spec — the rollback authority for suspend/resume. The whole spec is
+    the boundary (round-3 security finding 2): identity fields alone let
+    an altered execution template ride through suspension and be resumed,
+    so both emitted patches test the entire captured spec atomically. The
+    capture also records whether the selector was ALREADY suspended: a
+    rollback never resumes an object the ceremony did not suspend."""
 
     uid, resource_version, image, suspend = selector_identity(cronjob)
     document = {
-        "schema": "site-sync-branch-flip/selector-prestate/v1",
+        "schema": "site-sync-branch-flip/selector-prestate/v2",
         "uid": uid,
         "resourceVersion": resource_version,
         "image": image,
         "suspend": suspend,
+        "spec": cronjob["spec"],
     }
     return write_receipt(
         document, receipt_dir, "selector-prestate.json",
@@ -430,12 +453,13 @@ def selector_prestate(cronjob, receipt_dir):
 def load_selector_prestate(path):
     document = load_json(path)
     if (
-        document.get("schema") != "site-sync-branch-flip/selector-prestate/v1"
+        document.get("schema") != "site-sync-branch-flip/selector-prestate/v2"
         or not isinstance(document.get("uid"), str)
         or not isinstance(document.get("image"), str)
         or not isinstance(document.get("suspend"), bool)
+        or not isinstance(document.get("spec"), dict)
     ):
-        fail("selector prestate document is not a valid v1 capture")
+        fail("selector prestate document is not a valid v2 capture")
     return document
 
 
@@ -448,12 +472,7 @@ def suspend_patch(document):
     return json.dumps(
         [
             {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
-            {
-                "op": "test",
-                "path": "/spec/jobTemplate/spec/template/spec/containers/0/image",
-                "value": document["image"],
-            },
-            {"op": "test", "path": "/spec/suspend", "value": False},
+            {"op": "test", "path": "/spec", "value": captured_spec(document, False)},
             {"op": "replace", "path": "/spec/suspend", "value": True},
         ]
     )
@@ -469,27 +488,21 @@ def resume_patch(document):
     return json.dumps(
         [
             {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
-            {
-                "op": "test",
-                "path": "/spec/jobTemplate/spec/template/spec/containers/0/image",
-                "value": document["image"],
-            },
-            {"op": "test", "path": "/spec/suspend", "value": True},
+            {"op": "test", "path": "/spec", "value": captured_spec(document, True)},
             {"op": "replace", "path": "/spec/suspend", "value": False},
         ]
     )
 
 
 def resume_verify(cronjob, document):
-    uid, _, image, suspend = selector_identity(cronjob)
+    uid, _, _, _ = selector_identity(cronjob)
     if uid != document["uid"]:
         fail("live CronJob UID changed — this is not the captured selector")
-    if image != document["image"]:
-        fail("live selector image drifted from the captured identity")
-    if suspend != document["suspend"]:
+    if cronjob.get("spec") != captured_spec(document, document["suspend"]):
         fail(
-            "live suspend is {} — the captured pre-ceremony state was "
-            "{}".format(suspend, document["suspend"])
+            "the live selector spec does not equal the captured "
+            "pre-ceremony state — the rollback restored something this "
+            "ceremony never reviewed"
         )
 
 
@@ -641,12 +654,44 @@ def load_prestate(path):
     return document
 
 
+def pointer(key):
+    """RFC 6901 token escaping for annotation keys carrying '/'."""
+
+    return key.replace("~", "~0").replace("/", "~1")
+
+
+def source_guard_operations(document):
+    """The complete captured boundary as atomic ``test`` operations: UID,
+    every bounded non-ref spec field, and each reserved annotation. A
+    contested field that changes between capture and patch application —
+    the round-3 security race: a foreign URL introduced after capture —
+    refuses the WHOLE patch at the API server instead of being detected
+    only after the ref has already moved."""
+
+    operations = [
+        {"op": "test", "path": "/metadata/uid", "value": document["uid"]}
+    ]
+    for key in sorted(SOURCE_SPEC_KEYS - {"ref"}):
+        operations.append(
+            {"op": "test", "path": "/spec/" + key, "value": document["spec"][key]}
+        )
+    for key in RESERVED_ANNOTATIONS:
+        operations.append(
+            {
+                "op": "test",
+                "path": "/metadata/annotations/" + pointer(key),
+                "value": document["annotations"][key],
+            }
+        )
+    return operations
+
+
 def flip_patch(document):
-    """The flip as a UID- and field-bound compare-and-swap patch."""
+    """The flip as a full-boundary compare-and-swap patch."""
 
     return json.dumps(
-        [
-            {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+        source_guard_operations(document)
+        + [
             {"op": "test", "path": "/spec/ref/tag", "value": document["ref"]["tag"]},
             {"op": "remove", "path": "/spec/ref/tag"},
             {"op": "add", "path": "/spec/ref/branch", "value": "main"},
@@ -656,8 +701,8 @@ def flip_patch(document):
 
 def rollback_patch(document):
     return json.dumps(
-        [
-            {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+        source_guard_operations(document)
+        + [
             {"op": "test", "path": "/spec/ref/branch", "value": "main"},
             {"op": "remove", "path": "/spec/ref/branch"},
             {"op": "add", "path": "/spec/ref/tag", "value": document["ref"]["tag"]},
@@ -865,6 +910,7 @@ def main(argv=None):
     quiet.add_argument("cronjob_json")
     quiet.add_argument("jobs_json")
     quiet.add_argument("pods_json")
+    quiet.add_argument("selector_prestate_json")
     capture = commands.add_parser("prestate")
     capture.add_argument("gitrepository_json")
     capture.add_argument("--receipt-dir", required=True)
@@ -901,6 +947,7 @@ def main(argv=None):
                 load_json(arguments.cronjob_json),
                 load_json(arguments.jobs_json),
                 load_json(arguments.pods_json),
+                load_selector_prestate(arguments.selector_prestate_json),
             )
         )
     elif arguments.command == "prestate":

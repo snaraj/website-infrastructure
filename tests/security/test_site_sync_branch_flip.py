@@ -11,8 +11,10 @@ review's three surviving mutants) is a red test, never prose drift.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -155,6 +157,45 @@ def selector_cronjob(
     }
 
 
+def selector_document(**kwargs):
+    """A v2 custody capture of the (pre-suspend) selector fixture."""
+
+    cronjob = selector_cronjob(suspended=False, **kwargs)
+    return {
+        "schema": "site-sync-branch-flip/selector-prestate/v2",
+        "uid": cronjob["metadata"]["uid"],
+        "resourceVersion": "9",
+        "image": SELECTOR_IMAGE,
+        "suspend": False,
+        "spec": cronjob["spec"],
+    }
+
+
+def apply_patch(target, operations):
+    """A minimal RFC 6902 applier so the race tests prove the emitted
+    patches' SEMANTICS — a failed ``test`` refuses the whole patch — not
+    just their shape."""
+
+    target = copy.deepcopy(target)
+    for operation in operations:
+        parts = [
+            part.replace("~1", "/").replace("~0", "~")
+            for part in operation["path"].split("/")[1:]
+        ]
+        node = target
+        for part in parts[:-1]:
+            node = node[part]
+        leaf = parts[-1]
+        if operation["op"] == "test":
+            if node.get(leaf) != operation["value"]:
+                raise AssertionError("test failed at " + operation["path"])
+        elif operation["op"] == "remove":
+            del node[leaf]
+        else:
+            node[leaf] = operation["value"]
+    return target
+
+
 def selector_job(terminal=True):
     return {
         "metadata": {
@@ -184,7 +225,10 @@ class QuiescenceTests(unittest.TestCase):
 
     def quiet(self, cronjob, jobs=None):
         return flip.quiescence(
-            cronjob, jobs or self.empty("JobList"), self.empty("PodList")
+            cronjob,
+            jobs or self.empty("JobList"),
+            self.empty("PodList"),
+            selector_document(),
         )
 
     def test_unsuspended_cronjob_is_refused_before_anything_else(self):
@@ -238,6 +282,19 @@ class QuiescenceTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.quiet(cronjob)
 
+    def test_template_drift_since_capture_is_refused(self):
+        """The round-3 security race: an execution template altered while
+        keeping every tested identity field must never be receipted — the
+        COMPLETE live spec must equal the capture except for the
+        suspension the ceremony itself applied."""
+
+        drifted = selector_cronjob()
+        drifted["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["args"] = ["--exfiltrate"]
+        with self.assertRaises(SystemExit):
+            self.quiet(drifted)
+
 
 class ScratchMixin:
     def scratch(self):
@@ -258,25 +315,53 @@ class SelectorCustodyTests(ScratchMixin, unittest.TestCase):
         self.assertEqual(document["suspend"], False)
         self.assertEqual(document["image"], SELECTOR_IMAGE)
 
-    def test_suspend_and_resume_patches_bind_uid_image_and_state(self):
+    def test_suspend_and_resume_patches_bind_uid_and_the_entire_spec(self):
         document = self.capture(selector_cronjob(suspended=False))
         forward = json.loads(flip.suspend_patch(document))
         self.assertEqual(
-            [op["op"] for op in forward], ["test", "test", "test", "replace"]
+            [op["op"] for op in forward], ["test", "test", "replace"]
         )
         self.assertEqual(forward[0]["path"], "/metadata/uid")
-        self.assertEqual(forward[1]["value"], SELECTOR_IMAGE)
+        self.assertEqual(forward[1]["path"], "/spec")
+        self.assertEqual(forward[1]["value"]["suspend"], False)
+        self.assertEqual(
+            forward[1]["value"]["jobTemplate"],
+            selector_cronjob()["spec"]["jobTemplate"],
+        )
         self.assertEqual(forward[2], {
-            "op": "test", "path": "/spec/suspend", "value": False,
-        })
-        self.assertEqual(forward[3], {
             "op": "replace", "path": "/spec/suspend", "value": True,
         })
         backward = json.loads(flip.resume_patch(document))
-        self.assertEqual(backward[2]["value"], True)
-        self.assertEqual(backward[3], {
+        self.assertEqual(backward[1]["path"], "/spec")
+        self.assertEqual(backward[1]["value"]["suspend"], True)
+        self.assertEqual(backward[2], {
             "op": "replace", "path": "/spec/suspend", "value": False,
         })
+
+    def test_the_patches_refuse_post_capture_template_drift(self):
+        """The round-3 security race, semantically: the whole-spec test
+        operation makes the API server itself refuse a suspend or resume
+        of a template altered after capture — no window exists between the
+        identity check and the mutation."""
+
+        document = self.capture(selector_cronjob(suspended=False))
+        live = selector_cronjob(suspended=False)
+        suspended = apply_patch(live, json.loads(flip.suspend_patch(document)))
+        self.assertEqual(suspended["spec"]["suspend"], True)
+        drifted = selector_cronjob(suspended=False)
+        drifted["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["args"] = ["--exfiltrate"]
+        with self.assertRaises(AssertionError):
+            apply_patch(drifted, json.loads(flip.suspend_patch(document)))
+        drifted_suspended = selector_cronjob(suspended=True)
+        drifted_suspended["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+            "serviceAccountName"
+        ] = "admin"
+        with self.assertRaises(AssertionError):
+            apply_patch(
+                drifted_suspended, json.loads(flip.resume_patch(document))
+            )
 
     def test_a_pre_suspended_selector_is_never_suspended_or_resumed(self):
         """The rollback restores what the ceremony changed and nothing
@@ -410,25 +495,75 @@ class PrestateAndPatchTests(ScratchMixin, unittest.TestCase):
         with self.assertRaises(SystemExit):
             flip.prestate(live_gitrepository(), private)
 
-    def test_both_patches_lead_with_uid_and_field_test_operations(self):
+    def test_both_patches_test_the_complete_captured_boundary(self):
+        """UID, every bounded non-ref spec field, all nine reserved
+        annotations, and the contested ref — atomically, in the patch
+        itself (round-3 security finding 1: a boundary tested only after
+        application leaves a race in which a foreign URL rides through)."""
+
         document = self.capture(live_gitrepository())
         forward = json.loads(flip.flip_patch(document))
+        tested = {op["path"] for op in forward if op["op"] == "test"}
+        self.assertIn("/metadata/uid", tested)
+        for key in sorted(flip.SOURCE_SPEC_KEYS - {"ref"}):
+            self.assertIn("/spec/" + key, tested)
+        annotation_tests = [
+            path for path in tested if path.startswith("/metadata/annotations/")
+        ]
         self.assertEqual(
-            [op["op"] for op in forward], ["test", "test", "remove", "add"]
+            len(annotation_tests), len(flip.RESERVED_ANNOTATIONS)
         )
-        self.assertEqual(forward[0]["path"], "/metadata/uid")
-        self.assertEqual(forward[1], {
-            "op": "test", "path": "/spec/ref/tag", "value": "v0.1.54",
-        })
-        self.assertEqual(forward[3], {
-            "op": "add", "path": "/spec/ref/branch", "value": "main",
-        })
+        self.assertEqual(
+            forward[-3:],
+            [
+                {"op": "test", "path": "/spec/ref/tag", "value": "v0.1.54"},
+                {"op": "remove", "path": "/spec/ref/tag"},
+                {"op": "add", "path": "/spec/ref/branch", "value": "main"},
+            ],
+        )
         backward = json.loads(flip.rollback_patch(document))
         self.assertEqual(
-            [op["op"] for op in backward], ["test", "test", "remove", "add"]
+            backward[-3:],
+            [
+                {"op": "test", "path": "/spec/ref/branch", "value": "main"},
+                {"op": "remove", "path": "/spec/ref/branch"},
+                {"op": "add", "path": "/spec/ref/tag", "value": "v0.1.54"},
+            ],
         )
-        self.assertEqual(backward[1]["path"], "/spec/ref/branch")
-        self.assertEqual(backward[3]["value"], "v0.1.54")
+
+    def test_the_emitted_patches_refuse_post_capture_drift(self):
+        """The round-3 security race, semantically: applying the emitted
+        patch to an object whose URL (or any bounded field, or a reserved
+        annotation) moved AFTER capture must fail its test operations —
+        the API server refuses the mutation; no post-hoc check is the
+        defense."""
+
+        document = self.capture(live_gitrepository())
+        honest = apply_patch(
+            live_gitrepository(), json.loads(flip.flip_patch(document))
+        )
+        self.assertEqual(honest["spec"]["ref"], {"branch": "main"})
+        foreign_url = live_gitrepository(
+            spec_overrides={"url": "https://github.com/attacker/repo.git"}
+        )
+        with self.assertRaises(AssertionError):
+            apply_patch(foreign_url, json.loads(flip.flip_patch(document)))
+        moved_annotation = live_gitrepository()
+        moved_annotation["metadata"]["annotations"][
+            flip.RESERVED_ANNOTATIONS[2]
+        ] = "moved"
+        with self.assertRaises(AssertionError):
+            apply_patch(
+                moved_annotation, json.loads(flip.flip_patch(document))
+            )
+        drifted_back = live_gitrepository(
+            ref={"branch": "main"},
+            spec_overrides={"sparseCheckout": ["kubernetes"]},
+        )
+        with self.assertRaises(AssertionError):
+            apply_patch(
+                drifted_back, json.loads(flip.rollback_patch(document))
+            )
 
     def test_state_checks_bind_uid_ref_spec_and_annotations(self):
         document = self.capture(live_gitrepository())
@@ -610,16 +745,21 @@ class RunbookCanonTests(unittest.TestCase):
     narrowed through another query form, a retargeted patch — all change a
     block or a token count, and all go red here."""
 
-    def test_every_canonical_block_appears_exactly_once_in_order(self):
+    maxDiff = None
+
+    def test_the_fenced_blocks_are_exactly_the_canon(self):
+        """Complete extraction, complete equality (round-3 security
+        finding 3): every fenced block's ENTIRE content — ordered — must
+        equal the canon, and the fence count proves no other fence of any
+        kind exists. A line appended INSIDE an existing fence after the
+        canonical text (the review's bypass form) changes that fence's
+        extracted bytes and goes red, where an anchored-substring match
+        stayed green."""
+
         text = RUNBOOK.read_text()
-        position = -1
-        for block in flip.CEREMONY_BLOCKS:
-            anchored = "\n" + block
-            with self.subTest(block=block.splitlines()[0]):
-                self.assertEqual(text.count(anchored), 1)
-                index = text.index(anchored)
-                self.assertGreater(index, position)
-                position = index
+        fences = tuple(re.findall(r"(?ms)^```sh\n(.*?)^```$", text))
+        self.assertEqual(fences, flip.CEREMONY_BLOCKS)
+        self.assertEqual(text.count("```"), 2 * len(flip.CEREMONY_BLOCKS))
 
     def test_no_invocation_exists_outside_the_canonical_blocks(self):
         text = RUNBOOK.read_text()
