@@ -58,12 +58,15 @@ import argparse
 import base64
 import datetime as dt
 import fcntl
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import posixpath
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -72,6 +75,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from pathlib import Path
 
 REPOSITORY = "snaraj/website-infrastructure"
@@ -119,6 +123,12 @@ COMMAND_TIMEOUT_SECONDS = 600
 GATE_TIMEOUT_SECONDS = 3600
 MAX_JSON_BYTES = 1024 * 1024
 MAX_BLOB_BYTES = 64 * 1024 * 1024
+# The chart layer is read as a bounded stream: an entry-count ceiling, a
+# decompressed-byte ceiling and a per-file ceiling for the two files the
+# ceremony inspects, so a small signed gzip cannot expand into memory.
+ARCHIVE_MEMBER_CEILING = 4096
+ARCHIVE_EXPANSION_CEILING = 64 * 1024 * 1024
+CHART_FILE_CEILING = 1024 * 1024
 TIMEOUT = 60
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -372,33 +382,57 @@ class Registry:
 
 
 def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEOUT_SECONDS) -> str:
-    """Run one command and return its stdout; a non-zero exit, or a hang
-    past ``timeout`` seconds, is a Refusal. The refusal names the program
-    and its subcommand only — never the full argv, which can carry
-    workstation paths."""
+    """Run one command in its own process group and return its stdout; a
+    non-zero exit, or a hang past ``timeout`` seconds, is a Refusal. On
+    completion and on timeout the whole group is killed before returning,
+    so no descendant of a command outlives the tick's lock. The refusal
+    names the program and its subcommand only — never the full argv, which
+    can carry workstation paths."""
 
     label = " ".join(map(str, argv[:2]))
+    process = subprocess.Popen(
+        list(argv),
+        cwd=None if cwd is None else str(cwd),
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        completed = subprocess.run(
-            list(argv),
-            cwd=None if cwd is None else str(cwd),
-            input=input_text,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
+        stdout, stderr = process.communicate(input_text, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise Refusal(f"`{label}` exceeded {timeout}s and was killed") from None
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        _kill_process_group(process)
+        raise Refusal(f"`{label}` exceeded {timeout}s and its process group was killed") from None
+    finally:
+        _kill_process_group(process)
+    if process.returncode != 0:
+        detail = (stderr or stdout).strip().splitlines()
         tail = " | ".join(detail[-3:]) if detail else "no output"
         # The raw tail stays in the local log; the refusal, which can travel
         # into a public comment, is redacted at the source.
-        log(f"`{label}` exited {completed.returncode}: {tail}")
-        raise Refusal(f"`{label}` exited {completed.returncode}: {redact(tail)}")
-    return completed.stdout
+        log(f"`{label}` exited {process.returncode}: {tail}")
+        raise Refusal(f"`{label}` exited {process.returncode}: {redact(tail)}")
+    return stdout
+
+
+def _kill_process_group(process) -> None:
+    """Kill everything in the command's private session — the group id is
+    the child's pid because it was started as a session leader — then reap
+    the direct child. A descendant that detached its output is included;
+    the group is signalled before the child is reaped so its id cannot be
+    reused in between."""
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 class GitHub:
@@ -596,15 +630,65 @@ def image_pin(values_yaml: str) -> dict:
     }
 
 
-def _tar_member(layer: bytes, name: str) -> bytes:
-    with tarfile.open(fileobj=io.BytesIO(layer), mode="r:gz") as archive:
-        member = next((m for m in archive.getmembers() if m.name == name and m.isfile()), None)
-        if member is None:
+class _BoundedReader:
+    """Serves a decompressing stream and refuses once more than ``ceiling``
+    bytes have been produced, so an archive's expansion is bounded before
+    any entry is materialized."""
+
+    def __init__(self, inner, ceiling: int):
+        self._inner, self._ceiling, self._seen = inner, ceiling, 0
+
+    def read(self, size=-1) -> bytes:
+        chunk = self._inner.read(size)
+        self._seen += len(chunk)
+        if self._seen > self._ceiling:
+            raise Refusal(f"chart layer expands past {self._ceiling} bytes")
+        return chunk
+
+
+def chart_members(layer: bytes, names: tuple) -> dict:
+    """The exact bytes of ``names`` from the chart layer, read in ONE
+    bounded streaming pass. Every entry path is normalized and must be
+    unique — a second entry for a path, or a ``./``-prefixed twin, is
+    refused outright rather than resolved, because Helm's choice among such
+    entries need not be this tool's — and each wanted name must be exactly
+    one regular file within the per-file ceiling. Entries outside the
+    archive root are refused."""
+
+    wanted = set(names)
+    found, seen, count = {}, set(), 0
+    stream = _BoundedReader(gzip.GzipFile(fileobj=io.BytesIO(layer)), ARCHIVE_EXPANSION_CEILING)
+    try:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            for member in archive:
+                count += 1
+                if count > ARCHIVE_MEMBER_CEILING:
+                    raise Refusal(f"chart layer carries more than {ARCHIVE_MEMBER_CEILING} entries")
+                normalized = posixpath.normpath(member.name)
+                if normalized.startswith("/") or normalized == "." or ".." in normalized.split("/"):
+                    raise Refusal("chart layer carries an entry outside the archive root")
+                if normalized in seen:
+                    raise Refusal(f"chart layer carries {normalized} more than once")
+                seen.add(normalized)
+                if normalized not in wanted:
+                    continue
+                if not member.isfile():
+                    raise Refusal(f"chart layer member {normalized} is not a regular file")
+                if member.size > CHART_FILE_CEILING:
+                    raise Refusal(f"chart layer member {normalized} exceeds {CHART_FILE_CEILING} bytes")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise Refusal(f"chart layer member {normalized} is unreadable")
+                data = extracted.read(member.size + 1)
+                if len(data) != member.size:
+                    raise Refusal(f"chart layer member {normalized} does not match its declared size")
+                found[normalized] = data
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as error:
+        raise Refusal(f"chart layer is not a readable gzip tar: {type(error).__name__}") from None
+    for name in names:
+        if name not in found:
             raise Refusal(f"chart layer carries no {name}")
-        extracted = archive.extractfile(member)
-        if extracted is None:
-            raise Refusal(f"chart layer member {name} is unreadable")
-        return extracted.read()
+    return found
 
 
 def profile_for(subject: str) -> str:
@@ -709,8 +793,9 @@ def acquire_release_publisher(
     layer_bytes = registry.blob(chart_repo, layer["digest"])
     if layer.get("size") != len(layer_bytes):
         raise Refusal(f"{chart_repo}:{version}: layer size disagrees with its bytes")
-    chart_yaml = _tar_member(layer_bytes, f"{slug}/Chart.yaml")
-    values_yaml = _tar_member(layer_bytes, f"{slug}/values.yaml")
+    members = chart_members(layer_bytes, (f"{slug}/Chart.yaml", f"{slug}/values.yaml"))
+    chart_yaml = members[f"{slug}/Chart.yaml"]
+    values_yaml = members[f"{slug}/values.yaml"]
     if chart_identity(chart_yaml.decode("utf-8")) != expected_chart:
         raise Refusal(f"{chart_repo}:{version}: Chart.yaml identity is not {expected_chart}")
     pin = image_pin(values_yaml.decode("utf-8"))
@@ -1608,14 +1693,26 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
     if dry_run:
         log(f"PR #{number} WOULD be flipped Ready (dry run)")
         return False
-    if "cybersecurity-review-requested" in pr["labels"]:
-        github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/cybersecurity-review-requested", "DELETE")
-    github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
-    after = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
-    if after is None or after["head"] != pr["head"]:
-        github.command(["pr", "ready", str(number), "--repo", REPOSITORY, "--undo"])
+    try:
+        github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
+        after = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+        if after is None or after["head"] != pr["head"]:
+            raise Refusal("the head moved while it was being flipped")
+        if after["draft"]:
+            raise Refusal("GitHub still reports Draft after the flip")
+        # The security routing label leaves only once Ready is proven at
+        # the same head, never before.
+        if "cybersecurity-review-requested" in after["labels"]:
+            github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/cybersecurity-review-requested", "DELETE")
+    except Refusal as error:
+        # Every failed or ambiguous path returns the pull request to Draft
+        # and re-arms both lanes, so a lost response can never strand it.
+        try:
+            github.command(["pr", "ready", str(number), "--repo", REPOSITORY, "--undo"])
+        except Refusal as undo_error:
+            log(f"PR #{number}: the Draft restore failed as well: {undo_error}")
         github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels", "POST", body={"labels": list(REVIEW_LABELS)})
-        raise Refusal(f"PR #{number}: the head moved while it was being flipped; returned to Draft and re-armed")
+        raise Refusal(f"PR #{number}: Ready transition compensated, returned to Draft and re-armed: {error}") from None
     github.mutate(
         f"repos/{REPOSITORY}/issues/{number}/comments",
         "POST",
@@ -1719,8 +1816,21 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     if not issues or dry_run:
         return
     number = issues[0]
+    # Only the promoter's own earlier report counts as "already reported":
+    # the owner's authenticated identity (login and immutable id) and the
+    # exact marker as the first line. A marker pasted by anyone else, or
+    # anywhere else in a body, never suppresses the alert.
+    owner = github.api("user")
+    if owner.get("login") != ASSIGNEE or not isinstance(owner.get("id"), int):
+        raise Refusal("gh is not authenticated as the repository owner")
+    fence = f"`{marker}`\n"
     existing = github.api_pages(f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100")
-    if any(marker in (c.get("body") or "") for c in existing):
+    if any(
+        (c.get("user") or {}).get("login") == owner["login"]
+        and (c.get("user") or {}).get("id") == owner["id"]
+        and (c.get("body") or "").startswith(fence)
+        for c in existing
+    ):
         return
     # The reason is fenced, single-line, bounded and redacted: it can carry
     # strings an untrusted Release manifest chose, and a public comment must

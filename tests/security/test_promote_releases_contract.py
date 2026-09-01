@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -110,7 +111,7 @@ class FakeFleet:
             f"  repository: {self.image_repo}\n  # the published tag\n  tag: v{self.version}\n"
             f"  digest: {self.overrides.get('values_digest', self.index_digest)}\n  pullPolicy: IfNotPresent\n\nservice:\n  port: 8080\n"
         ).encode()
-        self.layer_bytes = self.tar({f"{self.slug}/Chart.yaml": self.chart_yaml, f"{self.slug}/values.yaml": self.values_yaml})
+        self.layer_bytes = self.overrides.get("layer_bytes") or self.tar({f"{self.slug}/Chart.yaml": self.chart_yaml, f"{self.slug}/values.yaml": self.values_yaml})
         self.layer_digest = sha(self.layer_bytes)
         self.config_bytes = json.dumps(
             {"name": self.slug, "version": self.version, "apiVersion": "v2", "appVersion": self.version, "type": "application"}
@@ -180,13 +181,7 @@ class FakeFleet:
 
     @staticmethod
     def tar(members: dict) -> bytes:
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            for name, data in members.items():
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                archive.addfile(info, io.BytesIO(data))
-        return buffer.getvalue()
+        return hostile_tar([(name, data, tarfile.REGTYPE) for name, data in members.items()])
 
     # -- transports --------------------------------------------------------
     def fetch(self, url, headers, limit):
@@ -489,6 +484,37 @@ class CeremonyTests(unittest.TestCase):
             f.downloads[f.asset_url] = body
             f.gh[f"repos/{f.site}/releases/tags/v{f.version}"]["assets"][0]["digest"] = sha(body)
 
+        def archive(f, entries):
+            f.overrides["layer_bytes"] = hostile_tar(entries)
+            f.build()
+
+        good = lambda f: [(f"{f.slug}/Chart.yaml", f.chart_yaml, tarfile.REGTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE)]
+
+        def duplicate_chart_yaml(f):
+            archive(f, good(f) + [(f"{f.slug}/Chart.yaml", f.chart_yaml.replace(b"version: ", b"version: 9."), tarfile.REGTYPE)])
+
+        def dot_prefixed_twin(f):
+            archive(f, good(f) + [(f"./{f.slug}/Chart.yaml", f.chart_yaml.replace(b"name: ", b"name: x"), tarfile.REGTYPE)])
+
+        def symlinked_chart_yaml(f):
+            archive(f, [(f"{f.slug}/Chart.yaml", b"", tarfile.SYMTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE)])
+
+        def entry_outside_root(f):
+            archive(f, good(f) + [("../escape", b"x", tarfile.REGTYPE)])
+
+        def too_many_entries(f):
+            archive(f, good(f) + [(f"{f.slug}/pad-{i}", b"", tarfile.REGTYPE) for i in range(MODULE.ARCHIVE_MEMBER_CEILING)])
+
+        def oversized_chart_yaml(f):
+            archive(f, [(f"{f.slug}/Chart.yaml", f.chart_yaml + b"#" * MODULE.CHART_FILE_CEILING, tarfile.REGTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE)])
+
+        def expansion_bomb(f):
+            archive(f, [(f"{f.slug}/pad", b"\0" * (MODULE.ARCHIVE_EXPANSION_CEILING + 1024 * 1024), tarfile.REGTYPE)] + good(f))
+
+        def not_a_gzip_tar(f):
+            f.overrides["layer_bytes"] = b"\x1f\x8b" + b"not really" * 8
+            f.build()
+
         def asset_is_not_json(f):
             body = b"not json"
             f.downloads[f.asset_url] = body
@@ -521,6 +547,14 @@ class CeremonyTests(unittest.TestCase):
             "source ancestry unknown": (source_ancestry_unknown, "not reachable from protected main"),
             "manifest omits chart repository": (manifest_omits_chart_repository, "states no chart.repository"),
             "asset is not json": (asset_is_not_json, "malformed answer"),
+            "duplicate Chart.yaml entries": (duplicate_chart_yaml, "more than once"),
+            "dot-prefixed twin of Chart.yaml": (dot_prefixed_twin, "more than once"),
+            "symlinked Chart.yaml": (symlinked_chart_yaml, "not a regular file"),
+            "entry outside the archive root": (entry_outside_root, "outside the archive root"),
+            "too many entries": (too_many_entries, f"more than {MODULE.ARCHIVE_MEMBER_CEILING} entries"),
+            "oversized Chart.yaml": (oversized_chart_yaml, f"exceeds {MODULE.CHART_FILE_CEILING} bytes"),
+            "expansion bomb": (expansion_bomb, "expands past"),
+            "not a gzip tar": (not_a_gzip_tar, "not a readable gzip tar"),
         }
         for name, (mutate, message) in cases.items():
             with self.subTest(case=name):
@@ -655,6 +689,26 @@ def promoted_record(record: dict, version: str, salt: str) -> dict:
     new["chart"] = {"appVersion": version, "name": record["chart"]["name"], "version": version}
     new["workloadImage"] = f"{record['workloadImage'].split(':v')[0]}:v{version}@{sha(f'{salt}index'.encode())}"
     return new
+
+
+def hostile_tar(entries) -> bytes:
+    """A gzip tar with exactly the given entries, in order: ``(name, data,
+    type)``; duplicates, twins, links and directories are all expressible."""
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data, kind in entries:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            if kind == tarfile.SYMTYPE:
+                info.linkname = "values.yaml"
+                archive.addfile(info)
+            elif kind == tarfile.DIRTYPE:
+                archive.addfile(info)
+            else:
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
 
 
 def bot_comment(body: str) -> dict:
@@ -1001,6 +1055,7 @@ class TickTests(unittest.TestCase):
         self.commits = []
         self.mutations = []
         self.fail_gates = set()
+        self.fail_ready = False
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -1036,6 +1091,8 @@ class TickTests(unittest.TestCase):
             return "https://github.com/snaraj/website-infrastructure/pull/300\n"
         if argv[:3] == ["gh", "pr", "ready"]:
             self.mutations.append(("pr-ready-undo" if "--undo" in argv else "pr-ready", tuple(argv)))
+            if "--undo" not in argv and self.fail_ready:
+                raise MODULE.Refusal("`gh pr` exited 1: transport failure")
             return ""
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
@@ -1119,6 +1176,17 @@ class TickTests(unittest.TestCase):
         self.assertIn("step=cut", body)
         with self.assertRaisesRegex(MODULE.Refusal, r"`sleep 5` exceeded 0\.2s"):
             MODULE.run_command(["sleep", "5"], timeout=0.2)
+        # A descendant that detaches its output dies with the command's
+        # process group, on completion and on timeout alike.
+        marker = self.repo / "descendant-marker"
+        MODULE.run_command(["sh", "-c", f"(sleep 0.4; touch '{marker}') >/dev/null 2>&1 & exit 0"])
+        time.sleep(0.8)
+        self.assertFalse(marker.exists(), "a descendant must not outlive its command's process group")
+        late = self.repo / "late-marker"
+        with self.assertRaisesRegex(MODULE.Refusal, r"`sh -c` exceeded 0\.2s"):
+            MODULE.run_command(["sh", "-c", f"(sleep 0.6; touch '{late}') >/dev/null 2>&1 & sleep 5"], timeout=0.2)
+        time.sleep(1.0)
+        self.assertFalse(late.exists(), "a descendant of a timed-out command is killed with its group")
         try:
             MODULE.run_command(["git", "-C", str(self.repo / "definitely-missing"), "status"])
         except MODULE.Refusal as error:
@@ -1178,7 +1246,8 @@ class TickTests(unittest.TestCase):
         # Second tick: the pull request is open at exact head with both verdicts.
         record = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[record]]
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = record
+        # The mutation-boundary read sees Draft; the post-flip read sees Ready.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([record, dict(record, draft=False)])
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [[
             bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
@@ -1195,6 +1264,7 @@ class TickTests(unittest.TestCase):
         cleared = self.writes("/labels/cybersecurity-review-requested")
         self.assertEqual(len(cleared), 1)
         self.assertEqual(cleared[0][3], "DELETE")
+        self.assertGreater(self.mutations.index(cleared[0]), kinds.index("pr-ready"), "the routing label leaves only after Ready is proven")
         ready_note = self.writes("/issues/300/comments")
         self.assertEqual(len(ready_note), 1)
         self.assertIn("two distinct exact-head adversarial", json.loads(ready_note[0][2])["body"])
@@ -1229,10 +1299,67 @@ class TickTests(unittest.TestCase):
         self.assertEqual(self.commits, [])
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "")
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[{"body": body}]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID}, "body": body}]]
         self.mutations.clear()
         MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual([m for m in self.mutations if m[0] == "api-write"], [])
+
+    def test_failure_alert_dedup_binds_the_owner_actor_and_the_exact_marker(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        path = f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"
+        self.fleet.gh[path] = [[]]
+        report = lambda: MODULE.report_failure(github, {"naranjo-online": self.next}, "cut", "boom", False)
+        report()
+        body = json.loads(self.writes("/issues/285/comments")[0][2])["body"]
+        marker = body.splitlines()[0]
+        self.fleet.gh[path] = [[{"user": {"login": "mallory", "id": 4242}, "body": body}]]
+        report()
+        self.assertEqual(len(self.writes("/issues/285/comments")), 2, "an outsider's preseed never suppresses the alert")
+        self.fleet.gh[path] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID}, "body": "quoting " + marker + " in prose"}]]
+        report()
+        self.assertEqual(len(self.writes("/issues/285/comments")), 3, "a lookalike never suppresses the alert")
+        self.fleet.gh[path] = [[{"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID}, "body": body}]]
+        report()
+        self.assertEqual(len(self.writes("/issues/285/comments")), 3, "the promoter's own exact report is reported once")
+
+    def test_ready_transition_compensates_every_failure_path(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head = "c" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [[
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
+        armed = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
+        # (a) The Ready call fails in transport: nothing was deleted first,
+        # Draft is restored and both lanes are re-armed.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, dict(armed, draft=False)])
+        self.fail_ready = True
+        with self.assertRaisesRegex(MODULE.Refusal, "compensated.*transport failure"):
+            MODULE.consider_ready(github, 300, False)
+        self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [], "the routing label is never removed before Ready is proven")
+        self.assertEqual([m[0] for m in self.mutations if m[0].startswith("pr-ready")], ["pr-ready", "pr-ready-undo"])
+        self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        self.assertEqual(self.writes("/issues/300/comments"), [])
+        # (b) The flip is not effective: GitHub still reports Draft.
+        self.fail_ready = False
+        self.mutations.clear()
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, armed])
+        with self.assertRaisesRegex(MODULE.Refusal, "still reports Draft"):
+            MODULE.consider_ready(github, 300, False)
+        self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
+        self.assertEqual(len(self.writes("/issues/300/labels")), 1)
+        # (c) The proven flip: label removed only after Ready, one note.
+        self.mutations.clear()
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, dict(armed, draft=False)])
+        self.assertTrue(MODULE.consider_ready(github, 300, False))
+        kinds = [m[0] for m in self.mutations]
+        cleared = self.writes("/labels/cybersecurity-review-requested")
+        self.assertEqual(len(cleared), 1)
+        self.assertGreater(self.mutations.index(cleared[0]), kinds.index("pr-ready"))
+        self.assertEqual(len(self.writes("/issues/300/comments")), 1)
 
     def test_lock_and_dirty_clone_guards(self):
         lock = self.repo / ".git" / "promoter.lock"
