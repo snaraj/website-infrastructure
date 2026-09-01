@@ -67,36 +67,171 @@ RESERVED_ANNOTATIONS = tuple(
 )
 
 # The exact ruleset that makes protected main the trust anchor. The ceremony
-# refuses to proceed if the live document has weakened in ANY field below —
-# a receipt that only reads name and enforcement would still pass after the
-# required checks, signatures, or linear history were removed.
+# refuses to proceed if the live document has weakened in ANY field below.
+# Every rule parameter is compared verbatim — a receipt that dropped
+# parameters would still pass after do_not_enforce_on_create or a
+# pull-request control was flipped (round-2 security finding 5). The only
+# fields deliberately outside the comparison are node_id, created_at,
+# updated_at, and _links: pure identifiers/timestamps that cannot relax an
+# enforced control.
 EXPECTED_RULESET = {
     "id": 20601016,
     "name": "only-me-merge",
     "target": "branch",
+    "source_type": "Repository",
+    "source": "snaraj/website-infrastructure",
     "enforcement": "active",
     "bypass_actors": [],
+    "current_user_can_bypass": "never",
     "conditions": {"ref_name": {"exclude": [], "include": ["refs/heads/main"]}},
     "rules": [
-        {"type": "creation"},
-        {"type": "deletion"},
-        {"type": "non_fast_forward"},
-        {"type": "required_linear_history"},
-        {"type": "required_signatures"},
+        {"type": "creation", "parameters": {}},
+        {"type": "deletion", "parameters": {}},
+        {"type": "non_fast_forward", "parameters": {}},
+        {"type": "required_linear_history", "parameters": {}},
+        {"type": "required_signatures", "parameters": {}},
         {
             "type": "pull_request",
-            "required_approving_review_count": 0,
+            "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": False,
+                "required_reviewers": [],
+                "require_code_owner_review": False,
+                "require_last_push_approval": False,
+                "required_review_thread_resolution": False,
+                "require_extra_approval_for_unattributed_changes": True,
+                "allowed_merge_methods": ["squash", "rebase"],
+            },
         },
         {
             "type": "required_status_checks",
-            "strict": True,
-            "checks": [
-                {"context": "dependency-review", "integration_id": 15368},
-                {"context": "repository-and-infrastructure", "integration_id": 15368},
-            ],
+            "parameters": {
+                "strict_required_status_checks_policy": True,
+                "do_not_enforce_on_create": False,
+                "required_status_checks": [
+                    {"context": "dependency-review", "integration_id": 15368},
+                    {
+                        "context": "repository-and-infrastructure",
+                        "integration_id": 15368,
+                    },
+                ],
+            },
         },
     ],
 }
+# A listing this long may be one truncated page (the ceremony captures with
+# per_page=100): refuse rather than reason about an inventory that might
+# hide a second branch-target ruleset past the page boundary.
+RULESET_LISTING_BOUND = 100
+
+# The closed live GitRepository shape (round-2 security finding 1): exactly
+# these spec keys, with the selection/authentication/artifact-shaping fields
+# bound to the reviewed values. A key outside this set — secretRef,
+# proxySecretRef, serviceAccountName, recurseSubmodules, include, verify,
+# suspend — is refused by the closed-set comparison itself.
+SOURCE_API_VERSION = "source.toolkit.fluxcd.io/v1"
+SOURCE_URL = "https://github.com/snaraj/website-infrastructure.git"
+SOURCE_SPEC_KEYS = frozenset(
+    {"ignore", "interval", "ref", "sparseCheckout", "timeout", "url"}
+)
+SOURCE_INTERVAL = "1m0s"
+SOURCE_TIMEOUT = "60s"
+SOURCE_IGNORE = (
+    "/*\n"
+    "!/kubernetes/\n"
+    "/kubernetes/*\n"
+    "!/kubernetes/websites/\n"
+    "/kubernetes/websites/*\n"
+    "!/kubernetes/websites/naranjo-online/\n"
+    "!/kubernetes/websites/naranjo-online/**\n"
+    "!/kubernetes/websites/lidersea-com/\n"
+    "!/kubernetes/websites/lidersea-com/**\n"
+)
+SPARSE_ENTRY = re.compile(
+    r"^\.?/?kubernetes/websites/(naranjo-online|lidersea-com)/?$"
+)
+
+# The reviewed selector CronJob identity (round-2 security finding 2): the
+# quiescence receipt binds the object it suspends, so rollback can never
+# activate a foreign or replaced CronJob.
+SELECTOR_SCHEDULE = "7,37 * * * *"
+SELECTOR_SERVICE_ACCOUNT = "platform-release-selector"
+SELECTOR_IMAGE = re.compile(
+    r"^ghcr\.io/snaraj/website-infrastructure/platform-release-selector"
+    r"@sha256:[0-9a-f]{64}$"
+)
+# The live asset must be a real stylesheet, not a stub that could appear in
+# an unrelated layer by coincidence.
+MIN_ASSET_BYTES = 1024
+
+# The ordered ceremony, canonically. docs/runbooks/site-sync-branch-flip.md
+# must carry EXACTLY these fenced command blocks, in this order, and no
+# other kubectl/python3/flux/gh invocation anywhere — the battery compares
+# structurally, so a neutralized invocation, a narrowed capture, or a
+# retargeted patch is a red test, not a prose drift (round-2 security
+# finding 3). Editing a block here and in the runbook together is the one
+# sanctioned way the ceremony changes.
+CEREMONY_BLOCKS = (
+    'scratch="$(mktemp -d)"\n',
+    "gh api 'repos/snaraj/website-infrastructure/rulesets?per_page=100'"
+    ' > "$scratch/rulesets.json"\n'
+    "gh api repos/snaraj/website-infrastructure/rulesets/20601016"
+    ' > "$scratch/ruleset.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py ruleset-receipt"
+    ' "$scratch/rulesets.json" "$scratch/ruleset.json"\n',
+    "kubectl get cronjob -n flux-system platform-release-selector -o json"
+    ' > "$scratch/cronjob.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py selector-prestate"
+    ' "$scratch/cronjob.json" --receipt-dir "$scratch"\n',
+    "python3 -I -B scripts/site_sync_branch_flip.py suspend-patch"
+    ' "$scratch/selector-prestate.json" > "$scratch/suspend.json"\n'
+    "kubectl patch cronjob -n flux-system platform-release-selector"
+    ' --type=json --patch-file "$scratch/suspend.json"\n',
+    "kubectl get cronjob -n flux-system platform-release-selector -o json"
+    ' > "$scratch/cronjob-now.json"\n'
+    'kubectl get jobs -n flux-system -o json > "$scratch/jobs.json"\n'
+    'kubectl get pods -n flux-system -o json > "$scratch/pods.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py quiescence"
+    ' "$scratch/cronjob-now.json" "$scratch/jobs.json" "$scratch/pods.json"\n',
+    "kubectl get gitrepository -n flux-system flux-system -o json"
+    ' > "$scratch/gitrepository.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py prestate"
+    ' "$scratch/gitrepository.json" --receipt-dir "$scratch"\n',
+    "python3 -I -B scripts/site_sync_branch_flip.py flip-patch"
+    ' "$scratch/flip-prestate.json" > "$scratch/flip.json"\n'
+    "kubectl patch gitrepository -n flux-system flux-system --type=json"
+    ' --patch-file "$scratch/flip.json"\n',
+    "kubectl get gitrepository -n flux-system flux-system -o json"
+    ' > "$scratch/post.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py poststate"
+    ' "$scratch/post.json" "$scratch/flip-prestate.json"\n',
+    "flux reconcile source git flux-system -n flux-system\n"
+    "flux reconcile kustomization naranjo-online-reconciler -n flux-system\n"
+    "flux reconcile kustomization lidersea-com-reconciler -n flux-system\n",
+    "kubectl get gitrepository -n flux-system flux-system"
+    " -o jsonpath='{.status.artifact.revision}'\n",
+    "python3 -I -B scripts/site_sync_branch_flip.py verify-live"
+    " kubernetes/websites/naranjo-online/source.yaml https://naranjo.online\n"
+    "python3 -I -B scripts/site_sync_branch_flip.py verify-live"
+    " kubernetes/websites/lidersea-com/source.yaml https://lidersea.com\n",
+    "python3 -I -B scripts/site_sync_branch_flip.py rollback-patch"
+    ' "$scratch/flip-prestate.json" > "$scratch/rollback.json"\n'
+    "kubectl patch gitrepository -n flux-system flux-system --type=json"
+    ' --patch-file "$scratch/rollback.json"\n'
+    "kubectl get gitrepository -n flux-system flux-system -o json"
+    ' > "$scratch/rolled-back.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py rollback-verify"
+    ' "$scratch/rolled-back.json" "$scratch/flip-prestate.json"\n',
+    "python3 -I -B scripts/site_sync_branch_flip.py resume-patch"
+    ' "$scratch/selector-prestate.json" > "$scratch/resume.json"\n'
+    "kubectl patch cronjob -n flux-system platform-release-selector"
+    ' --type=json --patch-file "$scratch/resume.json"\n'
+    "kubectl get cronjob -n flux-system platform-release-selector -o json"
+    ' > "$scratch/cronjob-final.json"\n'
+    "python3 -I -B scripts/site_sync_branch_flip.py resume-verify"
+    ' "$scratch/cronjob-final.json" "$scratch/selector-prestate.json"\n'
+    "flux reconcile source git flux-system -n flux-system\n",
+)
 
 HELM_CONTENT_TYPE = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
 BUNDLE_PATTERN = re.compile(r"assets/index-[A-Za-z0-9_-]+\.css")
@@ -115,7 +250,9 @@ def load_json(path):
 
 
 def normalized_rules(rules):
-    """Reduce the live rule inventory to the load-bearing comparison shape."""
+    """The complete rule inventory, parameters verbatim, deterministically
+    ordered. Nothing is projected away: a dropped parameter is a field the
+    receipt would silently stop defending."""
 
     if not isinstance(rules, list):
         fail("ruleset rules are not a list")
@@ -123,25 +260,13 @@ def normalized_rules(rules):
     for rule in rules:
         if not isinstance(rule, dict) or not isinstance(rule.get("type"), str):
             fail("ruleset rule is malformed")
-        entry = {"type": rule["type"]}
-        parameters = rule.get("parameters") or {}
-        if rule["type"] == "pull_request":
-            entry["required_approving_review_count"] = parameters.get(
-                "required_approving_review_count"
+        parameters = json.loads(json.dumps(rule.get("parameters") or {}))
+        checks = parameters.get("required_status_checks")
+        if isinstance(checks, list):
+            parameters["required_status_checks"] = sorted(
+                checks, key=lambda check: str(check.get("context"))
             )
-        if rule["type"] == "required_status_checks":
-            entry["strict"] = parameters.get("strict_required_status_checks_policy")
-            entry["checks"] = sorted(
-                (
-                    {
-                        "context": check.get("context"),
-                        "integration_id": check.get("integration_id"),
-                    }
-                    for check in parameters.get("required_status_checks", [])
-                ),
-                key=lambda check: str(check["context"]),
-            )
-        reduced.append(entry)
+        reduced.append({"type": rule["type"], "parameters": parameters})
     return sorted(reduced, key=lambda rule: rule["type"])
 
 
@@ -150,6 +275,13 @@ def ruleset_receipt(rulesets, ruleset):
 
     if not isinstance(rulesets, list):
         fail("ruleset listing is not a list")
+    if len(rulesets) >= RULESET_LISTING_BOUND:
+        fail(
+            "ruleset listing carries {} entries — a full page may be a "
+            "truncated one, and a hidden branch ruleset past the boundary "
+            "would evade the inventory; capture with --paginate and a "
+            "higher per_page".format(len(rulesets))
+        )
     branch_ids = [
         entry.get("id")
         for entry in rulesets
@@ -164,16 +296,16 @@ def ruleset_receipt(rulesets, ruleset):
         "id": ruleset.get("id"),
         "name": ruleset.get("name"),
         "target": ruleset.get("target"),
+        "source_type": ruleset.get("source_type"),
+        "source": ruleset.get("source"),
         "enforcement": ruleset.get("enforcement"),
         "bypass_actors": ruleset.get("bypass_actors"),
+        "current_user_can_bypass": ruleset.get("current_user_can_bypass"),
         "conditions": ruleset.get("conditions"),
         "rules": normalized_rules(ruleset.get("rules")),
     }
     expected = dict(EXPECTED_RULESET)
-    expected["rules"] = sorted(
-        (dict(rule) for rule in EXPECTED_RULESET["rules"]),
-        key=lambda rule: rule["type"],
-    )
+    expected["rules"] = normalized_rules(EXPECTED_RULESET["rules"])
     if observed != expected:
         fail(
             "protecting ruleset drifted from the reviewed anchor:\n"
@@ -187,14 +319,232 @@ def ruleset_receipt(rulesets, ruleset):
     )
 
 
-def quiescence(cronjob, jobs, pods):
-    """Suspension verified AND zero live selector executions, by lineage."""
+def selector_identity(cronjob):
+    """The reviewed selector CronJob, closed on its load-bearing identity:
+    a suspension receipt for a foreign, replaced, or lookalike CronJob
+    would let rollback activate an unproved object (round-2 security
+    finding 2). Returns (uid, resourceVersion, image, suspend)."""
 
+    metadata = cronjob.get("metadata")
+    if (
+        cronjob.get("apiVersion") != "batch/v1"
+        or cronjob.get("kind") != "CronJob"
+        or not isinstance(metadata, dict)
+        or metadata.get("name") != "platform-release-selector"
+        or metadata.get("namespace") != NAMESPACE
+    ):
+        fail("capture is not the flux-system platform-release-selector CronJob")
+    uid = metadata.get("uid")
+    resource_version = metadata.get("resourceVersion")
+    if not isinstance(uid, str) or not uid:
+        fail("selector CronJob UID is absent")
+    if not isinstance(resource_version, str) or not resource_version:
+        fail("selector CronJob resourceVersion is absent")
     spec = cronjob.get("spec")
-    if not isinstance(spec, dict) or spec.get("suspend") is not True:
+    if not isinstance(spec, dict):
+        fail("selector CronJob spec is absent")
+    if spec.get("schedule") != SELECTOR_SCHEDULE:
+        fail(
+            "selector schedule is {!r} — the reviewed selector runs "
+            "{!r}".format(spec.get("schedule"), SELECTOR_SCHEDULE)
+        )
+    if spec.get("concurrencyPolicy") != "Forbid":
+        fail("selector concurrencyPolicy is not Forbid")
+    pod = (
+        spec.get("jobTemplate", {})
+        .get("spec", {})
+        .get("template", {})
+        .get("spec", {})
+    )
+    if pod.get("serviceAccountName") != SELECTOR_SERVICE_ACCOUNT:
+        fail(
+            "selector serviceAccountName is {!r} — the reviewed identity "
+            "is {!r}".format(
+                pod.get("serviceAccountName"), SELECTOR_SERVICE_ACCOUNT
+            )
+        )
+    containers = pod.get("containers")
+    if not isinstance(containers, list) or len(containers) != 1:
+        fail("selector job template must carry exactly one container")
+    image = containers[0].get("image")
+    if not isinstance(image, str) or SELECTOR_IMAGE.match(image) is None:
+        fail(
+            "selector image is {!r} — the reviewed identity is the "
+            "digest-pinned selector image".format(image)
+        )
+    suspend = spec.get("suspend")
+    if suspend is not True and suspend is not False:
+        fail("selector spec.suspend is not an explicit boolean")
+    return uid, resource_version, image, suspend
+
+
+def quiescence(cronjob, jobs, pods):
+    """Suspension of the PROVEN selector, zero live executions by lineage,
+    and capture-completeness: every Job the CronJob's own status still
+    names as active must appear in the supplied inventory, so a narrowed
+    jobs capture cannot hide a running execution behind an empty list."""
+
+    uid, _, _, suspend = selector_identity(cronjob)
+    if suspend is not True:
         fail("selector CronJob is not suspended")
+    supplied = {
+        item.get("metadata", {}).get("uid")
+        for item in jobs.get("items", [])
+        if isinstance(item, dict)
+    }
+    for reference in cronjob.get("status", {}).get("active") or []:
+        if reference.get("uid") not in supplied:
+            fail(
+                "the CronJob's own status names active Job {} but the "
+                "supplied inventory does not contain it — the capture is "
+                "incomplete or filtered".format(reference.get("name"))
+            )
     bootstrap.selector_quiescent(cronjob, jobs, pods)
-    return "RECEIPT selector suspended and quiescent (owner-UID lineage, terminal states)"
+    return (
+        "RECEIPT selector {} suspended and quiescent (closed identity, "
+        "owner-UID lineage, terminal states, status-complete "
+        "inventory)".format(uid)
+    )
+
+
+def selector_prestate(cronjob, receipt_dir):
+    """Private, atomic capture of the selector's pre-ceremony state — the
+    rollback authority for suspend/resume. Records whether the selector
+    was ALREADY suspended: a rollback never resumes an object the
+    ceremony did not suspend."""
+
+    uid, resource_version, image, suspend = selector_identity(cronjob)
+    document = {
+        "schema": "site-sync-branch-flip/selector-prestate/v1",
+        "uid": uid,
+        "resourceVersion": resource_version,
+        "image": image,
+        "suspend": suspend,
+    }
+    return write_receipt(
+        document, receipt_dir, "selector-prestate.json",
+        "suspend={}".format(suspend),
+    )
+
+
+def load_selector_prestate(path):
+    document = load_json(path)
+    if (
+        document.get("schema") != "site-sync-branch-flip/selector-prestate/v1"
+        or not isinstance(document.get("uid"), str)
+        or not isinstance(document.get("image"), str)
+        or not isinstance(document.get("suspend"), bool)
+    ):
+        fail("selector prestate document is not a valid v1 capture")
+    return document
+
+
+def suspend_patch(document):
+    if document["suspend"] is True:
+        fail(
+            "the selector was ALREADY suspended before the ceremony — "
+            "there is nothing to suspend, and rollback must not resume it"
+        )
+    return json.dumps(
+        [
+            {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+            {
+                "op": "test",
+                "path": "/spec/jobTemplate/spec/template/spec/containers/0/image",
+                "value": document["image"],
+            },
+            {"op": "test", "path": "/spec/suspend", "value": False},
+            {"op": "replace", "path": "/spec/suspend", "value": True},
+        ]
+    )
+
+
+def resume_patch(document):
+    if document["suspend"] is True:
+        fail(
+            "the selector was suspended BEFORE the ceremony — resuming it "
+            "is not a rollback of anything this ceremony did; leave it to "
+            "the owner"
+        )
+    return json.dumps(
+        [
+            {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+            {
+                "op": "test",
+                "path": "/spec/jobTemplate/spec/template/spec/containers/0/image",
+                "value": document["image"],
+            },
+            {"op": "test", "path": "/spec/suspend", "value": True},
+            {"op": "replace", "path": "/spec/suspend", "value": False},
+        ]
+    )
+
+
+def resume_verify(cronjob, document):
+    uid, _, image, suspend = selector_identity(cronjob)
+    if uid != document["uid"]:
+        fail("live CronJob UID changed — this is not the captured selector")
+    if image != document["image"]:
+        fail("live selector image drifted from the captured identity")
+    if suspend != document["suspend"]:
+        fail(
+            "live suspend is {} — the captured pre-ceremony state was "
+            "{}".format(suspend, document["suspend"])
+        )
+
+
+def source_shape(gitrepository):
+    """The closed live GitRepository shape: exactly the reviewed spec keys,
+    the selection/artifact fields bound to reviewed values, and therefore
+    the structural ABSENCE of secretRef, proxySecretRef, serviceAccountName,
+    recurseSubmodules, include, verify, and suspend. Flux defines those as
+    repository selection, authentication, and artifact-shaping inputs, so a
+    receipt that ignored them could bless a foreign or credentialed source
+    (round-2 security finding 1). Returns the validated spec."""
+
+    if gitrepository.get("apiVersion") != SOURCE_API_VERSION:
+        fail(
+            "GitRepository apiVersion is {!r} — expected {}".format(
+                gitrepository.get("apiVersion"), SOURCE_API_VERSION
+            )
+        )
+    spec = gitrepository.get("spec")
+    if not isinstance(spec, dict) or set(spec) != SOURCE_SPEC_KEYS:
+        fail(
+            "GitRepository spec keys are {} — the reviewed closed shape is "
+            "exactly {}".format(
+                sorted(spec) if isinstance(spec, dict) else spec,
+                sorted(SOURCE_SPEC_KEYS),
+            )
+        )
+    for key, expected in (
+        ("url", SOURCE_URL),
+        ("interval", SOURCE_INTERVAL),
+        ("timeout", SOURCE_TIMEOUT),
+        ("ignore", SOURCE_IGNORE),
+    ):
+        if spec.get(key) != expected:
+            fail(
+                "GitRepository spec.{} is {!r} — the reviewed value is "
+                "{!r}".format(key, spec.get(key), expected)
+            )
+    sparse = spec.get("sparseCheckout")
+    matches = (
+        [SPARSE_ENTRY.match(str(entry)) for entry in sparse]
+        if isinstance(sparse, list)
+        else []
+    )
+    if (
+        len(matches) != 2
+        or any(match is None for match in matches)
+        or {match.group(1) for match in matches}
+        != {"naranjo-online", "lidersea-com"}
+    ):
+        fail(
+            "GitRepository sparseCheckout is {!r} — expected exactly the "
+            "two site directories".format(sparse)
+        )
+    return spec
 
 
 def source_identity(gitrepository):
@@ -206,6 +556,7 @@ def source_identity(gitrepository):
         or gitrepository.get("kind") != "GitRepository"
     ):
         fail("capture is not the flux-system GitRepository")
+    source_shape(gitrepository)
     uid = metadata.get("uid")
     resource_version = metadata.get("resourceVersion")
     if not isinstance(uid, str) or not uid:
@@ -225,20 +576,9 @@ def source_identity(gitrepository):
     return uid, resource_version, reserved
 
 
-def prestate(gitrepository, receipt_dir):
-    """Bounded semantic prestate, written atomically under private custody."""
+def write_receipt(document, receipt_dir, filename, note):
+    """Atomic private receipt custody, shared by both prestate captures."""
 
-    uid, resource_version, reserved = source_identity(gitrepository)
-    ref = gitrepository.get("spec", {}).get("ref")
-    if not isinstance(ref, dict) or set(ref) != {"tag"} or not ref.get("tag"):
-        fail("live ref is {} — the flip starts from exactly {{tag}}".format(ref))
-    document = {
-        "schema": "site-sync-branch-flip/prestate/v1",
-        "uid": uid,
-        "resourceVersion": resource_version,
-        "ref": {"tag": ref["tag"]},
-        "annotations": reserved,
-    }
     directory = Path(receipt_dir)
     if not directory.is_dir():
         fail("receipt directory {} does not exist".format(receipt_dir))
@@ -249,10 +589,10 @@ def prestate(gitrepository, receipt_dir):
             "use a fresh `mktemp -d`".format(receipt_dir, mode)
         )
     serialized = json.dumps(document, indent=2, sort_keys=True) + "\n"
-    final = directory / "flip-prestate.json"
+    final = directory / filename
     if final.exists():
         fail("{} already exists — refuse to overwrite a prior capture".format(final))
-    staged = directory / ".flip-prestate.json.staged"
+    staged = directory / (".{}.staged".format(filename))
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         handle.write(serialized)
@@ -261,20 +601,43 @@ def prestate(gitrepository, receipt_dir):
     os.replace(staged, final)
     digest = hashlib.sha256(serialized.encode()).hexdigest()
     if final.read_text() != serialized or final.stat().st_mode & 0o077:
-        fail("prestate receipt failed its own revalidation")
-    return "RECEIPT prestate {} sha256:{} tag={}".format(final, digest, ref["tag"])
+        fail("receipt {} failed its own revalidation".format(filename))
+    return "RECEIPT {} sha256:{} {}".format(final, digest, note)
+
+
+def prestate(gitrepository, receipt_dir):
+    """Bounded semantic prestate, written atomically under private custody."""
+
+    uid, resource_version, reserved = source_identity(gitrepository)
+    spec = gitrepository["spec"]
+    ref = spec.get("ref")
+    if not isinstance(ref, dict) or set(ref) != {"tag"} or not ref.get("tag"):
+        fail("live ref is {} — the flip starts from exactly {{tag}}".format(ref))
+    document = {
+        "schema": "site-sync-branch-flip/prestate/v2",
+        "uid": uid,
+        "resourceVersion": resource_version,
+        "ref": {"tag": ref["tag"]},
+        "spec": {key: spec[key] for key in sorted(SOURCE_SPEC_KEYS - {"ref"})},
+        "annotations": reserved,
+    }
+    return write_receipt(
+        document, receipt_dir, "flip-prestate.json", "tag={}".format(ref["tag"])
+    )
 
 
 def load_prestate(path):
     document = load_json(path)
     if (
-        document.get("schema") != "site-sync-branch-flip/prestate/v1"
+        document.get("schema") != "site-sync-branch-flip/prestate/v2"
         or not isinstance(document.get("uid"), str)
         or not isinstance(document.get("ref"), dict)
         or set(document["ref"]) != {"tag"}
+        or not isinstance(document.get("spec"), dict)
+        or set(document["spec"]) != SOURCE_SPEC_KEYS - {"ref"}
         or sorted(document.get("annotations", {})) != sorted(RESERVED_ANNOTATIONS)
     ):
-        fail("prestate document is not a valid v1 capture")
+        fail("prestate document is not a valid v2 capture")
     return document
 
 
@@ -306,9 +669,19 @@ def state_matches(gitrepository, document, expected_ref):
     uid, _, reserved = source_identity(gitrepository)
     if uid != document["uid"]:
         fail("live object UID changed — this is not the captured GitRepository")
-    ref = gitrepository.get("spec", {}).get("ref")
-    if ref != expected_ref:
-        fail("live ref is {} — expected exactly {}".format(ref, expected_ref))
+    spec = gitrepository["spec"]
+    if spec.get("ref") != expected_ref:
+        fail(
+            "live ref is {} — expected exactly {}".format(
+                spec.get("ref"), expected_ref
+            )
+        )
+    for key in sorted(SOURCE_SPEC_KEYS - {"ref"}):
+        if spec.get(key) != document["spec"][key]:
+            fail(
+                "live spec.{} drifted from the prestate capture — the flip "
+                "must never bless concurrent source drift".format(key)
+            )
     if reserved != document["annotations"]:
         fail("reserved annotations drifted from the prestate capture")
 
@@ -380,6 +753,19 @@ def verify_live(source_text, site_url):
     if len(bundles) != 1:
         fail("live page names {} CSS bundles — expected exactly one".format(len(bundles)))
     bundle = bundles[0].split("/", 1)[1]
+    # The proof object is the asset's CONTENT, not its name: a filename
+    # string can occur in an unrelated layer, log, or stale workload, but
+    # the exact served bytes existing verbatim inside the committed image
+    # ties what the visitor receives to what the owner reviewed (round-2
+    # security finding 4).
+    asset = http_get(
+        site_url.rstrip("/") + "/" + bundles[0], limit=4 * 1024 * 1024
+    )
+    if len(asset) < MIN_ASSET_BYTES:
+        fail(
+            "live asset {} is {} bytes — too small to be the fingerprinted "
+            "stylesheet this probe binds".format(bundle, len(asset))
+        )
 
     ready = http_get(site_url.rstrip("/") + "/readyz", limit=4096)
     if not ready:
@@ -447,18 +833,24 @@ def verify_live(source_text, site_url):
             blob = gzip.decompress(blob)
         except OSError:
             pass
-        if bundle.encode() in blob:
+        if asset in blob:
             hits.append(layer["digest"])
     if not hits:
         fail(
-            "live bundle {} appears in none of the {} arm64 layers of the "
-            "committed selection {} — the site is NOT serving the committed "
-            "chart".format(bundle, len(child.get("layers", [])), chart_digest)
+            "the {} bytes the live site serves as {} exist in none of the "
+            "{} arm64 layers of the committed selection {} — the served "
+            "content is NOT the committed content".format(
+                len(asset), bundle, len(child.get("layers", [])), chart_digest
+            )
         )
+    # Honest boundary: from outside the cluster this proves the exact bytes
+    # the site serves exist verbatim inside the committed image — it cannot
+    # prove which image digest the running workload was started from.
     return (
-        "RECEIPT {} serves {} which exists in committed image layer(s) {} "
-        "(chart {}, image {})".format(
-            site_url, bundle, ",".join(hits), chart_digest, image_digest
+        "RECEIPT {} serves {} ({} bytes) whose exact content exists in "
+        "committed image layer(s) {} (chart {}, image {})".format(
+            site_url, bundle, len(asset), ",".join(hits), chart_digest,
+            image_digest,
         )
     )
 
@@ -476,13 +868,22 @@ def main(argv=None):
     capture = commands.add_parser("prestate")
     capture.add_argument("gitrepository_json")
     capture.add_argument("--receipt-dir", required=True)
+    selector_capture = commands.add_parser("selector-prestate")
+    selector_capture.add_argument("cronjob_json")
+    selector_capture.add_argument("--receipt-dir", required=True)
     for name in ("flip-patch", "rollback-patch"):
         emitter = commands.add_parser(name)
         emitter.add_argument("prestate_json")
+    for name in ("suspend-patch", "resume-patch"):
+        emitter = commands.add_parser(name)
+        emitter.add_argument("selector_prestate_json")
     for name in ("poststate", "rollback-verify"):
         checker = commands.add_parser(name)
         checker.add_argument("gitrepository_json")
         checker.add_argument("prestate_json")
+    resume_check = commands.add_parser("resume-verify")
+    resume_check.add_argument("cronjob_json")
+    resume_check.add_argument("selector_prestate_json")
     live = commands.add_parser("verify-live")
     live.add_argument("source_yaml")
     live.add_argument("site_url")
@@ -504,10 +905,30 @@ def main(argv=None):
         )
     elif arguments.command == "prestate":
         print(prestate(load_json(arguments.gitrepository_json), arguments.receipt_dir))
+    elif arguments.command == "selector-prestate":
+        print(
+            selector_prestate(
+                load_json(arguments.cronjob_json), arguments.receipt_dir
+            )
+        )
     elif arguments.command == "flip-patch":
         print(flip_patch(load_prestate(arguments.prestate_json)))
     elif arguments.command == "rollback-patch":
         print(rollback_patch(load_prestate(arguments.prestate_json)))
+    elif arguments.command == "suspend-patch":
+        print(
+            suspend_patch(load_selector_prestate(arguments.selector_prestate_json))
+        )
+    elif arguments.command == "resume-patch":
+        print(
+            resume_patch(load_selector_prestate(arguments.selector_prestate_json))
+        )
+    elif arguments.command == "resume-verify":
+        resume_verify(
+            load_json(arguments.cronjob_json),
+            load_selector_prestate(arguments.selector_prestate_json),
+        )
+        print("RECEIPT selector restored to its captured pre-ceremony state")
     elif arguments.command == "poststate":
         document = load_prestate(arguments.prestate_json)
         state_matches(
