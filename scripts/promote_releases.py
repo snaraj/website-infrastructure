@@ -57,12 +57,14 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import fcntl
 import hashlib
 import importlib.util
 import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tarfile
@@ -90,16 +92,31 @@ FRAGMENTS = Path("changelog.d")
 VERSIONS_ENV = Path("versions.env")
 ANNOTATION = "platform.snaraj.dev/chart-release"
 REVIEWS_APP = "snaraj-agent-reviews[bot]"
+# A receipt is bound to the review App's immutable identity, never to a
+# login or a signature line alone: the bot user's id and type, and the App
+# id the comment was performed through.
+REVIEWS_APP_USER_ID = 318424677
+REVIEWS_APP_ID = 4641855
 PR_LABELS = ("release", "delivery-lane", "promoter")
 REVIEW_LABELS = ("requires-review", "cybersecurity-review-requested")
 REQUIRED_CHECKS = ("dependency-review", "repository-and-infrastructure")
+# The App that produces the required checks. A same-name check run from any
+# other writer is never a required check, and two runs of one name at one
+# head are ambiguous, so both fail closed.
+REQUIRED_CHECK_APP = "github-actions"
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
 SIGNATURE = "- Promoter"
 BRANCH_PREFIX = "promoter/"
 GATES = (("make", "check-fast"), ("make", "check-gitleaks"), ("make", "check-kubernetes"))
-LOCK_STALE_SECONDS = 2 * 60 * 60
+# The repository's outgoing-range gate: it runs on the exact signed commit,
+# after the commit and before the push, and a refusal pushes nothing.
+PUBLICATION_GATE = ("make", "pre-push-security")
+# Every subprocess is bounded, so a hung command cannot hold the tick's lock
+# forever; the gates get the long bound.
+COMMAND_TIMEOUT_SECONDS = 600
+GATE_TIMEOUT_SECONDS = 3600
 MAX_JSON_BYTES = 1024 * 1024
 MAX_BLOB_BYTES = 64 * 1024 * 1024
 TIMEOUT = 60
@@ -113,7 +130,6 @@ BRANCH_RE = re.compile(
     r"((?:[a-z0-9-]+-\d+\.\d+\.\d+)(?:_[a-z0-9-]+-\d+\.\d+\.\d+)*)$"
 )
 TARGET_RE = re.compile(r"^([a-z0-9]+(?:-[a-z0-9]+)*)-(\d+\.\d+\.\d+)$")
-RECEIPT_LANE_RE = re.compile(r"^- (.+?) \(adversarial reviewer\)\s*$")
 CAPTURE_HEADER_RE = re.compile(
     r"^Captured (\d{4}-\d{2}-\d{2}) for (?:the )?issues? (#\d+(?:/#\d+)*)", re.MULTILINE
 )
@@ -165,6 +181,9 @@ def _load_sibling(name, module_name):
 # The watchdog owns the annotation/subject grammar and the drift verdict; the
 # promoter reuses them so the two can never classify one manifest differently.
 ASSURANCE = _load_sibling("ci/deploy_assurance.py", "promoter_deploy_assurance")
+# The receipt shape is the repository's canonical one, so a receipt this tool
+# counts is exactly a receipt the coordinator's validator accepts.
+RECEIPTS = _load_sibling("validate_review_receipt.py", "promoter_review_receipt")
 
 
 def sha256_hex(data: bytes) -> str:
@@ -352,22 +371,33 @@ class Registry:
         return body
 
 
-def run_command(argv, cwd=None, input_text=None, env=None) -> str:
-    """Run one command and return its stdout; a non-zero exit is a Refusal."""
+def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEOUT_SECONDS) -> str:
+    """Run one command and return its stdout; a non-zero exit, or a hang
+    past ``timeout`` seconds, is a Refusal. The refusal names the program
+    and its subcommand only — never the full argv, which can carry
+    workstation paths."""
 
-    completed = subprocess.run(
-        list(argv),
-        cwd=None if cwd is None else str(cwd),
-        input=input_text,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    label = " ".join(map(str, argv[:2]))
+    try:
+        completed = subprocess.run(
+            list(argv),
+            cwd=None if cwd is None else str(cwd),
+            input=input_text,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise Refusal(f"`{label}` exceeded {timeout}s and was killed") from None
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip().splitlines()
         tail = " | ".join(detail[-3:]) if detail else "no output"
-        raise Refusal(f"`{' '.join(map(str, argv))}` exited {completed.returncode}: {tail}")
+        # The raw tail stays in the local log; the refusal, which can travel
+        # into a public comment, is redacted at the source.
+        log(f"`{label}` exited {completed.returncode}: {tail}")
+        raise Refusal(f"`{label}` exited {completed.returncode}: {redact(tail)}")
     return completed.stdout
 
 
@@ -1260,38 +1290,40 @@ def normalize_lane(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def parse_receipt(body: str) -> dict | None:
-    """``{"head", "verdict", "lane"}`` from a review receipt, or ``None``.
+def parse_receipt(body: str, head: str) -> dict | None:
+    """``{"head", "verdict", "lane"}`` from a review receipt bound to
+    ``head``, or ``None``. The shape is the repository's canonical one,
+    ``scripts/validate_review_receipt.py``: exactly one ``HEAD:`` line equal
+    to the head, exactly one ``VERDICT:`` line that IS a supported verdict
+    (no trailing tokens), the lane signature as the last non-empty line,
+    and the mutation and claim audit evidence a verdict must carry. A
+    comment the coordinator's validator would deny never counts here."""
 
-    The contract requires ``HEAD:`` and ``VERDICT:`` as standalone lines,
-    not as the first two lines, so a receipt with a heading above them —
-    the shape a REQUEST-CHANGES often takes — still binds its head."""
-
-    lines = [line.rstrip() for line in body.splitlines()]
-    heads = [line for line in lines if line.startswith("HEAD: ")]
-    verdicts = [line for line in lines if line.startswith("VERDICT: ")]
-    if len(heads) != 1 or len(verdicts) != 1:
+    if RECEIPTS.denial(body, head, "pull-request") is not None:
         return None
-    head = heads[0][len("HEAD: "):].strip()
-    verdict = verdicts[0][len("VERDICT: "):].split()[0] if verdicts[0][len("VERDICT: "):].split() else ""
-    if SHA_RE.fullmatch(head) is None or verdict not in {"APPROVE", "REQUEST-CHANGES"}:
-        return None
+    lines = body.replace("\r\n", "\n").splitlines()
+    verdict = [line[9:] for line in lines if line.startswith("VERDICT: ")][0]
     nonempty = [line for line in lines if line.strip()]
-    lane = RECEIPT_LANE_RE.match(nonempty[-1]) if nonempty else None
-    return {"head": head, "verdict": verdict, "lane": normalize_lane(lane.group(1)) if lane else None}
+    lane = RECEIPTS.SIGNATURE.fullmatch(nonempty[-1]).group(1)
+    return {"head": head, "verdict": verdict, "lane": normalize_lane(lane)}
 
 
 def ready_decision(head: str, labels, comments, checks, behind_by: int, is_draft: bool) -> tuple:
-    """Return ``(ready, reasons)``. ``comments`` are ``{"user", "body"}``;
-    ``checks`` are ``{"name", "status", "conclusion"}`` for the head."""
+    """Return ``(ready, reasons)``. ``comments`` are ``{"user", "user_id",
+    "user_type", "app_id", "body"}``; ``checks`` are ``{"name", "status",
+    "conclusion", "app"}`` for the head, ``app`` being the slug of the App
+    that produced the check run."""
 
     reasons = []
     receipts = [
         parsed
         for comment in comments
         if comment.get("user") == REVIEWS_APP
-        for parsed in [parse_receipt(comment.get("body", ""))]
-        if parsed is not None and parsed["head"] == head
+        and comment.get("user_id") == REVIEWS_APP_USER_ID
+        and comment.get("user_type") == "Bot"
+        and comment.get("app_id") == REVIEWS_APP_ID
+        for parsed in [parse_receipt(comment.get("body", ""), head)]
+        if parsed is not None
     ]
     approvals = {r["lane"] for r in receipts if r["verdict"] == "APPROVE" and r["lane"]}
     if any(r["verdict"] == "REQUEST-CHANGES" for r in receipts):
@@ -1300,10 +1332,15 @@ def ready_decision(head: str, labels, comments, checks, behind_by: int, is_draft
         reasons.append(f"{len(approvals)} distinct adversarial APPROVE receipt(s) at this head; two are required")
     if "requires-review" in labels:
         reasons.append("requires-review is still armed")
-    by_name = {check["name"]: check for check in checks}
     for name in REQUIRED_CHECKS:
-        check = by_name.get(name)
-        if check is None or check.get("status") != "completed" or check.get("conclusion") != "success":
+        candidates = [check for check in checks if check.get("name") == name]
+        if len(candidates) != 1:
+            reasons.append(f"required check {name} appears {len(candidates)} times at this head; exactly one authoritative run is required")
+            continue
+        check = candidates[0]
+        if check.get("app") != REQUIRED_CHECK_APP:
+            reasons.append(f"required check {name} was not produced by {REQUIRED_CHECK_APP}")
+        elif check.get("status") != "completed" or check.get("conclusion") != "success":
             reasons.append(f"required check {name} has not succeeded at this head")
     if any(check.get("conclusion") in {"failure", "timed_out", "cancelled", "action_required"} for check in checks):
         reasons.append("a check at this head failed")
@@ -1473,27 +1510,48 @@ def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, gate
     return "\n".join(lines)
 
 
+def owned_pull_request(pr: dict) -> dict | None:
+    """The identity tuple every promoter pull request must satisfy before any
+    read-derived decision or write: opened by the owner's credential, from a
+    promoter branch in THIS repository, against ``main`` of this repository,
+    Draft state known, carrying the promoter labels. Anything else — a fork
+    with a ``promoter/`` head above all — is never planned, superseded or
+    flipped by the owner's unattended process."""
+
+    head, base = pr.get("head") or {}, pr.get("base") or {}
+    branch = head.get("ref") or ""
+    labels = [label.get("name") for label in pr.get("labels") or []]
+    if (
+        (head.get("repo") or {}).get("full_name") != REPOSITORY
+        or (base.get("repo") or {}).get("full_name") != REPOSITORY
+        or base.get("ref") != "main"
+        or (pr.get("user") or {}).get("login") != ASSIGNEE
+        or parse_branch(branch) is None
+        or not set(PR_LABELS) <= set(labels)
+        or SHA_RE.fullmatch(head.get("sha") or "") is None
+        or not isinstance(pr.get("draft"), bool)
+        or not isinstance(pr.get("number"), int)
+    ):
+        return None
+    return {"number": pr["number"], "branch": branch, "head": head["sha"], "draft": pr["draft"], "labels": labels}
+
+
 def open_promoter_prs(github: GitHub) -> list:
-    prs = github.api_pages(f"repos/{REPOSITORY}/pulls?state=open&per_page=100")
     found = []
-    for pr in prs:
-        branch = pr.get("head", {}).get("ref", "")
+    for pr in github.api_pages(f"repos/{REPOSITORY}/pulls?state=open&per_page=100"):
+        branch = (pr.get("head") or {}).get("ref") or ""
         if not branch.startswith(BRANCH_PREFIX):
             continue
-        compare = github.api(f"repos/{REPOSITORY}/compare/main...{pr['head']['sha']}")
+        owned = owned_pull_request(pr)
+        if owned is None:
+            log(f"PR #{pr.get('number')} has a promoter head but is not an owned promoter pull request; ignored")
+            continue
+        compare = github.api(f"repos/{REPOSITORY}/compare/main...{owned['head']}")
         behind_by = compare.get("behind_by")
         if not isinstance(behind_by, int):
-            raise Refusal(f"PR #{pr['number']}: base freshness is unknown; refusing to assume current")
-        found.append(
-            {
-                "number": pr["number"],
-                "branch": branch,
-                "head": pr["head"]["sha"],
-                "behind_by": behind_by,
-                "draft": pr.get("draft", True),
-                "labels": [label["name"] for label in pr.get("labels", [])],
-            }
-        )
+            raise Refusal(f"PR #{owned['number']}: base freshness is unknown; refusing to assume current")
+        owned["behind_by"] = behind_by
+        found.append(owned)
     return found
 
 
@@ -1503,38 +1561,73 @@ def drift_issues(github: GitHub, targets: dict) -> list:
     return sorted(issue["number"] for issue in issues if "pull_request" not in issue and issue["title"] in wanted)
 
 
-def consider_ready(github: GitHub, pr: dict, dry_run: bool) -> bool:
+def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
+    """Judge ONE pull request from a fresh read taken at the mutation
+    boundary, never from the tick's earlier listing: head, base, Draft
+    state, labels and freshness are re-bound now, and the receipts and
+    checks are derived for exactly that head. After the flip the pull
+    request is read once more; a head that moved in between is returned to
+    Draft and re-armed, because Ready must never outlive the head the
+    receipts bound."""
+
+    pr = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    if pr is None:
+        log(f"PR #{number} is not an owned promoter pull request at the mutation boundary; nothing done")
+        return False
+    compare = github.api(f"repos/{REPOSITORY}/compare/main...{pr['head']}")
+    behind_by = compare.get("behind_by")
+    if not isinstance(behind_by, int):
+        raise Refusal(f"PR #{number}: base freshness is unknown; refusing to assume current")
     comments = [
-        {"user": c.get("user", {}).get("login"), "body": c.get("body", "")}
-        for c in github.api_pages(f"repos/{REPOSITORY}/issues/{pr['number']}/comments?per_page=100")
+        {
+            "user": (c.get("user") or {}).get("login"),
+            "user_id": (c.get("user") or {}).get("id"),
+            "user_type": (c.get("user") or {}).get("type"),
+            "app_id": (c.get("performed_via_github_app") or {}).get("id"),
+            "body": c.get("body", ""),
+        }
+        for c in github.api_pages(f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100")
     ]
     listing = github.api(f"repos/{REPOSITORY}/commits/{pr['head']}/check-runs?per_page=100")
     check_runs = listing.get("check_runs", [])
     if listing.get("total_count") != len(check_runs):
-        raise Refusal(f"PR #{pr['number']}: check-run listing is truncated; refusing to judge a partial view")
-    checks = [{"name": c.get("name"), "status": c.get("status"), "conclusion": c.get("conclusion")} for c in check_runs]
-    ready, reasons = ready_decision(pr["head"], pr["labels"], comments, checks, pr["behind_by"], pr["draft"])
+        raise Refusal(f"PR #{number}: check-run listing is truncated; refusing to judge a partial view")
+    checks = [
+        {
+            "name": c.get("name"),
+            "status": c.get("status"),
+            "conclusion": c.get("conclusion"),
+            "app": (c.get("app") or {}).get("slug"),
+        }
+        for c in check_runs
+    ]
+    ready, reasons = ready_decision(pr["head"], pr["labels"], comments, checks, behind_by, pr["draft"])
     if not ready:
-        log(f"PR #{pr['number']} stays Draft: " + "; ".join(reasons))
+        log(f"PR #{number} stays Draft: " + "; ".join(reasons))
         return False
     if dry_run:
-        log(f"PR #{pr['number']} WOULD be flipped Ready (dry run)")
+        log(f"PR #{number} WOULD be flipped Ready (dry run)")
         return False
     if "cybersecurity-review-requested" in pr["labels"]:
-        github.mutate(f"repos/{REPOSITORY}/issues/{pr['number']}/labels/cybersecurity-review-requested", "DELETE")
-    github.command(["pr", "ready", str(pr["number"]), "--repo", REPOSITORY])
+        github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/cybersecurity-review-requested", "DELETE")
+    github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
+    after = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    if after is None or after["head"] != pr["head"]:
+        github.command(["pr", "ready", str(number), "--repo", REPOSITORY, "--undo"])
+        github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels", "POST", body={"labels": list(REVIEW_LABELS)})
+        raise Refusal(f"PR #{number}: the head moved while it was being flipped; returned to Draft and re-armed")
     github.mutate(
-        f"repos/{REPOSITORY}/issues/{pr['number']}/comments",
+        f"repos/{REPOSITORY}/issues/{number}/comments",
         "POST",
         body={
             "body": (
                 f"READY by the promoter at head `{pr['head']}`: two distinct exact-head adversarial "
-                "APPROVE receipts, no REQUEST-CHANGES at this head, both required checks green, "
-                f"branch current with main. The owner alone merges.\n\n{SIGNATURE}"
+                "APPROVE receipts, no REQUEST-CHANGES at this head, both required checks green from "
+                f"{REQUIRED_CHECK_APP}, branch current with main. The owner alone merges.\n\n{SIGNATURE}"
             )
         },
     )
-    log(f"PR #{pr['number']} flipped Ready")
+    log(f"PR #{number} flipped Ready")
     return True
 
 
@@ -1560,12 +1653,13 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
     cosign_version = cosign.require_pinned_version()
     acquired = {slug: acquire(selections[slug], version, registry, github, cosign) for slug, version in sorted(targets.items())}
     branch = branch_name(base, issues[0], targets)
-    workspace.git("checkout", "--quiet", "-b", branch)
+    # The cut is made on the detached base and pushed to the remote branch
+    # name, so neither a dry run nor a live tick leaves a local ref behind.
     changed = apply_promotion(workspace.root, selections, acquired, issues[0], issue_refs, utc_today(), workspace._run)
-    log(f"rewrote {len(changed)} paths on {branch}: " + ", ".join(changed))
+    log(f"rewrote {len(changed)} paths for {branch}: " + ", ".join(changed))
     for gate in GATES:
         try:
-            workspace._run(list(gate), cwd=workspace.root)
+            workspace._run(list(gate), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
         except Refusal as error:
             # The output stays in the local log: a gate's findings (gitleaks
             # above all) are never forwarded into a public issue comment.
@@ -1578,6 +1672,12 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
         log(f"WOULD commit, push and open Draft PR `{title}` from {branch} (dry run)")
         return 0
     head = workspace.commit_signed(f"{title}\n\n{body}", workspace.identity(github), workspace.signing_key(github))
+    try:
+        workspace._run(list(PUBLICATION_GATE), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
+    except Refusal as error:
+        log(f"gate `{' '.join(PUBLICATION_GATE)}` FAILED on the signed commit {head}: {error}")
+        raise Refusal(f"gate `{' '.join(PUBLICATION_GATE)}` refused the outgoing commit; nothing was pushed") from None
+    log(f"gate `{' '.join(PUBLICATION_GATE)}` OK on the outgoing commit {head}")
     workspace.git("push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
     body_path = workspace.root / ".git" / "promoter-pr-body.md"
     body_path.write_text(body, encoding="utf-8")
@@ -1590,6 +1690,21 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
     github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels", "POST", body={"labels": list(REVIEW_LABELS)})
     log(f"opened Draft PR #{number} at {head} and armed both review lanes")
     return number
+
+
+def redact(text: str) -> str:
+    """What a public failure comment may carry: one line, no Markdown
+    fences, and no private host detail — every path-shaped token that is not
+    a scheme URL, every dotted address, this workstation's host name and the
+    login name are replaced. The raw text stays in the local log."""
+
+    flat = re.sub(r"[`\r\n]+", " ", text)
+    flat = re.sub(r"(?<!\S)(?!\w+://)\S*/\S*", "<path>", flat)
+    flat = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<addr>", flat)
+    for private in (socket.gethostname(), socket.gethostname().split(".")[0], os.environ.get("USER"), os.environ.get("LOGNAME")):
+        if private and len(private) > 2:
+            flat = flat.replace(private, "<host>")
+    return flat
 
 
 def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run: bool) -> None:
@@ -1607,10 +1722,10 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     existing = github.api_pages(f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100")
     if any(marker in (c.get("body") or "") for c in existing):
         return
-    # The reason is fenced, single-line and bounded: it can carry strings
-    # an untrusted Release manifest chose, and a public comment must never
-    # render them as Markdown or mentions.
-    detail = re.sub(r"[`\r\n]+", " ", error)[:400]
+    # The reason is fenced, single-line, bounded and redacted: it can carry
+    # strings an untrusted Release manifest chose, and a public comment must
+    # never render them as Markdown or mentions, nor disclose this host.
+    detail = redact(error)[:400]
     github.mutate(
         f"repos/{REPOSITORY}/issues/{number}/comments",
         "POST",
@@ -1618,25 +1733,34 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     )
 
 
-def acquire_lock(path: Path) -> bool:
+def acquire_lock(path: Path):
+    """Hold an OS-level exclusive lock on ``path`` for the tick's lifetime,
+    or return ``None`` while another live process holds it. The kernel
+    releases the lock when its holder exits, however it exits, so nothing
+    is ever reaped by age: a hung tick keeps its lock until it dies, and
+    every subprocess it runs is bounded so that death is guaranteed."""
+
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        if path.exists() and time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS:
-            path.unlink()
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except (FileExistsError, FileNotFoundError):
-        # A sibling tick either holds the lock or reaped the same stale one
-        # a moment ago; both mean this tick yields.
-        return False
-    os.write(fd, str(os.getpid()).encode())
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()} {int(time.time())}\n".encode())
+    return fd
+
+
+def release_lock(fd) -> None:
+    fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
-    return True
 
 
 def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run=run_command) -> int:
     github = github or GitHub(run=run)
     registry = registry or Registry()
-    lock = repo / ".git" / "promoter.lock"
-    if not acquire_lock(lock):
+    lock = acquire_lock(repo / ".git" / "promoter.lock")
+    if lock is None:
         log("another tick holds the lock; skipping")
         return 0
     try:
@@ -1662,16 +1786,18 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
                 workspace.restore(base)
         elif not decision["targets"]:
             log("every selection is current; nothing to promote")
+        code = 0
         for pr in open_promoter_prs(github):
             if pr["number"] in decision["supersede"]:
                 continue
-            consider_ready(github, pr, dry_run)
-        return 0
+            try:
+                consider_ready(github, pr["number"], dry_run)
+            except Refusal as error:
+                log(f"PR #{pr['number']}: {error}")
+                code = 1
+        return code
     finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+        release_lock(lock)
 
 
 # ---------------------------------------------------------------------------

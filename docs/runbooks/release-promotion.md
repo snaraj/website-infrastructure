@@ -8,8 +8,10 @@ manifests under `kubernetes/`, runs the issue-195 acquisition ceremony with
 every judgment in code, rewrites every pinned copy of the selection by
 counted substitution, and opens the Draft promotion pull request with both
 review lanes armed. It flips Ready only when the exact head carries two
-distinct adversarial APPROVE receipts, green required checks and a current
-base. The owner alone merges. The deploy-assurance watchdog stays the loud
+distinct adversarial APPROVE receipts in the repository's canonical receipt
+shape, both required checks green from GitHub Actions and a current base,
+all re-read at the moment of the flip; a head that moves during the flip is
+returned to Draft and re-armed. The owner alone merges. The deploy-assurance watchdog stays the loud
 backstop: a promotion the tool cannot open leaves the watchdog's drift issue
 open, with one comment naming the failed step.
 
@@ -64,8 +66,11 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.snaraj.releas
 
 The agent runs at load and every 15 minutes while the workstation is awake
 and the owner is logged in (the keyring and the ssh-agent are unlocked by
-that session). A tick that finds another tick's lock skips; a lock older
-than two hours is treated as stale.
+that session). A tick that finds another live tick's lock skips: the lock
+is held by the operating system and released when its holder exits, however
+it exits, so no stale lock survives a crash and none is ever reaped by age.
+Every command a tick runs is bounded (ten minutes; the gates sixty), so a
+hung tick cannot hold the lock indefinitely.
 
 ## Operate
 
@@ -78,7 +83,13 @@ tail -n 40 "$HOME/Library/Logs/release-promoter.log"
 
 Each tick logs one line per workload (`committed X vs latest Y -> verdict`),
 every gate it ran, the Draft pull request it opened or the Ready decision it
-made with its reasons. A promotion pull request that falls behind `main` or
+made with its reasons. After the signed commit the tick runs
+`make pre-push-security` on the exact outgoing commit and pushes only when
+it passes; a refusal pushes nothing. Only pull requests that satisfy the
+owned-promoter identity tuple (owner-authored, promoter branch of this
+repository against `main`, promoter labels) are ever planned, superseded or
+flipped; a failure comment on the drift issue is redacted of every path and
+host detail, the raw text staying in the local log. A promotion pull request that falls behind `main` or
 whose target release moves on is closed as superseded and re-cut on the
 next tick; nothing is ever amended, rebased or force-pushed.
 

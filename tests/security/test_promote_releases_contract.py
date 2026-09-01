@@ -15,6 +15,7 @@ labels, the Ready flip).
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import importlib.util
 import io
@@ -23,6 +24,7 @@ import os
 import plistlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -33,6 +35,7 @@ from pathlib import Path
 from .support import REPO_ROOT, hermetic_git_environment, load_script
 
 MODULE = load_script("promote_releases.py")
+CONTRACT_RECEIPTS = load_script("validate_review_receipt.py", module_name="contract_review_receipt")
 # The contract module declares dataclasses, which resolve their annotations
 # through ``sys.modules`` — so it must be registered under its own name.
 _CONTRACT_SPEC = importlib.util.spec_from_file_location(
@@ -210,14 +213,19 @@ class FakeFleet:
             return self.downloads[url], {}
         raise AssertionError(f"unexpected fetch {url}")
 
-    def run(self, argv, cwd=None, input_text=None, env=None):
+    def run(self, argv, cwd=None, input_text=None, env=None, timeout=None):
         self.calls.append(("run", tuple(argv)))
         if argv[:2] == ["gh", "api"]:
             path = argv[-1] if "--input" not in argv else argv[argv.index("--input") - 1]
             path = [a for a in argv if not a.startswith("-") and a not in ("gh", "api", "GET", "POST", "PATCH", "DELETE", "Accept: application/vnd.github+json")][-1]
             if path not in self.gh:
                 raise MODULE.Refusal(f"`gh api {path}` exited 1: gh: Not Found (HTTP 404)")
-            return json.dumps(self.gh[path])
+            answer = self.gh[path]
+            if isinstance(answer, collections.deque):
+                # Answers that change between reads: the live forge moving
+                # under the tool. The last answer stays.
+                answer = answer.popleft() if len(answer) > 1 else answer[0]
+            return json.dumps(answer)
         if argv[:3] == ["cosign", "version", "--json"]:
             return json.dumps({"gitVersion": "v3.1.3"})
         if argv[:2] == ["cosign", "verify"]:
@@ -649,6 +657,29 @@ def promoted_record(record: dict, version: str, salt: str) -> dict:
     return new
 
 
+def bot_comment(body: str) -> dict:
+    """A comment as GitHub lists it when the review App posts it."""
+
+    return {
+        "user": {"login": MODULE.REVIEWS_APP, "id": MODULE.REVIEWS_APP_USER_ID, "type": "Bot"},
+        "performed_via_github_app": {"id": MODULE.REVIEWS_APP_ID, "slug": "snaraj-agent-reviews"},
+        "body": body,
+    }
+
+
+def pr_record(number: int, branch: str, head: str, draft: bool = True, labels=MODULE.PR_LABELS) -> dict:
+    """A pull request as GitHub lists it, satisfying the owned-PR tuple."""
+
+    return {
+        "number": number,
+        "draft": draft,
+        "user": {"login": MODULE.ASSIGNEE},
+        "head": {"ref": branch, "sha": head, "repo": {"full_name": MODULE.REPOSITORY}},
+        "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY}},
+        "labels": [{"name": n} for n in labels],
+    }
+
+
 PINNED = (
     "kubernetes/websites/naranjo-online/source.yaml",
     "policies/conftest/kubernetes.rego",
@@ -817,11 +848,13 @@ class RewriteTests(unittest.TestCase):
 class ReadyRuleTests(unittest.TestCase):
     HEAD = "1" * 40
 
-    def receipt(self, head, verdict, lane, user=MODULE.REVIEWS_APP, preamble=""):
-        return {"user": user, "body": f"{preamble}HEAD: {head}\nVERDICT: {verdict}\n\nFindings: none.\n\n- {lane} (adversarial reviewer)\n"}
+    def receipt(self, head, verdict, lane, user=MODULE.REVIEWS_APP, preamble="", evidence=True, user_id=MODULE.REVIEWS_APP_USER_ID, user_type="Bot", app_id=MODULE.REVIEWS_APP_ID):
+        audit = "## Mutation kill matrix\n\nnone needed.\n\n## Claim audit\n\nsupported.\n\n" if evidence else ""
+        body = f"{preamble}HEAD: {head}\nVERDICT: {verdict}\n\nFindings: none.\n\n{audit}- {lane} (adversarial reviewer)\n"
+        return {"user": user, "user_id": user_id, "user_type": user_type, "app_id": app_id, "body": body}
 
-    def checks(self, conclusion="success"):
-        return [{"name": name, "status": "completed", "conclusion": conclusion} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": "neutral"}]
+    def checks(self, conclusion="success", app=MODULE.REQUIRED_CHECK_APP):
+        return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": "neutral", "app": "github-code-scanning"}]
 
     def test_two_distinct_exact_head_approvals_with_green_checks_flip(self):
         ready, reasons = MODULE.ready_decision(self.HEAD, ["release"], [self.receipt(self.HEAD, "APPROVE", "Opus5"), self.receipt(self.HEAD, "APPROVE", "Codex")], self.checks(), 0, True)
@@ -838,10 +871,17 @@ class ReadyRuleTests(unittest.TestCase):
             "request changes under a heading": (["release"], good + [self.receipt(self.HEAD, "REQUEST-CHANGES", "Daybreak", preamble="## Adversarial review of #300\n\n")], self.checks(), 0, True, "REQUEST-CHANGES"),
             "same lane spelled twice": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "Opus 5")], self.checks(), 0, True, "1 distinct"),
             "same lane cased twice": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "OPUS5")], self.checks(), 0, True, "1 distinct"),
+            "receipt with the bot login but another user id": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "Codex", user_id=1)], self.checks(), 0, True, "1 distinct"),
+            "receipt with the bot identity but not through the App": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "Codex", app_id=None)], self.checks(), 0, True, "1 distinct"),
+            "receipt from a user account with the bot login": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "Codex", user_type="User")], self.checks(), 0, True, "1 distinct"),
+            "verdict with trailing tokens": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE with caveats", "Codex")], self.checks(), 0, True, "1 distinct"),
+            "receipt without audit evidence": (["release"], [good[0], self.receipt(self.HEAD, "APPROVE", "Codex", evidence=False)], self.checks(), 0, True, "1 distinct"),
+            "required check from an untrusted app": (["release"], good, self.checks(app="mallory-ci"), 0, True, f"not produced by {MODULE.REQUIRED_CHECK_APP}"),
+            "required check name duplicated by another app": (["release"], good, self.checks() + [{"name": MODULE.REQUIRED_CHECKS[0], "status": "completed", "conclusion": "success", "app": "mallory-ci"}], 0, True, "appears 2 times"),
             "requires-review armed": (["requires-review"], good, self.checks(), 0, True, "still armed"),
             "check failed": (["release"], good, self.checks("failure"), 0, True, "has not succeeded"),
-            "check pending": (["release"], good, [{"name": n, "status": "in_progress", "conclusion": None} for n in MODULE.REQUIRED_CHECKS], 0, True, "has not succeeded"),
-            "check missing": (["release"], good, [], 0, True, "has not succeeded"),
+            "check pending": (["release"], good, [{"name": n, "status": "in_progress", "conclusion": None, "app": MODULE.REQUIRED_CHECK_APP} for n in MODULE.REQUIRED_CHECKS], 0, True, "has not succeeded"),
+            "check missing": (["release"], good, [], 0, True, "appears 0 times"),
             "behind main": (["release"], good, self.checks(), 2, True, "behind main"),
             "already ready": (["release"], good, self.checks(), 0, False, "already Ready"),
             "unsigned receipt": (["release"], [good[0], {"user": MODULE.REVIEWS_APP, "body": f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n\nno lane line\n"}], self.checks(), 0, True, "two are required"),
@@ -852,16 +892,29 @@ class ReadyRuleTests(unittest.TestCase):
                 self.assertFalse(ready)
                 self.assertTrue(any(reason in r for r in reasons), reasons)
 
-    def test_receipt_parser(self):
-        parsed = MODULE.parse_receipt(self.receipt(self.HEAD, "APPROVE", "Opus5")["body"])
+    def test_receipt_parser_is_the_canonical_validator(self):
+        parse = lambda body, head=self.HEAD: MODULE.parse_receipt(body, head)
+        parsed = parse(self.receipt(self.HEAD, "APPROVE", "Opus5")["body"])
         self.assertEqual(parsed, {"head": self.HEAD, "verdict": "APPROVE", "lane": "opus5"})
-        under_heading = MODULE.parse_receipt(self.receipt(self.HEAD, "REQUEST-CHANGES", "Codex", preamble="## Review\n\n")["body"])
+        under_heading = parse(self.receipt(self.HEAD, "REQUEST-CHANGES", "Codex", preamble="## Review\n\n")["body"])
         self.assertEqual(under_heading, {"head": self.HEAD, "verdict": "REQUEST-CHANGES", "lane": "codex"})
-        self.assertIsNone(MODULE.parse_receipt("REVIEW-CLAIM head=abc reviewer=x"))
-        self.assertIsNone(MODULE.parse_receipt("VERDICT: APPROVE\nHEAD: x"))
-        self.assertIsNone(MODULE.parse_receipt(f"HEAD: {self.HEAD}\nHEAD: {self.HEAD}\nVERDICT: APPROVE\n"))
-        self.assertIsNone(MODULE.parse_receipt(f"HEAD: {self.HEAD}\nVERDICT: MAYBE\n"))
-        self.assertEqual(MODULE.parse_receipt(f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n\nno signature\n")["lane"], None)
+        # Every shape the repository's validator denies is not a receipt here.
+        good = self.receipt(self.HEAD, "APPROVE", "Codex")["body"]
+        self.assertIsNone(CONTRACT_RECEIPTS.denial(good, self.HEAD, "pull-request"))
+        for body in (
+            "REVIEW-CLAIM head=abc reviewer=x",
+            "VERDICT: APPROVE\nHEAD: x",
+            f"HEAD: {self.HEAD}\nHEAD: {self.HEAD}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n",
+            f"HEAD: {self.HEAD}\nVERDICT: MAYBE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n",
+            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n\nmutation claim\n\nno signature\n",
+            self.receipt(self.HEAD, "APPROVE with caveats", "Codex")["body"],
+            self.receipt(self.HEAD, "APPROVE", "Codex", evidence=False)["body"],
+            self.receipt(self.HEAD, "APPROVE", " ")["body"],
+        ):
+            with self.subTest(body=body[:40]):
+                self.assertIsNotNone(CONTRACT_RECEIPTS.denial(body, self.HEAD, "pull-request"))
+                self.assertIsNone(parse(body))
+        self.assertIsNone(parse(good, "2" * 40), "a receipt for another head never binds this one")
 
 
 class PlanningTests(unittest.TestCase):
@@ -888,6 +941,29 @@ class PlanningTests(unittest.TestCase):
         for bad in ("promoter/285-naranjo-online-0.1.71", "promoter/8369bf7/x-naranjo-online-0.1.71", "fable5-high/286-tool", "promoter/8369bf7/285-naranjo-online-latest"):
             with self.subTest(branch=bad):
                 self.assertIsNone(MODULE.parse_branch(bad))
+
+    def test_only_owned_promoter_pull_requests_are_discovered(self):
+        fleet = FakeFleet()
+        head = "3" * 40
+        owned = pr_record(300, MODULE.branch_name("8" * 40, 285, {"naranjo-online": "0.1.99"}), head)
+        variants = {
+            "fork head": {"head": dict(owned["head"], repo={"full_name": "mallory/website-infrastructure"})},
+            "foreign base repository": {"base": {"ref": "main", "repo": {"full_name": "mallory/website-infrastructure"}}},
+            "base is not main": {"base": {"ref": "release", "repo": {"full_name": MODULE.REPOSITORY}}},
+            "not the owner": {"user": {"login": "mallory"}},
+            "labels missing": {"labels": [{"name": "release"}]},
+            "unknown draft state": {"draft": None},
+            "branch outside the grammar": {"head": dict(owned["head"], ref="promoter/not-a-branch")},
+        }
+        for name, override in variants.items():
+            with self.subTest(variant=name):
+                self.assertIsNone(MODULE.owned_pull_request(dict(owned, **override)))
+        self.assertEqual(MODULE.owned_pull_request(owned)["number"], 300)
+        foreign = dict(owned, number=301, **variants["fork head"])
+        fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[foreign, owned]]
+        fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        found = MODULE.open_promoter_prs(fleet.github())
+        self.assertEqual([pr["number"] for pr in found], [300], "a fork with a promoter head is never adopted")
 
     def test_fragment_path_obeys_the_release_contract_grammar(self):
         for targets in ({"naranjo-online": "0.1.71"}, {"naranjo-online": "0.2.0", "lidersea-com": "1.0.0"}):
@@ -924,6 +1000,7 @@ class TickTests(unittest.TestCase):
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues?state=open&labels=delivery-lane&per_page=100"] = [[{"number": 285, "title": "deploy-assurance[site-drift/naranjo-online]"}]]
         self.commits = []
         self.mutations = []
+        self.fail_gates = set()
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -932,11 +1009,12 @@ class TickTests(unittest.TestCase):
         MODULE.log = self._log
         self.tmp.cleanup()
 
-    def run_command(self, argv, cwd=None, input_text=None, env=None):
+    def run_command(self, argv, cwd=None, input_text=None, env=None, timeout=None):
         argv = list(argv)
         if argv[0] == "git":
             if "commit" in argv and "-S" in argv:
                 self.commits.append(tuple(argv))
+                self.mutations.append(("commit", tuple(argv)))
                 stripped = [a for a in argv if a not in ("-S",) and not a.startswith("user.signingkey=") and a != "gpg.format=ssh"]
                 stripped = [a for i, a in enumerate(stripped) if not (a == "-c" and i + 1 < len(stripped) and stripped[i + 1] in ("gpg.format=ssh",))]
                 stripped = [a for a in stripped if a != "-c"]
@@ -948,6 +1026,8 @@ class TickTests(unittest.TestCase):
             return MODULE.run_command(argv, cwd=cwd, input_text=input_text, env=merged)
         if argv[0] == "make":
             self.mutations.append(("gate", tuple(argv)))
+            if argv[1] in self.fail_gates:
+                raise MODULE.Refusal(f"`make {argv[1]}` exited 2: FAIL pre-push security gate did not authorize publication.")
             return ""
         if argv[:2] == ["ssh-add", "-L"]:
             return "ssh-ed25519 AAAATESTKEY loaded\nssh-ed25519 AAAAOTHER other\n"
@@ -955,7 +1035,7 @@ class TickTests(unittest.TestCase):
             self.mutations.append(("pr-create", tuple(argv)))
             return "https://github.com/snaraj/website-infrastructure/pull/300\n"
         if argv[:3] == ["gh", "pr", "ready"]:
-            self.mutations.append(("pr-ready", tuple(argv)))
+            self.mutations.append(("pr-ready-undo" if "--undo" in argv else "pr-ready", tuple(argv)))
             return ""
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
@@ -967,6 +1047,83 @@ class TickTests(unittest.TestCase):
     def writes(self, suffix):
         return [m for m in self.mutations if m[0] == "api-write" and m[1].endswith(suffix)]
 
+    def local_heads(self):
+        return subprocess.run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+
+    def test_publication_gate_refusal_pushes_nothing(self):
+        self.fail_gates = {"pre-push-security"}
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[]]
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.commits), 1, "the gate runs on the signed commit")
+        self.assertEqual([m[0] for m in self.mutations if m[0] in ("pr-create", "pr-ready")], [])
+        heads = subprocess.run(["git", "for-each-ref", "refs/heads/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("promoter/", heads, "a refused outgoing commit is never pushed")
+        body = json.loads(self.writes("/issues/285/comments")[0][2])["body"]
+        self.assertIn("refused the outgoing commit; nothing was pushed", body)
+        self.assertNotIn("promoter/", self.local_heads())
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout, "")
+
+    def test_ready_is_bound_to_the_live_head_at_the_mutation_boundary(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        base = "8" * 40
+        branch = MODULE.branch_name(base, 285, {"naranjo-online": self.next})
+        stale, live = "a" * 40, "b" * 40
+        approvals = [[
+            bot_comment(f"HEAD: {stale}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {stale}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = approvals
+        for sha in (stale, live):
+            self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{sha}"] = {"behind_by": 0}
+            self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{sha}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
+        # The listing (and any earlier snapshot) says the approved head; the
+        # fresh read at the mutation boundary says the head has moved on.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[pr_record(300, branch, stale)]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pr_record(300, branch, live)
+        self.assertFalse(MODULE.consider_ready(github, 300, False))
+        self.assertEqual([m for m in self.mutations if m[0] != "gate"], [], "a replacement head is never flipped on stale receipts")
+        self.assertTrue(any("stays Draft" in line and "0 distinct" in line for line in self.log_lines))
+        # The head moves between the fresh read and the flip: the flip is
+        # undone and both lanes re-armed.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([pr_record(300, branch, stale), pr_record(300, branch, live)])
+        with self.assertRaisesRegex(MODULE.Refusal, "head moved while it was being flipped"):
+            MODULE.consider_ready(github, 300, False)
+        kinds = [m[0] for m in self.mutations]
+        self.assertEqual(kinds.count("pr-ready"), 1)
+        self.assertEqual(kinds.count("pr-ready-undo"), 1)
+        self.assertGreater(kinds.index("pr-ready-undo"), kinds.index("pr-ready"))
+        rearmed = [m for m in self.writes("/issues/300/labels") if m[3] == "POST"]
+        self.assertEqual(len(rearmed), 1)
+        self.assertEqual(json.loads(rearmed[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        self.assertEqual(self.writes("/issues/300/comments"), [], "no READY note for a flip that was undone")
+
+    def test_public_failure_text_carries_no_private_host_detail(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[]]
+        host = socket.gethostname()
+        user = os.environ.get("USER") or "operator"
+        # A private address built at runtime, so no literal enters the tree.
+        address = ".".join(str(octet) for octet in (10, 0, 0, 5))
+        raw = f"`gh pr` exited 1: could not read /Users/{user}/Library/Application Support/x/body.md on {host} at {address} (~/.config too)"
+        MODULE.report_failure(github, {"naranjo-online": self.next}, "cut", raw, False)
+        body = json.loads(self.writes("/issues/285/comments")[0][2])["body"]
+        for private in ("/Users", "Library", "body.md", address, "~/.config"):
+            self.assertNotIn(private, body)
+        if len(user) > 2:
+            self.assertNotIn(user, body)
+        if len(host) > 2:
+            self.assertNotIn(host, body)
+        self.assertIn("<path>", body)
+        self.assertIn("step=cut", body)
+        with self.assertRaisesRegex(MODULE.Refusal, r"`sleep 5` exceeded 0\.2s"):
+            MODULE.run_command(["sleep", "5"], timeout=0.2)
+        try:
+            MODULE.run_command(["git", "-C", str(self.repo / "definitely-missing"), "status"])
+        except MODULE.Refusal as error:
+            self.assertNotIn(str(self.repo), str(error), "a refusal never echoes the full argv")
+
     def test_dry_run_reads_and_gates_but_never_writes(self):
         code = MODULE.tick(self.repo, True, registry=self.fleet.registry(), github=MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch), cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual(code, 0)
@@ -975,6 +1132,7 @@ class TickTests(unittest.TestCase):
         self.assertEqual(self.commits, [])
         heads = subprocess.run(["git", "for-each-ref", "refs/heads/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout
         self.assertNotIn("promoter/", heads)
+        self.assertNotIn("promoter/", self.local_heads(), "a dry run must leave no local promoter ref to collide with the real cut")
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "", "the dry run left the clone dirty")
 
@@ -983,6 +1141,10 @@ class TickTests(unittest.TestCase):
         code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual(code, 0)
         self.assertEqual(len(self.commits), 1)
+        # Three gates before the commit, the publication gate on the signed
+        # commit before the push, then the pull request.
+        sequence = [m[1][1] if m[0] == "gate" else m[0] for m in self.mutations]
+        self.assertEqual(sequence[:6], ["check-fast", "check-gitleaks", "check-kubernetes", "commit", "pre-push-security", "pr-create"])
         commit = self.commits[0]
         self.assertIn("-S", commit)
         self.assertIn("gpg.format=ssh", commit)
@@ -991,6 +1153,7 @@ class TickTests(unittest.TestCase):
         branch = MODULE.branch_name(base, 285, {"naranjo-online": self.next})
         heads = subprocess.run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout.split()
         self.assertIn(branch, heads)
+        self.assertNotIn("promoter/", self.local_heads(), "the cut must leave no local promoter branch behind")
         message = subprocess.run(["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B", branch], cwd=self.origin, capture_output=True, text=True, check=True).stdout
         self.assertTrue(message.startswith(f"t <{OWNER_EMAIL}>\nt <{OWNER_EMAIL}>\n"), message[:120])
         self.assertTrue(message.rstrip().endswith(MODULE.SIGNATURE))
@@ -1013,13 +1176,15 @@ class TickTests(unittest.TestCase):
         self.assertEqual(detached, base, "the clone must return to origin/main after a cut")
 
         # Second tick: the pull request is open at exact head with both verdicts.
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[{"number": 300, "draft": True, "head": {"ref": branch, "sha": head}, "labels": [{"name": n} for n in ("release", "delivery-lane", "promoter", "cybersecurity-review-requested")]}]]
+        record = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[record]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = record
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [[
-            {"user": {"login": MODULE.REVIEWS_APP}, "body": f"HEAD: {head}\nVERDICT: APPROVE\n\n- Opus5 (adversarial reviewer)\n"},
-            {"user": {"login": MODULE.REVIEWS_APP}, "body": f"HEAD: {head}\nVERDICT: APPROVE\n\n- Codex (adversarial reviewer)\n"},
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
         ]]
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success"} for n in MODULE.REQUIRED_CHECKS]}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
         self.fleet.gh[f"repos/{self.fleet.site}/releases/latest"] = {"tag_name": f"v{self.next}"}
         self.mutations.clear()
         code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
@@ -1043,9 +1208,12 @@ class TickTests(unittest.TestCase):
 
         # Fourth tick: a truncated check-run listing is refused, not judged.
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"]["total_count"] = 150
-        with self.assertRaisesRegex(MODULE.Refusal, "check-run listing is truncated"):
-            MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
-        self.assertFalse((self.repo / ".git" / "promoter.lock").exists(), "the lock must be released on every exit path")
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("check-run listing is truncated" in line for line in self.log_lines))
+        released = MODULE.acquire_lock(self.repo / ".git" / "promoter.lock")
+        self.assertIsNotNone(released, "the lock must be released on every exit path")
+        MODULE.release_lock(released)
 
     def test_a_refused_ceremony_reports_once_on_the_drift_issue_and_leaves_the_clone_clean(self):
         self.fleet.gh[f"repos/{self.fleet.site}/releases/tags/v{self.next}"]["immutable"] = False
@@ -1068,11 +1236,20 @@ class TickTests(unittest.TestCase):
 
     def test_lock_and_dirty_clone_guards(self):
         lock = self.repo / ".git" / "promoter.lock"
-        self.assertTrue(MODULE.acquire_lock(lock))
-        self.assertFalse(MODULE.acquire_lock(lock))
+        held = MODULE.acquire_lock(lock)
+        self.assertIsNotNone(held)
+        self.assertIsNone(MODULE.acquire_lock(lock), "a live holder's lock is never taken")
         os.utime(lock, (1, 1))
-        self.assertTrue(MODULE.acquire_lock(lock))
-        lock.unlink()
+        self.assertIsNone(MODULE.acquire_lock(lock), "age never reaps a lock a live process holds")
+        MODULE.release_lock(held)
+        again = MODULE.acquire_lock(lock)
+        self.assertIsNotNone(again, "a released lock is free")
+        MODULE.release_lock(again)
+        # A holder that dies releases the lock with it: no stale lock exists.
+        subprocess.run([sys.executable, "-c", "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR); fcntl.flock(fd, fcntl.LOCK_EX)", str(lock)], check=True)
+        orphaned = MODULE.acquire_lock(lock)
+        self.assertIsNotNone(orphaned)
+        MODULE.release_lock(orphaned)
         (self.repo / "stray.txt").write_text("x")
         with self.assertRaisesRegex(MODULE.Refusal, "clone is dirty"):
             MODULE.Workspace(self.repo, self.run_command).refresh()
@@ -1104,6 +1281,19 @@ class TickTests(unittest.TestCase):
         self.fleet.gh["user"] = {"login": MODULE.ASSIGNEE, "id": OWNER_ID + 1}
         with self.assertRaisesRegex(MODULE.Refusal, "no published commit"):
             workspace.identity(github)
+
+
+class HermeticGitTests(unittest.TestCase):
+    def test_auto_maintenance_is_pinned_off_in_every_hermetic_repository(self):
+        environment = quiet_git_environment()
+        pins = {environment[f"GIT_CONFIG_KEY_{i}"]: environment[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(environment["GIT_CONFIG_COUNT"]))}
+        self.assertEqual(pins, {"gc.auto": "0", "gc.autoDetach": "false", "maintenance.auto": "false"})
+        for key, value in pins.items():
+            seen = subprocess.run(["git", "config", "--get", key], capture_output=True, text=True, env=environment).stdout.strip()
+            self.assertEqual(seen, value, f"{key} must reach git through the environment")
+        bare = hermetic_git_environment()
+        self.assertNotIn("GIT_CONFIG_COUNT", bare)
+        self.assertNotEqual(subprocess.run(["git", "config", "--get", "maintenance.auto"], capture_output=True, text=True, env=bare).stdout.strip(), "false")
 
 
 class RunbookAndLaunchdTests(unittest.TestCase):
