@@ -801,6 +801,49 @@ class VerifyLiveTests(unittest.TestCase):
             flip.verify_live("nothing here", "https://naranjo.online")
 
 
+def canon_residue_violations(text):
+    """Everything outside the canonical fences that a Markdown renderer
+    could present as an unreviewed command block (round-7 review
+    finding): indented code blocks; block quotes ENTIRELY, because a
+    quoted fence or quoted indented block renders as an ordinary
+    copyable code block while its marker is invisible to both a
+    column-anchored fence inventory and a four-space indent check; any
+    three-plus backtick or tilde run anywhere in a line, which every
+    container-nested fence of any form needs to open; and CommonMark's
+    four type-1 raw-HTML starts plus code/comment markers. Returns the
+    violations so the battery can prove hostile shapes non-empty and
+    the honest document empty."""
+
+    violations = []
+    inside = False
+    for number, line in enumerate(text.split("\n"), start=1):
+        if line in ("```sh", "```"):
+            inside = not inside
+            continue
+        if inside:
+            continue
+        if line.startswith("    "):
+            violations.append("{}: indented code block".format(number))
+        if line.lstrip().startswith(">"):
+            violations.append("{}: block quote".format(number))
+        if re.search(r"`{3,}|~{3,}", line):
+            violations.append(
+                "{}: fence-capable character run".format(number)
+            )
+        lowered = line.lower()
+        for marker in (
+            "<pre",
+            "<code",
+            "<script",
+            "<style",
+            "<textarea",
+            "<!--",
+        ):
+            if marker in lowered:
+                violations.append("{}: {}".format(number, marker))
+    return violations
+
+
 class RunbookCanonTests(unittest.TestCase):
     """The runbook IS the canon: its fenced command blocks equal the tool's
     CEREMONY_BLOCKS byte for byte, in order, with no other invocation
@@ -814,15 +857,19 @@ class RunbookCanonTests(unittest.TestCase):
     def test_the_fenced_blocks_are_exactly_the_canon(self):
         """Complete extraction, complete equality (round-3 security
         finding 3): every fenced block's ENTIRE content — ordered — must
-        equal the canon. The fence inventory is proven under the FULL
-        CommonMark opener grammar (round-6 finding 2: counting literal
-        triple-backticks admits a tilde or longer-run fence carrying an
-        unreviewed block): every line that any Markdown renderer can
-        treat as a fence — three-plus backticks or tildes, up to three
-        leading spaces, any info string — must be exactly the reviewed
-        ```sh opener or bare closer at column 0, alternating, 2N lines
-        total. A line appended INSIDE an existing fence changes that
-        fence's extracted bytes and goes red."""
+        equal the canon. The fence inventory is proven under the
+        CommonMark opener grammar at column 0 (round-6 finding 2:
+        counting literal triple-backticks admits a tilde or longer-run
+        fence carrying an unreviewed block): every line opening with
+        three-plus backticks or tildes after at most three spaces must
+        be exactly the reviewed ```sh opener or bare closer at column 0,
+        alternating, 2N lines total. Container-NESTED fences (a
+        block-quoted or list-prefixed opener — round-7 finding) are not
+        this inventory's job: the residue sweep below refuses block
+        quotes and any fence-capable character run outside the reviewed
+        fences, so no such form parses anywhere. A line appended INSIDE
+        an existing fence changes that fence's extracted bytes and goes
+        red."""
 
         text = RUNBOOK.read_text()
         fences = tuple(re.findall(r"(?ms)^```sh\n(.*?)^```$", text))
@@ -838,28 +885,38 @@ class RunbookCanonTests(unittest.TestCase):
 
     def test_no_code_block_or_html_exists_outside_the_fences(self):
         """CommonMark's other executable-looking containers (round-6
-        finding 2's class): indented code blocks, and HTML pre/code/
-        script blocks or comments that could carry an invocation past
-        the token counts. The fence walk below is sound because the
-        test above proves the only fence lines are the reviewed
+        finding 2's class, closed over container nesting by the round-7
+        finding): the sweep refuses everything a renderer could present
+        as an unreviewed command block. The fence walk is sound because
+        the test above proves the only fence lines are the reviewed
         openers and closers."""
 
+        self.assertEqual(
+            canon_residue_violations(RUNBOOK.read_text()), []
+        )
+
+    def test_container_nested_blocks_are_refused(self):
+        """The round-7 survivors, pinned as named regressions: a
+        block-quoted ```sh fence (GitHub renders it as an ordinary
+        copyable code block inside a callout), a block-quoted indented
+        code block, a <textarea> block (a CommonMark type-1 raw-HTML
+        start the earlier enumeration missed, with <style> its sibling),
+        and a list-marker-prefixed fence — each carrying a verb OUTSIDE
+        the five counted tokens, so the residue sweep alone must catch
+        them. The honest document stays clean."""
+
         text = RUNBOOK.read_text()
-        inside = False
-        for number, line in enumerate(text.split("\n"), start=1):
-            if line in ("```sh", "```"):
-                inside = not inside
-                continue
-            if not inside:
-                self.assertFalse(
-                    line.startswith("    "),
-                    "line {}: indented code block outside the canon".format(
-                        number
-                    ),
-                )
-        lowered = text.lower()
-        for marker in ("<pre", "<code", "<script", "<!--"):
-            self.assertNotIn(marker, lowered)
+        self.assertEqual(canon_residue_violations(text), [])
+        for label, block in {
+            "block-quoted fence": "> ```sh\n> helm rollback site 1\n> ```\n",
+            "block-quoted indented code": ">     helm rollback site 1\n",
+            "textarea block": "<textarea>\nhelm rollback site 1\n</textarea>\n",
+            "style block": "<style>\nbody { display: none }\n</style>\n",
+            "list-marker fence": "- ```sh\n  helm rollback site 1\n  ```\n",
+        }.items():
+            with self.subTest(shape=label):
+                violations = canon_residue_violations(text + "\n" + block)
+                self.assertNotEqual(violations, [], label)
 
     def test_no_invocation_exists_outside_the_canonical_blocks(self):
         """Bare tokens, not line-anchored ones (round-6 review LOW): a

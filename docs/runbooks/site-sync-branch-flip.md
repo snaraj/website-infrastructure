@@ -15,12 +15,13 @@ Every judgment in this ceremony is made by
 `scripts/site_sync_branch_flip.py`, whose battery is
 `tests/security/test_site_sync_branch_flip.py`. The command blocks below are
 the CANONICAL ceremony: the battery compares them byte for byte, in order,
-against `CEREMONY_BLOCKS` in the tool, admits no fence of any Markdown
-form beyond these reviewed blocks, no indented or HTML code container,
-and no other kubectl/python3/flux/gh invocation anywhere in this
-document — so a neutralized invocation, a narrowed capture, a retargeted
-patch, or a smuggled extra block is a red test, never a silent prose
-drift. The operator captures live state
+against `CEREMONY_BLOCKS` in the tool, and outside these reviewed blocks
+admits no fence-capable character run at all, no indented code, no block
+quote, no HTML code container or comment, and no other
+kubectl/python3/flux/gh invocation anywhere in this document — so a
+neutralized invocation, a narrowed capture, a retargeted patch, or a
+smuggled extra block (container-nested forms included) is a red test,
+never a silent prose drift. The operator captures live state
 read-only, feeds the captures to the tool, and applies only the patches the
 tool emits. Any `DENY:` exit stops the ceremony; prose never overrides the
 tool. Every mutation patch leads with JSON-Patch `test` operations binding
