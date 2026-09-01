@@ -256,32 +256,32 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             sites["naranjo-online"]["chart"],
             {
                 "layer_digest": (
-                    "sha256:38074e0210c1ff7fdf27d185"
-                    "44d26aec7153d31870b4e3028"
-                    "8b6697cb15b57ea"
+                    "sha256:28f9e55716d91bce89b1db83"
+                    "2f5ef0269c453b46a1d7d8f09"
+                    "11f25b4c6c73b24"
                 ),
                 "manifest_digest": (
-                    "sha256:0d89ce68c5aa1413e436e84d"
-                    "39358444b8180238e81a70124"
-                    "8c65fabfe1d26e1"
+                    "sha256:5a94581af2cd07465a3d4f41"
+                    "cc868f511af5d33ca86428128"
+                    "56382f41a2d8a71"
                 ),
                 "repository": "ghcr.io/snaraj/charts/naranjo-online",
-                "version": "0.1.66",
+                "version": "0.1.69",
             },
         )
         self.assertEqual(
             sites["naranjo-online"]["workload"],
             {
                 "arm64_digest": (
-                    "sha256:0818dcb06c930843aaf23b0d"
-                    "32f07322ab9afe45d9de8526"
-                    "ffedb70a3ebf9454"
+                    "sha256:2bc751f6483201e07b8727a2"
+                    "2f19fea23070b6b8277b6a71"
+                    "a63579fc5e7cb4d5"
                 ),
                 "image": (
-                    "ghcr.io/snaraj/naranjo-online:v0.1.66@"
-                    "sha256:e8af1f3f036f164c637cc9f"
-                    "c76d3e9e6406736d1ce75fc0"
-                    "bf7499786adc68258"
+                    "ghcr.io/snaraj/naranjo-online:v0.1.69@"
+                    "sha256:121a469347cd8915aa5441a"
+                    "464447fa66c17ec66635ee45"
+                    "a3678c7e1406810cf"
                 ),
             },
         )
@@ -289,15 +289,15 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             sites["lidersea-com"]["workload"],
             {
                 "arm64_digest": (
-                    "sha256:694663936ee1061df4a74c19"
-                    "d6f3b5caa22892225dc77658"
-                    "7e83721b7488840d"
+                    "sha256:39929c6aaf5cc3c4feca57a7"
+                    "eac12858e83cc84505b99fdf"
+                    "0e0b57d6752d88e9"
                 ),
                 "image": (
-                    "ghcr.io/snaraj/lidersea-com:v0.1.40@"
-                    "sha256:cf8dfc93c863296c7de42ec"
-                    "92850a68ab173417d87498f3"
-                    "15fafaec9864484c0"
+                    "ghcr.io/snaraj/lidersea-com:v0.1.41@"
+                    "sha256:f661cdf9e33e8b36389b7f2"
+                    "d130a6fff6cbc1bbcb1c4609"
+                    "68de416a831fdd86d"
                 ),
             },
         )

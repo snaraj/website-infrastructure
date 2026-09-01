@@ -18,25 +18,25 @@ REPOSITORY_MODULE = load_script(
 )
 ACQUISITION_EXTRAS = {
     "naranjo-online": {
-        "chartConfigDigest": "sha256:6dbf80f2c75e5686fe7d569ecf70ef4d20dd2467b3539702c9353844345fc365",
-        "chartLayerDigest": "sha256:38074e0210c1ff7fdf27d18544d26aec7153d31870b4e30288b6697cb15b57ea",
-        "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.66@sha256:e8af1f3f036f164c637cc9fc76d3e9e6406736d1ce75fc0bf7499786adc68258",
-        "arm64Digest": "sha256:0818dcb06c930843aaf23b0d32f07322ab9afe45d9de8526ffedb70a3ebf9454",
+        "chartConfigDigest": "sha256:b633abeafa8f003100f4bf428a3862a7a547e8f0eca944f111d3fc68c3f46c78",
+        "chartLayerDigest": "sha256:28f9e55716d91bce89b1db832f5ef0269c453b46a1d7d8f0911f25b4c6c73b24",
+        "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.69@sha256:121a469347cd8915aa5441a464447fa66c17ec66635ee45a3678c7e1406810cf",
+        "arm64Digest": "sha256:2bc751f6483201e07b8727a22f19fea23070b6b8277b6a71a63579fc5e7cb4d5",
         "matchingChartLayerCount": 1,
         "release": {
-            "assetDigest": "sha256:dbe446315b1036560ea68aaa2423bc1c93469dd4e022b698667897cfa7a49d5b",
-            "sourceSha": "2e48af561f07409762bc7df7b38daa7306893dd9",
+            "assetDigest": "sha256:81f8ffddcfa98c1e9b53aa22ed156aa8a6640b9446c0adecdd1974d51007957e",
+            "sourceSha": "e1647e540925b21df83d7cc13ecbb35f6d820bc4",
         },
     },
     "lidersea-com": {
-        "chartConfigDigest": "sha256:bfeeb2bb371448f552e52ebdc1a0576f5f016e6421286315b4220ba8fb0a9c53",
-        "chartLayerDigest": "sha256:578296a596d8835a0e9185e46d6b2ac111ff19c181890e83b44d2caec0b4e517",
-        "workloadImage": "ghcr.io/snaraj/lidersea-com:v0.1.40@sha256:cf8dfc93c863296c7de42ec92850a68ab173417d87498f315fafaec9864484c0",
-        "arm64Digest": "sha256:694663936ee1061df4a74c19d6f3b5caa22892225dc776587e83721b7488840d",
+        "chartConfigDigest": "sha256:ae045bde722060e04ae5f8b6c3fc4135386068026d787692c055852ade98f289",
+        "chartLayerDigest": "sha256:2c2b92acd6488afe16b1deb034e445ce3064256c1971415f8600eb601fdd09cc",
+        "workloadImage": "ghcr.io/snaraj/lidersea-com:v0.1.41@sha256:f661cdf9e33e8b36389b7f2d130a6fff6cbc1bbcb1c460968de416a831fdd86d",
+        "arm64Digest": "sha256:39929c6aaf5cc3c4feca57a7eac12858e83cc84505b99fdf0e0b57d6752d88e9",
         "matchingChartLayerCount": 1,
         "release": {
-            "assetDigest": "sha256:c6d3571e10fda52ea9472e8f328f97892408dcaccbb237aa40d7b2d33a5eb771",
-            "sourceSha": "54790ce20cbe032bedcf12432001b754615b2f56",
+            "assetDigest": "sha256:34404bf9c348f50c0f4d0ff0a3a6efbe8b41eedf40d9ab58b1b3fa3eb4ff26d9",
+            "sourceSha": "382272756fafe6b7e7f52602fd6263299b5c2589",
         },
     },
 }
@@ -231,12 +231,12 @@ class ChartSourceContractTests(unittest.TestCase):
     def test_reviewed_tag_digest_pairs_are_exact_and_mutations_fail(self):
         expected = {
             "naranjo-online": (
-                "0.1.66",
-                "sha256:0d89ce68c5aa1413e436e84d39358444b8180238e81a701248c65fabfe1d26e1",
+                "0.1.69",
+                "sha256:5a94581af2cd07465a3d4f41cc868f511af5d33ca8642812856382f41a2d8a71",
             ),
             "lidersea-com": (
-                "0.1.40",
-                "sha256:004eaecfcc3dbbe2693e4c400be3dbf755a7972d40b7a5b5755b64e10afb354b",
+                "0.1.41",
+                "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
             ),
         }
         for slug, reviewed in expected.items():
