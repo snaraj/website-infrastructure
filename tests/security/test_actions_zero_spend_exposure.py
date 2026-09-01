@@ -47,6 +47,10 @@ _PINNED_USES = re.compile(
 # this mapping and must arrive as a reviewed edit to the pin.
 PINNED_CRON_INVENTORY = {
     "codeql.yml": ("37 9 * * 2",),
+    # Hourly on purpose (issue #273): the watchdog's whole value is loud,
+    # prompt detection of silent delivery drift, and its job is a single
+    # sub-minute API sweep on the free public-repo tier.
+    "deploy-assurance.yml": ("23 * * * *",),
     "scheduled-security.yml": ("19 10 * * 6",),
 }
 
@@ -352,11 +356,12 @@ class ActionsZeroSpendExposureTests(unittest.TestCase):
         )
 
     def test_cron_pin_covers_every_committed_scheduled_workflow(self):
-        """The pin and the tree must describe the same two weekly crons."""
+        """The pin and the tree must describe the same three cron sets."""
 
         names = {path.name for path in workflow_files(WORKFLOW_ROOT)}
         self.assertEqual(set(PINNED_CRON_INVENTORY), {
             "codeql.yml",
+            "deploy-assurance.yml",
             "scheduled-security.yml",
         })
         self.assertLessEqual(set(PINNED_CRON_INVENTORY), names)
