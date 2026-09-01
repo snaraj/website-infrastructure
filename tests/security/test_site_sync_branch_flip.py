@@ -976,6 +976,10 @@ class RunbookCanonTests(unittest.TestCase):
             "tab-padded list marker": "-\thelm rollback site 1\n",
             "ordered same-line list code": "1.      helm rollback site 1\n",
             "list-nested block quote": "- >     helm rollback site 1\n",
+            "chained-marker same-line code": (
+                "- 1.      helm rollback site 1\n"
+            ),
+            "two-space list-marker padding": "-  helm rollback site 1\n",
         }.items():
             with self.subTest(shape=label):
                 violations = canon_residue_violations(text + "\n" + block)
