@@ -15,12 +15,19 @@ platform-release run had died on a transient token-mint 422 with no retry):
    annotation is a condition. A committed annotation naming a release the
    site never published is a separate, worse condition.
 2. PLATFORM PUBLISH INTEGRITY — the newest completed protected-main gate
-   run must have a ``Platform release`` run at the same head SHA that
-   concluded successfully (a no-artifact merge still concludes success: it
-   logs its verdict and publishes nothing, so this check needs no
-   classification knowledge). A first-attempt failure is retried exactly
-   once via ``rerun-failed-jobs`` — under ``--apply`` only; absence after
-   the grace window or a repeated failure is a condition.
+   run whose conclusion is SUCCESS (a cancelled or failed gate authorized
+   no release and never anchors the check; no successful anchor at all is
+   itself the fail-closed condition, preserving any standing tracker) must
+   have a ``Platform release`` run at the same head SHA that concluded
+   successfully (a no-artifact merge still concludes success: it logs its
+   verdict and publishes nothing, so this check needs no classification
+   knowledge). A first-attempt conclusion of exactly ``failure`` is
+   retried exactly once via ``rerun-failed-jobs`` — under ``--apply``
+   only, and a failed dispatch still records the condition; every other
+   completed conclusion is a fail-closed ``abnormal`` condition that never
+   reruns; a run not completed past the two-hour runtime allowance is
+   ``stuck``; absence after the grace window or a repeated failure is a
+   condition.
 
 Any active condition exits 1 (a red scheduled run) and, with ``--apply``,
 maintains exactly one open tracking issue per condition key — opened when

@@ -35,6 +35,48 @@ assurance = load_script("ci/deploy_assurance.py")
 SITES = REPO_ROOT / "kubernetes" / "websites"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-assurance.yml"
 
+# The workflow's byte-exact lockstep twin (round-3 review finding 1): every
+# per-key assertion admitted SOME GitHub-valid key that changed execution
+# while the asserted bytes stayed intact, so the reviewed file IS the
+# contract, whole. Edit the workflow and this constant in the same commit.
+EXPECTED_WORKFLOW = """\
+name: Deploy assurance
+
+# Owns the promise that published site releases reach the committed desired
+# state and that the platform publish path is healthy (issue #273). Red run +
+# one idempotent tracking issue per condition; closes them when clear. The
+# checker's decisions are pinned by tests/security/test_deploy_assurance_contract.py.
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-assurance
+  cancel-in-progress: false
+
+jobs:
+  assure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # read gate/publish runs; the one bounded rerun-failed-jobs
+      issues: write # open/close the per-condition tracking issues
+    steps:
+      - name: Check out desired state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Evaluate drift and publish integrity
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -I -B scripts/ci/deploy_assurance.py --apply
+"""
+
 
 class SiteSelectionParsingTests(unittest.TestCase):
     maxDiff = None
@@ -860,25 +902,33 @@ class WorkflowSurfaceTests(unittest.TestCase):
             {"contents": "read", "actions": "write", "issues": "write"},
         )
 
-    def test_evaluator_step_block_is_pinned_exactly(self):
-        """The whole evaluator step, byte for byte — not the command as a
-        substring (round-2 review finding: a variant that kept the asserted
-        command only as inert text survived every check). Any wrapper,
-        suppressor, or body rewrite breaks this block."""
+    def test_the_workflow_file_is_the_reviewed_bytes(self):
+        """The COMPLETE file, byte for byte — the lockstep-twin pattern the
+        repository already uses for the Flux sync template. Round-2's
+        surviving mutant kept the asserted evaluator block intact while a
+        key elsewhere changed execution (round 3 demonstrated `shell:`
+        appended AFTER the run line: a GitHub-valid custom template that
+        discards the generated script), which is why no per-block or
+        per-key assertion closes this surface — only whole-file equality
+        does. Changing the workflow therefore requires changing this twin
+        in the same commit, which is the point: every workflow edit is a
+        reviewed edit."""
 
-        self.assertIn(
-            "      - name: Evaluate drift and publish integrity\n"
-            "        env:\n"
-            "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
-            "        run: python3 -I -B scripts/ci/deploy_assurance.py --apply\n",
-            WORKFLOW.read_text(),
-        )
+        self.assertEqual(WORKFLOW.read_text(), EXPECTED_WORKFLOW)
+
+    def test_the_shell_key_regression_stays_dead(self):
+        """The round-3 survivor by name: a `shell:` key anywhere in this
+        workflow selects a custom command template and can discard the
+        runner-generated script while every block assertion stays green."""
+
+        self.assertNotIn("shell:", WORKFLOW.read_text())
 
     def test_workflow_declares_no_suppression_and_exactly_two_steps(self):
         """No `if:` (the round-1 surviving mutant), no `continue-on-error`,
         no shell-level failure swallowing, and exactly the two reviewed
         steps with one `run:` between them — a third step or second run
-        line is an unreviewed execution surface."""
+        line is an unreviewed execution surface. Subsumed by the byte-exact
+        twin above; kept for focused failure messages."""
 
         text = WORKFLOW.read_text()
         self.assertIsNone(re.search(r"(?m)^\s*if:", text))
