@@ -212,6 +212,16 @@ def workflow_semantic_map(text):
     return _resolve(root)
 
 
+def workflow_text():
+    """The live workflow's RAW bytes, decoded without newline
+    translation. `read_text()` performs universal-newline decoding, so
+    an on-disk CRLF file reached both guards already normalized to LF
+    and passed them (round-5 review finding); every live assertion goes
+    through this reader so the bytes judged are the bytes committed."""
+
+    return WORKFLOW.read_bytes().decode("utf-8")
+
+
 def validated_workflow(text):
     """The closed semantic contract over the live workflow text."""
 
@@ -1095,7 +1105,7 @@ class MainWiringTests(unittest.TestCase):
 
 class WorkflowSurfaceTests(unittest.TestCase):
     def test_workflow_keeps_the_reviewed_narrow_surface(self):
-        text = WORKFLOW.read_text()
+        text = workflow_text()
         self.assertIn("\npermissions: {}\n", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("runs-on: ubuntu-24.04", text)
@@ -1128,14 +1138,14 @@ class WorkflowSurfaceTests(unittest.TestCase):
         (round-4 finding), which is what the closed semantic contract
         below refuses."""
 
-        self.assertEqual(WORKFLOW.read_text(), EXPECTED_WORKFLOW)
+        self.assertEqual(workflow_text(), EXPECTED_WORKFLOW)
 
     def test_the_shell_key_regression_stays_dead(self):
         """The round-3 survivor by name: a `shell:` key anywhere in this
         workflow selects a custom command template and can discard the
         runner-generated script while every block assertion stays green."""
 
-        self.assertNotIn("shell:", WORKFLOW.read_text())
+        self.assertNotIn("shell:", workflow_text())
 
     def test_workflow_declares_no_suppression_and_exactly_two_steps(self):
         """No `if:` (the round-1 surviving mutant), no `continue-on-error`,
@@ -1145,7 +1155,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         and the closed semantic contract; kept for focused failure
         messages."""
 
-        text = WORKFLOW.read_text()
+        text = workflow_text()
         self.assertIsNone(re.search(r"(?m)^\s*if:", text))
         self.assertNotIn("continue-on-error", text)
         self.assertNotIn("|| true", text)
@@ -1159,7 +1169,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         and the returned semantic map is real — the reviewed invocation
         and grants are readable back out of it."""
 
-        document = validated_workflow(WORKFLOW.read_text())
+        document = validated_workflow(workflow_text())
         self.assertEqual(
             document["jobs"]["assure"]["steps"][1]["run"],
             "python3 -I -B scripts/ci/deploy_assurance.py --apply",
@@ -1182,7 +1192,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         hostile text directly, so updating the twin in lockstep rescues
         none of these."""
 
-        text = WORKFLOW.read_text()
+        text = workflow_text()
         anchor = "    runs-on: ubuntu-24.04\n"
         self.assertIn(anchor, text)
         for line in [
@@ -1194,6 +1204,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
             "    ? if\n",
             "\tif: false\n",
             "    іf: false\n",  # Cyrillic i homoglyph
+            "    if : false\n",  # YAML-valid space before the colon
         ]:
             mutated = text.replace(anchor, anchor + line)
             self.assertNotEqual(mutated, text)
@@ -1216,7 +1227,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         dies in the parser or the closed key pins, before any comparison
         with the twin."""
 
-        text = WORKFLOW.read_text()
+        text = workflow_text()
         anchor = "    runs-on: ubuntu-24.04\n"
         run_line = (
             "        run: python3 -I -B scripts/ci/deploy_assurance.py"
@@ -1246,6 +1257,28 @@ class WorkflowSurfaceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validated_workflow(mutated)
 
+    def test_an_on_disk_crlf_workflow_is_refused(self):
+        """Round-5 review finding: `read_text()` universal-newline
+        decoding converted on-disk CRLF to LF before either guard saw
+        it, so a CRLF-converted workflow passed the byte twin AND the
+        semantic contract while carrying 35 CRLF pairs on disk. The
+        raw-bytes reader is what every live assertion now uses; this
+        regression proves that same reader surfaces on-disk CRLF to
+        both guards."""
+
+        import tempfile
+        from pathlib import Path
+
+        crlf = workflow_text().replace("\n", "\r\n")
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "deploy-assurance.yml"
+            path.write_bytes(crlf.encode("utf-8"))
+            raw = path.read_bytes().decode("utf-8")
+        self.assertIn("\r\n", raw)
+        self.assertNotEqual(raw, EXPECTED_WORKFLOW)
+        with self.assertRaises(ValueError):
+            validated_workflow(raw)
+
     def test_a_nonzero_checker_exit_fails_the_workflow_command(self):
         """Behavioral proof that the checker's exit code IS the job result:
         execute the exact `run:` line from the workflow with a PATH-shimmed
@@ -1257,7 +1290,7 @@ class WorkflowSurfaceTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        match = re.search(r"(?m)^        run: (.+)$", WORKFLOW.read_text())
+        match = re.search(r"(?m)^        run: (.+)$", workflow_text())
         self.assertIsNotNone(match)
         assert match is not None
         command = match.group(1)
