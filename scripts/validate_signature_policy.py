@@ -92,6 +92,9 @@ metadata:
     # bootstrap renders all canonical identity values from the signed v0.1.43
     # Release and creates these objects directly. Kustomize never consumes this
     # file, and the schema-invalid scalars below prevent accidental kubectl use.
+    # Site delivery is decoupled from platform releases (owner ruling
+    # 2026-09-01, issue #270): ref.branch follows protected main, and the
+    # live flip ceremony is docs/runbooks/site-sync-branch-flip.md.
     release-selector.platform.snaraj.dev/schema: BOOTSTRAP_RENDERS_CANONICAL_IDENTITY
     release-selector.platform.snaraj.dev/release-id: "0"
     release-selector.platform.snaraj.dev/release-tag: v0.1.43
@@ -116,7 +119,7 @@ spec:
     !/kubernetes/websites/lidersea-com/**
   interval: 1m0s
   ref:
-    tag: v0.1.43
+    branch: main
   sparseCheckout: BOOTSTRAP_RENDERS_EXACT_TWO_PATHS
   timeout: 60s
   url: https://github.com/snaraj/website-infrastructure.git

@@ -181,3 +181,18 @@ routine site-pin release after activation rather than a dedicated release.
 - **2026-08-26:** the absent Kyverno posture was retired, and platform source
   selection was bound to signed immutable platform releases through the
   external selector and native narrow admission guard.
+- **2026-09-01 (owner ruling, issue #270):** site desired-state consumption
+  was decoupled from platform releases. The measured incident: the live
+  cluster served naranjo.online four releases behind its own published
+  artifacts while every component truthfully reported healthy, because a
+  site deploy required a promotion merge PLUS a platform release PLUS a
+  selector advance, and only the first was alarmed by anything. The
+  `flux-system` GitRepository now follows protected `refs/heads/main` — the
+  one ref a no-bypass ruleset gates, the identical anchor every cosign
+  publisher identity in this repository already trusts — bounded by the
+  unchanged two-directory sparse checkout. Everything this ADR says about
+  exact-digest chart selection, the mandatory verify block, and receipted
+  promotion is UNCHANGED; the selector's runtime role ends with the
+  owner-attended ceremony in `docs/runbooks/site-sync-branch-flip.md`, and
+  platform releases continue as the platform's own versioned audit artifact
+  that nothing consumes for site delivery.
