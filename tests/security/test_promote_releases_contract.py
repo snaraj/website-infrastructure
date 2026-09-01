@@ -595,12 +595,31 @@ class ReceiptRenderingTests(unittest.TestCase):
         self.assertEqual(MODULE.tool_pins(REPO_ROOT), MODULE.load_receipt(REPO_ROOT)["tools"])
 
 
+def quiet_git_environment(*args, **kwargs) -> dict:
+    """``hermetic_git_environment`` with git's post-command auto maintenance
+    off. After ``fetch`` and ``commit`` git spawns a detached
+    ``maintenance run --auto`` (``gc --auto`` on older versions) that takes
+    ``.git/objects/maintenance.lock`` even when there is nothing to do; a
+    child that outlives the command races the ``TemporaryDirectory``
+    removal and cleanup fails with ``Directory not empty: .git`` — observed
+    once on the CI runner at head 38e3bba. Disabling it makes every
+    hermetic repository single-process."""
+
+    environment = hermetic_git_environment(*args, **kwargs)
+    pins = (("gc.auto", "0"), ("gc.autoDetach", "false"), ("maintenance.auto", "false"))
+    environment["GIT_CONFIG_COUNT"] = str(len(pins))
+    for index, (key, value) in enumerate(pins):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return environment
+
+
 def tracked_copy(destination: Path) -> Path:
     """Copy the WORKING TREE of every tracked file into a fresh git repository
     on branch ``main`` with one commit, so ``git ls-files`` and the rewrite
     see exactly what a checkout of this head would."""
 
-    env = hermetic_git_environment()
+    env = quiet_git_environment()
     listing = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, check=True).stdout
     for name in listing.decode().split("\0"):
         if not name:
@@ -779,7 +798,7 @@ class RewriteTests(unittest.TestCase):
         needle = '"naranjo-online": (\n                "' + version + '",'
         self.assertEqual(text.count(needle), 1)
         contract.write_text(text.replace(needle, '"naranjo-online": (\n                "0.0.0",'))
-        subprocess.run(["git", "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}", "commit", "-qam", "drift"], cwd=self.root, check=True, env=hermetic_git_environment())
+        subprocess.run(["git", "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}", "commit", "-qam", "drift"], cwd=self.root, check=True, env=quiet_git_environment())
         with self.assertRaisesRegex(MODULE.Refusal, "version pin shape 3 matched nowhere"):
             self.promote(issue=994)
 
@@ -885,7 +904,7 @@ class TickTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
-        self.env = hermetic_git_environment()
+        self.env = quiet_git_environment()
         source = tracked_copy(base / "source")
         self.origin = base / "origin.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(source), str(self.origin)], check=True, env=self.env)
