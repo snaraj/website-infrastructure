@@ -1,6 +1,6 @@
 # Bootstrap-owned platform release selector
 
-**RUNTIME RETIREMENT PENDING (owner ruling 2026-09-01, issue #270).** Site
+**RUNTIME RETIREMENT PENDING (owner ruling 2026-09-01, issue #275).** Site
 desired-state consumption moves to the protected-main-branch GitRepository
 per `docs/runbooks/site-sync-branch-flip.md`; that ceremony suspends this
 CronJob, after which nothing consumes platform releases for site delivery.

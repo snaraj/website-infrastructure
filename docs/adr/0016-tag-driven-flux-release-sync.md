@@ -181,7 +181,7 @@ routine site-pin release after activation rather than a dedicated release.
 - **2026-08-26:** the absent Kyverno posture was retired, and platform source
   selection was bound to signed immutable platform releases through the
   external selector and native narrow admission guard.
-- **2026-09-01 (owner ruling, issue #270):** site desired-state consumption
+- **2026-09-01 (owner ruling, issue #275):** site desired-state consumption
   was decoupled from platform releases. The measured incident: the live
   cluster served naranjo.online four releases behind its own published
   artifacts while every component truthfully reported healthy, because a
