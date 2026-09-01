@@ -431,7 +431,7 @@ class FluxTopologyContractTests(unittest.TestCase):
                 "  timeout: 5m0s\n",
                 1,
             ),
-            # Issue #270 decoupling: `main` is the ONE ref the no-bypass
+            # Issue #275 decoupling: `main` is the ONE ref the no-bypass
             # ruleset gates. Any other branch, and any reintroduced tag
             # selector, is outside the reviewed sync contract.
             "hostile branch": canonical.replace(
