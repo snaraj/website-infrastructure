@@ -706,6 +706,10 @@ class RewriteTests(unittest.TestCase):
         self.assertIn("Current selections: lidersea.com `0.1.41` and naranjo.online `0.1.99`, captured 2026-09-02 for issues #990", (self.root / "README.md").read_text())
         fragment = (self.root / "changelog.d/990-promote-naranjo-online-0-1-99.md").read_text()
         self.assertTrue(CONTRACT.FRAGMENT_PATH_RE.match("changelog.d/990-promote-naranjo-online-0-1-99.md"))
+        # The tool's fragment must pass the release-transition gate's own
+        # validator, or every promotion PR would fail its required check.
+        fragment_path = "changelog.d/990-promote-naranjo-online-0-1-99.md"
+        CONTRACT.validate_fragment_bytes(fragment_path, (self.root / fragment_path).read_bytes())
         self.assertTrue(all(line.startswith(("###", "- ")) or not line for line in fragment.splitlines()))
         self.assertIn("naranjo.online `0.1.99`", fragment)
 
