@@ -952,10 +952,17 @@ class RunbookCanonTests(unittest.TestCase):
         container-RELATIVE forms: same-line list indented code (bullet
         and ordered), a tab-padded marker, and a quote nested in a list
         item, each measured by GitHub's renderer as a real command
-        block. Each shape carries a verb OUTSIDE the five counted
-        tokens, so the residue sweep alone must catch it, and the pins
-        are what make each sweep clause undeletable. The honest
-        document stays clean."""
+        block. The round-10 and round-11 rows complete the boundary:
+        a chained marker (which kills a single-pass chain walk), the
+        two-space padding edge (which pins the exactly-one-space rule),
+        and one row per remaining marker spelling the grammar
+        recognizes — plus, star, paren-delimited ordered, and a
+        multi-digit ordered form — so narrowing either the chain walk
+        or the marker grammar to the spellings the other rows happen to
+        use turns a named row red. Each shape carries a verb OUTSIDE
+        the five counted tokens, so the residue sweep alone must catch
+        it, and the pins are what make each sweep clause undeletable.
+        The honest document stays clean."""
 
         text = RUNBOOK.read_text()
         self.assertEqual(canon_residue_violations(text), [])
@@ -980,6 +987,14 @@ class RunbookCanonTests(unittest.TestCase):
                 "- 1.      helm rollback site 1\n"
             ),
             "two-space list-marker padding": "-  helm rollback site 1\n",
+            "plus-marker same-line code": "+      helm rollback site 1\n",
+            "star-marker same-line code": "*      helm rollback site 1\n",
+            "paren-ordered same-line code": (
+                "1)      helm rollback site 1\n"
+            ),
+            "multi-digit ordered same-line code": (
+                "12.      helm rollback site 1\n"
+            ),
         }.items():
             with self.subTest(shape=label):
                 violations = canon_residue_violations(text + "\n" + block)
