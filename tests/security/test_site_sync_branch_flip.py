@@ -429,11 +429,31 @@ class PrestateAndPatchTests(ScratchMixin, unittest.TestCase):
 
     def test_prestate_captures_the_bounded_semantic_document(self):
         document = self.capture(live_gitrepository())
-        self.assertEqual(document["schema"], "site-sync-branch-flip/prestate/v2")
+        self.assertEqual(document["schema"], "site-sync-branch-flip/prestate/v3")
         self.assertEqual(document["ref"], {"tag": "v0.1.54"})
         self.assertEqual(document["spec"]["url"], flip.SOURCE_URL)
         self.assertEqual(
             sorted(document["annotations"]), sorted(flip.RESERVED_ANNOTATIONS)
+        )
+
+    def test_prestate_captures_foreign_annotations_whole(self):
+        """An annotation beyond the reserved nine (a prior ceremony's
+        reconcile request stamp, say) is CAPTURED, not refused — the
+        patches test the complete map by equality, so a partial capture
+        could not express that test, and refusing would strand any object
+        a legitimate operator action ever annotated."""
+
+        annotated = live_gitrepository()
+        annotated["metadata"]["annotations"][
+            "reconcile.fluxcd.io/requestedAt"
+        ] = "2026-08-31T00:00:00Z"
+        document = self.capture(annotated)
+        self.assertEqual(
+            document["annotations"]["reconcile.fluxcd.io/requestedAt"],
+            "2026-08-31T00:00:00Z",
+        )
+        self.assertEqual(
+            len(document["annotations"]), len(flip.RESERVED_ANNOTATIONS) + 1
         )
 
     def test_the_closed_source_shape_refuses_every_escape(self):
@@ -496,47 +516,66 @@ class PrestateAndPatchTests(ScratchMixin, unittest.TestCase):
             flip.prestate(live_gitrepository(), private)
 
     def test_both_patches_test_the_complete_captured_boundary(self):
-        """UID, every bounded non-ref spec field, all nine reserved
-        annotations, and the contested ref — atomically, in the patch
-        itself (round-3 security finding 1: a boundary tested only after
-        application leaves a race in which a foreign URL rides through)."""
+        """WHOLE-OBJECT equality tests — UID, the entire annotations map,
+        the entire spec with the direction's ref — then one ref
+        replacement, and nothing else. Round-6 security finding (both
+        reviewers): a per-key test list refuses a changed field but not
+        an ADDED one, so a credential-bearing spec key introduced after
+        capture rode through both directions; only equality over the
+        whole object refuses additions, removals, and changes alike."""
 
         document = self.capture(live_gitrepository())
-        forward = json.loads(flip.flip_patch(document))
-        tested = {op["path"] for op in forward if op["op"] == "test"}
-        self.assertIn("/metadata/uid", tested)
-        for key in sorted(flip.SOURCE_SPEC_KEYS - {"ref"}):
-            self.assertIn("/spec/" + key, tested)
-        annotation_tests = [
-            path for path in tested if path.startswith("/metadata/annotations/")
+        base = {
+            key: document["spec"][key]
+            for key in sorted(flip.SOURCE_SPEC_KEYS - {"ref"})
+        }
+        guards = [
+            {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+            {
+                "op": "test",
+                "path": "/metadata/annotations",
+                "value": document["annotations"],
+            },
         ]
         self.assertEqual(
-            len(annotation_tests), len(flip.RESERVED_ANNOTATIONS)
-        )
-        self.assertEqual(
-            forward[-3:],
-            [
-                {"op": "test", "path": "/spec/ref/tag", "value": "v0.1.54"},
-                {"op": "remove", "path": "/spec/ref/tag"},
-                {"op": "add", "path": "/spec/ref/branch", "value": "main"},
+            json.loads(flip.flip_patch(document)),
+            guards
+            + [
+                {
+                    "op": "test",
+                    "path": "/spec",
+                    "value": {**base, "ref": {"tag": "v0.1.54"}},
+                },
+                {
+                    "op": "replace",
+                    "path": "/spec/ref",
+                    "value": {"branch": "main"},
+                },
             ],
         )
-        backward = json.loads(flip.rollback_patch(document))
         self.assertEqual(
-            backward[-3:],
-            [
-                {"op": "test", "path": "/spec/ref/branch", "value": "main"},
-                {"op": "remove", "path": "/spec/ref/branch"},
-                {"op": "add", "path": "/spec/ref/tag", "value": "v0.1.54"},
+            json.loads(flip.rollback_patch(document)),
+            guards
+            + [
+                {
+                    "op": "test",
+                    "path": "/spec",
+                    "value": {**base, "ref": {"branch": "main"}},
+                },
+                {
+                    "op": "replace",
+                    "path": "/spec/ref",
+                    "value": {"tag": "v0.1.54"},
+                },
             ],
         )
 
     def test_the_emitted_patches_refuse_post_capture_drift(self):
-        """The round-3 security race, semantically: applying the emitted
-        patch to an object whose URL (or any bounded field, or a reserved
-        annotation) moved AFTER capture must fail its test operations —
-        the API server refuses the mutation; no post-hoc check is the
-        defense."""
+        """The round-3 and round-6 security races, semantically: applying
+        the emitted patch to an object whose URL moved, whose reserved
+        annotation moved, or which gained a spec key or an annotation the
+        capture never saw must fail its test operations — the API server
+        refuses the mutation; no post-hoc check is the defense."""
 
         document = self.capture(live_gitrepository())
         honest = apply_patch(
@@ -556,6 +595,25 @@ class PrestateAndPatchTests(ScratchMixin, unittest.TestCase):
             apply_patch(
                 moved_annotation, json.loads(flip.flip_patch(document))
             )
+        credentialed = live_gitrepository(
+            spec_overrides={"secretRef": {"name": "creds"}}
+        )
+        with self.assertRaises(AssertionError):
+            apply_patch(credentialed, json.loads(flip.flip_patch(document)))
+        credentialed_back = live_gitrepository(
+            ref={"branch": "main"},
+            spec_overrides={"secretRef": {"name": "creds"}},
+        )
+        with self.assertRaises(AssertionError):
+            apply_patch(
+                credentialed_back, json.loads(flip.rollback_patch(document))
+            )
+        annotated = live_gitrepository()
+        annotated["metadata"]["annotations"][
+            "reconcile.fluxcd.io/requestedAt"
+        ] = "post-capture"
+        with self.assertRaises(AssertionError):
+            apply_patch(annotated, json.loads(flip.flip_patch(document)))
         drifted_back = live_gitrepository(
             ref={"branch": "main"},
             spec_overrides={"sparseCheckout": ["kubernetes"]},
@@ -594,6 +652,12 @@ class PrestateAndPatchTests(ScratchMixin, unittest.TestCase):
         )
         with self.assertRaises(SystemExit):
             flip.state_matches(moved, document, {"branch": "main"})
+        gained = live_gitrepository(
+            ref={"branch": "main"},
+            spec_overrides={"secretRef": {"name": "creds"}},
+        )
+        with self.assertRaises(SystemExit):
+            flip.state_matches(gained, document, {"branch": "main"})
 
 
 class VerifyLiveTests(unittest.TestCase):
@@ -750,26 +814,67 @@ class RunbookCanonTests(unittest.TestCase):
     def test_the_fenced_blocks_are_exactly_the_canon(self):
         """Complete extraction, complete equality (round-3 security
         finding 3): every fenced block's ENTIRE content — ordered — must
-        equal the canon, and the fence count proves no other fence of any
-        kind exists. A line appended INSIDE an existing fence after the
-        canonical text (the review's bypass form) changes that fence's
-        extracted bytes and goes red, where an anchored-substring match
-        stayed green."""
+        equal the canon. The fence inventory is proven under the FULL
+        CommonMark opener grammar (round-6 finding 2: counting literal
+        triple-backticks admits a tilde or longer-run fence carrying an
+        unreviewed block): every line that any Markdown renderer can
+        treat as a fence — three-plus backticks or tildes, up to three
+        leading spaces, any info string — must be exactly the reviewed
+        ```sh opener or bare closer at column 0, alternating, 2N lines
+        total. A line appended INSIDE an existing fence changes that
+        fence's extracted bytes and goes red."""
 
         text = RUNBOOK.read_text()
         fences = tuple(re.findall(r"(?ms)^```sh\n(.*?)^```$", text))
         self.assertEqual(fences, flip.CEREMONY_BLOCKS)
-        self.assertEqual(text.count("```"), 2 * len(flip.CEREMONY_BLOCKS))
+        fence_lines = [
+            line
+            for line in text.split("\n")
+            if re.match(r"^ {0,3}(?:`{3,}|~{3,})", line)
+        ]
+        self.assertEqual(
+            fence_lines, ["```sh", "```"] * len(flip.CEREMONY_BLOCKS)
+        )
+
+    def test_no_code_block_or_html_exists_outside_the_fences(self):
+        """CommonMark's other executable-looking containers (round-6
+        finding 2's class): indented code blocks, and HTML pre/code/
+        script blocks or comments that could carry an invocation past
+        the token counts. The fence walk below is sound because the
+        test above proves the only fence lines are the reviewed
+        openers and closers."""
+
+        text = RUNBOOK.read_text()
+        inside = False
+        for number, line in enumerate(text.split("\n"), start=1):
+            if line in ("```sh", "```"):
+                inside = not inside
+                continue
+            if not inside:
+                self.assertFalse(
+                    line.startswith("    "),
+                    "line {}: indented code block outside the canon".format(
+                        number
+                    ),
+                )
+        lowered = text.lower()
+        for marker in ("<pre", "<code", "<script", "<!--"):
+            self.assertNotIn(marker, lowered)
 
     def test_no_invocation_exists_outside_the_canonical_blocks(self):
+        """Bare tokens, not line-anchored ones (round-6 review LOW): a
+        leading-newline token count admitted a mid-sentence or inline
+        invocation; the document must carry each verb exactly as often
+        as the canon does, anywhere."""
+
         text = RUNBOOK.read_text()
-        canon = "\n" + "".join(flip.CEREMONY_BLOCKS)
+        canon = "".join(flip.CEREMONY_BLOCKS)
         for token in (
-            "\nkubectl ",
-            "\npython3 ",
-            "\nflux ",
-            "\ngh api ",
-            "\nscratch=",
+            "kubectl ",
+            "python3 ",
+            "flux ",
+            "gh api ",
+            "scratch=",
         ):
             with self.subTest(token=token.strip()):
                 self.assertEqual(text.count(token), canon.count(token))
