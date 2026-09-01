@@ -10,13 +10,17 @@ counted substitution, and opens the Draft promotion pull request with both
 review lanes armed. It flips Ready only when the exact head carries two
 distinct adversarial APPROVE receipts in the repository's canonical receipt
 shape, both required checks green from GitHub Actions and a current base,
-all read at the moment of the flip and read AGAIN after it: the security
-routing label leaves only when the same judgment still passes at the same
-head. A head, receipt, label, check or base that changes during the flip is
-compensated: Draft is restored and both lanes re-armed, and the restore is
-claimed only from a read that shows Draft with both lanes. A restore that
-cannot be proven posts a `promoter-alert unresolved-ready` DO NOT MERGE
-comment on the pull request and fails loudly for the operator. The owner alone merges. The deploy-assurance watchdog stays the loud
+all read at the moment of the flip, read AGAIN after it, and read once more
+after the security routing label leaves: each read must pass the same
+judgment at the same head. A head, receipt, label, check or base that
+changes across those reads is compensated: Draft is restored and both lanes
+re-armed, and the restore is claimed only from a read that shows Draft with
+both lanes. A restore that cannot be proven posts a
+`promoter-alert unresolved-ready` comment stating exactly what was observed
+and fails loudly for the operator. Ready never outlives its authorization:
+every tick re-judges an open Ready promotion pull request and withdraws it
+to Draft with both lanes re-armed (`promoter-note ready-withdrawn`) the
+moment its head no longer carries it. The owner alone merges. The deploy-assurance watchdog stays the loud
 backstop: a promotion the tool cannot open leaves the watchdog's drift issue
 open, with one comment naming the failed step.
 

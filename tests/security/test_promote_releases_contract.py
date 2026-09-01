@@ -221,6 +221,8 @@ class FakeFleet:
                 # Answers that change between reads: the live forge moving
                 # under the tool. The last answer stays.
                 answer = answer.popleft() if len(answer) > 1 else answer[0]
+            if isinstance(answer, Exception):
+                raise answer
             return json.dumps(answer)
         if argv[:3] == ["cosign", "version", "--json"]:
             return json.dumps({"gitVersion": "v3.1.3"})
@@ -497,6 +499,12 @@ class CeremonyTests(unittest.TestCase):
         def dot_prefixed_twin(f):
             archive(f, good(f) + [(f"./{f.slug}/Chart.yaml", f.chart_yaml.replace(b"name: ", b"name: x"), tarfile.REGTYPE)])
 
+        def unrelated_symlink(f):
+            archive(f, [(f"{f.slug}/Chart.yaml", f.chart_yaml, tarfile.REGTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE), (f"{f.slug}/templates/link.yaml", b"", tarfile.SYMTYPE)])
+
+        def unrelated_hardlink(f):
+            archive(f, [(f"{f.slug}/Chart.yaml", f.chart_yaml, tarfile.REGTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE), (f"{f.slug}/templates/link.yaml", b"", tarfile.LNKTYPE)])
+
         def symlinked_chart_yaml(f):
             archive(f, [(f"{f.slug}/Chart.yaml", b"", tarfile.SYMTYPE), (f"{f.slug}/values.yaml", f.values_yaml, tarfile.REGTYPE)])
 
@@ -556,6 +564,8 @@ class CeremonyTests(unittest.TestCase):
             "duplicate Chart.yaml entries": (duplicate_chart_yaml, "more than once"),
             "dot-prefixed twin of Chart.yaml": (dot_prefixed_twin, "more than once"),
             "symlinked Chart.yaml": (symlinked_chart_yaml, "not a regular file"),
+            "unrelated symlink under templates": (unrelated_symlink, "not a regular file"),
+            "unrelated hardlink under templates": (unrelated_hardlink, "not a regular file"),
             "entry outside the archive root": (entry_outside_root, "outside the archive root"),
             "too many entries": (too_many_entries, f"more than {MODULE.ARCHIVE_MEMBER_CEILING} entries"),
             "oversized Chart.yaml": (oversized_chart_yaml, f"exceeds {MODULE.CHART_FILE_CEILING} bytes"),
@@ -707,7 +717,7 @@ def hostile_tar(entries) -> bytes:
         for name, data, kind in entries:
             info = tarfile.TarInfo(name)
             info.type = kind
-            if kind == tarfile.SYMTYPE:
+            if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
                 info.linkname = "values.yaml"
                 archive.addfile(info)
             elif kind == tarfile.DIRTYPE:
@@ -1158,7 +1168,7 @@ class TickTests(unittest.TestCase):
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque(
             [pr_record(300, branch, stale), pr_record(300, branch, live), pr_record(300, branch, live, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)]
         )
-        with self.assertRaisesRegex(MODULE.Refusal, "returned to Draft \\(proven at head " + live + ", moved from " + stale + "\\).*head moved while it was being flipped"):
+        with self.assertRaisesRegex(MODULE.Refusal, "returned to Draft \\(proven at head " + live + ", moved from " + stale + "\\).*head moved after the flip"):
             MODULE.consider_ready(github, 300, False)
         kinds = [m[0] for m in self.mutations]
         self.assertEqual(kinds.count("pr-ready"), 1)
@@ -1259,8 +1269,10 @@ class TickTests(unittest.TestCase):
         # Second tick: the pull request is open at exact head with both verdicts.
         record = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[record]]
-        # The mutation-boundary read sees Draft; the post-flip read sees Ready.
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([record, dict(record, draft=False)])
+        # The mutation-boundary read sees Draft; the post-flip read sees Ready;
+        # the read after the routing label left sees it gone.
+        label_gone = dict(record, draft=False, labels=[{"name": n} for n in MODULE.PR_LABELS])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([record, dict(record, draft=False), label_gone])
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [[
             bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
@@ -1282,12 +1294,23 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(ready_note), 1)
         self.assertIn("two distinct exact-head adversarial", json.loads(ready_note[0][2])["body"])
 
-        # Third tick: one verdict withdrawn -> the same head stays Draft.
+        # Third tick: one verdict withdrawn from the now-Ready pull request ->
+        # Ready is withdrawn: note, undo, both lanes re-armed, proven by a read.
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"][0].pop()
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([label_gone, restored])
         self.mutations.clear()
-        MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
-        self.assertEqual([m[0] for m in self.mutations], [])
-        self.assertTrue(any("two are required" in line for line in self.log_lines))
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 0)
+        kinds = [m[0] for m in self.mutations]
+        self.assertEqual(kinds.count("pr-ready"), 0)
+        self.assertEqual(kinds.count("pr-ready-undo"), 1)
+        notes = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].startswith(f"`promoter-note ready-withdrawn head={head}`"))
+        self.assertIn("two are required", notes[0])
+        self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        self.assertTrue(any("compensated, returned to Draft (proven at head " + head + ")" in line for line in self.log_lines))
 
         # Fourth tick: a truncated check-run listing is refused, not judged.
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"]["total_count"] = 150
@@ -1368,9 +1391,11 @@ class TickTests(unittest.TestCase):
             MODULE.consider_ready(github, 300, False)
         self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
         self.assertEqual(len(self.writes("/issues/300/labels")), 1)
-        # (c) The proven flip: label removed only after Ready, one note.
+        # (c) The proven flip: label removed only after Ready, its removal
+        # proven by a third read, one note.
         self.mutations.clear()
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, dict(armed, draft=False)])
+        label_gone = dict(armed, draft=False, labels=[{"name": n} for n in MODULE.PR_LABELS])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, dict(armed, draft=False), label_gone])
         self.assertTrue(MODULE.consider_ready(github, 300, False))
         kinds = [m[0] for m in self.mutations]
         cleared = self.writes("/labels/cybersecurity-review-requested")
@@ -1470,6 +1495,98 @@ class TickTests(unittest.TestCase):
                 )
                 self.assertEqual(len(self.writes("/issues/300/labels")), 1)
 
+    def test_every_authorization_input_is_re_proven_after_the_routing_label_leaves(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head, other = "d" * 40, "f" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        approvals = [
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]
+        blocking = bot_comment(f"HEAD: {head}\nVERDICT: REQUEST-CHANGES\n\nmutation claim\n\n- Daybreak (adversarial reviewer)\n")
+        green = [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]
+        armed = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
+        flipped = dict(armed, draft=False)
+        cleared = dict(flipped, labels=[{"name": n} for n in MODULE.PR_LABELS])
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        cases = {
+            "same-head blocking receipt after the label left": ({"comments": approvals + [blocking]}, "changed after the routing label left.*REQUEST-CHANGES"),
+            "requires-review renewed after the label left": ({"pr": dict(cleared, labels=[{"name": n} for n in MODULE.PR_LABELS + ("requires-review",)])}, "changed after the routing label left.*requires-review is still armed"),
+            "required check regressed after the label left": ({"checks": [dict(green[0], conclusion="failure")] + green[1:]}, "changed after the routing label left.*has not succeeded"),
+            "required check duplicated after the label left": ({"checks": green + [dict(green[0], app={"slug": "mallory-ci"})]}, "changed after the routing label left.*appears 2 times"),
+            "base drifted after the label left": ({"behind": 1}, "changed after the routing label left.*behind main"),
+            "head moved after the label left": ({"pr": dict(cleared, head=dict(cleared["head"], sha=other))}, "the head moved after the routing label left"),
+            "routing label still present after its removal": ({"pr": flipped}, "still present after its removal"),
+        }
+        for name, (third, expected) in cases.items():
+            with self.subTest(case=name):
+                self.mutations.clear()
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, flipped, third.get("pr", cleared), restored])
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque([[approvals], [approvals], [third.get("comments", approvals)]])
+                for h in (head, other):
+                    self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{h}"] = collections.deque([{"behind_by": 0}, {"behind_by": 0}, {"behind_by": third.get("behind", 0)}])
+                    self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{h}/check-runs?per_page=100"] = collections.deque([
+                        {"total_count": len(green), "check_runs": green},
+                        {"total_count": len(green), "check_runs": green},
+                        {"total_count": len(third.get("checks", green)), "check_runs": third.get("checks", green)},
+                    ])
+                with self.assertRaisesRegex(MODULE.Refusal, "compensated, returned to Draft.*" + expected):
+                    MODULE.consider_ready(github, 300, False)
+                kinds = [m[0] for m in self.mutations]
+                cleared_writes = self.writes("/labels/cybersecurity-review-requested")
+                self.assertEqual(len(cleared_writes), 1, "the routing label was removed once, after the proven flip")
+                self.assertLess(kinds.index("pr-ready"), self.mutations.index(cleared_writes[0]))
+                self.assertLess(self.mutations.index(cleared_writes[0]), kinds.index("pr-ready-undo"))
+                rearmed = self.writes("/issues/300/labels")
+                self.assertEqual(len(rearmed), 1)
+                self.assertEqual(json.loads(rearmed[0][2])["labels"], list(MODULE.REVIEW_LABELS), "compensation restores the routing label it removed")
+                self.assertEqual(self.writes("/issues/300/comments"), [], "no READY note, no alert: the restore was proven")
+
+    def test_ready_never_outlives_its_authorization(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head = "d" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        approvals = [
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n"),
+            bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Codex (adversarial reviewer)\n"),
+        ]
+        blocking = bot_comment(f"HEAD: {head}\nVERDICT: REQUEST-CHANGES\n\nmutation claim\n\n- Daybreak (adversarial reviewer)\n")
+        ready = pr_record(300, branch, head, draft=False, labels=MODULE.PR_LABELS)
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
+        # Authorization holds: an already-Ready pull request is left alone.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = ready
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals]
+        self.assertFalse(MODULE.consider_ready(github, 300, False))
+        self.assertEqual(self.mutations, [])
+        self.assertTrue(any("authorization holds" in line for line in self.log_lines))
+        # A same-head REQUEST-CHANGES lands after the flip: dry run names it,
+        # the live tick withdraws Ready and proves the restore.
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals + [blocking]]
+        self.assertFalse(MODULE.consider_ready(github, 300, True))
+        self.assertEqual(self.mutations, [])
+        self.assertTrue(any("WOULD be withdrawn" in line and "REQUEST-CHANGES" in line for line in self.log_lines))
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([ready, restored])
+        self.assertFalse(MODULE.consider_ready(github, 300, False))
+        kinds = [m[0] for m in self.mutations]
+        self.assertEqual(kinds.count("pr-ready"), 0)
+        self.assertEqual(kinds.count("pr-ready-undo"), 1)
+        notes = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].startswith(f"`promoter-note ready-withdrawn head={head}`"))
+        self.assertIn("REQUEST-CHANGES receipt binds this head", notes[0])
+        self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        self.assertLess(self.mutations.index(self.writes("/issues/300/comments")[0]), kinds.index("pr-ready-undo"), "the note precedes the withdrawal")
+        # An unprovable withdrawal is the same operator-blocking state.
+        self.mutations.clear()
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([ready, ready])
+        with self.assertRaisesRegex(MODULE.UnresolvedReady, "OPERATOR ACTION REQUIRED"):
+            MODULE.consider_ready(github, 300, False)
+        bodies = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("promoter-alert unresolved-ready", bodies[1])
+
     def test_ready_undo_response_loss_never_claims_unproven_restoration(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
         head = "e" * 40
@@ -1510,8 +1627,8 @@ class TickTests(unittest.TestCase):
         }
         self.fail_undo = True
         with self.assertRaisesRegex(
-            MODULE.Refusal,
-            "OPERATOR ACTION REQUIRED.*did not prove head.*undo response lost",
+            MODULE.UnresolvedReady,
+            "OPERATOR ACTION REQUIRED.*did not prove Draft.*undo response lost",
         ):
             MODULE.consider_ready(github, 300, False)
         self.assertEqual(self.writes("/labels/cybersecurity-review-requested"), [])
@@ -1520,7 +1637,28 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1, "the unresolved state is surfaced on the pull request itself")
         self.assertTrue(alerts[0].startswith(f"`promoter-alert unresolved-ready head={head}`"))
         self.assertIn("DO NOT MERGE", alerts[0])
+        self.assertIn(f"Observed: READY at head {head}; missing labels: requires-review.", alerts[0])
+        self.assertNotIn("re-armed", alerts[0], "an unproven restore never claims the lanes are armed")
         self.assertTrue(alerts[0].rstrip().endswith(MODULE.SIGNATURE.strip()))
+
+        def alert_after(proof, expect_observed):
+            self.mutations.clear()
+            self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, still_ready, proof])
+            self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque(
+                [[comments], [comments + [blocking]]]
+            )
+            with self.assertRaisesRegex(MODULE.UnresolvedReady, "OPERATOR ACTION REQUIRED"):
+                MODULE.consider_ready(github, 300, False)
+            bodies = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
+            self.assertEqual(len(bodies), 1)
+            self.assertIn(f"Observed: {expect_observed}.", bodies[0])
+            self.assertNotIn("re-armed", bodies[0])
+
+        # The proof read cannot be made at all.
+        alert_after(MODULE.Refusal("`gh api` exited 1: gh: Not Found (HTTP 404)"), "the pull request could not be read back as an owned promoter pull request")
+        # The head moved and the pull request is still Ready there.
+        other = "f" * 40
+        alert_after(dict(still_ready, head=dict(still_ready["head"], sha=other)), f"READY at head {other}, moved from {head}; missing labels: requires-review")
         # The undo response is lost but the proof read shows Draft with both
         # lanes: restoration is claimed from the read alone, no alert.
         self.mutations.clear()
@@ -1533,15 +1671,9 @@ class TickTests(unittest.TestCase):
             MODULE.consider_ready(github, 300, False)
         self.assertEqual(self.writes("/issues/300/comments"), [])
         self.assertTrue(any("transport was ambiguous" in line for line in self.log_lines))
-        # Draft proven but a lane missing is NOT a proven restore.
-        self.mutations.clear()
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([armed, still_ready, armed])
-        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = collections.deque(
-            [[comments], [comments + [blocking]]]
-        )
-        with self.assertRaisesRegex(MODULE.Refusal, "OPERATOR ACTION REQUIRED"):
-            MODULE.consider_ready(github, 300, False)
-        self.assertEqual(len(self.writes("/issues/300/comments")), 1)
+        # Draft proven but a lane missing is NOT a proven restore, and the
+        # alert says exactly which lane the read did not show.
+        alert_after(armed, f"Draft at head {head}; missing labels: requires-review")
         self.fail_undo = False
 
     def test_lock_and_dirty_clone_guards(self):
@@ -1604,6 +1736,22 @@ class HermeticGitTests(unittest.TestCase):
         bare = hermetic_git_environment()
         self.assertNotIn("GIT_CONFIG_COUNT", bare)
         self.assertNotEqual(subprocess.run(["git", "config", "--get", "maintenance.auto"], capture_output=True, text=True, env=bare).stdout.strip(), "false")
+
+
+    def test_every_command_runs_with_git_auto_maintenance_pinned_off(self):
+        # The production path: run_command pins the maintenance keys into
+        # every command's environment, extending an existing GIT_CONFIG set.
+        quiet = quiet_git_environment()
+        pinned = MODULE.pinned_environment(quiet)
+        self.assertEqual(int(pinned["GIT_CONFIG_COUNT"]), int(quiet["GIT_CONFIG_COUNT"]) + len(MODULE.GIT_MAINTENANCE_PINS))
+        for index in range(int(quiet["GIT_CONFIG_COUNT"])):
+            self.assertEqual(pinned[f"GIT_CONFIG_KEY_{index}"], quiet[f"GIT_CONFIG_KEY_{index}"])
+        bare = hermetic_git_environment()
+        for key, value in MODULE.GIT_MAINTENANCE_PINS:
+            self.assertEqual(MODULE.run_command(["git", "config", "--get", key], env=bare).strip(), value, f"{key} must reach git under run_command")
+            self.assertEqual(MODULE.run_command(["sh", "-c", f"git config --get {key}"], env=bare).strip(), value, f"{key} must reach a git started by an intermediate command")
+        self.assertEqual(MODULE.run_command(["git", "config", "--get", "maintenance.auto"]).strip(), "false", "the pins apply when the caller passes no environment")
+        self.assertNotIn("GIT_CONFIG_COUNT", bare, "run_command never mutates the caller's mapping")
 
 
 class RunbookAndLaunchdTests(unittest.TestCase):

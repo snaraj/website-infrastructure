@@ -381,11 +381,36 @@ class Registry:
         return body
 
 
+GIT_MAINTENANCE_PINS = (("gc.auto", "0"), ("gc.autoDetach", "false"), ("maintenance.auto", "false"))
+
+
+def pinned_environment(env=None) -> dict:
+    """The environment every command runs in: the caller's (or the
+    process's) plus git's post-command auto maintenance pinned OFF through
+    ``GIT_CONFIG_COUNT``, appended after any entries already present. After
+    ``fetch`` and ``commit`` git otherwise detaches a ``maintenance run
+    --auto`` child into its own session, the one known way a command the
+    tick runs — directly or under ``make``/``gh`` — leaves the session the
+    tick supervises."""
+
+    merged = dict(os.environ if env is None else env)
+    start = int(merged.get("GIT_CONFIG_COUNT", "0") or 0)
+    for offset, (key, value) in enumerate(GIT_MAINTENANCE_PINS):
+        merged[f"GIT_CONFIG_KEY_{start + offset}"] = key
+        merged[f"GIT_CONFIG_VALUE_{start + offset}"] = value
+    merged["GIT_CONFIG_COUNT"] = str(start + len(GIT_MAINTENANCE_PINS))
+    return merged
+
+
 def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEOUT_SECONDS) -> str:
-    """Run one command in its own process group and return its stdout; a
-    non-zero exit, or a hang past ``timeout`` seconds, is a Refusal. On
-    completion and on timeout the whole group is killed before returning,
-    so no descendant of a command outlives the tick's lock. The refusal
+    """Run one command as the leader of its own session and return its
+    stdout; a non-zero exit, or a hang past ``timeout`` seconds, is a
+    Refusal. On completion and on timeout the whole process group is killed
+    before returning, so no descendant IN THAT SESSION outlives the tick's
+    lock. A descendant that starts a session of its own is outside this
+    boundary: the commands the tick runs are a fixed set (git, gh, make,
+    cosign and the gates), and their one known detaching path — git's auto
+    maintenance — is pinned off in every command's environment. The refusal
     names the program and its subcommand only — never the full argv, which
     can carry workstation paths."""
 
@@ -396,7 +421,7 @@ def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEO
         stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env,
+        env=pinned_environment(env),
         text=True,
         start_new_session=True,
     )
@@ -429,11 +454,11 @@ def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEO
 
 
 def _kill_process_group(process) -> None:
-    """Kill everything in the command's private session — the group id is
-    the child's pid because it was started as a session leader — then reap
-    the direct child. A descendant that detached its output is included;
-    the group is signalled before the child is reaped so its id cannot be
-    reused in between."""
+    """Kill everything in the command's process group — its id is the
+    child's pid because it was started as a session leader — then reap the
+    direct child. A descendant that detached its output but stayed in the
+    session is included; the group is signalled before the child is reaped
+    so its id cannot be reused in between."""
 
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -662,9 +687,10 @@ def chart_members(layer: bytes, names: tuple) -> dict:
     bounded streaming pass. Every entry path is normalized and must be
     unique — a second entry for a path, or a ``./``-prefixed twin, is
     refused outright rather than resolved, because Helm's choice among such
-    entries need not be this tool's — and each wanted name must be exactly
-    one regular file within the per-file ceiling. Entries outside the
-    archive root are refused."""
+    entries need not be this tool's — every entry must be a regular file or
+    a directory (a link or device anywhere in the chart is refused), and
+    each wanted name must be a regular file within the per-file ceiling.
+    Entries outside the archive root are refused."""
 
     wanted = set(names)
     found, seen, count = {}, set(), 0
@@ -681,6 +707,8 @@ def chart_members(layer: bytes, names: tuple) -> dict:
                 if normalized in seen:
                     raise Refusal(f"chart layer carries {normalized} more than once")
                 seen.add(normalized)
+                if not (member.isfile() or member.isdir()):
+                    raise Refusal(f"chart layer member {normalized} is not a regular file")
                 if normalized not in wanted:
                     continue
                 if not member.isfile():
@@ -1713,14 +1741,20 @@ def ready_snapshot(github: GitHub, number: int) -> dict | None:
     return dict(pr, behind_by=behind_by, comments=comments, checks=checks)
 
 
-def compensate_ready(github: GitHub, number: int, head: str, cause: Refusal) -> None:
-    """Return a failed transition to exact-head Draft and re-arm both lanes.
+class UnresolvedReady(Refusal):
+    """A Ready transition that failed AND whose restore to Draft with both
+    review lanes could not be proven by a read: operator action required."""
 
-    Command responses are not proof. Even if the undo or label write reports
-    failure, a final pull-request read decides whether the exact head is
-    demonstrably Draft with both review lanes armed. Anything less is a loud
-    operator-blocking refusal and is never described as restored.
-    """
+
+def compensate_ready(github: GitHub, number: int, head: str, cause: Refusal) -> str:
+    """Return a failed or lapsed Ready to exact-head Draft and re-arm both
+    lanes; the returned message CLAIMS only what a final read proved.
+
+    Command responses are not proof. Even if the undo or label write
+    reports failure, a final pull-request read decides whether the pull
+    request is demonstrably Draft with both review lanes armed. Anything
+    less posts an alert on the pull request that states what was observed
+    — never a restoration it did not see — and raises UnresolvedReady."""
 
     transport = []
     try:
@@ -1743,97 +1777,116 @@ def compensate_ready(github: GitHub, number: int, head: str, cause: Refusal) -> 
     # Draft is pull-request state, not commit state: a Draft read at ANY
     # head proves the Ready this tick caused no longer exists, while a head
     # that moved meanwhile is named rather than silently accepted.
-    proven = (
-        restored is not None
-        and restored["draft"]
-        and set(REVIEW_LABELS) <= set(restored["labels"])
-    )
-    if not proven:
-        details = "; ".join(transport) if transport else "mutation responses were nominal"
+    if restored is None:
+        observed = "the pull request could not be read back as an owned promoter pull request"
+        missing = set(REVIEW_LABELS)
+    else:
+        missing = set(REVIEW_LABELS) - set(restored["labels"])
+        where = f"head {restored['head']}" + (f", moved from {head}" if restored["head"] != head else "")
+        observed = ("Draft" if restored["draft"] else "READY") + f" at {where}"
+        observed += ("; missing labels: " + ", ".join(sorted(missing))) if missing else "; both review lanes present"
+    details = "; ".join(transport) if transport else "mutation responses were nominal"
+    if restored is None or not restored["draft"] or missing:
         # The alert lives on the pull request itself, where the merge click
-        # is, and names the head so the operator can see exactly what to
-        # restore; the tick's own failure is the second, local surface.
+        # is, and says only what the final read showed; the tick's own
+        # failure is the second, local surface.
         github.mutate(
             f"repos/{REPOSITORY}/issues/{number}/comments",
             "POST",
             body={
                 "body": (
                     f"`promoter-alert unresolved-ready head={head}`\n\nThe promoter's Ready transition "
-                    "failed and the Draft restore could NOT be proven; both review lanes are re-armed. "
-                    "DO NOT MERGE until an operator returns this pull request to Draft.\n\n"
+                    "failed and the restore to Draft with both review lanes could NOT be proven. "
+                    f"Observed: {observed}. Transport: {redact(details)[:300]}. DO NOT MERGE until an "
+                    "operator returns this pull request to Draft and arms both review lanes.\n\n"
                     f"```\n{redact(str(cause))[:400]}\n```\n\n{SIGNATURE}"
                 )
             },
         )
-        raise Refusal(
+        raise UnresolvedReady(
             f"PR #{number}: OPERATOR ACTION REQUIRED: Ready compensation after {cause} "
-            f"did not prove head {head} is Draft with both review lanes armed; {details}"
+            f"did not prove Draft with both review lanes armed; observed {observed}; {details}"
         ) from None
     if transport:
         log(
             f"PR #{number}: compensation transport was ambiguous but the final "
             "Draft and review-lane state was proven: " + "; ".join(transport)
         )
-    where = f"head {restored['head']}" if restored["head"] == head else f"head {restored['head']}, moved from {head}"
-    raise Refusal(
-        f"PR #{number}: Ready transition compensated, returned to Draft (proven at {where}) and "
-        f"both lanes re-armed: {cause}"
-    ) from None
+    return f"PR #{number}: Ready transition compensated, returned to Draft (proven at {where}) and both lanes re-armed: {cause}"
 
 
 def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
     """Judge ONE pull request from a fresh read taken at the mutation
     boundary, never from the tick's earlier listing: head, base, Draft
     state, labels and freshness are re-bound now, and the receipts and
-    checks are derived for exactly that head. After the flip every one of
-    those inputs is read and judged again before the routing label can move.
-    Any changed authorization is compensated, and restoration is claimed
-    only after a final exact-head Draft plus both review labels is observed."""
+    checks are derived for exactly that head. The flip is read and judged
+    again after `gh pr ready` and once more after the security routing
+    label leaves; any changed authorization is compensated, and restoration
+    is claimed only from a final read showing Draft plus both review lanes.
+    Ready never outlives its authorization: an open Ready promoter pull
+    request whose head no longer carries it is withdrawn to Draft with both
+    lanes re-armed on the tick that sees it."""
 
     pr = ready_snapshot(github, number)
     if pr is None:
         log(f"PR #{number} is not an owned promoter pull request at the mutation boundary; nothing done")
         return False
-    ready, reasons = ready_decision(
-        pr["head"],
-        pr["labels"],
-        pr["comments"],
-        pr["checks"],
-        pr["behind_by"],
-        pr["draft"],
+    authorized, reasons = ready_decision(
+        pr["head"], pr["labels"], pr["comments"], pr["checks"], pr["behind_by"], pr["draft"], require_draft=False
     )
-    if not ready:
+    if not pr["draft"]:
+        if authorized:
+            log(f"PR #{number} is already Ready and its authorization holds at head {pr['head']}")
+            return False
+        if dry_run:
+            log(f"PR #{number} WOULD be withdrawn from Ready (dry run): " + "; ".join(reasons))
+            return False
+        github.mutate(
+            f"repos/{REPOSITORY}/issues/{number}/comments",
+            "POST",
+            body={
+                "body": (
+                    f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head: "
+                    + "; ".join(reasons)
+                    + f". Returned to Draft with both review lanes re-armed.\n\n{SIGNATURE}"
+                )
+            },
+        )
+        log(compensate_ready(github, number, pr["head"], Refusal("Ready authorization lapsed: " + "; ".join(reasons))))
+        return False
+    if not authorized:
         log(f"PR #{number} not flipped: " + "; ".join(reasons))
         return False
     if dry_run:
         log(f"PR #{number} WOULD be flipped Ready (dry run)")
         return False
-    try:
-        github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
+
+    def proven_ready(stage: str) -> dict:
         after = ready_snapshot(github, number)
         if after is None or after["head"] != pr["head"]:
-            raise Refusal("the head moved while it was being flipped")
+            raise Refusal(f"the head moved {stage}")
         if after["draft"]:
-            raise Refusal("GitHub still reports Draft after the flip")
+            raise Refusal(f"GitHub still reports Draft {stage}")
         still_ready, post_reasons = ready_decision(
-            after["head"],
-            after["labels"],
-            after["comments"],
-            after["checks"],
-            after["behind_by"],
-            after["draft"],
-            require_draft=False,
+            after["head"], after["labels"], after["comments"], after["checks"], after["behind_by"], after["draft"], require_draft=False
         )
         if not still_ready:
-            raise Refusal(
-                "Ready authorization changed after the flip: " + "; ".join(post_reasons)
-            )
+            raise Refusal(f"Ready authorization changed {stage}: " + "; ".join(post_reasons))
+        return after
+
+    try:
+        github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
+        after = proven_ready("after the flip")
         # The security routing label leaves only once Ready is proven at
-        # the same head, never before.
+        # the same head, never before — and its removal is proven the same
+        # way, by a complete read taken after it.
         if "cybersecurity-review-requested" in after["labels"]:
             github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/cybersecurity-review-requested", "DELETE")
+        final = proven_ready("after the routing label left")
+        if "cybersecurity-review-requested" in final["labels"]:
+            raise Refusal("cybersecurity-review-requested is still present after its removal")
     except Refusal as error:
-        compensate_ready(github, number, pr["head"], error)
+        raise Refusal(compensate_ready(github, number, pr["head"], error)) from None
     github.mutate(
         f"repos/{REPOSITORY}/issues/{number}/comments",
         "POST",
@@ -1841,7 +1894,8 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
             "body": (
                 f"READY by the promoter at head `{pr['head']}`: two distinct exact-head adversarial "
                 "APPROVE receipts, no REQUEST-CHANGES at this head, both required checks green from "
-                f"{REQUIRED_CHECK_APP}, branch current with main. The owner alone merges.\n\n{SIGNATURE}"
+                f"{REQUIRED_CHECK_APP}, branch current with main, all re-proven after the flip and after "
+                f"the routing label left. The owner alone merges.\n\n{SIGNATURE}"
             )
         },
     )
