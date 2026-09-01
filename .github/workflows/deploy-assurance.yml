@@ -32,4 +32,4 @@ jobs:
       - name: Evaluate drift and publish integrity
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 -B scripts/ci/deploy_assurance.py --apply
+        run: python3 -I -B scripts/ci/deploy_assurance.py --apply

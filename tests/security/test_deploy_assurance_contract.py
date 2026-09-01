@@ -93,20 +93,49 @@ class DriftVerdictTests(unittest.TestCase):
 
 
 class PublishVerdictTests(unittest.TestCase):
-    def run_verdict(self, **run):
-        return assurance.publish_verdict(assurance.PENDING_GRACE_SECONDS + 1, run)
+    def run_verdict(self, run_age=60, **run):
+        return assurance.publish_verdict(
+            assurance.PENDING_GRACE_SECONDS + 1, run, run_age
+        )
 
     def test_absent_run_within_grace_is_pending_then_absent(self):
-        self.assertEqual(assurance.publish_verdict(30, None), "pending")
+        self.assertEqual(assurance.publish_verdict(30, None, None), "pending")
         self.assertEqual(
-            assurance.publish_verdict(assurance.PENDING_GRACE_SECONDS + 1, None),
+            assurance.publish_verdict(
+                assurance.PENDING_GRACE_SECONDS + 1, None, None
+            ),
             "absent",
         )
 
-    def test_incomplete_run_is_pending_regardless_of_age(self):
+    def test_incomplete_run_is_pending_only_inside_the_runtime_allowance(self):
+        """A wedged run must never stay "pending" forever (round-2 review
+        finding: a seven-day-old in_progress run classified as pending, no
+        condition, no tracker). Past the allowance it is STUCK — loud."""
+
+        for status in ("in_progress", "queued", "waiting"):
+            self.assertEqual(
+                self.run_verdict(status=status, conclusion=None, run_attempt=1),
+                "pending",
+                status,
+            )
+            self.assertEqual(
+                self.run_verdict(
+                    run_age=assurance.STUCK_RUN_SECONDS + 1,
+                    status=status,
+                    conclusion=None,
+                    run_attempt=1,
+                ),
+                "stuck",
+                status,
+            )
         self.assertEqual(
-            self.run_verdict(status="in_progress", conclusion=None, run_attempt=1),
-            "pending",
+            self.run_verdict(
+                run_age=7 * 24 * 3600,
+                status="in_progress",
+                conclusion=None,
+                run_attempt=1,
+            ),
+            "stuck",
         )
 
     def test_successful_run_is_ok(self):
@@ -131,20 +160,57 @@ class PublishVerdictTests(unittest.TestCase):
                 attempt,
             )
 
+    def test_every_other_completed_conclusion_is_abnormal_never_retry(self):
+        """``status=completed`` is a STATUS spanning many conclusions
+        (round-2 review finding): the rerun authority reaches exactly the
+        reviewed attempt-1 ``failure`` and nothing else. Every other
+        conclusion GitHub documents — and any future unknown one — maps to
+        the fail-closed ``abnormal`` verdict at every attempt."""
+
+        for conclusion in (
+            "cancelled",
+            "skipped",
+            "neutral",
+            "action_required",
+            "timed_out",
+            "stale",
+            "startup_failure",
+            None,
+            "some-future-conclusion",
+        ):
+            for attempt in (1, 2):
+                self.assertEqual(
+                    self.run_verdict(
+                        status="completed", conclusion=conclusion, run_attempt=attempt
+                    ),
+                    "abnormal",
+                    (conclusion, attempt),
+                )
+
     def test_retry_is_the_only_verdict_that_dispatches_a_rerun(self):
         """The rerun call sits behind the single ``retry`` branch: the verdict
-        space is exactly these five values, and only one of them reruns."""
+        space is exactly these seven values, and only one of them reruns."""
 
         verdicts = {
-            assurance.publish_verdict(30, None),
-            assurance.publish_verdict(assurance.PENDING_GRACE_SECONDS + 1, None),
+            assurance.publish_verdict(30, None, None),
+            assurance.publish_verdict(
+                assurance.PENDING_GRACE_SECONDS + 1, None, None
+            ),
             self.run_verdict(status="in_progress", conclusion=None, run_attempt=1),
+            self.run_verdict(
+                run_age=assurance.STUCK_RUN_SECONDS + 1,
+                status="in_progress",
+                conclusion=None,
+                run_attempt=1,
+            ),
             self.run_verdict(status="completed", conclusion="success", run_attempt=1),
             self.run_verdict(status="completed", conclusion="failure", run_attempt=1),
             self.run_verdict(status="completed", conclusion="failure", run_attempt=2),
+            self.run_verdict(status="completed", conclusion="skipped", run_attempt=1),
         }
         self.assertEqual(
-            verdicts, {"pending", "absent", "ok", "retry", "failing"}
+            verdicts,
+            {"pending", "stuck", "absent", "ok", "retry", "failing", "abnormal"},
         )
         rerun_sites = re.findall(
             r"rerun_failed_jobs\(", (REPO_ROOT / "scripts/ci/deploy_assurance.py").read_text()
@@ -322,7 +388,13 @@ class GitHubLayerTests(unittest.TestCase):
         with canned_api(
             {
                 ("GET", runs_path.format("pull-request.yml")): {
-                    "workflow_runs": [{"head_sha": "a" * 40}]
+                    "workflow_runs": [
+                        # completed-but-cancelled newest: NOT a valid anchor
+                        # (status=completed spans many conclusions), so the
+                        # gate lookup must skip it for the newest SUCCESS.
+                        {"head_sha": "f" * 40, "conclusion": "cancelled"},
+                        {"head_sha": "a" * 40, "conclusion": "success"},
+                    ]
                 },
                 ("GET", runs_path.format("platform-release.yml")): {
                     "workflow_runs": [
@@ -334,7 +406,8 @@ class GitHubLayerTests(unittest.TestCase):
             }
         ) as calls:
             self.assertEqual(
-                self.github.newest_main_gate_run(), {"head_sha": "a" * 40}
+                self.github.newest_main_gate_run(),
+                {"head_sha": "a" * 40, "conclusion": "success"},
             )
             self.assertEqual(
                 self.github.publish_run_for("a" * 40), {"head_sha": "a" * 40, "id": 2}
@@ -349,6 +422,23 @@ class GitHubLayerTests(unittest.TestCase):
         self.assertIn("event=push", gate_query)
         self.assertIn("status=completed", gate_query)
         self.assertEqual(calls[-1][0], "POST")
+
+    def test_gate_page_without_any_successful_run_anchors_nothing(self):
+        runs_path = (
+            "/repos/snaraj/website-infrastructure/actions/workflows/"
+            "pull-request.yml/runs"
+        )
+        with canned_api(
+            {
+                ("GET", runs_path): {
+                    "workflow_runs": [
+                        {"head_sha": "f" * 40, "conclusion": "failure"},
+                        {"head_sha": "e" * 40, "conclusion": "timed_out"},
+                    ]
+                }
+            }
+        ):
+            self.assertIsNone(self.github.newest_main_gate_run())
 
     def test_issue_listing_filters_paginates_and_repairs_duplicates(self):
         page_one = [
@@ -566,11 +656,86 @@ class GatherConditionsTests(unittest.TestCase):
             conditions["deploy-assurance[publish-integrity]"],
         )
 
-    def test_no_gate_run_skips_the_publish_leg(self):
+    def test_no_successful_gate_is_a_condition_never_a_clear(self):
+        """Unknown probe state must never mean clear (round-2 review
+        finding: the old "skipped" path exited 0 and closed a standing
+        publish tracker). The unverifiable state emits the SAME
+        publish-integrity key, so an existing tracker is preserved by
+        update-in-place instead of being closed as cleared."""
+
         github = _ScriptedGitHub(self.current_tags(), None, None)
         conditions, log = assurance.gather_conditions(github, REPO_ROOT)
-        self.assertEqual(conditions, {})
-        self.assertTrue(any("publish check skipped" in line for line in log))
+        self.assertIn("deploy-assurance[publish-integrity]", conditions)
+        self.assertIn(
+            "cannot be verified", conditions["deploy-assurance[publish-integrity]"]
+        )
+        self.assertTrue(any("publish-unverifiable" in line for line in log))
+        self.assertFalse(any("skipped" in line for line in log))
+
+    def test_stuck_publish_run_is_a_condition_not_pending_forever(self):
+        github = _ScriptedGitHub(
+            self.current_tags(),
+            _fresh_gate(),
+            {
+                "status": "in_progress",
+                "conclusion": None,
+                "run_attempt": 1,
+                "id": 7,
+                "run_started_at": "2026-08-20T00:00:00Z",
+            },
+        )
+        conditions, _ = assurance.gather_conditions(github, REPO_ROOT)
+        self.assertEqual(github.reruns, [])
+        self.assertIn(
+            "wedged run", conditions["deploy-assurance[publish-integrity]"]
+        )
+
+    def test_abnormal_conclusions_condition_without_ever_rerunning(self):
+        """The write authority reaches exactly the reviewed attempt-1
+        failure: every other completed conclusion raises the condition and
+        dispatches nothing, at any attempt, even under --apply."""
+
+        for conclusion in ("skipped", "cancelled", "neutral", "action_required",
+                           "timed_out", "stale"):
+            for attempt in (1, 2):
+                github = _ScriptedGitHub(
+                    self.current_tags(),
+                    _fresh_gate(),
+                    {
+                        "status": "completed",
+                        "conclusion": conclusion,
+                        "run_attempt": attempt,
+                        "id": 7,
+                    },
+                )
+                conditions, _ = assurance.gather_conditions(
+                    github, REPO_ROOT, apply=True
+                )
+                self.assertEqual(github.reruns, [], (conclusion, attempt))
+                self.assertIn(
+                    "`{}`".format(conclusion),
+                    conditions["deploy-assurance[publish-integrity]"],
+                    (conclusion, attempt),
+                )
+
+    def test_rerun_dispatch_failure_still_records_the_condition(self):
+        """A transport failure on the one bounded mutation must not escape
+        gather (round-2 review finding: the exception previously prevented
+        reconcile_issues from recording the failed publish at all)."""
+
+        class _DispatchBroken(_ScriptedGitHub):
+            def rerun_failed_jobs(self, run_id):
+                raise urllib.error.URLError("boom")
+
+        github = _DispatchBroken(
+            self.current_tags(),
+            _fresh_gate(),
+            {"status": "completed", "conclusion": "failure", "run_attempt": 1, "id": 7},
+        )
+        conditions, log = assurance.gather_conditions(github, REPO_ROOT, apply=True)
+        body = conditions["deploy-assurance[publish-integrity]"]
+        self.assertIn("dispatch itself failed", body)
+        self.assertTrue(any("dispatch FAILED" in line for line in log))
 
     def test_malformed_source_is_a_condition_naming_the_relative_path(self):
         """A source.yaml the checker cannot parse is a blindness condition,
@@ -585,7 +750,16 @@ class GatherConditionsTests(unittest.TestCase):
             site = root / "kubernetes" / "websites" / "broken-site"
             site.mkdir(parents=True)
             (site / "source.yaml").write_text("not: [the, expected, shape]\n")
-            github = _ScriptedGitHub({}, None, None)
+            github = _ScriptedGitHub(
+                {},
+                _fresh_gate(),
+                {
+                    "status": "completed",
+                    "conclusion": "success",
+                    "run_attempt": 1,
+                    "id": 5,
+                },
+            )
             conditions, _ = assurance.gather_conditions(github, root)
         self.assertEqual(list(conditions), ["deploy-assurance[unparseable/broken-site]"])
         body = conditions["deploy-assurance[unparseable/broken-site]"]
@@ -608,6 +782,18 @@ class MainWiringTests(unittest.TestCase):
         }
         if drifted:
             tags["snaraj/naranjo.online"] = "v9.9.9"
+        # Defaults model a HEALTHY publish leg: without a successful gate
+        # anchor the checker now (correctly) raises publish-unverifiable,
+        # so an all-clear fixture must supply one.
+        if gate is None:
+            gate = _fresh_gate()
+        if publish is None:
+            publish = {
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+                "id": 5,
+            }
         return _ScriptedGitHub(tags, gate, publish)
 
     def run_main(self, fake, argv):
@@ -674,20 +860,67 @@ class WorkflowSurfaceTests(unittest.TestCase):
             {"contents": "read", "actions": "write", "issues": "write"},
         )
 
-    def test_workflow_runs_the_checker_with_apply(self):
+    def test_evaluator_step_block_is_pinned_exactly(self):
+        """The whole evaluator step, byte for byte — not the command as a
+        substring (round-2 review finding: a variant that kept the asserted
+        command only as inert text survived every check). Any wrapper,
+        suppressor, or body rewrite breaks this block."""
+
         self.assertIn(
-            "python3 -B scripts/ci/deploy_assurance.py --apply",
+            "      - name: Evaluate drift and publish integrity\n"
+            "        env:\n"
+            "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
+            "        run: python3 -I -B scripts/ci/deploy_assurance.py --apply\n",
             WORKFLOW.read_text(),
         )
 
-    def test_no_step_or_job_is_conditional(self):
-        """The watchdog must be unconditional for every declared trigger: an
-        `if:` guard anywhere in this workflow can silence the evaluator while
-        every shape check stays green (the round-1 surviving mutant was
-        exactly `if: github.event_name == 'pull_request'` on a workflow with
-        no pull_request trigger — green forever, never executing)."""
+    def test_workflow_declares_no_suppression_and_exactly_two_steps(self):
+        """No `if:` (the round-1 surviving mutant), no `continue-on-error`,
+        no shell-level failure swallowing, and exactly the two reviewed
+        steps with one `run:` between them — a third step or second run
+        line is an unreviewed execution surface."""
 
-        self.assertIsNone(re.search(r"(?m)^\s*if:", WORKFLOW.read_text()))
+        text = WORKFLOW.read_text()
+        self.assertIsNone(re.search(r"(?m)^\s*if:", text))
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("|| true", text)
+        self.assertNotIn("exit 0", text)
+        self.assertEqual(text.count("      - name: "), 2)
+        self.assertEqual(text.count("        run: "), 1)
+
+    def test_a_nonzero_checker_exit_fails_the_workflow_command(self):
+        """Behavioral proof that the checker's exit code IS the job result:
+        execute the exact `run:` line from the workflow with a PATH-shimmed
+        python3 that exits 7, and require the shell to propagate 7 with the
+        exact reviewed arguments delivered. An inert body, a swallowed
+        exit, or a rewritten invocation all fail here, not just in shape."""
+
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        match = re.search(r"(?m)^        run: (.+)$", WORKFLOW.read_text())
+        self.assertIsNotNone(match)
+        assert match is not None
+        command = match.group(1)
+        with tempfile.TemporaryDirectory() as scratch:
+            shim = Path(scratch) / "python3"
+            shim.write_text(
+                "#!/bin/sh\nprintf '%s' \"$*\" > \"{}/argv\"\nexit 7\n".format(
+                    scratch
+                )
+            )
+            shim.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", "-e", "-c", command],
+                env={"PATH": scratch, "GITHUB_TOKEN": "shim"},
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertEqual(
+                (Path(scratch) / "argv").read_text(),
+                "-I -B scripts/ci/deploy_assurance.py --apply",
+            )
 
 
 if __name__ == "__main__":

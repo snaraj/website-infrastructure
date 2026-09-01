@@ -54,6 +54,17 @@ PUBLISH_WORKFLOW = "platform-release.yml"
 # still "pending", not yet a condition: workflow_run dispatch plus queue time
 # is ordinarily seconds, and one scheduled interval later the verdict is real.
 PENDING_GRACE_SECONDS = 20 * 60
+# A publish run still queued/waiting/in progress past this allowance is STUCK,
+# a condition in its own right — the publisher ordinarily finishes in minutes,
+# and "pending forever" is exactly how a wedged run stays silent (round-2
+# review finding: a seven-day-old in_progress run classified as pending).
+STUCK_RUN_SECONDS = 2 * 60 * 60
+# The one conclusion that authorizes the bounded rerun-failed-jobs dispatch.
+# Every other completed conclusion (cancelled, skipped, neutral,
+# action_required, timed_out, stale, startup_failure, anything future) is a
+# fail-closed condition WITHOUT a rerun: the write authority reaches exactly
+# the reviewed first-failed-attempt state and nothing else.
+RETRYABLE_CONCLUSIONS = frozenset({"failure"})
 
 ANNOTATION_PATTERN = re.compile(
     r'^\s*platform\.snaraj\.dev/chart-release:\s*"(\d+\.\d+\.\d+)"\s*$',
@@ -99,22 +110,32 @@ def drift_verdict(committed, latest_published):
     return "behind" if committed_t < latest_t else "ahead"
 
 
-def publish_verdict(gate_age_seconds, publish_run):
-    """Classify the publish leg for the newest completed main gate SHA.
+def publish_verdict(gate_age_seconds, publish_run, run_age_seconds):
+    """Classify the publish leg for the newest successful main gate SHA.
 
     ``publish_run`` is the matching Platform release run summary (or None):
-    ``{"status": ..., "conclusion": ..., "run_attempt": int}``. Returns one
-    of ``"ok"``, ``"pending"``, ``"absent"``, ``"retry"`` (failed on its
-    first attempt — rerun exactly once), or ``"failing"`` (failed again
-    after the one bounded retry; never rerun further).
+    ``{"status": ..., "conclusion": ..., "run_attempt": int}``;
+    ``run_age_seconds`` is that run's own age (None when there is no run).
+    Returns one of ``"ok"``, ``"pending"``, ``"stuck"`` (not completed past
+    the runtime allowance — a wedged run must go loud, never stay pending
+    forever), ``"absent"``, ``"retry"`` (concluded exactly ``failure`` on
+    its first attempt — rerun exactly once), ``"failing"`` (``failure``
+    again after the bounded retry), or ``"abnormal"`` (any other completed
+    conclusion — cancelled, skipped, neutral, action_required, timed_out,
+    stale, or anything future/unknown — a fail-closed condition that never
+    authorizes the rerun write).
     """
 
     if publish_run is None:
         return "pending" if gate_age_seconds < PENDING_GRACE_SECONDS else "absent"
     if publish_run.get("status") != "completed":
+        if run_age_seconds is not None and run_age_seconds > STUCK_RUN_SECONDS:
+            return "stuck"
         return "pending"
     if publish_run.get("conclusion") == "success":
         return "ok"
+    if publish_run.get("conclusion") not in RETRYABLE_CONCLUSIONS:
+        return "abnormal"
     return "retry" if publish_run.get("run_attempt") == 1 else "failing"
 
 
@@ -122,6 +143,15 @@ def condition_title(key):
     """One stable title per condition key — the idempotency anchor."""
 
     return "{}{}]".format(ISSUE_MARKER, key)
+
+
+def iso_age_seconds(stamp):
+    """Seconds elapsed since an ISO-8601 GitHub timestamp."""
+
+    return (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    ).total_seconds()
 
 
 class GitHub:
@@ -160,14 +190,26 @@ class GitHub:
         return release["tag_name"], release.get("published_at")
 
     def newest_main_gate_run(self):
+        """The newest completed main gate run whose conclusion is success.
+
+        ``status=completed`` is a STATUS, not a conclusion — it also covers
+        cancelled, skipped, and timed-out runs, none of which authorized a
+        release, so anchoring on one of those would demand a Platform
+        release nothing dispatched. Only a successful gate is a valid
+        publish anchor; a failed gate is main CI's own loud problem.
+        """
+
         runs = self.request(
             "GET",
             "/repos/{}/actions/workflows/{}/runs"
-            "?branch=main&event=push&status=completed&per_page=1".format(
+            "?branch=main&event=push&status=completed&per_page=30".format(
                 self.repository, GATE_WORKFLOW
             ),
         )["workflow_runs"]
-        return runs[0] if runs else None
+        for run in runs:
+            if run.get("conclusion") == "success":
+                return run
+        return None
 
     def publish_run_for(self, head_sha):
         runs = self.request(
@@ -327,28 +369,53 @@ def gather_conditions(github, root, apply=False):
 
     gate = github.newest_main_gate_run()
     if gate is None:
-        log.append("no completed main gate run found; publish check skipped")
+        # Unknown never means clear: without a successful gate anchor the
+        # publish path CANNOT be verified, and the shared condition key
+        # keeps any previously opened publish tracker standing (updated in
+        # place) instead of letting an unverifiable pass close it.
+        log.append("no successful main gate run found -> publish-unverifiable")
+        conditions[condition_title("publish-integrity")] = (
+            "No completed successful main gate run is visible from the "
+            "Actions API, so the publish path cannot be verified. This is a "
+            "fail-closed condition, not a clear: any previously recorded "
+            "publish failure must be treated as still standing until a "
+            "successful gate anchor exists again."
+        )
         return conditions, log
-    gate_age = (
-        datetime.now(timezone.utc)
-        - datetime.fromisoformat(gate["updated_at"].replace("Z", "+00:00"))
-    ).total_seconds()
+    gate_age = iso_age_seconds(gate["updated_at"])
     publish_run = github.publish_run_for(gate["head_sha"])
-    verdict = publish_verdict(gate_age, publish_run)
+    run_age = None
+    if publish_run is not None:
+        started = publish_run.get("run_started_at") or publish_run.get("created_at")
+        run_age = iso_age_seconds(started) if started else STUCK_RUN_SECONDS + 1
+    verdict = publish_verdict(gate_age, publish_run, run_age)
     log.append(
         "publish integrity for gate {} ({}): {}".format(
             gate["head_sha"][:12], gate["conclusion"], verdict
         )
     )
     if verdict == "retry":
+        rerun_note = ""
         if apply:
-            github.rerun_failed_jobs(publish_run["id"])
-            log.append(
-                "platform-release run {} failed on attempt 1; "
-                "rerun-failed-jobs dispatched (the one bounded retry)".format(
-                    publish_run["id"]
+            try:
+                github.rerun_failed_jobs(publish_run["id"])
+                log.append(
+                    "platform-release run {} failed on attempt 1; "
+                    "rerun-failed-jobs dispatched (the one bounded retry)".format(
+                        publish_run["id"]
+                    )
                 )
-            )
+            except (urllib.error.URLError, OSError) as error:
+                # The dispatch is best-effort; the CONDITION is not. A
+                # transport failure here must still leave the tracker
+                # recording the failed publish (round-2 review finding).
+                log.append(
+                    "rerun-failed-jobs dispatch FAILED: {}".format(error)
+                )
+                rerun_note = (
+                    " The bounded rerun dispatch itself failed ({}); no "
+                    "retry is in flight.".format(error)
+                )
         else:
             log.append(
                 "platform-release run {} failed on attempt 1; a bounded "
@@ -360,19 +427,29 @@ def gather_conditions(github, root, apply=False):
             "Platform release run {} for main SHA `{}` failed on its first "
             "attempt; one bounded rerun is dispatched under --apply. If the "
             "next assurance pass still finds it failing, no further "
-            "automatic retry will happen.".format(
-                publish_run["id"], gate["head_sha"]
+            "automatic retry will happen.{}".format(
+                publish_run["id"], gate["head_sha"], rerun_note
             )
         )
-    elif verdict in {"absent", "failing"}:
+    elif verdict in {"absent", "failing", "stuck", "abnormal"}:
+        described = {
+            "absent": "no Platform release run at all",
+            "failing": "a Platform release run that failed after its "
+            "bounded retry",
+            "stuck": "a Platform release run still not completed past the "
+            "{}-minute runtime allowance — a wedged run, not a pending "
+            "one".format(STUCK_RUN_SECONDS // 60),
+            "abnormal": "a Platform release run with completed conclusion "
+            "`{}` — outside the reviewed success/failure vocabulary, so it "
+            "is refused fail-closed and never authorizes a rerun".format(
+                None if publish_run is None else publish_run.get("conclusion")
+            ),
+        }[verdict]
         conditions[condition_title("publish-integrity")] = (
-            "The newest completed main gate run (SHA `{}`) has {} — the "
+            "The newest successful main gate run (SHA `{}`) has {} — the "
             "publish path between a merged change and its platform release "
             "is broken and will not recover on its own.".format(
-                gate["head_sha"],
-                "no Platform release run at all"
-                if verdict == "absent"
-                else "a Platform release run that failed after its bounded retry",
+                gate["head_sha"], described
             )
         )
     return conditions, log
