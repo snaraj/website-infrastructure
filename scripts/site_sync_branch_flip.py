@@ -579,14 +579,14 @@ def source_identity(gitrepository):
     annotations = metadata.get("annotations")
     if not isinstance(annotations, dict):
         fail("GitRepository annotations are absent")
-    reserved = {}
+    for key, value in annotations.items():
+        if not isinstance(key, str) or not key or not isinstance(value, str):
+            fail("GitRepository annotation {!r} is not a string pair".format(key))
     for key in RESERVED_ANNOTATIONS:
-        value = annotations.get(key)
-        if not isinstance(value, str) or not value:
+        if not annotations.get(key):
             fail("reserved annotation {} is absent — the suspended selector "
                  "cannot reactivate without it".format(key))
-        reserved[key] = value
-    return uid, resource_version, reserved
+    return uid, resource_version, dict(annotations)
 
 
 def write_receipt(document, receipt_dir, filename, note):
@@ -619,20 +619,25 @@ def write_receipt(document, receipt_dir, filename, note):
 
 
 def prestate(gitrepository, receipt_dir):
-    """Bounded semantic prestate, written atomically under private custody."""
+    """Bounded semantic prestate, written atomically under private custody.
 
-    uid, resource_version, reserved = source_identity(gitrepository)
+    The annotations map is captured WHOLE — every annotation on the live
+    object, not only the nine reserved ones — because the patches test the
+    complete map by equality and a partial capture could not express that
+    test. The reserved nine must still all be present."""
+
+    uid, resource_version, annotations = source_identity(gitrepository)
     spec = gitrepository["spec"]
     ref = spec.get("ref")
     if not isinstance(ref, dict) or set(ref) != {"tag"} or not ref.get("tag"):
         fail("live ref is {} — the flip starts from exactly {{tag}}".format(ref))
     document = {
-        "schema": "site-sync-branch-flip/prestate/v2",
+        "schema": "site-sync-branch-flip/prestate/v3",
         "uid": uid,
         "resourceVersion": resource_version,
         "ref": {"tag": ref["tag"]},
         "spec": {key: spec[key] for key in sorted(SOURCE_SPEC_KEYS - {"ref"})},
-        "annotations": reserved,
+        "annotations": annotations,
     }
     return write_receipt(
         document, receipt_dir, "flip-prestate.json", "tag={}".format(ref["tag"])
@@ -641,77 +646,85 @@ def prestate(gitrepository, receipt_dir):
 
 def load_prestate(path):
     document = load_json(path)
+    annotations = document.get("annotations")
     if (
-        document.get("schema") != "site-sync-branch-flip/prestate/v2"
+        document.get("schema") != "site-sync-branch-flip/prestate/v3"
         or not isinstance(document.get("uid"), str)
         or not isinstance(document.get("ref"), dict)
         or set(document["ref"]) != {"tag"}
         or not isinstance(document.get("spec"), dict)
         or set(document["spec"]) != SOURCE_SPEC_KEYS - {"ref"}
-        or sorted(document.get("annotations", {})) != sorted(RESERVED_ANNOTATIONS)
+        or not isinstance(annotations, dict)
+        or not all(
+            isinstance(key, str) and key and isinstance(value, str)
+            for key, value in annotations.items()
+        )
+        or any(not annotations.get(key) for key in RESERVED_ANNOTATIONS)
     ):
-        fail("prestate document is not a valid v2 capture")
+        fail("prestate document is not a valid v3 capture")
     return document
 
 
-def pointer(key):
-    """RFC 6901 token escaping for annotation keys carrying '/'."""
+def captured_source_spec(document, ref):
+    """The COMPLETE captured spec with the direction's expected ref."""
 
-    return key.replace("~", "~0").replace("/", "~1")
+    spec = {
+        key: document["spec"][key] for key in sorted(SOURCE_SPEC_KEYS - {"ref"})
+    }
+    spec["ref"] = ref
+    return spec
 
 
-def source_guard_operations(document):
-    """The complete captured boundary as atomic ``test`` operations: UID,
-    every bounded non-ref spec field, and each reserved annotation. A
-    contested field that changes between capture and patch application —
-    the round-3 security race: a foreign URL introduced after capture —
-    refuses the WHOLE patch at the API server instead of being detected
-    only after the ref has already moved."""
+def source_guard_operations(document, ref):
+    """The complete captured boundary as WHOLE-OBJECT ``test`` operations:
+    UID, the entire annotations map, and the entire spec carrying the
+    direction's expected ref. Round-6 security finding (both reviewers):
+    per-key child tests refuse a changed field but cannot refuse an ADDED
+    one — RFC 6902 has no operation that detects a key the capture never
+    saw — so a credential-bearing key introduced after capture rode
+    through both directions. Equality over the whole object refuses
+    additions, removals, and changes alike, atomically at the API server."""
 
-    operations = [
-        {"op": "test", "path": "/metadata/uid", "value": document["uid"]}
+    return [
+        {"op": "test", "path": "/metadata/uid", "value": document["uid"]},
+        {
+            "op": "test",
+            "path": "/metadata/annotations",
+            "value": dict(document["annotations"]),
+        },
+        {
+            "op": "test",
+            "path": "/spec",
+            "value": captured_source_spec(document, ref),
+        },
     ]
-    for key in sorted(SOURCE_SPEC_KEYS - {"ref"}):
-        operations.append(
-            {"op": "test", "path": "/spec/" + key, "value": document["spec"][key]}
-        )
-    for key in RESERVED_ANNOTATIONS:
-        operations.append(
-            {
-                "op": "test",
-                "path": "/metadata/annotations/" + pointer(key),
-                "value": document["annotations"][key],
-            }
-        )
-    return operations
 
 
 def flip_patch(document):
-    """The flip as a full-boundary compare-and-swap patch."""
+    """The flip as one atomic compare-and-swap: whole-object guards over
+    the captured boundary, then the single ref replacement."""
 
     return json.dumps(
-        source_guard_operations(document)
-        + [
-            {"op": "test", "path": "/spec/ref/tag", "value": document["ref"]["tag"]},
-            {"op": "remove", "path": "/spec/ref/tag"},
-            {"op": "add", "path": "/spec/ref/branch", "value": "main"},
-        ]
+        source_guard_operations(document, {"tag": document["ref"]["tag"]})
+        + [{"op": "replace", "path": "/spec/ref", "value": {"branch": "main"}}]
     )
 
 
 def rollback_patch(document):
     return json.dumps(
-        source_guard_operations(document)
+        source_guard_operations(document, {"branch": "main"})
         + [
-            {"op": "test", "path": "/spec/ref/branch", "value": "main"},
-            {"op": "remove", "path": "/spec/ref/branch"},
-            {"op": "add", "path": "/spec/ref/tag", "value": document["ref"]["tag"]},
+            {
+                "op": "replace",
+                "path": "/spec/ref",
+                "value": {"tag": document["ref"]["tag"]},
+            }
         ]
     )
 
 
 def state_matches(gitrepository, document, expected_ref):
-    uid, _, reserved = source_identity(gitrepository)
+    uid, _, annotations = source_identity(gitrepository)
     if uid != document["uid"]:
         fail("live object UID changed — this is not the captured GitRepository")
     spec = gitrepository["spec"]
@@ -721,14 +734,13 @@ def state_matches(gitrepository, document, expected_ref):
                 spec.get("ref"), expected_ref
             )
         )
-    for key in sorted(SOURCE_SPEC_KEYS - {"ref"}):
-        if spec.get(key) != document["spec"][key]:
-            fail(
-                "live spec.{} drifted from the prestate capture — the flip "
-                "must never bless concurrent source drift".format(key)
-            )
-    if reserved != document["annotations"]:
-        fail("reserved annotations drifted from the prestate capture")
+    if spec != captured_source_spec(document, expected_ref):
+        fail(
+            "live spec drifted from the prestate capture — the flip must "
+            "never bless concurrent source drift, added keys included"
+        )
+    if annotations != document["annotations"]:
+        fail("annotations drifted from the prestate capture")
 
 
 def http_get(url, headers=None, limit=64 * 1024 * 1024):

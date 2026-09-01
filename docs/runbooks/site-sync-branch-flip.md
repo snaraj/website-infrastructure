@@ -15,18 +15,21 @@ Every judgment in this ceremony is made by
 `scripts/site_sync_branch_flip.py`, whose battery is
 `tests/security/test_site_sync_branch_flip.py`. The command blocks below are
 the CANONICAL ceremony: the battery compares them byte for byte, in order,
-against `CEREMONY_BLOCKS` in the tool, and admits no other
-kubectl/python3/flux/gh invocation anywhere in this document — so a
-neutralized invocation, a narrowed capture, or a retargeted patch is a red
-test, never a silent prose drift. The operator captures live state
+against `CEREMONY_BLOCKS` in the tool, admits no fence of any Markdown
+form beyond these reviewed blocks, no indented or HTML code container,
+and no other kubectl/python3/flux/gh invocation anywhere in this
+document — so a neutralized invocation, a narrowed capture, a retargeted
+patch, or a smuggled extra block is a red test, never a silent prose
+drift. The operator captures live state
 read-only, feeds the captures to the tool, and applies only the patches the
 tool emits. Any `DENY:` exit stops the ceremony; prose never overrides the
 tool. Every mutation patch leads with JSON-Patch `test` operations binding
-the captured object UID and the COMPLETE captured boundary — the source's
-full bounded spec and reserved annotations, the selector's entire spec —
-so a moved, replaced, or concurrently edited object refuses the patch at
-the API server itself, with no window between a check and the mutation it
-guards.
+the captured object UID and the COMPLETE captured boundary as whole-object
+equality — the source's entire spec and entire annotations map, the
+selector's entire spec — so a moved, replaced, or concurrently edited
+object, and equally one that GAINED a key the capture never saw, refuses
+the patch at the API server itself, with no window between a check and the
+mutation it guards.
 
 ## Preconditions
 
@@ -113,8 +116,9 @@ python3 -I -B scripts/site_sync_branch_flip.py quiescence "$scratch/cronjob-now.
    include, verify, and suspend — plus kind, name, namespace, UID, a
    `{tag}`-only ref, and all nine
    `release-selector.platform.snaraj.dev/*` annotations, then writes the
-   bounded prestate document (including that full bounded spec) atomically
-   into the private directory:
+   prestate document — the full bounded spec and the ENTIRE annotations
+   map, so the patches can test both whole — atomically into the private
+   directory:
 
 ```sh
 kubectl get gitrepository -n flux-system flux-system -o json > "$scratch/gitrepository.json"
@@ -122,20 +126,21 @@ python3 -I -B scripts/site_sync_branch_flip.py prestate "$scratch/gitrepository.
 ```
 
 5. Flip the source ref with the emitted compare-and-swap patch. Its `test`
-   operations bind the captured UID, every bounded non-ref spec field, all
-   nine reserved annotations, and the old tag, so a contested field that
-   moved after capture refuses the whole patch atomically (the admission
-   policy that bounds the selector ServiceAccount does not match an
-   owner/admin principal):
+   operations bind the captured UID, the entire annotations map, and the
+   entire spec with the old tag — whole-object equality, so a field that
+   moved after capture AND a key that appeared after capture both refuse
+   the whole patch atomically (the admission policy that bounds the
+   selector ServiceAccount does not match an owner/admin principal):
 
 ```sh
 python3 -I -B scripts/site_sync_branch_flip.py flip-patch "$scratch/flip-prestate.json" > "$scratch/flip.json"
 kubectl patch gitrepository -n flux-system flux-system --type=json --patch-file "$scratch/flip.json"
 ```
 
-6. Verify the poststate — same UID, ref exactly `{branch: main}`, every
-   other spec field byte-equal to the capture (the flip must never bless
-   concurrent source drift), and all nine evidence annotations intact. The
+6. Verify the poststate — same UID, ref exactly `{branch: main}`, the
+   whole spec otherwise equal to the capture with no key gained or lost
+   (the flip must never bless concurrent source drift), and the entire
+   annotations map equal to the capture, evidence intact. The
    annotations stay untouched on purpose: the suspended selector's
    `ValidateCurrent` requires them to reactivate on rollback, and their
    removal belongs to the selector's platform-lane decommission, not to
