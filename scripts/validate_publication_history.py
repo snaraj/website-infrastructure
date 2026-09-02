@@ -13,8 +13,6 @@ for a protected fast-forward push.  ``--pull-request`` accepts a related but
 divergent, server-authenticated PR base and scans Git's exact ``base..head`` set.
 """
 
-import base64
-import binascii
 import fnmatch
 import hashlib
 import ipaddress
@@ -77,19 +75,16 @@ ALLOWED_DIST_PATHS = {
     "websites/lidersea.com/internal/web/dist/.gitkeep",
     "websites/naranjo.online/internal/web/dist/.gitkeep",
 }
-APPROVED_SOPS_PATH = (
-    "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
-)
-# This one inert, non-rendered manifest documents only the Secret shape that a
-# later SOPS ceremony must produce.  Pinning both path and bytes avoids a broad
-# examples/placeholder exemption: a copy, edit, alternate token, or newly added
-# plaintext Secret remains a publication failure.
+# This one inert, non-rendered manifest documents only the Secret shape the
+# owner's cluster-side ceremony must produce.  Pinning both path and bytes
+# avoids a broad examples/placeholder exemption: a copy, edit, alternate token,
+# or newly added Secret remains a publication failure.
 STRUCTURAL_SECRET_EXAMPLE_PATH = (
     "kubernetes/platform/cloudflare-public/examples/"
     "tunnel-token.invalid-example.yaml"
 )
 STRUCTURAL_SECRET_EXAMPLE_SHA256 = (
-    "9338ed72189de69f2949db74f34cacd5147dc8a60487826933adb1ac8e3366f1"
+    "4595e398a051186524a4e40a1a2029054eb6e2ee38703f886f3746e04a9b972d"
 )
 
 # The KEYS of this table are published diagnostic labels, not secrets. They are
@@ -399,11 +394,8 @@ def _path_findings(relative_path):
         findings.append("forbidden repository layout")
     if components[:2] == ("kubernetes", "homelab"):
         findings.append("forbidden repository layout")
-    if (
-        re.search(r"\.sops\.ya?ml$", lowered)
-        and lowered not in {".sops.yaml", APPROVED_SOPS_PATH}
-    ):
-        findings.append("unapproved SOPS ciphertext path")
+    if re.search(r"\.sops\.ya?ml$", lowered):
+        findings.append("forbidden SOPS ciphertext path")
     return findings
 
 
@@ -645,11 +637,6 @@ _FLOW_SECRET_KIND = re.compile(
     r"(?:^|[,{])\s*(?:kind|\"kind\"|'kind')\s*:\s*"
     r"(?:Secret|\"Secret\"|'Secret')\s*(?:[,}]|$)"
 )
-_SOPS_AES256_GCM = re.compile(
-    r"ENC\[AES256_GCM,data:([A-Za-z0-9+/]+={0,2}),"
-    r"iv:([A-Za-z0-9+/]+={0,2}),tag:([A-Za-z0-9+/]+={0,2}),type:str\]"
-)
-_HYBRID_AGE_RECIPIENT = re.compile(r"age1pq1[0-9a-z]+\Z")
 
 
 def _top_level_yaml_lines(document):
@@ -705,269 +692,6 @@ def _is_pinned_structural_secret_example(relative_path, data):
         relative_path.casefold() == STRUCTURAL_SECRET_EXAMPLE_PATH
         and hashlib.sha256(data).hexdigest() == STRUCTURAL_SECRET_EXAMPLE_SHA256
     )
-
-
-def _canonical_base64_bytes(value):
-    try:
-        decoded = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    if base64.b64encode(decoded).decode("ascii") != value:
-        return None
-    return decoded
-
-
-def _valid_sops_aes256_gcm(value):
-    match = _SOPS_AES256_GCM.fullmatch(value)
-    if match is None:
-        return False
-    data, initialization_vector, authentication_tag = (
-        _canonical_base64_bytes(field) for field in match.groups()
-    )
-    return (
-        data is not None
-        and 1 <= len(data) <= 8192
-        and initialization_vector is not None
-        and len(initialization_vector) == 12
-        and authentication_tag is not None
-        and len(authentication_tag) == 16
-    )
-
-
-def _valid_age_armor_body(lines):
-    if not lines or any(
-        re.fullmatch(r"        [A-Za-z0-9+/]+={0,2}", line) is None
-        or len(line) > 72
-        for line in lines
-    ):
-        return False
-    encoded = "".join(line[8:] for line in lines)
-    decoded = _canonical_base64_bytes(encoded)
-    return (
-        decoded is not None
-        and 40 <= len(decoded) <= 65536
-        and decoded.startswith(b"age-encryption.org/v1\n")
-        and b"\n--- " in decoded
-        and decoded.endswith(b"\n")
-    )
-
-
-def _direct_mapping_items(document, mapping_name):
-    lines = document.splitlines()
-    entries = []
-    for index, line in enumerate(lines):
-        if not re.match(r"^{}:\s*(?:#.*)?$".format(re.escape(mapping_name)), line):
-            continue
-        direct_indent = None
-        for child in lines[index + 1:]:
-            if not child.strip() or child.lstrip().startswith("#"):
-                continue
-            indent = len(child) - len(child.lstrip())
-            if indent == 0:
-                break
-            if direct_indent is None:
-                direct_indent = indent
-            if indent != direct_indent:
-                continue
-            scalar = re.match(r"^\s*([^:#][^:]*):\s*(.*?)\s*$", child)
-            if scalar:
-                entries.append((
-                    scalar.group(1).strip(),
-                    scalar.group(2).split(" #", 1)[0].strip().strip("'\""),
-                ))
-        break
-    return entries
-
-
-def _historical_sops_recipient(config):
-    config = config.replace("\r\n", "\n")
-    if "\r" in config:
-        return None
-    significant = [
-        line for line in config.split("\n")
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    expected = [
-        "creation_rules:",
-        r"  - path_regex: ^kubernetes/.+\.sops\.ya?ml$",
-        "    encrypted_regex: ^(data|stringData)$",
-        "    age:",
-    ]
-    if significant[:4] != expected or len(significant) != 5:
-        return None
-    prefix = "      - "
-    if not significant[4].startswith(prefix):
-        return None
-    recipient = significant[4][len(prefix):]
-    return recipient if _HYBRID_AGE_RECIPIENT.fullmatch(recipient) else None
-
-
-def _strict_historical_sops_secret(text, expected_recipient):
-    """Mirror the current closed ENC/metadata/age and Tunnel identity grammar."""
-
-    text = text.replace("\r\n", "\n")
-    if "\r" in text:
-        return False
-    documents = [
-        document for document in re.split(r"(?m)^---\s*$", text)
-        if document.strip()
-    ]
-    if len(documents) != 1 or expected_recipient is None:
-        return False
-    document = documents[0]
-    secret_like, canonical_kind = _secret_kind_state(document)
-    if not secret_like or not canonical_kind:
-        return False
-    top_level_lines = _top_level_yaml_lines(document)
-    if any(
-        re.match(r"^[A-Za-z][A-Za-z0-9]*:\s*.*$", line) is None
-        for line in top_level_lines
-    ):
-        return False
-    top_level_names = [
-        re.match(r"^([A-Za-z][A-Za-z0-9]*):", line).group(1)
-        for line in top_level_lines
-    ]
-    if top_level_names != [
-        "apiVersion", "kind", "metadata", "type", "stringData", "sops",
-    ]:
-        return False
-    if re.search(r"(?m)^apiVersion:\s*v1\s*$", document) is None:
-        return False
-    if re.search(r"(?m)^type:\s*Opaque\s*$", document) is None:
-        return False
-
-    metadata_items = _direct_mapping_items(document, "metadata")
-    if metadata_items != [
-        ("name", "pi-websites-tunnel-token"),
-        ("namespace", "cloudflare-public"),
-    ]:
-        return False
-
-    lines = document.splitlines()
-    payload_lines = [
-        line for line in top_level_lines
-        if re.match(
-            r"^(?:data|stringData|\"data\"|'data'|\"stringData\"|'stringData')\s*:",
-            line,
-        )
-    ]
-    payloads = [
-        (index, match.group(1))
-        for index, line in enumerate(lines)
-        for match in [re.fullmatch(r"(data|stringData):\s*(?:#.*)?", line)]
-        if match is not None
-    ]
-    if len(payload_lines) != 1 or len(payloads) != 1 or payloads[0][1] != "stringData":
-        return False
-    payload_index, _payload_name = payloads[0]
-    payload_items = []
-    for child in lines[payload_index + 1:]:
-        if not child.strip() or child.lstrip().startswith("#"):
-            continue
-        indent = len(child) - len(child.lstrip(" "))
-        if indent == 0:
-            break
-        scalar = re.fullmatch(r"  ([A-Za-z0-9._-]+):\s*(\S+)\s*", child)
-        if scalar is None or indent != 2:
-            return False
-        payload_items.append((scalar.group(1), scalar.group(2)))
-    if (
-        [key for key, _value in payload_items] != ["token"]
-        or not _valid_sops_aes256_gcm(payload_items[0][1])
-    ):
-        return False
-
-    sops_lines = [
-        line for line in top_level_lines
-        if re.match(r"^(?:sops|\"sops\"|'sops')\s*:", line)
-    ]
-    sops_indices = [
-        index for index, line in enumerate(lines)
-        if re.fullmatch(r"sops:\s*(?:#.*)?", line)
-    ]
-    if len(sops_lines) != 1 or len(sops_indices) != 1:
-        return False
-    sops_block = []
-    for child in lines[sops_indices[0] + 1:]:
-        if child.strip() and not child.lstrip().startswith("#"):
-            if len(child) - len(child.lstrip(" ")) == 0:
-                break
-        sops_block.append(child)
-
-    direct_entries = []
-    for line in sops_block:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if "\t" in line[:len(line) - len(line.lstrip())]:
-            return False
-        if indent != 2:
-            continue
-        match = re.fullmatch(r"  ([a-z][a-z0-9_]*):\s*(.*?)\s*(?:#.*)?", line)
-        if match is None:
-            return False
-        direct_entries.append((match.group(1), match.group(2)))
-    if [key for key, _value in direct_entries] != [
-        "age", "lastmodified", "mac", "encrypted_regex", "version",
-    ]:
-        return False
-    direct_values = dict(direct_entries)
-    if direct_values.get("age") != "":
-        return False
-    if re.fullmatch(
-        r'"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
-        r'(?:\.[0-9]+)?Z"',
-        direct_values.get("lastmodified", ""),
-    ) is None:
-        return False
-    if direct_values.get("encrypted_regex") != "^(data|stringData)$":
-        return False
-    if direct_values.get("version") != "3.13.3":
-        return False
-    if not _valid_sops_aes256_gcm(direct_values.get("mac", "")):
-        return False
-
-    active_direct_key = None
-    for line in sops_block:
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent == 2:
-            match = re.fullmatch(r"  ([a-z][a-z0-9_]*):\s*(.*?)\s*(?:#.*)?", line)
-            active_direct_key = match.group(1) if match is not None else None
-        elif indent > 2 and active_direct_key != "age":
-            return False
-
-    age_indices = [
-        index for index, line in enumerate(sops_block)
-        if re.fullmatch(r"  age:\s*(?:#.*)?", line)
-    ]
-    if len(age_indices) != 1:
-        return False
-    age_block = []
-    for child in sops_block[age_indices[0] + 1:]:
-        if child.strip() and not child.lstrip().startswith("#"):
-            if len(child) - len(child.lstrip(" ")) <= 2:
-                break
-        age_block.append(child)
-    significant_age = [
-        line for line in age_block
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    recipient = (
-        re.fullmatch(r"    - recipient:\s*(age1pq1[0-9a-z]+)", significant_age[0])
-        if significant_age else None
-    )
-    if recipient is None or recipient.group(1) != expected_recipient:
-        return False
-    if len(significant_age) < 5 or significant_age[1] != "      enc: |":
-        return False
-    if significant_age[2] != "        -----BEGIN AGE ENCRYPTED FILE-----":
-        return False
-    if significant_age[-1] != "        -----END AGE ENCRYPTED FILE-----":
-        return False
-    return _valid_age_armor_body(significant_age[3:-1])
 
 
 def _parse_tree(root, commit, findings):
@@ -1108,16 +832,6 @@ def validate(root, baseline, candidate):
             relative_path.casefold(): blobs[oid]
             for _raw_path, relative_path, _identity, oid, _size in entries
         }
-        config_data = commit_blobs.get(".sops.yaml")
-        if config_data is None:
-            expected_sops_recipient = None
-        else:
-            try:
-                config_text = config_data.decode("utf-8", "strict")
-            except UnicodeDecodeError:
-                expected_sops_recipient = None
-            else:
-                expected_sops_recipient = _historical_sops_recipient(config_text)
         asset_totals = {}
         for raw_path, relative_path, _identity, oid, size in entries:
             data = blobs[oid]
@@ -1154,17 +868,9 @@ def validate(root, baseline, candidate):
                 relative_path.casefold().startswith("kubernetes/")
                 and relative_path.casefold().endswith((".yaml", ".yml"))
                 and _contains_secret_document(text)
-                and relative_path.casefold() != APPROVED_SOPS_PATH
                 and not _is_pinned_structural_secret_example(relative_path, data)
             ):
-                findings.add("unencrypted Kubernetes Secret manifest", commit, raw_path)
-            if (
-                relative_path.casefold() == APPROVED_SOPS_PATH
-                and not _strict_historical_sops_secret(
-                    text, expected_sops_recipient
-                )
-            ):
-                findings.add("invalid historical SOPS Secret", commit, raw_path)
+                findings.add("committed Kubernetes Secret manifest", commit, raw_path)
         for _scope, total in asset_totals.items():
             if total > MAX_ASSET_TREE_BYTES:
                 findings.add("frontend media tree exceeds aggregate ceiling", commit)

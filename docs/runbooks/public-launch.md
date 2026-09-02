@@ -9,7 +9,7 @@ Public launch is blocked until every item is evidenced:
   SBOMs, provenance, keyless signatures and verification, plus an immutable
   stable-version/digest evidence mapping for each selected image;
 - public GHCR visibility for anonymous Pi pulls;
-- final chart digest, no suspended releases, real SOPS tunnel Secret;
+- final chart digest, no suspended releases, the cluster-side tunnel Secret;
 - restricted PSA/RBAC/default-deny negative tests and workload API denial;
 - exact Conftest rejection of public Services, mutable images, cross-tenant
   references, and overbroad RBAC; signed digest-only site artifacts verified by

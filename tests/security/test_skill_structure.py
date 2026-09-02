@@ -49,7 +49,7 @@ SKILL_LOCAL_FORBIDDEN_IDENTITY = {
         "512 MB",
         "protected `main`",
         "GHCR repository",
-        "SOPS identity install",
+        "tunnel-token ceremony",
     ),
 }
 # The shared list applies to every skill; an exemption is per-skill, explicit,
@@ -1014,8 +1014,7 @@ class SkillStructureTests(unittest.TestCase):
             "explicit allowlist of API group, kind, namespace, and name",
             "immutable hashes of desired-state manifests, images, configuration",
             "metadata-only Secret references and key names, never Secret data",
-            "tokens, Secrets, SOPS or age material, private keys, etcd and "
-            "control-plane PKI",
+            "tokens, Secrets, private keys, etcd and control-plane PKI",
             "StatefulSets, PVs, PVCs, databases, and operators",
             "backup and restore evidence",
             "never enter this method's deletion allowlist",

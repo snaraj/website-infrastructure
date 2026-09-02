@@ -3,10 +3,10 @@
 # for the individual policy shapes, not a second complete controller render:
 # the real render supplies the full primary/status/finalizer inventories. This
 # fixture covers the shared role and binding, the exact secondary-source rules,
-# one-owner bindings, name-restricted impersonation, the exact decryption Secret
-# name, and a reconciler config-watcher gate. If a rule added
-# to policies/conftest/kubernetes.rego is broader than the property it is meant
-# to enforce, it fails here rather than silently rejecting the real manifests.
+# one-owner bindings, name-restricted impersonation, and a reconciler
+# config-watcher gate. If a rule added to policies/conftest/kubernetes.rego is
+# broader than the property it is meant to enforce, it fails here rather than
+# silently rejecting the real manifests.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -150,17 +150,6 @@ rules:
     resources: [serviceaccounts]
     verbs: [impersonate]
     resourceNames: [helm-reconciler]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: flux-controller-decryption
-  namespace: flux-system
-rules:
-  - apiGroups: [""]
-    resources: [secrets]
-    resourceNames: [sops-age]
-    verbs: [get]
 ---
 apiVersion: apps/v1
 kind: Deployment

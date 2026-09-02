@@ -1,18 +1,17 @@
-# Flux and SOPS bootstrap — Draft / unverified
+# Flux bootstrap — Draft / unverified
 
 Flux reads public `main` anonymously. Never use `flux bootstrap github` or
 `flux bootstrap git`, and never create a Git authentication Secret.
 
-The `sops-age` Secret and the sync objects are separate mutations, and they
-remain blocked until independent physical/LAN recovery and two simultaneously
-working admin sessions have been proven immediately before the first mutation.
-Losing either session afterward is recoverable; claiming the proof before it
-happened is not.
+The sync objects remain blocked until independent physical/LAN recovery and two
+simultaneously working admin sessions have been proven immediately before the
+first mutation. Losing either session afterward is recoverable; claiming the
+proof before it happened is not.
 
 **The controllers-only install is the one exception, and it is not performed
-from this directory.** Installing the three controllers creates no Secret,
-needs no age identity, and applies no Flux custom resource. Its live modes are
-not credential-free: they use the protected flattened kubeconfig and its client
+from this directory.** Installing the three controllers creates no Secret and
+applies no Flux custom resource. Its live modes are not credential-free: they
+use the protected flattened kubeconfig and its client
 credential through a pinned kubectl. Kustomize and kubectl are copied into a
 private work directory and their exact executable bytes are SHA-256-bound
 before either copy is invoked. The install was separated into its own reviewed entry point,
@@ -47,10 +46,9 @@ reviewed expectations.
 
 The code-enforced blocker for everything else stands: no trusted stage-zero
 reviewed-blob launcher exists yet. `bootstrap.sh --apply-controllers`,
-`--apply-sync`, and `--verify`; `verify.sh`; both `install-sops-age-secret.sh`
-modes; both protected SOPS verifiers; and the raw-etcd canary all stop before
-reading a protected file or making a cluster request. Do not invoke them or
-supply secret-bearing environment variables. Their implementations remain
+`--apply-sync`, and `--verify`; `verify.sh`; and the raw-etcd canary all stop
+before reading a protected file or making a cluster request. Do not invoke them
+or supply secret-bearing environment variables. Their implementations remain
 in-tree for review only. Reopening them requires a separately installed
 immutable launcher that starts with a clean execution environment, extracts
 exact reviewed commit blobs into private custody with trusted absolute tools,
@@ -78,9 +76,8 @@ Stage these release artifacts inside the protected root as single-link
 owner-only executables, without adding them to the repository:
 
 - Flux v2.9.3 Linux AMD64 for controller generation;
-- kubectl v1.36.3 Linux AMD64 for target reads and mutations;
-- age/age-keygen v1.3.1 Linux AMD64; and
-- SOPS v3.13.3 Linux AMD64.
+- kubectl v1.36.3 Linux AMD64 for target reads and mutations; and
+- age/age-keygen v1.3.1 Linux AMD64.
 
 Verify the publishers' signature/provenance material and the archive/checksum
 files independently. `versions.env` pins the resulting executable hashes. The
@@ -108,8 +105,8 @@ The future launcher must start the protected process through an absolute
 runs. In-script rejection of `BASH_ENV`, exported functions, or loader variables
 is drift detection after interpreter startup and is not the stage-zero control.
 The latent ceremony also rejects proxies, GitHub, SSH-agent, Cloudflare,
-OpenTofu, cloud-KMS, and unapproved SOPS authority before its first intentional
-private-file read. Each future live operation requires the exact reviewed
+OpenTofu, and cloud-KMS authority before its first intentional private-file
+read. Each future live operation requires the exact reviewed
 `main` commit in `EXPECTED_REPOSITORY_HEAD`, rejects
 replace refs, grafts, shallow history, and mutable critical blobs, and extracts
 validators and pins from that commit. Bind the target with the reviewed
@@ -133,77 +130,13 @@ and waits for all three deployments. Its `--apply-controllers` mode remains
 code-blocked by the missing launcher; this description is a future acceptance
 contract, not an instruction to bypass the stop.
 
-## Cluster age identity ceremony
-
-Do not generate the real identities merely because this branch is ready. Begin
-only after the reviewed-blob launcher exists and the protected machine, two
-independent backup destinations, restore test, raw-etcd Secret-encryption
-canary, metadata-only audit evidence, recovery, and two-session gates are ready.
-
-1. On the trusted offline Linux machine, generate a hybrid post-quantum cluster
-   identity with the pinned `age-keygen -pq`. Capture only its public
-   `age1pq1...` recipient. Never display or transmit the private identity.
-2. Generate a different operator-wrapping identity. Create two independently
-   stored operator-wrapped copies of the cluster identity. Restore each into
-   protected scratch and prove it decrypts disposable ciphertext; a copy
-   encrypted only to a key stored beside it is not independent recovery.
-3. Verify a disposable SOPS encrypt/decrypt round trip with the pinned binaries.
-   Commit only the cluster public recipient to `.sops.yaml`. The operator key,
-   cluster identity, decrypted material, and backup locations never enter Git,
-   CI, chat, email, clipboard sync, or the Pi at this stage.
-4. After the launcher blocker is resolved, Flux controllers are healthy, and
-   the raw-etcd canary proves the configured encrypted-storage prefix while the
-   plaintext marker is absent, the future procedure runs
-   `install-sops-age-secret.sh create`. Supply protected paths through the
-   private process, not command-history literals. Required inputs include
-   `CREDENTIAL_WORKSPACE`, `KUBECONFIG_FILE`, `KUBECTL_BINARY`,
-   `AGE_KEYGEN_BINARY`, the exact context/server/node/CA/namespace-UID,
-   encrypted-filesystem UUID hash, the exact custody acknowledgement,
-   `SOPS_AGE_TWO_BACKUPS_RESTORE_TESTED=yes`, and the create acknowledgement.
-
-The installer derives the public recipient from the protected private file,
-creates candidates only inside the protected root, and uses create or
-resourceVersion compare-and-swap replace. Replacement also requires the
-independently retained predecessor identity-count, recipient-set, and private-
-data digests, so a merely well-shaped but unexpected Secret cannot be silently
-overwritten. It compares both the API server's mutation response and a fresh
-live read with the intended `age.agekey` bytes, UID, resourceVersion, exact
-annotations, and closed security metadata before reporting success. The
-standalone verifier likewise requires the protected identity file(s) and pinned
-age-keygen, then compares the exact live bytes; metadata and shape alone are
-never proof.
-
-## Public Tunnel-token ciphertext
+## Public Tunnel token
 
 The `pi-websites` runtime token is a Cloudflare Tunnel bearer, not an API token.
-Retrieve it directly into a mode-0600 protected file without printing it. Build
-the exact `cloudflare-public/pi-websites-tunnel-token` Secret plaintext only in
-protected scratch, encrypt `stringData.token` with the one recipient selected by
-`.sops.yaml`, and write SOPS output to a new candidate before any atomic rename.
-Never source the token from OpenTofu state.
-
-Only after the launcher blocker is resolved, and before copying ciphertext into
-`kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml`, run the
-static snapshot/repository validators. Review and merge only the ciphertext,
-public recipient, and token revision. Then, from the exact merged protected
-`main`, the future procedure runs `verify-sops-ciphertext.sh` on protected snapshots of the committed
-`.sops.yaml` and ciphertext, the cluster identity, pinned SOPS/age-keygen
-executables, and independently prepared SHA-256 digests of the reviewed
-Cloudflare account and `pi-websites` Tunnel IDs. The script:
-
-- checks the exact SOPS grammar and single hybrid-PQ recipient;
-- decrypts under a network namespace, which authenticates the SOPS MAC;
-- directs plaintext only to mode-0600 protected scratch;
-- validates the decrypted bearer token's canonical standard-base64 JSON,
-  account digest, Tunnel UUID digest, and secret length; and
-- requires both public input snapshots to equal their exact committed Git blobs,
-  with replace refs, grafts, local credential helpers, and mutable validator
-  sources excluded; and
-- emits only PASS plus the public ciphertext SHA-256 before deleting scratch.
-
-CI repeats structure, path, recipient, and ciphertext-envelope checks, but CI
-has no private identity and therefore cannot authenticate the MAC or plaintext
-token identity. A CI PASS is not a decrypt proof.
+It never enters this repository: the owner creates the
+`cloudflare-public/pi-websites-tunnel-token` Secret directly on the cluster from
+a mode-0600 protected file, and the connector release stays suspended until that
+ceremony has run. Never source the token from OpenTofu state.
 
 `bootstrap.sh --apply-sync` remains blocked and is retired as a recovery path.
 Its dormant implementation predates the exact-consumer, authority-quarantine,
@@ -211,5 +144,5 @@ and compare-and-swap requirements of ADR 0016; it must not be enabled or used to
 apply all of `access.yaml` or `gotk-sync.yaml`. The only sanctioned initial site
 sync is the owner-attended, release-bound
 `bootstrap/flux/release-selector/bootstrap.sh` transaction. Controller install,
-controller RBAC, SOPS custody, and Cloudflare recovery remain separate
-out-of-band procedures and never enter the two site Kustomizations.
+controller RBAC, and Cloudflare recovery remain separate out-of-band procedures
+and never enter the two site Kustomizations.

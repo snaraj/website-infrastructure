@@ -22,8 +22,8 @@ token.
 
 Posting source to GitHub remains a workstation responsibility. Authenticate Git
 with the dedicated passphrase-protected SSH agent or the OS credential manager/
-passkey; never copy that GitHub authority to the Pi, Flux, SOPS documents, or a
-Cloudflare credential store. Before every push, review the exact index rather
+passkey; never copy that GitHub authority to the Pi, Flux, or a Cloudflare
+credential store. Before every push, review the exact index rather
 than the whole working directory, run the repository secret/privacy gates over
 the index and full Git history, and push only the reviewed commit. Ignored files
 are not a confidentiality boundary, and a force-added local artifact/state path

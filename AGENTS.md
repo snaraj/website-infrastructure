@@ -40,8 +40,8 @@ the owner. In order:
 5. Never give Flux a Git credential or write capability. The source is public
    anonymous HTTPS and reconciliation is pull-only.
 6. Never deploy a mutable image tag. Workloads use a full `sha256` digest.
-7. Every committed Kubernetes Secret must be a valid SOPS document whose
-   `data` and `stringData` values are ciphertext.
+7. The repository carries no secrets; runtime secrets are created on the
+   cluster by an owner ceremony.
 8. Direct `kubectl apply` is limited to documented bootstrap or recovery. Once
    Flux owns a resource, normal changes flow through a reviewed Git commit.
 9. Dashboard mutations are break-glass only and must be recorded and reconciled
@@ -54,8 +54,7 @@ the owner. In order:
     policy/redaction tooling and must never enter a production image.
 12. Treat the Git index as public. Real host/service inventory, account or zone
    IDs, emails, IPs, machine IDs, user/workspace paths, plans, state, and local
-   evidence remain ignored/local unless an explicitly designed SOPS/age Secret
-   flow requires ciphertext in Git.
+   evidence remain ignored/local.
 13. Keep heavyweight media out of Git, OCI images, Flux, ConfigMaps,
     Secrets, and etcd. Before Pi discovery, reject every
     hostPath/PV/PVC/storage-profile activation; current zero-spend Cloudflare
@@ -108,9 +107,9 @@ the owner. In order:
   disposable fixture must prove a mode-0600 pre-mutation recovery journal,
   repeated/mixed-signal-safe single rollback, bounded receipt, and zero residue.
   Stateful/PV/PVC/database/operator resources remain supported but never
-  inherit deletion permission. Protected tokens, Secrets, SOPS/age material,
-  private keys, etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and
-  Git history are excluded from destructive tests.
+  inherit deletion permission. Protected tokens, Secrets, private keys,
+  etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and Git history
+  are excluded from destructive tests.
 - Use official upstream documentation to revalidate versions, schemas,
   entitlements, and billing immediately before any external change.
 
@@ -173,11 +172,9 @@ and dependency-governed Draft capacity is recorded durably in
   covering the delivery-owned `kubernetes/flux-system/**` manifests, and
   that model is the mechanism that proves the cluster matches them. Its
   live-apply custody surface stays PLATFORM-owned and stays blocked: the
-  `--apply-controllers` / `--apply-sync` / `--verify` stop, the four
-  sibling entry points `install-sops-age-secret.sh`,
-  `verify-sops-age-secret.sh`, `verify-sops-ciphertext.sh`, and
-  `verify.sh` in their entirety — each blocked by the same reviewed-blob
-  stop — the trusted reviewed-blob launcher requirement, and the
+  `--apply-controllers` / `--apply-sync` / `--verify` stop, the sibling
+  entry point `verify.sh` in its entirety — blocked by the same
+  reviewed-blob stop — the trusted reviewed-blob launcher requirement, and the
   credential-custody preconditions. The split is by responsibility, not
   by line range — a delivery-lane change may correct what the model
   asserts about reviewed state, never what the custody surface above
@@ -396,7 +393,7 @@ Three tiers, and a change takes the highest tier any of its paths earns:
 
 Nothing here relaxes a fail-closed control at a real trust boundary: the
 safety invariants, owner-only merge, commit identity and signing, digest-only
-deploys, SOPS-only secrets, protected-branch settings, and the release
+deploys, the secretless repository, protected-branch settings, and the release
 transition gates are the same in every tier. Exact-head discipline is also
 unchanged for whatever review DOES run — a verdict binds the head it names.
 

@@ -4,7 +4,7 @@ metadata:
   name: cloudflare-public
   namespace: cloudflare-public
   annotations:
-    platform.snaraj.dev/readiness: suspended-until-sops-token-and-cloudflare-plan
+    platform.snaraj.dev/readiness: suspended-until-tunnel-token-ceremony-and-cloudflare-plan
 spec:
   suspend: true
   interval: 10m0s
@@ -14,9 +14,9 @@ spec:
   # retention default that can reach the namespace Secret budget wedges the
   # release permanently: the prune frees nothing, the create is denied by
   # quota, and no reconcile can recover it (issue #198, measured on the site
-  # releases). This namespace's budget must also hold the reviewed SOPS tunnel
-  # credential for each connector, so retention is bounded here for the same
-  # reason rather than left to consume the margin those Secrets need.
+  # releases). This namespace's budget must also hold the tunnel credential
+  # each connector's owner ceremony creates, so retention is bounded here for
+  # the same reason rather than left to consume the margin those Secrets need.
   maxHistory: 2
   releaseName: cloudflare-public
   serviceAccountName: helm-reconciler

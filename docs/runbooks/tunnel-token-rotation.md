@@ -36,12 +36,10 @@ runs with the old credential.
 The persistent root-only token is not encrypted at rest, so loss or offline
 theft of the Pi triggers immediate force-disconnect and rotation.
 
-The public `pi-websites` SOPS path is also `NO-GO`: its protected ciphertext
-verifier and the Flux age-secret/live-sync entrypoints are code-blocked until
-the same class of separately installed reviewed-blob launcher exists. Public
-token rotation instructions below are a future acceptance contract only. Do
-not generate the production age identities or Tunnel ciphertext, and do not
-bypass the guards.
+The public `pi-websites` path is also `NO-GO`: the Flux live-sync entrypoints
+are code-blocked until the same class of separately installed reviewed-blob
+launcher exists. Public token rotation instructions below are a future
+acceptance contract only; do not bypass the guards.
 
 The admin and public Tunnel tokens are separate. Never rotate both in one
 change. A remotely managed Tunnel token is a bearer credential: anyone holding
@@ -70,18 +68,12 @@ clear it immediately afterward.
    have the owner rotate `pi-websites` and capture the new runtime token directly
    into a protected mode-0600 file without printing it. Existing replicas may
    remain connected, but the old token can no longer reconnect them.
-2. Generate the same Kubernetes Secret name/key, encrypt with the one public age
-   recipient selected by `.sops.yaml`, list `tunnel-token.sops.yaml` exactly once
-   in the public release Kustomization, and update the chart's non-secret
-   `tokenRevision` in one feature-branch PR. The gate accepts this as staged only
-   when the file, listing, ciphertext structure, Secret identity/key, recipient,
-   and revision all agree. Before the file enters the repository, run the
-   protected Linux `bootstrap/flux/verify-sops-ciphertext.sh` ceremony. A PASS
-   authenticates the SOPS MAC and proves the decrypted bearer matches the
-   independently reviewed account and `pi-websites` Tunnel-ID digests without
-   printing it; CI structural validation cannot provide that proof. Initial
-   state requires the Secret both absent and
-   unlisted; never commit a latent listing or split these fields across PRs.
+2. Create the `cloudflare-public/pi-websites-tunnel-token` Secret directly on
+   the cluster from that protected file. The token never enters the repository
+   in any encoding, and the public release Kustomization stays at its exact two
+   resources. The only committed half is the chart's non-secret `tokenRevision`,
+   updated in one feature-branch PR; the gate accepts this as staged when that
+   revision is resolved.
 3. Render, policy-check, and secret-scan the exact diff. After merge, watch the
    `maxUnavailable=0` rollout and verify two healthy new-token connectors plus
    public, terminal-404, and origin-denial tests.
@@ -101,9 +93,9 @@ clear it immediately afterward.
    either bearer value in the URL or command line. Downtime is required because
    every old-token connector, including a malicious one, can otherwise remain
    active.
-3. Install the new token through the same SOPS/age, review, merge, rollout, and
-   verification path above. Revoke the short-lived API token after recording
-   non-secret revocation evidence.
+3. Install the new token through the same cluster ceremony, review, merge,
+   rollout, and verification path above. Revoke the short-lived API token after
+   recording non-secret revocation evidence.
 4. Prove the public connector recovered and `pi-admin` remained unchanged.
    Never restore the compromised token or skip the force-disconnect step.
 

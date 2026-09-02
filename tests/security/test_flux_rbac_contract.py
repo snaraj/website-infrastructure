@@ -2438,18 +2438,25 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                 )
 
     def test_flux_system_secret_authority_cannot_reappear(self):
+        """Even a read of one named Secret in flux-system is refused."""
+
         anchor = "rules:\n  # Leader election is per-controller"
-        injected = (
-            "rules:\n"
-            '  - apiGroups: [""]\n'
-            "    resources: [secrets]\n"
-            "    verbs: [get, update]\n"
-            "  # Leader election is per-controller"
-        )
-        errors = self.mutate("kubernetes/flux-system/access.yaml", anchor, injected)
-        self.assertTrue(
-            any("Secret grant must be read-only" in error for error in errors), errors
-        )
+        for verbs in ("[get]", "[get, update]"):
+            injected = (
+                "rules:\n"
+                '  - apiGroups: [""]\n'
+                "    resources: [secrets]\n"
+                "    verbs: {}\n".format(verbs)
+                + "  # Leader election is per-controller"
+            )
+            with self.subTest(verbs=verbs):
+                errors = self.mutate(
+                    "kubernetes/flux-system/access.yaml", anchor, injected
+                )
+                self.assertTrue(
+                    any("must not grant Secret access" in error for error in errors),
+                    errors,
+                )
 
     def test_per_controller_roles_cannot_gain_cluster_secret_access(self):
         relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
@@ -2920,7 +2927,7 @@ class YamlSubsetReaderTests(unittest.TestCase):
             "    resources: [secrets, configmaps]\n"
             "    verbs: [get]\n"
             "    resourceNames:\n"
-            "      - sops-age\n"
+            "      - example-name\n"
             "---\n"
             "kind: Other\n"
             "spec:\n"
@@ -2937,7 +2944,7 @@ class YamlSubsetReaderTests(unittest.TestCase):
                     "apiGroups": [""],
                     "resources": ["secrets", "configmaps"],
                     "verbs": ["get"],
-                    "resourceNames": ["sops-age"],
+                    "resourceNames": ["example-name"],
                 }
             ],
         )

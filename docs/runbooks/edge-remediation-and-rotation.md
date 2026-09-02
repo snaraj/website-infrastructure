@@ -281,14 +281,11 @@ off, and clear it immediately afterwards.
    holding the old token — including one an attacker controls — keeps serving.
 5. **Install the new token through the approved workflow.** The connector reads
    its token from a Kubernetes Secret through `secretKeyRef`, never as a literal
-   manifest value; the Secret is SOPS/age ciphertext under the recipient
-   selected by `.sops.yaml`, staged in one feature-branch pull request together
-   with the non-secret revision field the chart uses to trigger a rollout. The
-   per-site Secret paths for the two-Tunnel shape are platform-lane
-   reconciliation work and are not yet in Git; until they land, the exact
-   staging contract, its ciphertext ceremony, and its blockers are the ones in
-   `docs/runbooks/tunnel-token-rotation.md`. Never commit a latent listing, and
-   never split the Secret and its listing across two pull requests.
+   manifest value; the Secret is created directly on the cluster by the owner's
+   ceremony and never enters Git, while the non-secret revision field the chart
+   uses to trigger a rollout is the only part that moves through a pull request.
+   The exact ceremony and its blockers are in
+   `docs/runbooks/tunnel-token-rotation.md`.
 6. **Prove the old token cannot reconnect.** After the rollout completes, the
    audit must show that Tunnel healthy with `idle=0` and no connector that
    predates the rotation. An old-token connector that reappears means the

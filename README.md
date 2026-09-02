@@ -82,8 +82,8 @@ violations automatically:
   LoadBalancer, host network, Ingress controller, or public admin hostname.
   The only public path is an outbound-only tunnel.
 - **Nothing secret in the open.** Flux reads this public repo anonymously and
-  holds no write credential. Committed Secrets are SOPS ciphertext; the age
-  private identity never touches Git, CI, logs, or chat. Commit metadata
+  holds no write credential. The repository carries no secrets at all: runtime
+  Secrets are created on the cluster by an owner ceremony. Commit metadata
   itself is scanned — a real email address can't even ride along in a
   trailer.
 - **Only what was reviewed runs.** Signed charts are selected by immutable OCI
@@ -186,8 +186,8 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Flux live-vs-reviewed drift | Open serialization gate: `v0.1.40` publication alone is not #141 terminal execution/convergence evidence, which remains required before combined #195/#189 can advance |
 | `flux-system` egress policy | Committed desired state only. The #141 transaction explicitly excludes `kubernetes/flux-system/access.yaml`; no live application or health is claimed |
 | Flux site desired state | Combined #195/#189 candidate: both manifests are unsuspended at exact signed chart digests behind the protected-main-branch source (owner decoupling ruling 2026-09-01, issue #275; the tag-driven selector path retires per `docs/runbooks/site-sync-branch-flip.md`) and two direct `prune: false`, `deletionPolicy: Orphan` reconcilers. Current selections: lidersea.com `0.1.41` and naranjo.online `0.1.71`, captured 2026-09-01 for issues #285 in `docs/assurance/195-chart-acquisition-receipt.json`; acquisition receipts never assert live convergence, so no health claim of any kind attaches to the committed digests. No live equivalence, readiness, or traffic is claimed |
-| Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.43` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` and `v0.1.42` are never selected. It does not reconcile SOPS, controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
-| SOPS key ceremony | Not run |
+| Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.43` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` and `v0.1.42` are never selected. It does not reconcile controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
+| Tunnel-token ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |
 

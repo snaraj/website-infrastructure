@@ -1,6 +1,6 @@
 # STRUCTURAL EXAMPLE ONLY. This path is not included by any Kustomization.
-# A production file must be named tunnel-token.sops.yaml and contain SOPS
-# ciphertext for stringData/data plus valid SOPS metadata.
+# The repository carries no secrets: the real Secret is created on the cluster
+# by the owner's tunnel-token ceremony and never committed here.
 apiVersion: v1
 kind: Secret
 metadata:

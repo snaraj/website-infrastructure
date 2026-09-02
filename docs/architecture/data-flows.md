@@ -45,10 +45,10 @@ durable storage.
 
 1. A reviewed commit reaches protected `main` after secretless CI.
 2. Flux fetches the public repository anonymously.
-3. Kustomize controller decrypts only SOPS-encrypted Secret fields using an age
-   identity mounted out-of-band in `flux-system`.
-4. Explicit reconciliation ServiceAccounts apply the desired state.
-5. The API server encrypts Secret values in etcd with the reviewed encryption
+3. Explicit reconciliation ServiceAccounts apply the desired state; the
+   repository carries no Secret for them to apply.
+4. Runtime Secrets are created on the cluster by an owner ceremony. The API
+   server encrypts their values in etcd with the reviewed encryption
    configuration; the workload receives only its Secret.
 
 ## Immutable chart selection

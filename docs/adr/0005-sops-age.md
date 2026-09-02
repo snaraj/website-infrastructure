@@ -1,6 +1,8 @@
 # ADR 0005: SOPS with age
 
-- Status: Accepted
+- Status: Superseded by the owner's 2026-09-02 decision that the repository
+  carries no secrets (AGENTS.md safety invariant 7); the scaffolding below is
+  removed and the Tunnel token is created on the cluster by an owner ceremony
 - Date: 2026-08-08
 
 Implementation status: deployment blocked. The architecture below is accepted,

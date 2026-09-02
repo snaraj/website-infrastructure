@@ -427,8 +427,7 @@ class Authorizer:
       binding's own namespace, never at cluster scope;
     * ``resourceNames`` restricts a rule to named objects, and a request that
       carries no object name (``list``, ``watch``, ``create``) therefore cannot
-      be authorized by a rule that sets it. That asymmetry is why the SOPS key
-      read is granted namespace-wide instead of by name.
+      be authorized by a rule that sets it.
     """
 
     def __init__(self):
@@ -1369,15 +1368,6 @@ def derive_requirements(root=REPO_ROOT):
                 "kustomizations/status", namespace, None, owner, reason,
             )
         )
-        decryption = (spec.get("decryption") or {}).get("secretRef") or {}
-        if decryption:
-            controller.append(
-                Requirement(
-                    kustomize_controller, "get", "", "secrets", namespace,
-                    decryption.get("name"), owner, reason + " SOPS decryption",
-                )
-            )
-
         controller.extend(
             source_reads(
                 kustomize_controller, spec["sourceRef"], namespace, owner, reason

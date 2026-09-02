@@ -17,7 +17,6 @@ TRANSITION = load_script(
     "validate_release_transition.py", module_name="kyverno_retirement_transition"
 )
 TRANSITION_FILES = (
-    ".sops.yaml",
     "kubernetes/websites/naranjo-online/release.yaml",
     "kubernetes/websites/lidersea-com/release.yaml",
     "kubernetes/platform/cloudflare-public/release/release.yaml",

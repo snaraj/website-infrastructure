@@ -19,24 +19,15 @@ copy, or environment changes.
    a mutable default context.
 3. Wait for source, kustomize, and helm controllers. Confirm cross-namespace
    references and remote bases remain disabled.
-4. The future recovery flow confirms the out-of-band `sops-age` Secret through
-   `verify-sops-age-secret.sh`, which compares the exact live bytes, UID,
-   resourceVersion, annotations, and closed security metadata with protected
-   identity snapshots through the protected target. It restores only from a
-   user-controlled tested backup using `install-sops-age-secret.sh`; both the
-   create/replace response and a fresh live read must contain the intended
-   private bytes. Never use a raw `--from-file` command.
-5. Never enable or invoke the retired `bootstrap/flux/bootstrap.sh --apply-sync`
+4. Never enable or invoke the retired `bootstrap/flux/bootstrap.sh --apply-sync`
    body. Restore site sync only through the release-bound
    `bootstrap/flux/release-selector/bootstrap.sh` transaction: prove the
    GitRepository is credentialless and selects one exact immutable tag, its
    consumer inventory is closed, and both tenant Kustomizations use their
    explicit ServiceAccounts with `prune: false`.
-6. Inspect Flux events/status. Prefer a Git revert for bad desired state; do not
+5. Inspect Flux events/status. Prefer a Git revert for bad desired state; do not
    patch Flux-owned resources as ordinary recovery.
-7. Before re-enabling a suspended release, render/policy-check the exact revision
+6. Before re-enabling a suspended release, render/policy-check the exact revision
    and verify signatures/digests.
 
-Removing the age Secret is a planned negative test only after backups: reconcile
-must fail closed, and restoring the same Secret must recover. Never print Secret
-YAML or create Git credentials to make recovery easier.
+Never print Secret YAML or create Git credentials to make recovery easier.

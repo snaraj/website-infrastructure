@@ -111,5 +111,3 @@ Thumbs.db
 *.bak
 *.tmp
 *~
-
-# Keep SOPS ciphertext tracked. Do not add *.sops.yaml here.

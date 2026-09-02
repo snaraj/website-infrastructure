@@ -2048,34 +2048,15 @@ deny contains msg if {
   msg := sprintf("%s %s must not grant ServiceAccount token creation", [input.kind, input.metadata.name])
 }
 
-# The controllers read the SOPS age key in flux-system and write no Secret
-# anywhere; a write verb there would let a controller replace the key it
-# decrypts with.
+# The repository carries no secrets and the controllers decrypt nothing, so no
+# flux-system Role needs Secret access at all; Helm release storage lives in the
+# impersonated tenant namespace. Any verb here is a finding.
 deny contains msg if {
   input.kind == "Role"
   input.metadata.namespace == "flux-system"
   some rule in object.get(input, "rules", [])
   "secrets" in object.get(rule, "resources", [])
-  some verb in object.get(rule, "verbs", [])
-  verb in {"create", "update", "patch", "delete", "deletecollection"}
-  msg := sprintf("Role flux-system/%s must not write Secrets", [input.metadata.name])
-}
-
-valid_flux_decryption_role if {
-  object.get(input, "rules", []) == [{
-    "apiGroups": [""],
-    "resources": ["secrets"],
-    "resourceNames": ["sops-age"],
-    "verbs": ["get"],
-  }]
-}
-
-deny contains msg if {
-  input.kind == "Role"
-  input.metadata.namespace == "flux-system"
-  input.metadata.name == "flux-controller-decryption"
-  not valid_flux_decryption_role
-  msg := "Role flux-system/flux-controller-decryption must grant only exact sops-age Secret get"
+  msg := sprintf("Role flux-system/%s must not grant Secret access", [input.metadata.name])
 }
 
 # Optional ConfigMap/Secret watchers are disabled on both reconcilers. Helm

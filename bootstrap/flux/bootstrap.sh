@@ -193,7 +193,6 @@ unset KUBECONFIG HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
   http_proxy https_proxy all_proxy no_proxy KUBECTL_PLUGINS_PATH KUBECTL_EXTERNAL_DIFF
 while IFS= read -r authority_name; do
   case "${authority_name}" in
-    SOPS_AGE_IDENTITY_FILE|SOPS_AGE_SECONDARY_IDENTITY_FILE|SOPS_AGE_TWO_BACKUPS_RESTORE_TESTED) ;;
     AWS_*|AZURE_*|GOOGLE_*|GCP_*|HCLOUD_*|VAULT_*|TF_*|TOFU_*|\
     GH_*|GITHUB_*|GIT_*|GCM_*|SSH_*|CF_*|CLOUDFLARE_*|SOPS_*) fail ;;
   esac
@@ -253,12 +252,10 @@ git_repo diff --quiet --no-ext-diff || fail
 git_repo diff --cached --quiet --no-ext-diff || fail
 
 critical_inventory='100755 bootstrap/flux/bootstrap.sh
-100755 bootstrap/flux/verify-sops-age-secret.sh
 100644 scripts/validate_kubeconfig_snapshot.py
 100644 versions.env'
 actual_critical_inventory="$(git_repo ls-tree "${EXPECTED_REPOSITORY_HEAD}" -- \
   bootstrap/flux/bootstrap.sh \
-  bootstrap/flux/verify-sops-age-secret.sh \
   scripts/validate_kubeconfig_snapshot.py \
   versions.env | awk '{ mode=$1; sub(/^[^\t]*\t/, ""); print mode " " $0 }')" || fail
 [[ "${actual_critical_inventory}" == "${critical_inventory}" ]] || fail
@@ -1638,16 +1635,12 @@ if [[ "${mode}" == --apply-controllers ]]; then
   done
   verify_reviewed_live_state controllers || fail
   verify_cluster_target || fail
-  printf 'PASS Flux controllers are available; stop for the age backup/install checkpoint.\n'
+  printf 'PASS Flux controllers are available.\n'
   exit 0
 fi
 
 if [[ "${mode}" == --apply-sync ]]; then
   [[ "${CONFIRM_FLUX_SYNC:-}" == apply-reviewed-anonymous-sync ]] || fail
-  : "${EXPECTED_SOPS_AGE_RECIPIENT:?Set the reviewed public hybrid-PQ recipient}"
-  KUBECONFIG_FILE="${kubeconfig}" KUBECTL_BINARY="${kubectl}" \
-    /bin/bash "${repo_root}/bootstrap/flux/verify-sops-age-secret.sh" \
-      1 "${EXPECTED_SOPS_AGE_RECIPIENT}" || fail
   verify_cluster_target || fail
   mutation_attempted=1
   for manifest in \
@@ -1659,7 +1652,7 @@ if [[ "${mode}" == --apply-sync ]]; then
   done
   verify_reviewed_live_state full || fail
   verify_cluster_target || fail
-  printf 'PASS bootstrap-owned access and anonymous sync were applied after exact age Secret verification.\n'
+  printf 'PASS bootstrap-owned access and anonymous sync were applied.\n'
   exit 0
 fi
 
@@ -1676,10 +1669,6 @@ git_repository="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get \
 git_secret_count="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get secret \
   -o jsonpath='{range .items[?(@.type=="kubernetes.io/basic-auth")]}x{end}{range .items[?(@.type=="kubernetes.io/ssh-auth")]}x{end}' | wc -c)" || fail
 [[ "${git_secret_count}" -eq 0 ]] || fail
-: "${EXPECTED_SOPS_AGE_RECIPIENT:?Set the reviewed public hybrid-PQ recipient}"
-KUBECONFIG_FILE="${kubeconfig}" KUBECTL_BINARY="${kubectl}" \
-  /bin/bash "${repo_root}/bootstrap/flux/verify-sops-age-secret.sh" \
-    1 "${EXPECTED_SOPS_AGE_RECIPIENT}" || fail
 verify_reviewed_live_state full || fail
 
 source_args="$("${kubectl}" "${kubectl_target_args[@]}" -n flux-system get deployment source-controller -o jsonpath='{.spec.template.spec.containers[0].args}')" || fail
@@ -1699,4 +1688,4 @@ for namespace in flux-system cloudflare-public naranjo-online; do
     grep -qx no || fail
 done
 verify_cluster_target || fail
-printf 'PASS Flux target, exact reviewed live state, anonymous source, and exact SOPS Secret verification.\n'
+printf 'PASS Flux target, exact reviewed live state, and anonymous source.\n'

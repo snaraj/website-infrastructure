@@ -53,9 +53,10 @@ signed artifacts by digest.
   infer CNI, proxy, firewall, VPN, tunnel, route, or CIDR behavior without live
   evidence. Treat Kind as disposable integration testing, never target-host
   acceptance evidence.
-- For secrets, preserve the repository-selected encrypted-secret format,
-  stable consumer names/keys, and decryptor identity. Never create, read, print,
-  or request private decryption material; SOPS/age is one conditional variant.
+- For secrets, preserve the repository's own secret contract and its stable
+  consumer names/keys. Never create, read, print, or request private credential
+  material; carrying no secrets at all is one conditional variant, and an
+  in-repository encrypted-secret format is another.
 - For Cloudflare work, load `$cloudflare:cloudflare` when that skill is
   available; otherwise retrieve current official Cloudflare and provider
   documentation directly. Treat unknown price, entitlement, or terms

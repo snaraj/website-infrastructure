@@ -1,11 +1,9 @@
 """Exercise safe mixed GitOps release-state transitions."""
 
-import base64
 import contextlib
 import io
 import shutil
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
@@ -16,7 +14,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TRANSITION = load_script("validate_release_transition.py")
 
 RELEASE_FILES = (
-    ".sops.yaml",
     "kubernetes/websites/naranjo-online/release.yaml",
     "kubernetes/websites/lidersea-com/release.yaml",
     "kubernetes/platform/cloudflare-public/release/release.yaml",
@@ -24,29 +21,6 @@ RELEASE_FILES = (
 ) + tuple(
     path.as_posix()
     for path in sorted(TRANSITION.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
-)
-SYNTHETIC_RECIPIENT = "age1pq1" + ("q" * 80)
-
-
-def synthetic_sops_envelope(payload):
-    return "ENC[AES256_GCM,data:{},iv:{},tag:{},type:str]".format(
-        base64.b64encode(payload).decode("ascii"),
-        base64.b64encode(b"i" * 12).decode("ascii"),
-        base64.b64encode(b"t" * 16).decode("ascii"),
-    )
-
-
-SYNTHETIC_TOKEN_ENVELOPE = synthetic_sops_envelope(b"synthetic encrypted token")
-SYNTHETIC_MAC_ENVELOPE = synthetic_sops_envelope(b"synthetic authenticated mac")
-SYNTHETIC_AGE_BODY = "\n".join(
-    "        " + line
-    for line in textwrap.wrap(
-        base64.b64encode(
-            b"age-encryption.org/v1\n-> X25519 synthetic\n"
-            b"c3ludGhldGlj\n--- synthetic-mac\nciphertext\n"
-        ).decode("ascii"),
-        64,
-    )
 )
 SITE_FILES = {
     "naranjo-online": "kubernetes/websites/naranjo-online/release.yaml",
@@ -118,50 +92,6 @@ class ReleaseTransitionTests(unittest.TestCase):
             )
         with path.open("w", encoding="utf-8", newline="\n") as output:
             output.write(text)
-
-    def write_cloudflare_secret(self, *, listed=True, recipient=None):
-        if recipient is None:
-            recipient = SYNTHETIC_RECIPIENT
-        self.root.joinpath(".sops.yaml").write_bytes((
-            "creation_rules:\n"
-            "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
-            "    encrypted_regex: ^(data|stringData)$\n"
-            "    age:\n"
-            "      - {}\n".format(recipient)
-        ).encode("utf-8"))
-        secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
-        secret.write_bytes((
-            "apiVersion: v1\n"
-            "kind: Secret\n"
-            "metadata:\n"
-            "  name: pi-websites-tunnel-token\n"
-            "  namespace: cloudflare-public\n"
-            "type: Opaque\n"
-            "stringData:\n"
-            "  token: {}\n"
-            "sops:\n"
-            "  age:\n"
-            "    - recipient: {}\n"
-            "      enc: |\n"
-            "        -----BEGIN AGE ENCRYPTED FILE-----\n"
-            "{}\n"
-            "        -----END AGE ENCRYPTED FILE-----\n"
-            "  lastmodified: \"2026-08-09T00:00:00Z\"\n"
-            "  mac: {}\n"
-            "  encrypted_regex: ^(data|stringData)$\n"
-            "  version: 3.13.3\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE,
-                recipient,
-                SYNTHETIC_AGE_BODY,
-                SYNTHETIC_MAC_ENVELOPE,
-            )
-        ).encode("utf-8"))
-        if listed:
-            self.replace_once(
-                TRANSITION.CLOUDFLARE_RELEASE_KUSTOMIZATION,
-                "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
-                "  - tunnel-token.sops.yaml\n",
-            )
 
     def activate_both_sites(self):
         for site in SITE_FILES:
@@ -247,92 +177,21 @@ class ReleaseTransitionTests(unittest.TestCase):
                     self.tearDown()
                     self.setUp()
                 self.configure_cloudflare_revision(sites=(site,))
-                self.write_cloudflare_secret()
                 with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
                     TRANSITION.classify(self.root)
 
-    def test_configured_revision_without_encrypted_secret_is_rejected(self):
-        self.configure_cloudflare_revision()
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
+    def test_public_release_inventory_must_stay_secretless(self):
+        """Re-listing anything beside the two reviewed resources is refused.
 
-    def test_listed_tunnel_secret_must_exist(self):
-        self.configure_cloudflare_revision()
-        self.replace_once(
-            TRANSITION.CLOUDFLARE_RELEASE_KUSTOMIZATION,
-            "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
-            "  - tunnel-token.sops.yaml\n",
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
+        This is the whole mechanism keeping a Secret — or a file that renders
+        one — out of the connector's release now that no ciphertext path is
+        approved anywhere.
+        """
 
-    def test_present_tunnel_secret_must_be_listed(self):
         self.configure_cloudflare_revision()
-        self.write_cloudflare_secret(listed=False)
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_tunnel_secret_recipient_must_match_sops_configuration(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret()
-        secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
-        secret.write_bytes(
-            secret.read_text(encoding="utf-8").replace(
-                "recipient: {}".format(SYNTHETIC_RECIPIENT),
-                "recipient: age1mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
-            ).encode("utf-8")
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_classical_age_recipient_is_rejected_even_when_ciphertext_matches(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret(
-            recipient="age1" + ("q" * 80)
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_tunnel_secret_token_must_remain_sops_ciphertext(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret()
-        secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
-        secret.write_bytes(
-            secret.read_bytes().replace(
-                SYNTHETIC_TOKEN_ENVELOPE.encode("ascii"),
-                b"plaintext-token",
-                1,
-            )
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_tunnel_secret_rejects_quoted_kind_key(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret()
-        secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
-        secret.write_bytes(
-            secret.read_bytes().replace(b"kind: Secret\n", b'"kind": Secret\n', 1)
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_tunnel_secret_rejects_quoted_plaintext_string_data_override(self):
-        self.configure_cloudflare_revision()
-        self.write_cloudflare_secret()
-        secret = self.root / TRANSITION.CLOUDFLARE_TUNNEL_SECRET
-        secret.write_bytes(
-            secret.read_bytes().replace(
-                b"sops:\n",
-                b'"stringData":\n  token: plaintext-override\nsops:\n',
-                1,
-            )
-        )
-        with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
-            TRANSITION.classify(self.root)
-
-    def test_unresolved_revision_must_not_have_a_staged_secret(self):
-        self.write_cloudflare_secret()
+        path = self.root / TRANSITION.CLOUDFLARE_RELEASE_KUSTOMIZATION
+        with path.open("a", encoding="utf-8", newline="\n") as output:
+            output.write("  - tunnel-token.yaml\n")
         with self.assertRaises(TRANSITION.STATE.CanonicalYamlError):
             TRANSITION.classify(self.root)
 

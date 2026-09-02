@@ -209,7 +209,6 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
             "termination, restart, node loss, and dependency loss",
             "never encode replica=1",
             "PV/PVC, database, operator",
-            "SOPS/age keys and ciphertext",
             "API/Tunnel tokens",
             "public HTTPS recovery proof",
             "prestate hash -> exact fault -> recovery action -> poststate hash",

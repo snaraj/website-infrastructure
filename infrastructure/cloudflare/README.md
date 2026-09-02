@@ -223,18 +223,18 @@ requires and parses its `terraform.tfstate` backend metadata and requires the
 configured local-backend path to equal the phase path above. Never initialize live state beside the repository. Never commit
 or upload `.terraform/`, state, state backups, variable files, saved plans,
 plan JSON, provider environment, Tunnel runtime tokens, audit evidence
-containing opaque IDs, or decrypted SOPS material. State and plans remain
-outside Git even when the repository otherwise uses SOPS and age.
+containing opaque IDs, or decrypted credential material. State and plans remain
+outside Git.
 
 Write-token plaintext may enter only through `CLOUDFLARE_API_TOKEN` in the exact
 OpenTofu provider child process. It must not be exported into the parent shell,
 offline gate, parser, audit process, or another child. The distinct read-only
 audit bearer may enter only the future isolated audit child through the same
 trusted reviewed-blob launcher boundary; it is never shared with OpenTofu or an
-offline validator. SOPS/age ciphertext may
-protect approved credential source material, but decryption must be ephemeral
-and must never feed a Terraform variable, provider data source, plan, state,
-log, or repository plaintext. The required child-only launcher is not yet
+age ciphertext may protect approved credential source material on the
+protected volume, but decryption must be ephemeral and must never feed a
+Terraform variable, provider data source, plan, state, log, or repository
+plaintext. The required child-only launcher is not yet
 implemented, so this rule currently blocks live plan/apply.
 
 The six JIT write tokens have these maximum Cloudflare-enforced boundaries:

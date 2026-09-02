@@ -73,7 +73,7 @@ RELEASE_CONTRACTS = {
         "parent_name": None,
         "namespace": "cloudflare-public",
         "repository": None,
-        "readiness": "suspended-until-sops-token-and-cloudflare-plan",
+        "readiness": "suspended-until-tunnel-token-ceremony-and-cloudflare-plan",
         # The connector chart is this repository's own, so it keeps the
         # anonymous Git chart source; it has no published release identity of
         # its own and therefore no OCI chart reference.

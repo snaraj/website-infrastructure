@@ -30,7 +30,7 @@ resources appear by type and ordinal only. Inferences are marked
 
 | Principal | May | May not | Enforced by |
 | --- | --- | --- | --- |
-| Owner (`snaraj`) | merge to `main`, create rulesets, run ceremonies (SOPS, package visibility, billing), authorize mutations | — | GitHub rulesets; every gate assumes owner merge |
+| Owner (`snaraj`) | merge to `main`, create rulesets, run ceremonies (cluster Secrets, package visibility, billing), authorize mutations | — | GitHub rulesets; every gate assumes owner merge |
 | Codex deployment identity | mutate the live Pi within its staged, receipted loop; own `deploy/pi-live-readiness` | push to `main`; touch site repos; publish releases | division contract; branch protection |
 | Fable GitHub identity | feature branches, PRs, releases when owner grants tags; observations channel | merge to `main`; mutate Pi platform state; Cloudflare account writes | division contract; rulesets; this program's boundaries |
 | GitHub Actions (PR) | read-only validation, no credentials persisted | reach secrets, publish, deploy | `permissions: {}` top-level + job grants; `persist-credentials: false`; tests pin both |
@@ -47,8 +47,8 @@ resources appear by type and ordinal only. Inferences are marked
    evidence (mode-0600, untracked, checked by `assert_capacity_evidence`).
 3. **Root-only Pi state** — Codex's staged payloads, receipts, host state;
    never leaves the host; this repo holds only their public SHA-256 values.
-4. **In-cluster Secrets** — exactly one designed SOPS/age ciphertext path
-   (tunnel token); age private identity never in Git/CI/chat.
+4. **In-cluster Secrets** — created on the cluster by an owner ceremony
+   (tunnel token); never in Git/CI/chat, in any encoding.
 5. **GitHub secrets** — none consumed by PR CI (secretless by test);
    publishers use OIDC keyless signing, no long-lived keys.
 6. **Cloudflare secrets** — JIT token ceremonies validated hash-bound
@@ -67,7 +67,6 @@ flowchart LR
     end
     subgraph local["Owner-local (ignored)"]
       decisions[".local decisions + capacity evidence"]
-      sops["age identity"]
     end
     subgraph pi["Pi (root-only)"]
       stage["immutable stage + receipts"]
@@ -77,7 +76,6 @@ flowchart LR
     repo -->|anonymous Flux pull| cluster
     ghcr -->|digest-pinned pulls| cluster
     decisions -->|user-run ceremonies| stage --> cluster
-    sops -.->|one ciphertext path| repo
     cluster -->|sanitized PASS/FAIL + hashes only| repo
 ```
 

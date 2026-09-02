@@ -41,9 +41,6 @@ from validate_release_transition import (
     classify as classify_release_transition,
     cloudflare_phase_contract_errors,
     contains_secret_document,
-    sops_recipient_from_config,
-    sops_secret_errors,
-    tunnel_secret_errors,
 )
 from validate_signature_policy import (
     CHART_REPOSITORIES,
@@ -157,11 +154,6 @@ ALLOWED_CLOUDFLARE_RESOURCES = {
     "cloudflare_zero_trust_tunnel_cloudflared_config",
     "cloudflare_zero_trust_tunnel_cloudflared_route",
     "cloudflare_zone_setting",
-}
-APPROVED_SOPS_SECRET_PATHS = {
-    "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml": (
-        "pi-websites-tunnel-token"
-    ),
 }
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
@@ -848,58 +840,25 @@ def check_secrets(root):
                     errors.append(problem)
 
         if rel.startswith("kubernetes/") and path.suffix in {".yaml", ".yml"}:
-            if not re.search(r"\.sops\.ya?ml$", path.name):
-                if contains_secret_document(text) and not is_fixture(path):
-                    problem = "unencrypted Kubernetes Secret manifest: " + rel
-                    if problem not in errors:
-                        errors.append(problem)
+            if contains_secret_document(text) and not is_fixture(path):
+                problem = "committed Kubernetes Secret manifest: " + rel
+                if problem not in errors:
+                    errors.append(problem)
         if contains_plaintext_encryption_configuration(text):
             problem = "plaintext Kubernetes API encryption configuration: " + rel
             if problem not in errors:
                 errors.append(problem)
 
-    def inspect_sops_snapshot(documents):
-        sops_paths = {
-            rel for rel in documents
-            if rel != ".sops.yaml" and re.search(r"\.sops\.ya?ml$", rel)
-        }
-        for rel in sorted(sops_paths - set(APPROVED_SOPS_SECRET_PATHS)):
-            errors.append("unapproved SOPS Secret path: " + rel)
-        approved_present = sorted(sops_paths & set(APPROVED_SOPS_SECRET_PATHS))
-        if not approved_present:
-            return
-        config = documents.get(".sops.yaml")
-        if config is None:
-            errors.append("SOPS configuration is unavailable for approved ciphertext")
-            return
-        try:
-            recipient = sops_recipient_from_config(config)
-        except TRANSITION_RELEASE_STATE.CanonicalYamlError:
-            errors.append("SOPS configuration is unsafe for approved ciphertext")
-            return
-        if recipient is None:
-            errors.append("approved SOPS ciphertext requires a configured recipient")
-            return
-        for rel in approved_present:
-            for problem in tunnel_secret_errors(documents[rel], recipient):
-                detail = "invalid approved SOPS Secret {}: {}".format(rel, problem)
-                if detail not in errors:
-                    errors.append(detail)
-
-    worktree_documents = {}
     for path, text in files(root):
         rel = relative(path, root)
         if text is None:
             errors.append("unsafe or unstable public repository path: " + rel)
             continue
-        worktree_documents[rel] = text
         inspect(text, path, rel)
-    inspect_sops_snapshot(worktree_documents)
     index_documents, index_errors = _git_index_text_documents(root)
     errors.extend(index_errors)
     for rel, text in index_documents:
         inspect(text, root.joinpath(*Path(rel).parts), rel)
-    inspect_sops_snapshot(dict(index_documents))
     return errors
 
 
@@ -1661,7 +1620,6 @@ FLUX_CONTROLLER_ROLE_NAMESPACES = {
     "helm-reconciler": ("naranjo-online", "lidersea-com"),
 }
 
-RBAC_WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
 RBAC_READ_VERBS = ("get", "list", "watch")
 DISABLE_CONFIG_WATCHERS_FLAG = (
     "--feature-gates=DisableConfigWatchers=true"
@@ -2154,17 +2112,15 @@ def flux_rbac_contract_errors(root):
                         namespace, name
                     )
                 )
-            # A controller that can write Secrets in flux-system can rewrite
-            # the SOPS key it decrypts with.
+            # Nothing this repository deploys reads or writes a Secret in
+            # flux-system: the controllers decrypt nothing and every release
+            # Secret lives in the impersonated tenant namespace.
             if namespace == "flux-system" and "secrets" in _rbac_rule_list(block, "resources"):
-                granted = _rbac_rule_list(block, "verbs")
-                for verb in RBAC_WRITE_VERBS:
-                    if verb in granted:
-                        errors.append(
-                            "flux-system Secret grant must be read-only: {}/{} grants {}".format(
-                                namespace, name, verb
-                            )
-                        )
+                errors.append(
+                    "flux-system Role {}/{} must not grant Secret access".format(
+                        namespace, name
+                    )
+                )
         if name == "helm-reconciler" and namespace in {
             "naranjo-online", "lidersea-com",
         }:
@@ -2730,7 +2686,6 @@ def check_release(root):
         errors.append("versions.env still contains UNRESOLVED pins")
     required_generated = [
         "kubernetes/flux-system/controllers/gotk-components.yaml",
-        "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
     ] + [path.as_posix() for path in sorted(CLOUDFLARE_LOCK_FILES)]
     for name in required_generated:
         if not (root / name).is_file():
@@ -2748,15 +2703,6 @@ def check_release(root):
         errors.append(
             "flux-system API-server egress still carries the unresolved control-plane sentinel"
         )
-
-    sops_config = read(root / ".sops.yaml")
-    if "REPLACE_WITH_PUBLIC_RECIPIENT" in sops_config:
-        errors.append(".sops.yaml still has the invalid public-recipient sentinel")
-    configured_recipients = re.findall(
-        r"(?m)^\s*-\s*(age1[0-9a-z]+)\s*$", sops_config
-    )
-    if len(configured_recipients) != 1:
-        errors.append(".sops.yaml must contain exactly one valid age recipient")
 
     for domain, slug, _ in SITE_RELEASE_CONTRACTS:
         try:
@@ -2790,15 +2736,6 @@ def check_release(root):
     except (CanonicalYamlError, OSError, UnicodeError):
         errors.append("public tunnel release state is unavailable or non-canonical")
 
-    tunnel_kustomization = read(
-        root / "kubernetes/platform/cloudflare-public/release/kustomization.yaml"
-    )
-    if not active_kustomization_resource(tunnel_kustomization, "tunnel-token.sops.yaml"):
-        errors.append("encrypted tunnel token is not active in the public release Kustomization")
-    tunnel_secret = root / "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
-    if tunnel_secret.is_file() and len(configured_recipients) == 1:
-        for problem in tunnel_secret_errors(read(tunnel_secret), configured_recipients[0]):
-            errors.append("invalid production tunnel Secret: " + problem)
     errors.extend(signed_chart_source_errors(root))
     errors.extend(reviewed_capacity_errors(root))
     return errors
@@ -2858,11 +2795,6 @@ def activation_requested(root):
                     return True
             except (CanonicalYamlError, OSError, UnicodeError):
                 return True
-    tunnel_kustomization = root / "kubernetes/platform/cloudflare-public/release/kustomization.yaml"
-    if tunnel_kustomization.is_file() and active_kustomization_resource(
-        read(tunnel_kustomization), "tunnel-token.sops.yaml"
-    ):
-        return True
     return False
 
 
@@ -2887,8 +2819,7 @@ def _allowed_transition_release_errors(plan):
     # SAME validator mandates that sentinel (`check_kubernetes` fails when it is
     # absent), so its presence cannot also disqualify a transition: one check
     # requiring the exact bytes another refuses is a contract no tree satisfies.
-    # It is inert here for the same reason the pre-ceremony SOPS sentinels below
-    # are: nothing is being released, and the operator substitution happens at
+    # Nothing is being released, and the operator substitution happens at
     # apply time, not in Git. A genuine release claim is unaffected — `mode ==
     # "release"` returns `check_release` UNFILTERED, so a release while the
     # sentinel is still committed still fails exactly as before.
@@ -2902,16 +2833,9 @@ def _allowed_transition_release_errors(plan):
             "parent Kustomization remains suspended: platform-services",
         })
     if plan.cloudflare_public == "initial":
-        # Exact classification already proved the Secret absent and unlisted.
-        # Only those expected pre-ceremony failures are inert; staged state must
-        # never filter a missing, unlisted, or malformed encrypted Secret.
-        allowed.update({
-            "public tunnel tokenRevision is unresolved",
-            "required reviewed/generated file missing: kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml",
-            ".sops.yaml still has the invalid public-recipient sentinel",
-            ".sops.yaml must contain exactly one valid age recipient",
-            "encrypted tunnel token is not active in the public release Kustomization",
-        })
+        # Only the expected pre-ceremony revision sentinel is inert; staged
+        # state must never filter an unresolved connector revision.
+        allowed.add("public tunnel tokenRevision is unresolved")
     return allowed
 
 
@@ -2956,7 +2880,7 @@ def check_activation(root):
     # Reuse the complete production contract whenever any controller or public
     # workload is active. Filter only failures whose exact release is proven
     # inert by the classifier; shared controller/install failures and every
-    # active or outer-reconcilable workload's identity, SOPS, signature, and
+    # active or outer-reconcilable workload's identity, signature, and
     # capacity proof remain mandatory.
     allowed = _allowed_transition_release_errors(plan)
     errors.extend(

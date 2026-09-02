@@ -15,7 +15,7 @@ The install surface is
 [`kubernetes/flux-system/controllers`](../../kubernetes/flux-system/controllers).
 It contains the three pinned Flux controllers, their CRDs, Services, and
 least-privilege RBAC. It contains no `GitRepository`, `Kustomization`,
-`HelmRelease`, Secret object, SOPS material, Tunnel route, or website release. The
+`HelmRelease`, Secret object, Tunnel route, or website release. The
 controller install therefore creates no Flux-managed workload and changes no
 public route.
 
@@ -90,10 +90,10 @@ Bucket, GitRepository, and OCIRepository, and Helm starts secondary informers
 for HelmChart and OCIRepository. Those list/watch grants are part of the same
 install transaction even when no current object uses a kind. Both reconcilers'
 ConfigMap/Secret event watchers are disabled rather than granting cluster-wide
-Secret list/watch. The exact `sops-age` Secret remains available to Kustomize
-by named `get`, while Helm release storage uses the impersonated tenant
-reconciler's namespaced Role. Kustomize referenced inputs are fetched by exact
-name during reconciliation, with changes observed on interval, retry, source
+Secret list/watch, and no controller reads a Secret in `flux-system` at all;
+Helm release storage uses the impersonated tenant reconciler's namespaced Role.
+Kustomize referenced inputs are fetched by exact name during reconciliation,
+with changes observed on interval, retry, source
 event, or manual reconciliation. Helm permits only inline values and the local
 release namespace; external inputs and namespace redirects are rejected.
 
@@ -184,9 +184,9 @@ and two `prune: false` site Kustomizations are created only by their reviewed
 owner-attended bootstrap. The installer target is a constant and cannot be
 redirected to that root.
 
-No step in this runbook authorizes a Flux custom resource, unsuspend, SOPS/age
-ceremony, Secret, public route, website rollout, NodePort, LoadBalancer,
-Ingress, Gateway, host port, or host network. Stop rather than expand the scope.
+No step in this runbook authorizes a Flux custom resource, unsuspend, Secret,
+public route, website rollout, NodePort, LoadBalancer, Ingress, Gateway, host
+port, or host network. Stop rather than expand the scope.
 
 ## Bindings shared by every live mode
 
@@ -497,7 +497,7 @@ After any authorized live step, repeat section A. The final evidence must show:
 - no validation Namespace or canary Pod;
 - no added, deleted, or changed Flux custom resource and no `suspend` changes
   field relative to the captured prestate;
-- no Secret/SOPS/Tunnel/public-route/website change;
+- no Secret/Tunnel/public-route/website change;
 - no unexpected cluster-scoped object or RBAC widening;
 - exact controller images and scalable rollout status;
 - exact expected policies, with the public policy still at its authorized
@@ -613,6 +613,6 @@ exactly as wide the minute after this merges as the minute before, and it
 closes only when the separate reviewed in-place transaction executes it.
 
 Kyverno is retired, not merely uninstalled. The retained Conftest policies are
-pre-merge CI controls rather than live admission. The per-site SOPS/age token
+pre-merge CI controls rather than live admission. The per-site tunnel-token
 ceremonies and any reconciliation unsuspend also remain blocked. A green
 render, green CI, or healthy idle controller is evidence, never authorization.

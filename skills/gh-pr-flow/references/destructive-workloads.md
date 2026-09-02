@@ -31,7 +31,7 @@ Bind a ledger to a closed schema with no missing or foreign fields and:
   fault target;
 - immutable desired-state and deployable-artifact SHA-256 hashes;
 - prestate health/readiness/availability and externalized-state proof;
-- explicit protected exclusions: Secrets and token material; SOPS/age keys and ciphertext;
+- explicit protected exclusions: Secrets and token material;
   private keys, etcd and PKI; provider/DNS/domain/Tunnel identities
   and state; protected custody; Git history;
 - serialized lane, expected downtime, measurable RTO, readiness and

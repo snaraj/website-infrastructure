@@ -45,7 +45,7 @@ the platform contract; S3 = drift that misleads operators.
 
 | ID | Invariant | Checker | Evidence | Sev | Remediation |
 | --- | --- | --- | --- | --- | --- |
-| PLAT-SEC-001 | No plaintext secret anywhere in tree or history; committed Secrets are SOPS ciphertext bound to the exact age recipient | pinned gitleaks (tree + full history via pre-push), `validate_sops_ciphertext_snapshot.py`, structural-example byte pin in `validate_publication_history.py` | gate PASS | S1 | Fable lane |
+| PLAT-SEC-001 | No secret anywhere in tree or history; a committed Kubernetes Secret manifest is a failure | pinned gitleaks (tree + full history via pre-push), `validate_repository.py secrets`, structural-example byte pin in `validate_publication_history.py` | gate PASS | S1 | Fable lane |
 | PLAT-SEC-002 | Commit metadata carries no real email (only `.invalid` / `users.noreply`) | `validate_publication_history.py` metadata law (pre-push, full outgoing range) | gate PASS | S1 | Fable lane |
 | PLAT-SEC-003 | No private host identity (IP, path, username, unit, route, inventory) in any tracked file | `validate_repository.py privacy` + file-level email/identifier validators | CI PASS | S1 | Fable lane |
 | PLAT-SEC-004 | Heavy media never enters Git/OCI/ConfigMaps/etcd | `validate_repository.py` media contract + Conftest binary/encoded deny fixtures | CI PASS | S2 | Fable lane |

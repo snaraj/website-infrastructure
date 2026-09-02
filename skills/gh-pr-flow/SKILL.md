@@ -333,7 +333,7 @@ Before opening a destructive acceptance lane:
    deployable artifacts. Treat an unlisted object as protected.
 2. Prove dependencies without reading protected values. Inspect metadata-only
    Secret references and key names, never Secret data. Hard-exclude tokens,
-   Secrets, SOPS or age material, private keys, etcd and control-plane PKI,
+   Secrets, private keys, etcd and control-plane PKI,
    DNS and Tunnel/provider identities, routes and recovery custody, and Git
    refs or history.
 3. Classify persistence separately. StatefulSets, PVs, PVCs, databases, and

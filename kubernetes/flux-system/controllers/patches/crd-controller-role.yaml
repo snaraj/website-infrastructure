@@ -43,9 +43,9 @@
 #     are never installed and no object of those groups can exist.
 #   * secrets (shared cluster-wide read) — both reconcilers disable optional
 #     ConfigMap/Secret event watchers rather than receiving cluster-wide Secret
-#     list/watch. kustomize-controller retains only the exact flux-system SOPS
-#     read in ../../access.yaml. Helm release storage uses each impersonated
-#     tenant reconciler's namespaced Role. Every source remains anonymous.
+#     list/watch, and no controller reads a Secret in flux-system at all. Helm
+#     release storage uses each impersonated tenant reconciler's namespaced
+#     Role. Every source remains anonymous.
 #   * serviceaccounts/token (create) — Flux uses it for cloud-provider workload
 #     identity. This cluster authenticates to no provider, and the verb is a
 #     cluster-wide privilege-escalation primitive.
