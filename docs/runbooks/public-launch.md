@@ -23,9 +23,9 @@ Public launch is blocked until every item is evidenced:
 - external HTTPS/header/DNS/port/WARP/identity/tunnel-failure tests.
 
 `release-gate.sh --live` remains fail closed PENDING; #195 does not close it.
-The protected `v0.1.40` merge/tag/Release publishes #141's terminal transaction source,
-but does not prove live execution or convergence; a separately validated #141
-terminal result remains the serialization gate. #189 must bind the immutable
+The #141 convergence transaction was retired unexecuted (issue #299); the live
+controller RBAC drift it would have closed stays open and needs a fresh owner
+decision, and it remains the serialization gate. #189 must bind the immutable
 annotated platform tag and peeled commit to the Flux artifact and both site
 Kustomizations' `lastAppliedRevision` values, compare server-normalized desired
 and live specs, and prove a complete pre/post inventory with only declared

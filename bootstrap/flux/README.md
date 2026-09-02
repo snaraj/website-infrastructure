@@ -33,8 +33,8 @@ blanket `allow-egress` rule, and labels `flux-system` warn-only. The reviewed
 overlay and installer here are the desired state that install does not match.
 The installer is fresh-install-only and will refuse that cluster by design; the
 runbook's "Live prestate" and "Converging the existing install" sections carry
-the honest prestate and the two owner-gated convergence options. Nothing in
-this directory or that one converges the cluster.
+the honest prestate and record that no reviewed convergence design exists.
+Nothing in this directory or that one converges the cluster.
 
 `bootstrap.sh --apply-controllers` remains blocked and is **not** the sanctioned
 path: it is the protected-custody variant, and it is code-blocked by the same

@@ -17,8 +17,7 @@
 #
 # `roleRef` is immutable, so this is a deletion rather than a repoint: a live
 # cluster that already carries the broad binding is migrated by applying the
-# narrowed authority first and deleting this binding afterwards
-# (docs/runbooks/flux-rbac-narrowing.md).
+# narrowed authority first and deleting this binding afterwards.
 $patch: delete
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

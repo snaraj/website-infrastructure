@@ -1,6 +1,0 @@
-apiVersion: v2
-name: flux-rbac-acceptance
-description: Isolated real-Helm workload for the Flux RBAC acceptance.
-type: application
-version: 0.1.0
-appVersion: 0.1.0

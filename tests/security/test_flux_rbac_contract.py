@@ -22,9 +22,8 @@ battery is the evidence that removing it is safe in both directions:
 
 What is modelled rather than observed is stated in the module docstring of
 ``testsupport/rbac_model.py``. The live half is the live-state comparison in
-``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound, fail-closed
-authorization oracle and disposable real-API-server matrix described in
-``docs/runbooks/flux-rbac-narrowing.md``.
+``bootstrap/flux/bootstrap.sh --verify``; the convergence ceremony that once
+supplied a second live oracle was retired by the owner (issue #299).
 """
 
 from __future__ import annotations
@@ -37,8 +36,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import NamedTuple
-
-from scripts import flux_rbac_denial_oracle as denial_oracle
 
 from .support import load_script
 from .testsupport import rbac_model as model
@@ -1191,41 +1188,6 @@ class FluxRbacNarrownessTests(unittest.TestCase):
                     self.authorizer.allows(subject, verb, group, resource, namespace, name),
                     "{} may {} {}/{}: {}".format(subject, verb, group or "core", resource, why),
                 )
-
-    def test_all_18_issue_98_rows_fit_the_closed_live_oracle(self):
-        """The readable deputy matrix is executable evidence, not prose.
-
-        #184 deliberately closed the oracle over reviewed verbs and resource
-        identities. Issue #98 adds no second authorization path: every one of
-        its literal crossing rows must fit that existing closed contract, with
-        the exact ServiceAccount grammar and the one declared finalizer
-        discovery exception.
-        """
-
-        self.assertEqual(len(ISSUE_98_CROSS_CONTROLLER_REQUESTS), 18)
-        for subject, verb, group, resource, namespace, name, _ in (
-            ISSUE_98_CROSS_CONTROLLER_REQUESTS
-        ):
-            with self.subTest(subject=str(subject), verb=verb, resource=resource):
-                denial_oracle.canonical_service_account(str(subject))
-                self.assertIn(verb, denial_oracle.VERBS)
-                self.assertIn((group, resource), denial_oracle.RESOURCE_IDENTITIES)
-                identity = denial_oracle.RESOURCE_IDENTITIES[(group, resource)]
-                self.assertTrue(identity.namespaced)
-                self.assertIsNone(namespace)
-                self.assertIsNone(name)
-                request = (verb, group, identity.resource, identity.subresource)
-                if identity.subresource == "finalizers":
-                    self.assertIn(
-                        request,
-                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
-                    )
-                else:
-                    self.assertNotIn(
-                        request,
-                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
-                    )
-
     def test_the_shared_controller_role_grants_no_flux_api_group(self):
         """The structural half of the split (issue #98).
 

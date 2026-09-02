@@ -100,7 +100,8 @@ The deliberately non-applicable root-sync review template lives in
 [`kubernetes/flux-system/gotk-sync.yaml.in`](../../kubernetes/flux-system/gotk-sync.yaml.in).
 It is not part of the 30-object controller render and cannot be applied as-is.
 The owner-attended #189 bootstrap renders the exact immutable-tag source and two
-site Kustomizations directly after the #141 prerequisite is terminal. Until that
+site Kustomizations only after the live-vs-reviewed controller RBAC drift above
+is resolved under a fresh owner decision. Until that
 bootstrap, the controllers elect leaders, establish watches, and idle. Both
 public sites continue through their independent outbound Cloudflare Tunnels.
 
@@ -553,36 +554,16 @@ owner-authorized convergence decision below rather than to an ad-hoc cleanup.
 ## Converging the existing install
 
 The cluster runs the stock render while this repository reviews a different
-one. Because live Flux custom resources now exist, there is one eligible design:
-a separately reviewed, journaled in-place transaction. Neither existing entry
-point is that transaction. `install-flux-controllers.sh --apply` is deliberately
-fresh-only, and `bootstrap/flux/bootstrap.sh` blocks live modes pending a
-trusted launcher. Do not bypass either refusal.
+one. **There is no reviewed convergence design today.** The journaled in-place
+RBAC transaction that formerly occupied this section was retired unexecuted by
+the owner (issue #299); its tooling, tests, and runbook are gone, and the
+narrowed RBAC it would have installed remains the reviewed desired state under
+`kubernetes/flux-system/**` and nothing more. Converging the live cluster onto
+it needs a fresh owner decision and a separately reviewed design.
 
-The in-place RBAC transaction must create the six split controller objects with
-no cluster-wide Secret access; create or replace only the reviewed runtime,
-impersonation, and active-tenant objects; while the broad binding still exists,
-roll out the exact `DisableConfigWatchers=true` argument on each reconciler
-whose live prestate lacks it; verify each new zero-restart generation; replace the shared role and
-subject-pinned binding; canary source-controller; and only then delete the broad
-binding with UID/resourceVersion preconditions. The disposable kind acceptance
-first proves a final-RBAC Kustomize cold start while Helm remains at zero, then
-proves Helm's final-RBAC zero-restart cold start and cluster-wide Secret denials
-while the same Kustomize Pod remains ready. The protected transaction performs
-no ad-hoc Pod deletion, eviction, or scale-down. After the reviewed Helm rollout,
-it observes the Deployment fully ready without `cluster-admin`, then performs the separately
-plan-bound HelmRelease upgrade described in the narrowing runbook. NetworkPolicy
-and Namespace-label drift should be separate reviewed transactions rather than
-extra mutations hidden in the RBAC rollback boundary.
-
-The prestate journal must bind the reviewed commit and plan, tool and target
-tuple, every touched object's semantic bytes plus UID/resourceVersion, controller
-images and rollout state, and the exact Flux object revisions, generations,
-conditions, histories, and suspension fields. It must never record Secret data.
-Rollback recreates the captured broad binding first, restores captured shared
-and namespaced RBAC, then deletes only transaction-created objects whose
-identity and semantic receipt still match. Concurrent change is
-`recovery-required`, never permission to overwrite.
+Neither existing entry point converges anything. `install-flux-controllers.sh
+--apply` is deliberately fresh-only, and `bootstrap/flux/bootstrap.sh` blocks
+live modes pending a trusted launcher. Do not bypass either refusal.
 
 **Teardown/reinstall is rejected for the current cluster.** Deleting the Flux
 CRDs would delete the two live OCIRepositories and two live HelmReleases. The

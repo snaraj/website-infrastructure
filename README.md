@@ -178,10 +178,10 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Cloudflare subscription audit | Not run |
 | kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
 | CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
-| Cluster initialization | Historical repository evidence only. Terminal #141's protected `v0.1.40` merge/tag/Release publishes the frozen transaction source; its live receipt, not publication alone, is the initialization proof |
-| Flux controller install | Terminal #141's reviewed `v0.1.40` in-place convergence transaction does not install Flux; no live execution or current controller version is claimed here |
-| Flux live-vs-reviewed drift | Open serialization gate: `v0.1.40` publication alone is not #141 terminal execution/convergence evidence, which remains required before combined #195/#189 can advance |
-| `flux-system` egress policy | Committed desired state only. The #141 transaction explicitly excludes `kubernetes/flux-system/access.yaml`; no live application or health is claimed |
+| Cluster initialization | Historical repository evidence only; no live initialization receipt is claimed here |
+| Flux controller install | Not run. Nothing in this repository installs Flux; no live execution or current controller version is claimed here |
+| Flux live-vs-reviewed drift | Open. The live cluster still runs the stock upstream render; the #141 convergence ceremony was retired unexecuted (issue #299), so converging onto the reviewed narrowed RBAC needs a fresh owner decision and a separately reviewed design |
+| `flux-system` egress policy | Committed desired state only; no live application or health is claimed |
 | Flux site desired state | Combined #195/#189 candidate: both manifests are unsuspended at exact signed chart digests behind the protected-main-branch source (owner decoupling ruling 2026-09-01, issue #275; the tag-driven selector path retires per `docs/runbooks/site-sync-branch-flip.md`) and two direct `prune: false`, `deletionPolicy: Orphan` reconcilers. Current selections: lidersea.com `0.1.41` and naranjo.online `0.1.71`, captured 2026-09-01 for issues #285 in `docs/assurance/195-chart-acquisition-receipt.json`; acquisition receipts never assert live convergence, so no health claim of any kind attaches to the committed digests. No live equivalence, readiness, or traffic is claimed |
 | Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.43` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` and `v0.1.42` are never selected. It does not reconcile controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
 | Tunnel-token ceremony | Not run |

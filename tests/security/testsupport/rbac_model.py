@@ -31,10 +31,9 @@ observed and are named as such at their definitions: the verb set a Flux apply
 issues (``APPLY_VERBS``), the kinds each Helm chart renders (``SITE_CHART_KINDS``
 for charts that live in the site repositories), and the kind-to-resource mapping
 (``KIND_RESOURCES``). The live half is
-``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound denial oracle
-and disposable real-API-server matrix in
-``docs/runbooks/flux-rbac-narrowing.md``; this module is what makes that matrix
-bounded enough to review and repeat.
+``bootstrap/flux/bootstrap.sh --verify``; the custody-bound denial oracle and
+disposable real-API-server matrix that once accompanied it belonged to the
+convergence ceremony the owner retired (issue #299).
 
 This module is support code: unittest discovery only collects ``test_*.py``, and
 the coverage gate measures ``scripts/`` alone, so nothing here enters any
