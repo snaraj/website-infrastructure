@@ -2,20 +2,6 @@
 promotion pull request, and the owner's merge is the only human touch
 (issue #286).
 
-Since the issue #275 decoupling, a merge to protected ``main`` deploys within
-minutes — but ADVANCING the committed exact-digest selection was still a
-hand-run ceremony. This tool makes that ceremony deterministic, testable and
-unattended, without moving any authority: it can only open Draft pull
-requests that still need two exact-head APPROVE receipts and the owner's
-merge through the no-bypass ruleset. Trust model of that quorum, stated
-plainly: every receipt is posted by the ONE reviews App principal, and the
-two receipts are distinguished by their lane signature — content, exactly
-as the repository's manual Ready rule reads it — not by a second
-authenticated identity. The tool binds each receipt to the App's immutable
-identity and the exact head; it cannot and does not prove that two lanes
-were independently controlled. Counting two principals needs a second
-reviewer App and is a lift, not this file.
-
 Design, in the order the ``tick`` runs it:
 
 * **Discovery.** Promotable workloads are read from the manifests, never from
@@ -23,14 +9,8 @@ Design, in the order the ``tick`` runs it:
   carries the ``platform.snaraj.dev/chart-release`` annotation and a cosign
   ``matchOIDCIdentity`` is a selection, and its identity tuple (chart
   repository, source repository, publisher subject) comes from that
-  document. Adding a workload — a NAS, a vault, a mesh, a GPU operator —
-  means committing its manifest; this file does not change.
-* **Acquisition profiles.** How a release is verified depends on who
-  publishes it. The publisher identity selects the profile; a workload whose
-  identity has no profile is refused, never guessed. One profile exists
-  today, ``release-publisher``: the snaraj site publisher contract (keyless
-  GitHub Actions identity, immutable Release with a ``release-manifest.json``
-  asset, SLSA v1 provenance at the workload index digest).
+  document. The publisher identity selects the acquisition profile, and a
+  workload whose identity has no profile is refused, never guessed.
 * **Ceremony.** Every judgment of the issue-195 acquisition sequence is
   code: double tag resolution with ``docker-content-digest`` agreement and
   byte identity, config and sole Helm layer fetched by their own digests and
@@ -46,17 +26,16 @@ Design, in the order the ``tick`` runs it:
   tracked tree — including split string literals in the security batteries —
   so no two surfaces can disagree. An unexpected occurrence count refuses
   the entire rewrite.
-* **Ready rule.** A promotion pull request is flipped Ready only when its
-  exact head carries two distinct adversarial ``VERDICT: APPROVE`` receipts
-  posted by the reviews App, no REQUEST-CHANGES at that head, both required
-  checks succeeded there, the branch is not behind ``main``, and the
-  ``requires-review`` signal has been consumed. A single approval — the
-  mistake this rule encodes — is never enough.
+* **Publication.** The gates run, the commit is signed under the owner's
+  noreply identity, the publication gate runs on that exact signed commit,
+  and the branch is pushed and opened as a labelled DRAFT pull request.
 
 The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
 principal, no credential in CI, and the identity, signature and
-account-protection contracts are untouched. Standard library only.
+account-protection contracts are untouched. Standard library only. It holds
+no readiness authority: under AGENTS.md the coordinator flips Ready
+(``scripts/ready_check.py`` is that rule in code) and the owner alone merges.
 """
 
 from __future__ import annotations
@@ -102,20 +81,8 @@ README = Path("README.md")
 FRAGMENTS = Path("changelog.d")
 VERSIONS_ENV = Path("versions.env")
 ANNOTATION = "platform.snaraj.dev/chart-release"
-REVIEWS_APP = "snaraj-agent-reviews[bot]"
-# A receipt is bound to the review App's immutable identity, never to a
-# login or a signature line alone: the bot user's id and type, and the App
-# id the comment was performed through.
-REVIEWS_APP_USER_ID = 318424677
-REVIEWS_APP_ID = 4641855
 PR_LABELS = ("release", "delivery-lane", "promoter")
 REVIEW_LABELS = ("requires-review", "cybersecurity-review-requested")
-REQUIRED_CHECKS = ("dependency-review", "repository-and-infrastructure")
-# The App that produces the required checks. A same-name check run from any
-# other writer is never a required check, and two runs of one name at one
-# head are ambiguous, so both fail closed.
-REQUIRED_CHECK_APP = "github-actions"
-ACCEPTABLE_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
@@ -199,9 +166,6 @@ def _load_sibling(name, module_name):
 # The watchdog owns the annotation/subject grammar and the drift verdict; the
 # promoter reuses them so the two can never classify one manifest differently.
 ASSURANCE = _load_sibling("ci/deploy_assurance.py", "promoter_deploy_assurance")
-# The receipt shape is the repository's canonical one, so a receipt this tool
-# counts is exactly a receipt the coordinator's validator accepts.
-RECEIPTS = _load_sibling("validate_review_receipt.py", "promoter_review_receipt")
 
 
 def sha256_hex(data: bytes) -> str:
@@ -1435,94 +1399,8 @@ def verify(root: Path, registry: Registry, github: GitHub, cosign: Cosign) -> li
 
 
 # ---------------------------------------------------------------------------
-# Pull requests: the Ready rule and the tick's planning, both network-free.
+# Pull requests: the tick's planning, network-free.
 # ---------------------------------------------------------------------------
-
-
-def normalize_lane(name: str) -> str:
-    """``Opus5``, ``Opus 5`` and ``opus-5`` are one lane, so two receipts
-    that differ only in spelling cannot count as two reviewers."""
-
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def parse_receipt(body: str, head: str) -> dict | None:
-    """``{"head", "verdict", "lane"}`` from a review receipt bound to
-    ``head``, or ``None``. The shape is the repository's canonical one,
-    ``scripts/validate_review_receipt.py``: exactly one ``HEAD:`` line equal
-    to the head, exactly one ``VERDICT:`` line that IS a supported verdict
-    (no trailing tokens), the lane signature as the last non-empty line,
-    and the mutation and claim audit evidence a verdict must carry. A
-    comment the coordinator's validator would deny never counts here."""
-
-    if RECEIPTS.denial(body, head, "pull-request") is not None:
-        return None
-    lines = body.replace("\r\n", "\n").splitlines()
-    verdict = [line[9:] for line in lines if line.startswith("VERDICT: ")][0]
-    nonempty = [line for line in lines if line.strip()]
-    lane = RECEIPTS.SIGNATURE.fullmatch(nonempty[-1]).group(1)
-    return {"head": head, "verdict": verdict, "lane": normalize_lane(lane)}
-
-
-def ready_decision(
-    head: str,
-    labels,
-    comments,
-    checks,
-    behind_by: int,
-    is_draft: bool,
-    require_draft: bool = True,
-) -> tuple:
-    """Return ``(ready, reasons)``. ``comments`` are ``{"user", "user_id",
-    "user_type", "app_id", "body"}``; ``checks`` are ``{"name", "status",
-    "conclusion", "app"}`` for the head, ``app`` being the slug of the App
-    that produced the check run. ``require_draft=False`` is reserved for the
-    post-flip revalidation after the caller has separately proven Ready."""
-
-    reasons = []
-    receipts = [
-        parsed
-        for comment in comments
-        if comment.get("user") == REVIEWS_APP
-        and comment.get("user_id") == REVIEWS_APP_USER_ID
-        and comment.get("user_type") == "Bot"
-        and comment.get("app_id") == REVIEWS_APP_ID
-        for parsed in [parse_receipt(comment.get("body", ""), head)]
-        if parsed is not None
-    ]
-    approvals = {r["lane"] for r in receipts if r["verdict"] == "APPROVE" and r["lane"]}
-    if any(r["verdict"] == "REQUEST-CHANGES" for r in receipts):
-        reasons.append("a REQUEST-CHANGES receipt binds this head")
-    if len(approvals) < 2:
-        reasons.append(f"{len(approvals)} distinct adversarial APPROVE receipt(s) at this head; two are required")
-    if "requires-review" in labels:
-        reasons.append("requires-review is still armed")
-    for name in PR_LABELS:
-        if name not in labels:
-            reasons.append(f"promoter label {name} is missing")
-    for name in REQUIRED_CHECKS:
-        candidates = [check for check in checks if check.get("name") == name]
-        if len(candidates) != 1:
-            reasons.append(f"required check {name} appears {len(candidates)} times at this head; exactly one authoritative run is required")
-            continue
-        check = candidates[0]
-        if check.get("app") != REQUIRED_CHECK_APP:
-            reasons.append(f"required check {name} was not produced by {REQUIRED_CHECK_APP}")
-        elif check.get("status") != "completed" or check.get("conclusion") != "success":
-            reasons.append(f"required check {name} has not succeeded at this head")
-    # Every completed check at the head, required or not, must have ended in
-    # one of the conclusions that mean "nothing went wrong": an explicit
-    # allowlist, so GitHub's other terminal conclusions (failure, timed_out,
-    # cancelled, action_required, stale) and any value this code has never
-    # seen all fail closed. A check still running is not a conclusion.
-    for check in checks:
-        if check.get("status") == "completed" and check.get("conclusion") not in ACCEPTABLE_CONCLUSIONS:
-            reasons.append(f"a check at this head did not succeed: {check.get('name')} ended {check.get('conclusion')}")
-    if behind_by:
-        reasons.append(f"branch is {behind_by} commit(s) behind main")
-    if require_draft and not is_draft:
-        reasons.append("already Ready")
-    return (not reasons, reasons)
 
 
 def parse_branch(branch: str) -> tuple | None:
@@ -1577,7 +1455,7 @@ def plan(report: dict, open_prs: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The tick: git, gates, signing, push, pull request, Ready.
+# The tick: git, gates, signing, push, Draft pull request.
 # ---------------------------------------------------------------------------
 
 
@@ -1657,30 +1535,20 @@ def pr_title(selections: dict, targets: dict) -> str:
     return f"Promote {moved} to the published release by receipted ceremony"
 
 
-def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, gates: list, cosign_version: str) -> str:
+def pr_body(selections: dict, acquired: dict, issues: list, head_base: str) -> str:
+    """One line per moved workload; the regenerated receipt is the evidence."""
+
     lines = [
         "## Promotion",
         "",
-        "Opened by `scripts/promote_releases.py` (issue #286): the receipted acquisition",
-        f"ceremony ran on the owner's workstation against protected `main` at `{head_base}`.",
+        f"Opened by `scripts/promote_releases.py` (issue #286) from protected `main` at `{head_base}`.",
         "",
     ]
+    for slug, (record, _) in sorted(acquired.items()):
+        lines.append(f"- {selections[slug].domain}: `{selections[slug].version}` to `{record['chartTag']}`, workload index `{record['workloadImage'].split('@', 1)[1]}`")
+    lines += ["", "Evidence: the regenerated `docs/assurance/195-chart-acquisition-receipt.*` files in this pull request.", ""]
     lines += [f"Closes #{number}" for number in issues]
-    lines += ["", "## Evidence", ""]
-    for slug, (record, inspection) in sorted(acquired.items()):
-        lines += [
-            f"### {selections[slug].domain} → `{record['chartTag']}`",
-            "",
-            f"- chart `{record['chartRepository']}` manifest `{record['manifestDigest']}` (resolved twice, byte-identical, `docker-content-digest` == bytes)",
-            f"- config `{record['chartConfigDigest']}`, sole Helm layer `{record['chartLayerDigest']}` (both hash-verified by digest)",
-            f"- `Chart.yaml` `{inspection['Chart.yaml']}`, `values.yaml` `{inspection['values.yaml']}`",
-            f"- workload `{record['workloadImage']}` (index resolved twice == embedded pin), linux/arm64 child `{record['arm64Digest']}`",
-            f"- cosign {cosign_version} verified the chart at its digest and SLSA v1 provenance at the index digest for `{record['signer']['subject']}`",
-            f"- Release asset `{record['release']['assetDigest']}` (== GitHub's stated digest) names source `{record['release']['sourceSha']}` == the annotated tag's commit",
-            "",
-        ]
-    lines += ["## Gates", ""] + [f"- `{' '.join(gate)}` OK" for gate in gates]
-    lines += ["", "Ready is flipped by the promoter only after two distinct exact-head adversarial APPROVE receipts; the owner alone merges.", "", SIGNATURE, ""]
+    lines += ["", SIGNATURE, ""]
     return "\n".join(lines)
 
 
@@ -1688,16 +1556,12 @@ def owned_pull_request(pr: dict) -> dict | None:
     """The identity tuple every promoter pull request must satisfy before any
     read-derived decision or write: opened by the owner's credential, from a
     promoter branch in THIS repository, against ``main`` of this repository,
-    Draft state known. Every part is immutable or owner-only. Labels are
-    NOT identity — anyone with triage can remove one, and a pull request the
-    tool once flipped Ready must stay in its view so it can be withdrawn —
-    they are authorization inputs judged by ``authorization``. Anything
-    else — a fork with a ``promoter/`` head above all — is never planned,
-    superseded or flipped by the owner's unattended process."""
+    Draft state known. Every part is immutable or owner-only. Anything else —
+    a fork with a ``promoter/`` head above all — is never planned or
+    superseded by the owner's unattended process."""
 
     head, base = pr.get("head") or {}, pr.get("base") or {}
     branch = head.get("ref") or ""
-    labels = [label.get("name") for label in pr.get("labels") or []]
     if (
         (head.get("repo") or {}).get("full_name") != REPOSITORY
         or (base.get("repo") or {}).get("full_name") != REPOSITORY
@@ -1709,7 +1573,7 @@ def owned_pull_request(pr: dict) -> dict | None:
         or not isinstance(pr.get("number"), int)
     ):
         return None
-    return {"number": pr["number"], "branch": branch, "head": head["sha"], "draft": pr["draft"], "labels": labels}
+    return {"number": pr["number"], "branch": branch, "head": head["sha"], "draft": pr["draft"]}
 
 
 def open_promoter_prs(github: GitHub) -> list:
@@ -1726,8 +1590,7 @@ def open_promoter_prs(github: GitHub) -> list:
         behind_by = compare.get("behind_by")
         if not isinstance(behind_by, int):
             # Unknown freshness is neither current nor behind: the planner
-            # keeps the pull request (no cut, no supersede) and the Ready
-            # judgment names the unknown as a blocker.
+            # keeps the pull request, making no cut and no supersede.
             log(f"PR #{owned['number']}: base freshness is unknown; kept, not judged current")
             behind_by = None
         owned["behind_by"] = behind_by
@@ -1739,243 +1602,6 @@ def drift_issues(github: GitHub, targets: dict) -> list:
     issues = github.api_pages(f"repos/{REPOSITORY}/issues?state=open&labels=delivery-lane&per_page=100")
     wanted = {ASSURANCE.condition_title(f"site-drift/{slug}") for slug in targets}
     return sorted(issue["number"] for issue in issues if "pull_request" not in issue and issue["title"] in wanted)
-
-
-def ready_snapshot(github: GitHub, number: int) -> dict | None:
-    """Read every input that authorizes Ready from one exact-head snapshot.
-
-    GitHub has no transaction spanning a pull request, comments, checks and
-    base comparison. Callers therefore take this complete snapshot on both
-    sides of the Ready mutation. An input that cannot be proven (unknown
-    base freshness, a truncated check-run listing) is not an error here but
-    an entry in ``unknowns``: a Draft pull request is then not judged, and a
-    Ready one is withdrawn, because an authorization that cannot be read is
-    not one."""
-
-    pr = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
-    if pr is None:
-        return None
-    unknowns = []
-    compare = github.api(f"repos/{REPOSITORY}/compare/main...{pr['head']}")
-    behind_by = compare.get("behind_by")
-    if not isinstance(behind_by, int):
-        unknowns.append("base freshness is unknown")
-        behind_by = None
-    comments = [
-        {
-            "user": (comment.get("user") or {}).get("login"),
-            "user_id": (comment.get("user") or {}).get("id"),
-            "user_type": (comment.get("user") or {}).get("type"),
-            "app_id": (comment.get("performed_via_github_app") or {}).get("id"),
-            "body": comment.get("body", ""),
-        }
-        for comment in github.api_pages(
-            f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100"
-        )
-    ]
-    listing = github.api(
-        f"repos/{REPOSITORY}/commits/{pr['head']}/check-runs?per_page=100"
-    )
-    check_runs = listing.get("check_runs", [])
-    if listing.get("total_count") != len(check_runs):
-        unknowns.append("check-run listing is truncated")
-    checks = [
-        {
-            "name": check.get("name"),
-            "status": check.get("status"),
-            "conclusion": check.get("conclusion"),
-            "app": (check.get("app") or {}).get("slug"),
-        }
-        for check in check_runs
-    ]
-    return dict(pr, behind_by=behind_by, comments=comments, checks=checks, unknowns=unknowns)
-
-
-class UnresolvedReady(Refusal):
-    """A Ready transition that failed AND whose restore to Draft with both
-    review lanes could not be proven by a read: operator action required."""
-
-
-def compensate_ready(github: GitHub, number: int, head: str, cause: Refusal) -> str:
-    """Return a failed or lapsed Ready to exact-head Draft and re-arm both
-    lanes; the returned message CLAIMS only what a final read proved.
-
-    Command responses are not proof. Even if the undo or label write
-    reports failure, a final pull-request read decides whether the pull
-    request is demonstrably Draft with both review lanes armed. Anything
-    less posts an alert on the pull request that states what was observed
-    — never a restoration it did not see — and raises UnresolvedReady."""
-
-    transport = []
-    try:
-        github.command(["pr", "ready", str(number), "--repo", REPOSITORY, "--undo"])
-    except Refusal as error:
-        transport.append("undo reported " + str(error))
-    try:
-        github.mutate(
-            f"repos/{REPOSITORY}/issues/{number}/labels",
-            "POST",
-            body={"labels": list(REVIEW_LABELS)},
-        )
-    except Refusal as error:
-        transport.append("review re-arm reported " + str(error))
-    try:
-        restored = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
-    except Refusal as error:
-        restored = None
-        transport.append("restoration read reported " + str(error))
-    # Draft is pull-request state, not commit state: a Draft read at ANY
-    # head proves the Ready this tick caused no longer exists, while a head
-    # that moved meanwhile is named rather than silently accepted.
-    if restored is None:
-        observed = "the pull request could not be read back as an owned promoter pull request"
-        missing = set(REVIEW_LABELS)
-    else:
-        missing = set(REVIEW_LABELS) - set(restored["labels"])
-        where = f"head {restored['head']}" + (f", moved from {head}" if restored["head"] != head else "")
-        observed = ("Draft" if restored["draft"] else "READY") + f" at {where}"
-        observed += ("; missing labels: " + ", ".join(sorted(missing))) if missing else "; both review lanes present"
-    details = "; ".join(transport) if transport else "mutation responses were nominal"
-    if restored is None or not restored["draft"] or missing:
-        # The alert lives on the pull request itself, where the merge click
-        # is, and says only what the final read showed; the tick's own
-        # failure is the second, local surface.
-        github.mutate(
-            f"repos/{REPOSITORY}/issues/{number}/comments",
-            "POST",
-            body={
-                "body": (
-                    f"`promoter-alert unresolved-ready head={head}`\n\nThe promoter's Ready transition "
-                    "failed and the restore to Draft with both review lanes could NOT be proven. "
-                    f"Observed: {observed}. Transport: {redact(details)[:300]}. DO NOT MERGE until an "
-                    "operator returns this pull request to Draft and arms both review lanes.\n\n"
-                    f"```\n{redact(str(cause))[:400]}\n```\n\n{SIGNATURE}"
-                )
-            },
-        )
-        raise UnresolvedReady(
-            f"PR #{number}: OPERATOR ACTION REQUIRED: Ready compensation after {cause} "
-            f"did not prove Draft with both review lanes armed; observed {observed}; {details}"
-        ) from None
-    if transport:
-        log(
-            f"PR #{number}: compensation transport was ambiguous but the final "
-            "Draft and review-lane state was proven: " + "; ".join(transport)
-        )
-    return f"PR #{number}: Ready transition compensated, returned to Draft (proven at {where}) and both lanes re-armed: {cause}"
-
-
-def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
-    """Judge ONE pull request from a fresh read taken at the mutation
-    boundary, never from the tick's earlier listing: head, base, Draft
-    state, labels and freshness are re-bound now, and the receipts and
-    checks are derived for exactly that head. The flip is read and judged
-    again after `gh pr ready` and once more after the security routing
-    label leaves; any changed authorization is compensated, and restoration
-    is claimed only from a final read showing Draft plus both review lanes.
-    An open Ready promoter pull request whose head no longer carries its
-    authorization — a lapsed receipt, a renewed lane, a removed promoter
-    label, a check that regressed, or any input that can no longer be read
-    — is withdrawn to Draft with both lanes re-armed on the tick that sees
-    it. The bound this gives is "the next successful tick that reaches the
-    pull request" — the audit runs first in every tick, but the agent runs
-    only while the workstation is awake and the owner is logged in — so
-    Ready stays advisory: the owner's merge click is the authority and the
-    receipts are on the pull request. A zero bound needs an authoritative
-    status computed at the head (the #289 lift)."""
-
-    pr = ready_snapshot(github, number)
-    if pr is None:
-        log(f"PR #{number} is not an owned promoter pull request at the mutation boundary; nothing done")
-        return False
-    authorized, reasons = ready_decision(
-        pr["head"], pr["labels"], pr["comments"], pr["checks"], pr["behind_by"], pr["draft"], require_draft=False
-    )
-    reasons = pr["unknowns"] + reasons
-    authorized = authorized and not pr["unknowns"]
-    if not pr["draft"]:
-        if authorized:
-            log(f"PR #{number} is already Ready and its authorization holds at head {pr['head']}")
-            return False
-        if dry_run:
-            log(f"PR #{number} WOULD be withdrawn from Ready (dry run): " + "; ".join(reasons))
-            return False
-        # Intent first, never a result: the outcome is proven by the read
-        # inside compensate_ready, which alerts when it cannot be. The note
-        # is informational and best-effort — a failed or lost POST never
-        # stands between a lapsed authorization and its withdrawal. The
-        # reasons are fenced, single-line, bounded and redacted like every
-        # other public write: a check name is chosen by whichever App
-        # produced the check, not by this tool, and must never render as
-        # Markdown or a mention. The full text is in the local log.
-        detail = redact("; ".join(reasons))[:400]
-        try:
-            github.mutate(
-                f"repos/{REPOSITORY}/issues/{number}/comments",
-                "POST",
-                body={
-                    "body": (
-                        f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head:\n\n"
-                        f"```\n{detail}\n```\n\nWithdrawing now: returning to Draft and re-arming both review lanes; "
-                        f"the outcome is proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
-                    )
-                },
-            )
-        except Refusal as error:
-            log(f"PR #{number}: the withdrawal note could not be posted ({error}); withdrawing regardless")
-        log(compensate_ready(github, number, pr["head"], Refusal("Ready authorization lapsed: " + "; ".join(reasons))))
-        return False
-    if pr["unknowns"]:
-        raise Refusal(f"PR #{number}: " + "; ".join(pr["unknowns"]) + "; refusing to judge a partial view")
-    if not authorized:
-        log(f"PR #{number} not flipped: " + "; ".join(reasons))
-        return False
-    if dry_run:
-        log(f"PR #{number} WOULD be flipped Ready (dry run)")
-        return False
-
-    def proven_ready(stage: str) -> dict:
-        after = ready_snapshot(github, number)
-        if after is None or after["head"] != pr["head"]:
-            raise Refusal(f"the head moved {stage}")
-        if after["draft"]:
-            raise Refusal(f"GitHub still reports Draft {stage}")
-        if after["unknowns"]:
-            raise Refusal(f"authorization could not be read {stage}: " + "; ".join(after["unknowns"]))
-        still_ready, post_reasons = ready_decision(
-            after["head"], after["labels"], after["comments"], after["checks"], after["behind_by"], after["draft"], require_draft=False
-        )
-        if not still_ready:
-            raise Refusal(f"Ready authorization changed {stage}: " + "; ".join(post_reasons))
-        return after
-
-    try:
-        github.command(["pr", "ready", str(number), "--repo", REPOSITORY])
-        after = proven_ready("after the flip")
-        # The security routing label leaves only once Ready is proven at
-        # the same head, never before — and its removal is proven the same
-        # way, by a complete read taken after it.
-        if "cybersecurity-review-requested" in after["labels"]:
-            github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/cybersecurity-review-requested", "DELETE")
-        final = proven_ready("after the routing label left")
-        if "cybersecurity-review-requested" in final["labels"]:
-            raise Refusal("cybersecurity-review-requested is still present after its removal")
-    except Refusal as error:
-        raise Refusal(compensate_ready(github, number, pr["head"], error)) from None
-    github.mutate(
-        f"repos/{REPOSITORY}/issues/{number}/comments",
-        "POST",
-        body={
-            "body": (
-                f"READY by the promoter at head `{pr['head']}`: two distinct exact-head adversarial "
-                "APPROVE receipts, no REQUEST-CHANGES at this head, both required checks green from "
-                f"{REQUIRED_CHECK_APP}, branch current with main, all re-proven after the flip and after "
-                f"the routing label left. The owner alone merges.\n\n{SIGNATURE}"
-            )
-        },
-    )
-    log(f"PR #{number} flipped Ready")
-    return True
 
 
 def supersede(github: GitHub, number: int, reason: str, dry_run: bool) -> None:
@@ -1997,7 +1623,7 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
     if not issues:
         raise Refusal("no open deploy-assurance drift issue names these workloads; wait for the watchdog's tick")
     issue_refs = "/".join(f"#{n}" for n in issues)
-    cosign_version = cosign.require_pinned_version()
+    cosign.require_pinned_version()
     acquired = {slug: acquire(selections[slug], version, registry, github, cosign) for slug, version in sorted(targets.items())}
     branch = branch_name(base, issues[0], targets)
     # The cut is made on the detached base and pushed to the remote branch
@@ -2014,7 +1640,7 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
             raise Refusal(f"gate `{' '.join(gate)}` failed; the promoter log carries its output") from None
         log(f"gate `{' '.join(gate)}` OK")
     title = pr_title(selections, targets)
-    body = pr_body(selections, acquired, issues, base, list(GATES), cosign_version)
+    body = pr_body(selections, acquired, issues, base)
     if dry_run:
         log(f"WOULD commit, push and open Draft PR `{title}` from {branch} (dry run)")
         return 0
@@ -2058,9 +1684,8 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     """One idempotent comment per (targets, step) on the drift issue. Its
     one call site is a refused CUT — the failure whose silence would
     otherwise hide behind the watchdog's open drift issue. Every other
-    refusal in a tick (a dirty clone, a status or planning refusal, a Ready
-    withdrawal or flip that failed) stays in the local log and the tick's
-    exit status."""
+    refusal in a tick (a dirty clone, a status or planning refusal) stays in
+    the local log and the tick's exit status."""
 
     marker = "promoter-failure " + " ".join(f"{s}={v}" for s, v in sorted(targets.items())) + f" step={step}"
     try:
@@ -2120,30 +1745,6 @@ def release_lock(fd) -> None:
     os.close(fd)
 
 
-def withdraw_lapsed(github: GitHub, dry_run: bool) -> int:
-    """The Ready audit, FIRST in every tick and needing nothing but GitHub
-    reads: every open Ready promoter pull request is re-judged and withdrawn
-    if its authorization lapsed or cannot be read. Nothing that can fail
-    later in the tick — the clone refresh, the registry, the planning, a
-    cut — is allowed to stand in front of it."""
-
-    code = 0
-    try:
-        open_prs = open_promoter_prs(github)
-    except Refusal as error:
-        log(f"Ready audit could not list promoter pull requests: {error}")
-        return 1
-    for pr in open_prs:
-        if pr["draft"]:
-            continue
-        try:
-            consider_ready(github, pr["number"], dry_run)
-        except Refusal as error:
-            log(f"PR #{pr['number']}: {error}")
-            code = 1
-    return code
-
-
 def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run=run_command) -> int:
     github = github or GitHub(run=run)
     registry = registry or Registry()
@@ -2152,7 +1753,6 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
         log("another tick holds the lock; skipping")
         return 0
     try:
-        audit = withdraw_lapsed(github, dry_run)
         workspace = Workspace(repo, run)
         base = workspace.refresh()
         cosign = cosign or Cosign(run=run, pinned_version="v" + tool_pins(repo)["cosign"])
@@ -2175,16 +1775,7 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
                 workspace.restore(base)
         elif not decision["targets"]:
             log("every selection is current; nothing to promote")
-        code = audit
-        for pr in open_promoter_prs(github):
-            if pr["number"] in decision["supersede"]:
-                continue
-            try:
-                consider_ready(github, pr["number"], dry_run)
-            except Refusal as error:
-                log(f"PR #{pr['number']}: {error}")
-                code = 1
-        return code
+        return 0
     finally:
         release_lock(lock)
 
