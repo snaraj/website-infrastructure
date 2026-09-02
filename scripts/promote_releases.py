@@ -1903,17 +1903,21 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
         # Intent first, never a result: the outcome is proven by the read
         # inside compensate_ready, which alerts when it cannot be. The note
         # is informational and best-effort — a failed or lost POST never
-        # stands between a lapsed authorization and its withdrawal.
+        # stands between a lapsed authorization and its withdrawal. The
+        # reasons are fenced, single-line, bounded and redacted like every
+        # other public write: a check name is chosen by whichever App
+        # produced the check, not by this tool, and must never render as
+        # Markdown or a mention. The full text is in the local log.
+        detail = redact("; ".join(reasons))[:400]
         try:
             github.mutate(
                 f"repos/{REPOSITORY}/issues/{number}/comments",
                 "POST",
                 body={
                     "body": (
-                        f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head: "
-                        + "; ".join(reasons)
-                        + ". Withdrawing now: returning to Draft and re-arming both review lanes; the outcome is "
-                        f"proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
+                        f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head:\n\n"
+                        f"```\n{detail}\n```\n\nWithdrawing now: returning to Draft and re-arming both review lanes; "
+                        f"the outcome is proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
                     )
                 },
             )

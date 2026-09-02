@@ -1656,16 +1656,22 @@ class TickTests(unittest.TestCase):
                 self.assertEqual(any("withdrawal note could not be posted" in line for line in self.log_lines), isinstance(answer, Exception))
                 self.log_lines.clear()
         self.note_answer = None
-        # A removed promoter label, a truncated check listing or unknown base
-        # freshness: an authorization that cannot be read is not one, and a
-        # Ready pull request is withdrawn on it rather than dropped from view.
+        # A removed promoter label, a truncated check listing, unknown base
+        # freshness or a regressed check that is not even required: an
+        # authorization that cannot be read is not one, and a Ready pull
+        # request is withdrawn on it rather than dropped from view. The
+        # regressed check carries a name the tool did not author — fence
+        # closers, a mention, a path and 600 bytes of padding — and the
+        # public note fences, bounds and redacts it like every other write.
         good_checks = self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"]
+        hostile = {"name": "ci`\n```\n@someone /Users/leak/path " + "x" * 600, "status": "completed", "conclusion": "failure", "app": {"slug": "other-app"}}
         lapses = {
             "promoter label removed": ({"pr": dict(ready, labels=[{"name": "release"}, {"name": "delivery-lane"}])}, "promoter label promoter is missing"),
             "check-run listing truncated": ({"checks": dict(good_checks, total_count=150)}, "check-run listing is truncated"),
             "base freshness unknown": ({"compare": {}}, "base freshness is unknown"),
         }
-        for name, (broken, expected) in lapses.items():
+        regressed = {"non-required check regressed": ({"checks": {"total_count": 3, "check_runs": good_checks["check_runs"] + [hostile]}}, "did not succeed: ci @someone <path> xxx")}
+        for name, (broken, expected) in {**lapses, **regressed}.items():
             with self.subTest(lapse=name):
                 self.mutations.clear()
                 self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals]
@@ -1676,6 +1682,9 @@ class TickTests(unittest.TestCase):
                 self.assertEqual([m[0] for m in self.mutations if m[0].startswith("pr-ready")], ["pr-ready-undo"])
                 note = json.loads(self.writes("/issues/300/comments")[0][2])["body"]
                 self.assertIn(expected, note)
+                self.assertEqual(note.count("```"), 2, "the reasons sit inside one fence nothing in them can close")
+                self.assertLessEqual(len(note.split("```")[1].strip()), 400)
+                self.assertNotIn("/Users/", note)
                 self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
         # The same unreadable inputs never let a Draft pull request flip.
         for name, (broken, expected) in lapses.items():
@@ -1689,6 +1698,14 @@ class TickTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.Refusal, expected + ".*partial view"):
                     MODULE.consider_ready(github, 300, False)
                 self.assertEqual(self.mutations, [])
+        # A regressed check is a plain block for a Draft, not a partial view.
+        self.mutations.clear()
+        self.log_lines.clear()
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = regressed["non-required check regressed"][0]["checks"]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        self.assertFalse(MODULE.consider_ready(github, 300, False))
+        self.assertEqual(self.mutations, [])
+        self.assertTrue(any("not flipped" in line and "did not succeed: ci`" in line for line in self.log_lines), "the local log keeps the raw name")
 
     def test_the_ready_audit_runs_before_anything_in_the_tick_that_can_fail(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
