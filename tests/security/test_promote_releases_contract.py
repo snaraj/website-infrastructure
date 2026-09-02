@@ -1929,12 +1929,16 @@ class RunbookAndLaunchdTests(unittest.TestCase):
     def test_latest_release_distinguishes_no_releases_from_any_other_refusal(self):
         fleet = FakeFleet()
         self.assertEqual(MODULE.latest_release(fleet.github(), "snaraj/publishes-nothing"), (None, None), "the API's 404 means the repository publishes nothing")
+        self.assertIsNotNone(MODULE.NOT_FOUND_RE.search("`gh api x` exited 1: gh: Not Found (HTTP 404)"))
+        self.assertIsNotNone(MODULE.NOT_FOUND_RE.search("`gh api x` exited 1: gh: Not Found (HTTP 404)  "), "trailing whitespace after the final marker is still the final marker")
 
         for text in (
             "`gh api` exited 1: transport failure",
             "`gh api` exited 1: proxy port 4040 refused the connection",
             "`gh api` exited 1: gh: Forbidden (HTTP 403)",
             "`gh api` exited 1: gh: Bad Gateway (HTTP 5404)",
+            "`gh api` exited 1: proxy body said (HTTP 404) | gh: Internal Server Error (HTTP 500)",
+            "`gh api` exited 1: gh: Not Found (HTTP 404) | then a trailing hint line",
         ):
             with self.subTest(refusal=text):
                 def down(argv, cwd=None, input_text=None, env=None, timeout=None, text=text):

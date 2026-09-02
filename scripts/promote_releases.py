@@ -1374,7 +1374,10 @@ def status_exit_code(report: dict) -> int:
     return 3 if any(entry["verdict"] != "current" for entry in report.values()) else 0
 
 
-NOT_FOUND_RE = re.compile(r"\(HTTP 404\)")
+# gh reports the request's final status as the LAST thing it says; only a
+# refusal that ENDS with the Not Found marker is a 404, so a body phrase or
+# proxy line quoting "(HTTP 404)" ahead of a real "(HTTP 500)" stays a 500.
+NOT_FOUND_RE = re.compile(r"\(HTTP 404\)\s*$")
 
 
 def latest_release(github: GitHub, repository: str) -> tuple:
@@ -1384,9 +1387,10 @@ def latest_release(github: GitHub, repository: str) -> tuple:
     try:
         release = github.api(f"repos/{repository}/releases/latest")
     except Refusal as error:
-        # Only gh's own anchored status marker for Not Found means "publishes
+        # Only a refusal that ENDS with gh's Not Found marker means "publishes
         # nothing"; any other refusal (a transport failure that happens to
-        # mention 4040, a 403, a 5xx) propagates with its real classification.
+        # mention 4040, a 403, a 5xx, a 404 quoted ahead of the final status)
+        # propagates with its real classification.
         if NOT_FOUND_RE.search(str(error)):
             return None, None
         raise
