@@ -14,7 +14,7 @@ the platform contract; S3 = drift that misleads operators.
 
 | ID | Invariant | Checker | Evidence | Sev | Remediation |
 | --- | --- | --- | --- | --- | --- |
-| PLAT-COST-001 | No Cloudflare resource outside two Free-plan zones; no metered feature in IaC | `scripts/validate_repository.py cloudflare` + `policies/conftest` cloudflare fixtures + `scripts/validate-cloudflare-iac.sh` (credential-free init/validate of all seven phase roots) | CI PASS | S1 | Fable lane |
+| PLAT-COST-001 | No Cloudflare resource outside two Free-plan zones; no metered feature in IaC | `scripts/validate_repository.py cloudflare` + `policies/conftest` cloudflare fixtures + `scripts/validate-cloudflare-iac.sh` (credential-free init/validate of every phase root) | CI PASS | S1 | Fable lane |
 | PLAT-COST-002 | No paid GitHub feature: public repos, free runners, GHCR public pulls | repo settings are owner-controlled; CI asserts nothing pulls with credentials (`persist-credentials: false` and SHA pins enforced by `scripts/validate_repository.py` `check_workflows`) | CI PASS | S1 | owner |
 | PLAT-COST-003 | Registrar renewals are the only authorized charges; unknown billing = NO-GO | documented law (`README.md`, `docs/runbooks/public-launch.md`); no executable probe can exist without credentials — GAP accepted, owner audits billing UI | owner attestation | S1 | owner |
 
@@ -26,7 +26,7 @@ the platform contract; S3 = drift that misleads operators.
 | PLAT-SUP-002 | Only the two exact protected-`main` publisher identities are trusted; each chart is selected by one immutable manifest digest | `scripts/validate_signature_policy.py`, `scripts/ci/verify-existing-oci-release.sh`, acquisition receipt and signature-drift/cross-site mutants | CI PASS + allow/deny fixtures | S1 | Fable lane |
 | PLAT-SUP-003 | Flux pulls anonymously; each site OCIRepository selects its signature-verified chart by one exact nonzero manifest digest, while only the platform connector keeps its reviewed Git source | `scripts/validate_signature_policy.py`, `scripts/validate_repository.py`, and `policies/conftest/kubernetes.rego` over rendered objects | CI PASS with mutable-selector and cross-site hostile fixtures | S1 | Fable lane |
 | PLAT-SUP-004 | Third-party Actions pinned to full SHAs; tools installed checksum-verified | `scripts/validate_repository.py` `check_workflows` (full-SHA pin law) + `scripts/ci/install-tools.sh` pinned hashes | CI PASS | S1 | Fable lane |
-| PLAT-SUP-005 | The retired live gate's evidence validators stay executable and tested for the successor | `tests/security/test_release_gate_contract.py` (27 executed tests over `validate_flux_release_evidence.py` / `validate_runtime_inventory_evidence.py`) | unittest PASS | S2 | Fable lane |
+| PLAT-SUP-005 | The retired live gate's evidence validators stay executable and tested for the successor | `tests/security/test_release_gate_contract.py` over `validate_flux_release_evidence.py` / `validate_runtime_inventory_evidence.py` | unittest PASS | S2 | Fable lane |
 
 ## Exposure and isolation
 

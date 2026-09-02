@@ -1,8 +1,9 @@
 # Phase A — platform surface map, authority matrix, and data flow
 
-Derived exclusively from public/tracked repository material. Private
-resources appear by type and ordinal only. Inferences are marked
-*(inference)* with the evidence that would prove them.
+Point-in-time at the Phase A base commit; the State column is that snapshot,
+not current live state. Derived exclusively from public/tracked repository
+material. Private resources appear by type and ordinal only. Inferences are
+marked *(inference)* with the evidence that would prove them.
 
 ## Component map
 

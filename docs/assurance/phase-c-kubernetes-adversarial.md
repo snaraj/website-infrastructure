@@ -55,13 +55,10 @@ Live acceptance must demonstrate:
 
 ## Storage truth
 
-The sanitized live cluster currently has an older unbound hostPath PV and no
-PVC or StorageClass. That is not reviewed local-PV activation. The future
-usage-export target remains static `local`, root `/mnt/local-pie-ssd`,
-StorageClass `local-pie-ssd`, `ReadWriteOnce`, `Retain`, exact node
-affinity and local-device proof. The Naranjo Helm reconciler may own PVC
-lifecycle only, never PV, StorageClass, node, or host authority. See the
-[static storage runbook](../runbooks/storage-admission.md).
+The reviewed local-volume design is not active. The
+[static storage runbook](../runbooks/storage-admission.md) is the single source
+for the present-state inventory, the closed target posture, and the PVC-only
+reconciler authority.
 
 ## Revisit trigger
 

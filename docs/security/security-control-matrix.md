@@ -2,7 +2,7 @@
 
 | Objective | Preventive control | Repository evidence | Runtime evidence required |
 | --- | --- | --- | --- |
-| No public origin/admin | ClusterIP only, no forwarding, admin/public and per-site split Tunnels (ADR 0015) | Conftest deny fixtures | external scan, WARP on/off tests, DNS audit |
+| No public origin/admin | ClusterIP only, no forwarding, admin/public and per-site split Tunnels (ADR 0015) | Conftest deny fixtures | external scan, DNS audit |
 | Pod containment | restricted PSA/context, no token, default deny | manifests and policy tests | rejected insecure pod, denied egress/cross-namespace probes |
 | GitOps least privilege | anonymous source, explicit SAs, scoped paths, one flattened plugin-free kubeconfig and digest-pinned kubectl snapshot | Flux manifests/RBAC and protected-target tests | exact-target `kubectl auth can-i`, anonymous source and controller status |
 | Secret confidentiality | no secret in Git at all, API-server encryption at rest, encrypted operator volume | committed-Secret and secret-pattern scanners, classification and ceremony contracts | raw-etcd at-rest verification without exposing values |

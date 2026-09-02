@@ -13,11 +13,10 @@ separate reviewed change that atomically switches the selected gate in
 `release-policy.env` to `yes` and moves its VERSION to `1.0.0` or later; never
 reuse or manually move an existing OCI version tag.
 
-Before a Kubernetes upgrade, create a fresh local snapshot with
-`sudo env CONFIRM_ETCD_SNAPSHOT=create-reviewed-stacked-etcd-snapshot /usr/local/sbin/website-infrastructure-etcd-snapshot --apply`, then run
-`sudo /usr/local/sbin/website-infrastructure-etcd-snapshot --check`. Copy that
-snapshot encrypted off-device and verify the external copy; the timer does not
-perform this external step. Protect the current PKI/API-encryption material;
+Before a Kubernetes upgrade, create and verify a fresh snapshot and its
+off-device copy exactly as [disaster recovery](disaster-recovery.md)
+prescribes; that runbook owns the commands, timer, retention, and the external
+step the timer does not perform. Protect the current PKI/API-encryption material;
 record containerd, kubeadm, kubelet, kubectl, control-plane image, CNI, and kube-proxy
 versions/configuration; and test recovery access. Follow upstream kubeadm's
 one-minor-at-a-time order and version-skew policy. Revalidate CNI/kube-proxy

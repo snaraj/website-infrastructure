@@ -61,12 +61,11 @@ whether it merges independently.
 ## Evidence ledger
 
 Machine-readable JSON Lines at `docs/assurance/evidence-ledger.jsonl`, one
-record per command/gate, schema `platform-assurance/v1`
-([evidence-ledger.schema.json](evidence-ledger.schema.json)). `PASS` requires
-an executable check; `BLOCKED` names the missing public prerequisite, never a
-private value; evidence hashes bind only sanitized artifacts whose bytes are
-preserved. CI validates schema, ordering, unique IDs, and forbidden-pattern
-absence.
+record per command/gate, schema `platform-assurance/v1`, whose sole authority
+is `scripts/validate_assurance_ledger.py`. `PASS` requires an executable
+check; `BLOCKED` names the missing public prerequisite, never a private value;
+evidence hashes bind only sanitized artifacts whose bytes are preserved. CI
+validates schema, ordering, unique IDs, and forbidden-pattern absence.
 
 ## Finding discipline
 
