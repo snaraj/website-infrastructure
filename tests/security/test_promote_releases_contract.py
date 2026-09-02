@@ -924,8 +924,8 @@ class ReadyRuleTests(unittest.TestCase):
         body = f"{preamble}HEAD: {head}\nVERDICT: {verdict}\n\nFindings: none.\n\n{audit}- {lane} (adversarial reviewer)\n"
         return {"user": user, "user_id": user_id, "user_type": user_type, "app_id": app_id, "body": body}
 
-    def checks(self, conclusion="success", app=MODULE.REQUIRED_CHECK_APP):
-        return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": "neutral", "app": "github-code-scanning"}]
+    def checks(self, conclusion="success", app=MODULE.REQUIRED_CHECK_APP, other="neutral"):
+        return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": other, "app": "github-code-scanning"}]
 
     def test_two_distinct_exact_head_approvals_with_green_checks_flip(self):
         # Both receipts come from the ONE reviews App principal and differ
@@ -956,6 +956,8 @@ class ReadyRuleTests(unittest.TestCase):
             "required check name duplicated by another app": (["release"], good, self.checks() + [{"name": MODULE.REQUIRED_CHECKS[0], "status": "completed", "conclusion": "success", "app": "mallory-ci"}], 0, True, "appears 2 times"),
             "requires-review armed": (["requires-review"], good, self.checks(), 0, True, "still armed"),
             "check failed": (["release"], good, self.checks("failure"), 0, True, "has not succeeded"),
+            "a check that is not required failed": (list(MODULE.PR_LABELS), good, self.checks(other="failure"), 0, True, "a check at this head failed"),
+            "a check that is not required timed out": (list(MODULE.PR_LABELS), good, self.checks(other="timed_out"), 0, True, "a check at this head failed"),
             "check pending": (["release"], good, [{"name": n, "status": "in_progress", "conclusion": None, "app": MODULE.REQUIRED_CHECK_APP} for n in MODULE.REQUIRED_CHECKS], 0, True, "has not succeeded"),
             "check missing": (["release"], good, [], 0, True, "appears 0 times"),
             "behind main": (["release"], good, self.checks(), 2, True, "behind main"),
@@ -1247,6 +1249,19 @@ class TickTests(unittest.TestCase):
         self.assertNotIn("promoter/", self.local_heads(), "a dry run must leave no local promoter ref to collide with the real cut")
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "", "the dry run left the clone dirty")
+
+    def test_a_refused_dry_run_writes_nothing_not_even_the_failure_report(self):
+        # The one write a dry run can reach is report_failure after a refused
+        # ceremony; the rehearsal must reach it and prove it writes nothing.
+        self.fleet.gh[f"repos/{self.fleet.site}/releases/tags/v{self.next}"]["immutable"] = False
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[]]
+        code = MODULE.tick(self.repo, True, registry=self.fleet.registry(), github=MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch), cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("promotion refused" in line and "not an immutable final release" in line for line in self.log_lines))
+        self.assertEqual([m for m in self.mutations if m[0] != "gate"], [], "a refused dry run posts nothing, not even the drift-issue report")
+        self.assertEqual(self.commits, [])
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(status, "", "the refused dry run left the clone dirty")
 
     def test_live_tick_cuts_signs_pushes_opens_and_arms_then_flips_when_both_verdicts_land(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
@@ -1884,6 +1899,27 @@ class RunbookAndLaunchdTests(unittest.TestCase):
         output = subprocess.run([__import__("sys").executable, "-B", str(REPO_ROOT / "scripts" / "promote_releases.py"), "--help"], capture_output=True, text=True, check=True).stdout
         for mode in ("status", "verify", "tick", "launchd-plist"):
             self.assertIn(mode, output)
+
+    def test_status_exit_code_is_three_for_any_selection_that_is_not_current(self):
+        current = {"committed": "0.1.71", "latest": "0.1.71", "verdict": "current"}
+        self.assertEqual(MODULE.status_exit_code({"a": current, "b": current}), 0)
+        for verdict in ("behind", "ahead", "unpublished"):
+            with self.subTest(verdict=verdict):
+                self.assertEqual(MODULE.status_exit_code({"a": current, "b": dict(current, verdict=verdict)}), 3)
+
+    def test_an_unrunnable_program_is_a_refusal_not_a_traceback(self):
+        with self.assertRaisesRegex(MODULE.Refusal, r"`definitely-not-a-real-binary-xyz version` could not be run: "):
+            MODULE.run_command(["definitely-not-a-real-binary-xyz", "version"])
+
+    def test_latest_release_distinguishes_no_releases_from_any_other_refusal(self):
+        fleet = FakeFleet()
+        self.assertEqual(MODULE.latest_release(fleet.github(), "snaraj/publishes-nothing"), (None, None), "the API's 404 means the repository publishes nothing")
+
+        def down(argv, cwd=None, input_text=None, env=None, timeout=None):
+            raise MODULE.Refusal("`gh api` exited 1: transport failure")
+
+        with self.assertRaisesRegex(MODULE.Refusal, "transport failure"):
+            MODULE.latest_release(MODULE.GitHub(run=down, fetch=fleet.fetch), "snaraj/publishes-nothing")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -128,7 +128,8 @@ still a valid promotion.
 ## Manual use
 
 From any checkout, `status` compares every committed selection with the
-latest published release (exit 3 when any workload is behind):
+latest published release (exit 3 when any workload is not current — behind,
+ahead or unpublished alike):
 
 ```sh
 python3 -I -B scripts/promote_releases.py status

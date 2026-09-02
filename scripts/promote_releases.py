@@ -422,16 +422,22 @@ def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEO
     can carry workstation paths."""
 
     label = " ".join(map(str, argv[:2]))
-    process = subprocess.Popen(
-        list(argv),
-        cwd=None if cwd is None else str(cwd),
-        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=pinned_environment(env),
-        text=True,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            cwd=None if cwd is None else str(cwd),
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=pinned_environment(env),
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        # A program missing from the agent's pinned PATH, or not executable,
+        # is a refusal the tick reports — never a traceback that escapes
+        # every handler. The strerror carries no path; the filename would.
+        raise Refusal(f"`{label}` could not be run: {error.strerror or type(error).__name__}") from None
     timed_out = False
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout)
@@ -1359,6 +1365,14 @@ def apply_promotion(root: Path, selections: dict, acquired: dict, issue: int, is
 # ---------------------------------------------------------------------------
 
 
+def status_exit_code(report: dict) -> int:
+    """0 when every selection is current; 3 when ANY selection is not —
+    behind, ahead or unpublished alike, so a wrapper cannot read a non-zero
+    exit as "a newer release exists"."""
+
+    return 3 if any(entry["verdict"] != "current" for entry in report.values()) else 0
+
+
 def latest_release(github: GitHub, repository: str) -> tuple:
     """``(version-without-v, tag)`` of the latest published Release, or
     ``(None, None)`` when the repository publishes nothing."""
@@ -2020,8 +2034,12 @@ def redact(text: str) -> str:
 
 
 def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run: bool) -> None:
-    """One idempotent comment per (targets, step) on the drift issue, so a
-    silent tool failure is impossible while the watchdog's issue is open."""
+    """One idempotent comment per (targets, step) on the drift issue. Its
+    one call site is a refused CUT — the failure whose silence would
+    otherwise hide behind the watchdog's open drift issue. Every other
+    refusal in a tick (a dirty clone, a status or planning refusal, a Ready
+    withdrawal or flip that failed) stays in the local log and the tick's
+    exit status."""
 
     marker = "promoter-failure " + " ".join(f"{s}={v}" for s, v in sorted(targets.items())) + f" step={step}"
     try:
@@ -2206,7 +2224,7 @@ def main(argv=None) -> int:
             report = status(args.repo.resolve(), GitHub())
             for slug, entry in report.items():
                 print(f"{slug}: committed {entry['committed']} vs latest {entry['latest']} -> {entry['verdict']}")
-            return 3 if any(e["verdict"] != "current" for e in report.values()) else 0
+            return status_exit_code(report)
         if args.mode == "verify":
             root = args.repo.resolve()
             cosign = Cosign(pinned_version="v" + tool_pins(root)["cosign"])
