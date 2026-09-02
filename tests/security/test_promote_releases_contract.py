@@ -928,6 +928,11 @@ class ReadyRuleTests(unittest.TestCase):
         return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": "neutral", "app": "github-code-scanning"}]
 
     def test_two_distinct_exact_head_approvals_with_green_checks_flip(self):
+        # Both receipts come from the ONE reviews App principal and differ
+        # only by lane signature: that is the repository's manual Ready rule
+        # as written, and the trust model the module docstring states. The
+        # tool proves the App identity and the exact head, not that two
+        # lanes were independently controlled.
         ready, reasons = MODULE.ready_decision(self.HEAD, list(MODULE.PR_LABELS), [self.receipt(self.HEAD, "APPROVE", "Opus5"), self.receipt(self.HEAD, "APPROVE", "Codex")], self.checks(), 0, True)
         self.assertEqual((ready, reasons), (True, []))
 
@@ -1085,6 +1090,7 @@ class TickTests(unittest.TestCase):
         self.fail_gates = set()
         self.fail_ready = False
         self.fail_undo = False
+        self.note_answer = None
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -1128,6 +1134,10 @@ class TickTests(unittest.TestCase):
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
             self.mutations.append(("api-write", path, input_text, argv[argv.index("-X") + 1]))
+            if self.note_answer is not None and path.endswith("/comments") and "ready-withdrawn" in (input_text or ""):
+                if isinstance(self.note_answer, Exception):
+                    raise self.note_answer
+                return self.note_answer
             # GitHub answers label writes with the label ARRAY, not an object.
             return "[]" if "/labels" in path else "{}"
         return self.fleet.run(argv, cwd=cwd, input_text=input_text, env=env)
@@ -1601,6 +1611,21 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(bodies), 2)
         self.assertNotIn("Returned to Draft", bodies[0])
         self.assertIn("promoter-alert unresolved-ready", bodies[1])
+        # The note is informational: a failed POST, or one whose response is
+        # lost or unreadable, never stands between a lapsed authorization and
+        # its withdrawal.
+        for name, answer in {"note POST fails": MODULE.Refusal("`gh api` exited 1: transport failure"), "note response unreadable": "<html>not json</html>"}.items():
+            with self.subTest(note=name):
+                self.mutations.clear()
+                self.note_answer = answer
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals + [blocking]]
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([ready, restored])
+                self.assertFalse(MODULE.consider_ready(github, 300, False))
+                self.assertEqual([m[0] for m in self.mutations if m[0].startswith("pr-ready")], ["pr-ready-undo"])
+                self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+                self.assertEqual(any("withdrawal note could not be posted" in line for line in self.log_lines), isinstance(answer, Exception))
+                self.log_lines.clear()
+        self.note_answer = None
         # A removed promoter label, a truncated check listing or unknown base
         # freshness: an authorization that cannot be read is not one, and a
         # Ready pull request is withdrawn on it rather than dropped from view.
@@ -1634,6 +1659,36 @@ class TickTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.Refusal, expected + ".*partial view"):
                     MODULE.consider_ready(github, 300, False)
                 self.assertEqual(self.mutations, [])
+
+    def test_the_ready_audit_runs_before_anything_in_the_tick_that_can_fail(self):
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        head = "d" * 40
+        branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
+        approvals = [bot_comment(f"HEAD: {head}\nVERDICT: APPROVE\n\nmutation claim\n\n- Opus5 (adversarial reviewer)\n")]
+        ready = pr_record(300, branch, head, draft=False, labels=MODULE.PR_LABELS)
+        restored = pr_record(300, branch, head, labels=MODULE.PR_LABELS + MODULE.REVIEW_LABELS)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[ready]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([ready, restored])
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = {"total_count": 2, "check_runs": [{"name": n, "status": "completed", "conclusion": "success", "app": {"slug": MODULE.REQUIRED_CHECK_APP}} for n in MODULE.REQUIRED_CHECKS]}
+        # The clone is dirty, so the refresh — the first thing after the
+        # audit — refuses and the tick fails; the lapsed Ready was withdrawn
+        # before that failure could skip it.
+        (self.repo / "stray.txt").write_text("not the promoter's\n")
+        with self.assertRaisesRegex(MODULE.Refusal, "promoter clone is dirty"):
+            MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        kinds = [m[0] for m in self.mutations]
+        self.assertEqual(kinds.count("pr-ready-undo"), 1, "the withdrawal ran before the refresh failed")
+        self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        self.assertTrue(any("ready-withdrawn" in (m[2] or "") for m in self.writes("/issues/300/comments")))
+        (self.repo / "stray.txt").unlink()
+        # The audit's own listing failure is logged, not fatal to the tick.
+        self.mutations.clear()
+        del self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"]
+        with self.assertRaises(MODULE.Refusal):
+            MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertTrue(any("Ready audit could not list" in line for line in self.log_lines))
 
     def test_ready_undo_response_loss_never_claims_unproven_restoration(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)

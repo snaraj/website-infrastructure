@@ -6,8 +6,15 @@ Since the issue #275 decoupling, a merge to protected ``main`` deploys within
 minutes — but ADVANCING the committed exact-digest selection was still a
 hand-run ceremony. This tool makes that ceremony deterministic, testable and
 unattended, without moving any authority: it can only open Draft pull
-requests that still need two independent exact-head verdicts and the
-owner's merge through the no-bypass ruleset.
+requests that still need two exact-head APPROVE receipts and the owner's
+merge through the no-bypass ruleset. Trust model of that quorum, stated
+plainly: every receipt is posted by the ONE reviews App principal, and the
+two receipts are distinguished by their lane signature — content, exactly
+as the repository's manual Ready rule reads it — not by a second
+authenticated identity. The tool binds each receipt to the App's immutable
+identity and the exact head; it cannot and does not prove that two lanes
+were independently controlled. Counting two principals needs a second
+reviewer App and is a lift, not this file.
 
 Design, in the order the ``tick`` runs it:
 
@@ -1839,9 +1846,12 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
     authorization — a lapsed receipt, a renewed lane, a removed promoter
     label, a check that regressed, or any input that can no longer be read
     — is withdrawn to Draft with both lanes re-armed on the tick that sees
-    it. That bounds how long Ready can outlive its authorization to ONE
-    tick period; it does not make the bound zero, which only an
-    authoritative status computed at the head (the #289 lift) can."""
+    it. The bound this gives is "the next successful tick that reaches the
+    pull request" — the audit runs first in every tick, but the agent runs
+    only while the workstation is awake and the owner is logged in — so
+    Ready stays advisory: the owner's merge click is the authority and the
+    receipts are on the pull request. A zero bound needs an authoritative
+    status computed at the head (the #289 lift)."""
 
     pr = ready_snapshot(github, number)
     if pr is None:
@@ -1860,19 +1870,24 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
             log(f"PR #{number} WOULD be withdrawn from Ready (dry run): " + "; ".join(reasons))
             return False
         # Intent first, never a result: the outcome is proven by the read
-        # inside compensate_ready, which alerts when it cannot be.
-        github.mutate(
-            f"repos/{REPOSITORY}/issues/{number}/comments",
-            "POST",
-            body={
-                "body": (
-                    f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head: "
-                    + "; ".join(reasons)
-                    + ". Withdrawing now: returning to Draft and re-arming both review lanes; the outcome is "
-                    f"proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
-                )
-            },
-        )
+        # inside compensate_ready, which alerts when it cannot be. The note
+        # is informational and best-effort — a failed or lost POST never
+        # stands between a lapsed authorization and its withdrawal.
+        try:
+            github.mutate(
+                f"repos/{REPOSITORY}/issues/{number}/comments",
+                "POST",
+                body={
+                    "body": (
+                        f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head: "
+                        + "; ".join(reasons)
+                        + ". Withdrawing now: returning to Draft and re-arming both review lanes; the outcome is "
+                        f"proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
+                    )
+                },
+            )
+        except Refusal as error:
+            log(f"PR #{number}: the withdrawal note could not be posted ({error}); withdrawing regardless")
         log(compensate_ready(github, number, pr["head"], Refusal("Ready authorization lapsed: " + "; ".join(reasons))))
         return False
     if pr["unknowns"]:
@@ -2066,6 +2081,30 @@ def release_lock(fd) -> None:
     os.close(fd)
 
 
+def withdraw_lapsed(github: GitHub, dry_run: bool) -> int:
+    """The Ready audit, FIRST in every tick and needing nothing but GitHub
+    reads: every open Ready promoter pull request is re-judged and withdrawn
+    if its authorization lapsed or cannot be read. Nothing that can fail
+    later in the tick — the clone refresh, the registry, the planning, a
+    cut — is allowed to stand in front of it."""
+
+    code = 0
+    try:
+        open_prs = open_promoter_prs(github)
+    except Refusal as error:
+        log(f"Ready audit could not list promoter pull requests: {error}")
+        return 1
+    for pr in open_prs:
+        if pr["draft"]:
+            continue
+        try:
+            consider_ready(github, pr["number"], dry_run)
+        except Refusal as error:
+            log(f"PR #{pr['number']}: {error}")
+            code = 1
+    return code
+
+
 def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run=run_command) -> int:
     github = github or GitHub(run=run)
     registry = registry or Registry()
@@ -2074,6 +2113,7 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
         log("another tick holds the lock; skipping")
         return 0
     try:
+        audit = withdraw_lapsed(github, dry_run)
         workspace = Workspace(repo, run)
         base = workspace.refresh()
         cosign = cosign or Cosign(run=run, pinned_version="v" + tool_pins(repo)["cosign"])
@@ -2096,7 +2136,7 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
                 workspace.restore(base)
         elif not decision["targets"]:
             log("every selection is current; nothing to promote")
-        code = 0
+        code = audit
         for pr in open_promoter_prs(github):
             if pr["number"] in decision["supersede"]:
                 continue

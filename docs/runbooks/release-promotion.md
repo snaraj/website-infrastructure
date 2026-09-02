@@ -17,15 +17,22 @@ changes across those reads is compensated: Draft is restored and both lanes
 re-armed, and the restore is claimed only from a read that shows Draft with
 both lanes. A restore that cannot be proven posts a
 `promoter-alert unresolved-ready` comment stating exactly what was observed
-and fails loudly for the operator. Every tick re-judges an open Ready
-promotion pull request and withdraws it to Draft with both lanes re-armed
+and fails loudly for the operator. Every tick begins with the Ready audit,
+before the clone refresh, the registry reads and the planning: an open
+Ready promotion pull request is withdrawn to Draft with both lanes re-armed
 (`promoter-note ready-withdrawn`) when its head no longer carries the
 authorization or any input of it can no longer be read; a promoter label
-someone removed is a blocker, not an escape from the tool's view. That
-bounds the time Ready can outlive a lapsed authorization to one tick
-period (15 minutes); the receipts stay visible on the pull request for the
-merge click, and only an authoritative status computed at the head (the
-#289 lift) can make the bound zero. The owner alone merges. The deploy-assurance watchdog stays the loud
+someone removed is a blocker, not an escape from the tool's view. The bound
+this gives is the next successful tick that reaches the pull request — the
+agent runs only while the workstation is awake and the owner is logged in,
+so it is not a wall-clock guarantee — and Ready therefore stays advisory:
+the owner's merge click is the authority and the receipts are on the pull
+request. Only an authoritative status computed at the head (the #289 lift)
+makes the bound zero. Trust model of the two-receipt quorum: both receipts
+are posted by the one reviews App and are distinguished by their lane
+signature, exactly as the manual Ready rule reads them; the tool binds each
+to the App's immutable identity and the exact head and does not prove that
+the two lanes were independently controlled. The owner alone merges. The deploy-assurance watchdog stays the loud
 backstop: a promotion the tool cannot open leaves the watchdog's drift issue
 open, with one comment naming the failed step.
 
@@ -101,7 +108,9 @@ made with its reasons. After the signed commit the tick runs
 `make pre-push-security` on the exact outgoing commit and pushes only when
 it passes; a refusal pushes nothing. Only pull requests that satisfy the
 owned-promoter identity tuple (owner-authored, promoter branch of this
-repository against `main`, promoter labels) are ever planned, superseded or
+repository against `main`; labels are authorization inputs, not identity,
+so a stripped label blocks or withdraws Ready and never removes the pull
+request from the tool's view) are ever planned, superseded or
 flipped; a failure comment on the drift issue is redacted of every path and
 host detail, the raw text staying in the local log. A promotion pull request that falls behind `main` or
 whose target release moves on is closed as superseded and re-cut on the
