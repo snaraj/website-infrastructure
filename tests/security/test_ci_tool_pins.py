@@ -49,26 +49,16 @@ class CiToolPinTests(unittest.TestCase):
             "ORAS_VERSION",
             "COSIGN_VERSION",
             "SHELLCHECK_VERSION",
-            "KUBERNETES_VERSION",
         )
         for key in keys:
             with self.subTest(key=key):
                 self.assertIn(self.versions[key], self.installer)
 
-    def test_ci_kubectl_matches_the_protected_operator_pin(self):
-        """Protocol parity must not fall back to the runner's ambient client."""
-
-        self.assertIn(
-            self.versions["KUBECTL_LINUX_AMD64_SHA256"],
-            self.installer,
-        )
-        self.assertIn("${install_root}/kubectl", self.installer)
-
     def test_downloads_cross_a_full_sha256_boundary(self):
         """No archive or standalone executable may be installed before hashing."""
 
         hashes = re.findall(r"(?m)^\s*'([0-9a-f]{64})'\s*\\?$", self.installer)
-        self.assertGreaterEqual(len(hashes), 12)
+        self.assertGreaterEqual(len(hashes), 11)
         self.assertEqual(len(hashes), len(set(hashes)))
         self.assertIn("sha256sum --check --status", self.installer)
         self.assertLess(

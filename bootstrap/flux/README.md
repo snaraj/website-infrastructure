@@ -75,9 +75,8 @@ portable signature and is not accepted as proof for a later Linux process.
 Stage these release artifacts inside the protected root as single-link
 owner-only executables, without adding them to the repository:
 
-- Flux v2.9.3 Linux AMD64 for controller generation;
-- kubectl v1.36.3 Linux AMD64 for target reads and mutations; and
-- age/age-keygen v1.3.1 Linux AMD64.
+- Flux v2.9.3 Linux AMD64 for controller generation; and
+- kubectl v1.36.3 Linux AMD64 for target reads and mutations.
 
 Verify the publishers' signature/provenance material and the archive/checksum
 files independently. `versions.env` pins the resulting executable hashes. The
