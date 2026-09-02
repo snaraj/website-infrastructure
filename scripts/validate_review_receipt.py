@@ -18,6 +18,8 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 SIGNATURE = re.compile(r"^- (.+?) \(adversarial reviewer\)$")
 MAIN_WORKER_SIGNATURE = re.compile(r"^- (.+?) \(Main Worker\)$")
 VERDICTS = frozenset({"APPROVE", "REQUEST-CHANGES"})
+# A verdict the owner reads in one sitting: AGENTS.md caps a receipt here.
+RECEIPT_BYTE_CEILING = 6000
 MAIN_WORKER_VERDICTS = frozenset({"BLOCK", "PASS"})
 MAIN_WORKER_SCOPE = (
     "architecture,merge-order,authority,settings,base-freshness,required-checks"
@@ -46,6 +48,8 @@ def denial(text, expected_head, resource_kind):
 
     if resource_kind != "pull-request":
         return "exact-head review receipts apply only to pull requests"
+    if len(text.encode("utf-8")) > RECEIPT_BYTE_CEILING:
+        return f"receipt exceeds the {RECEIPT_BYTE_CEILING}-byte ceiling"
     if not SHA.fullmatch(expected_head):
         return "expected head is not one lowercase 40-hex SHA"
     lines = text.replace("\r\n", "\n").splitlines()

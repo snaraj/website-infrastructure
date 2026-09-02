@@ -227,33 +227,16 @@ class GitHubFlowSkillContractTests(unittest.TestCase):
                 self.assertIn(fragment, destructive)
         self.assertIn("Stateful/PV/PVC/database/", main)
 
-    def test_pr_template_requires_release_and_two_independent_receipts(self):
+    def test_pr_template_is_the_five_field_schema_without_retired_rows(self):
         template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
         for fragment in (
-            "Closes #",
-            "Exact base",
-            "Exact head",
-            "Platform source release",
-            "tag-derived after protected-main merge",
-            "no patch is pre-allocated by this PR",
-            "Adds exactly one new `changelog.d/<issue>-<lowercase-slug>.md`",
-            "`VERSION` and `CHANGELOG.md` remain unchanged",
-            "Derived patch is exactly one after the immutable predecessor tag",
-            "Predecessor tag and immutable Release GET receipt",
-            "requires-review",
-            "Independent normal-comment verdict",
-            "ROLE: MAIN-WORKER",
-            "VERDICT: PASS",
-            "Merge order and collision paths",
+            "## Head and base", "Exact base", "Exact head", "## Scope", "Closes #",
+            "dependency order", "actuals against the issue's estimate", "changelog.d",
+            "## Gates", "## Findings resolved", "## Limitations",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, template)
-        for retired in (
-            "Platform source release: `vX.Y.Z`",
-            "`VERSION` is exactly one patch after the protected base",
-            "`CHANGELOG.md` records this exact release",
-            "Successors that must resync their base and platform patch",
-        ):
+        for retired in ("ROLE: MAIN-WORKER", "VERDICT: PASS", "Platform source release", "Merge order and collision paths"):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, template)
 

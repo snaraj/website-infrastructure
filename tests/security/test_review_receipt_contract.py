@@ -87,6 +87,10 @@ class ReviewReceiptTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNotNone(MODULE.denial(text, HEAD, "pull-request"))
         self.assertIsNotNone(MODULE.denial(receipt(), "B" * 40, "pull-request"))
+        # The byte ceiling, at both sides of the boundary.
+        padded = receipt().replace("Claim audit:", "Claim audit:" + "x" * (MODULE.RECEIPT_BYTE_CEILING - len(receipt().encode())))
+        self.assertIsNone(MODULE.denial(padded, HEAD, "pull-request"))
+        self.assertIsNotNone(MODULE.denial(padded + "x", HEAD, "pull-request"))
 
     def test_cli_validates_shape_without_an_author_context(self):
         with tempfile.TemporaryDirectory() as temporary:

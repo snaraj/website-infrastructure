@@ -368,6 +368,9 @@ Delivery-lane requirements, explicit and numbered:
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
    or update restriction before this release policy is Ready.
 
+**Promoter feature freeze.** No new `scripts/promote_releases.py` feature
+lands until one real promotion has run and been reviewed; security fixes do.
+
 ## Adversarial review protocol
 
 Every substantive PR receives an independent adversarial review BEFORE it
@@ -380,19 +383,21 @@ Neither gets a different protocol.)
 **Review depth is risk-based** (owner reduction, 2026-08-22). Ceremony is
 spent where a mistake reaches something real; spending security-grade
 attention on a comment fix costs the attention a trust boundary needs.
-Three tiers, and a change takes the highest tier any of its paths earns:
+Four tiers, and a change takes the highest tier any of its paths earns:
 
 - **Security-surface changes** — credentials, authorization, public exposure,
   signing, digests, immutable artifacts, destructive operations, workflows,
   policies, validators, the safety invariants, and anything the delivery-lane
-  requirements gate — take focused tests, one full CI cycle at the exact head,
-  live validation where runtime behavior moves, ONE independent adversarial
-  review, and owner merge.
+  requirements gate — take focused tests, a mutation kill matrix, one full CI
+  cycle at the exact head, ONE independent adversarial review, and owner
+  merge.
 - **Normal code changes** take focused tests and one full local gate; a live
   check only when runtime behavior changes; one review.
-- **Documentation, comments, and formatting** run the relevant checks, and
-  adversarial review is the coordinator's routing decision rather than a
-  mandate. No tier ever skips the secret scans or the publication gate.
+- **Documentation and metadata** run the relevant checks and take one
+  lightweight review: hygiene and doctrine only, no claim-audit table and no
+  mutation matrix.
+- **Live or destructive work** adds an owner checkpoint to the tier it earns.
+  No tier ever skips the secret scans or the publication gate.
 
 Nothing here relaxes a fail-closed control at a real trust boundary: the
 safety invariants, owner-only merge, commit identity and signing, digest-only
@@ -445,11 +450,14 @@ kind in `scripts/validate_review_receipt.py`, the Main Worker sections of
 `.github/PULL_REQUEST_TEMPLATE.md` — and issue #188 owns removing it. Until
 that lands this file governs, because a skill never supersedes AGENTS.md.
 
-**The review must:**
+**The review must** — items 1–3 in the ordinary-code and security tiers;
+documentation and metadata runs items 5 and 6 only:
 
 1. Audit every claim in the PR body and commit messages against the
-   actual diffs, reproducing every number the body cites. Overstatement
-   is a finding even when the code is right.
+   actual diffs, reproducing every number the body cites. Severity decides
+   what blocks: cosmetic metadata and evidence-placement problems are notes
+   the author corrects in metadata; a false security claim, an unsafe
+   runbook step, leaked data, and exploitable behaviour block in any tier.
 2. Build a mutation kill matrix: for each guard or test the PR adds or
    changes, apply the exact regression it claims to prevent — the suite
    must go red. Revert between mutations. A surviving mutant is a
@@ -501,6 +509,18 @@ performs that flip. The flip happens only once the verdict is APPROVE
 outstanding, and every check is green at the exact head. A coordination
 action never confers merge authority; the owner alone merges. The evidence
 comment remains on the PR as the permanent record.
+
+A receipt is at most 6,000 bytes, enforced by
+`scripts/validate_review_receipt.py`; a PR body is at most 6,000 bytes. The
+first review of a head is comprehensive and every later one covers only the
+scope that changed since the last verdict; after two repair rounds the third
+answer is a design reset — author and coordinator simplify instead of adding
+defensive machinery, and the reviewer names that reset rather than more
+findings. `scripts/ready_check.py` is the Ready rule in code and the only
+place it is expressed outside this file; NO TOOL FLIPS READY, promoter
+included. The commission states an estimate (files, net lines, review rounds)
+and the PR body the actuals; a material overrun — a doubling — takes a design
+reset before Ready, and green gates alone never make a PR Ready.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
@@ -563,10 +583,9 @@ authority: the owner alone merges.
   its pull requests carry `promoter` in place of the agent pair, its commit
   and pull-request bodies end with `- Promoter`, and it runs under the
   owner's own keyring credential and signing key. Its standing authority is
-  exactly: open Draft promotion pull requests from a receipted acquisition,
-  arm `requires-review` and `cybersecurity-review-requested`, and flip Ready
-  only when the exact head carries two distinct adversarial APPROVE
-  receipts with green required checks and a current base. It never merges.
+  exactly: open Draft promotion pull requests from a receipted acquisition
+  and arm `requires-review` and `cybersecurity-review-requested`. It never
+  flips Ready and never merges.
   Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep
@@ -812,6 +831,11 @@ required only for a real code or semantic dependency, conflict, or current-main
 repair; port only the residual diff. Every PR that eventually targets main
 independently adds one fragment and passes the release gate.
 
+**Serialize review, not authoring.** Drafts may be authored in parallel, but a
+reviewer claims a PR only once every predecessor it depends on has merged and
+its base is current with `main`; a claim on a stale-base or blocked PR is void
+and the coordinator says so, and the body's scope field states that order.
+
 **Stale concurrent Drafts are re-cut, never rewritten.** A Draft that has
 fallen far behind current protected `main`, or that has absorbed repeated
 REQUEST-CHANGES rounds against a moving base until its published history no
@@ -934,6 +958,9 @@ is the consolidated command view:
   Runbooks and assurance documents are
   delivery-lane and follow the same evidence standard as PR bodies —
   their cross-references are pinned by tests.
+- **Process evidence out of product files.** Review evidence and process text
+  — comparison commands, round histories, reviewer instructions — never enter
+  product files; PR bodies, commit messages and receipts carry them.
 - **Attribution.** No third-party creative assets exist here. Any that
   ever arrive land with their reviewed license alongside the asset; the
   site repositories carry their own asset-policy notices.
