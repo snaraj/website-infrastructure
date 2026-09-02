@@ -8,10 +8,13 @@ manifests under `kubernetes/`, runs the issue-195 acquisition ceremony with
 every judgment in code, rewrites every pinned copy of the selection by
 counted substitution, and opens the Draft promotion pull request with both
 review lanes armed. It never flips Ready and never merges: the coordinator
-flips under AGENTS.md's one rule — one exact-head adversarial APPROVE from the
-security lane, green required checks and a current base, evaluated read-only
-by `scripts/ready_check.py` — and the owner merges. No new promoter feature
-lands until one real promotion has run and been reviewed.
+flips under AGENTS.md's one rule and the owner merges. `scripts/ready_check.py`
+evaluates that rule read-only, proving exactly that the pull request is open,
+targets the default branch, is not behind it, carries an App-posted exact-head
+APPROVE with no REQUEST-CHANGES at that head, and has green required checks and
+intact labels. It prints the approving lanes beside the tier labels and judges
+neither against the other: that match is the coordinator's. No new promoter
+feature lands until one real promotion has run and been reviewed.
 The deploy-assurance watchdog stays the loud
 backstop: a promotion the tool cannot open leaves the watchdog's drift issue
 open, with one comment naming the failed step.

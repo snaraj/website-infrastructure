@@ -75,10 +75,34 @@ class ReviewReceiptTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNotNone(MODULE.denial(text, HEAD, "pull-request"))
         self.assertIsNotNone(MODULE.denial(receipt(), "B" * 40, "pull-request"))
-        # The byte ceiling, at both sides of the boundary.
-        padded = receipt().replace("Claim audit:", "Claim audit:" + "x" * (MODULE.RECEIPT_BYTE_CEILING - len(receipt().encode())))
-        self.assertIsNone(MODULE.denial(padded, HEAD, "pull-request"))
-        self.assertIsNotNone(MODULE.denial(padded + "x", HEAD, "pull-request"))
+
+    def test_the_byte_ceiling_denies_for_SIZE_at_the_exact_boundary(self):
+        """The padding goes BEFORE the signature, so only size can deny it.
+
+        Appending the extra byte after the final signature line would make the
+        receipt invalid for a second reason — the signature would no longer be
+        the last non-empty line — and the case would still deny with the
+        ceiling removed, proving nothing. Padding the body keeps the receipt
+        otherwise perfectly valid, so the ONLY thing separating the two
+        assertions below is one byte crossing the cap.
+        """
+
+        def sized(total):
+            base = receipt()
+            pad = total - len(base.encode("utf-8"))
+            self.assertGreater(pad, 0)
+            return base.replace("Claim audit: supported.", "Claim audit: supported." + "x" * pad)
+
+        at_cap = sized(MODULE.RECEIPT_BYTE_CEILING)
+        over_cap = sized(MODULE.RECEIPT_BYTE_CEILING + 1)
+        self.assertEqual(len(at_cap.encode("utf-8")), MODULE.RECEIPT_BYTE_CEILING)
+        self.assertEqual(len(over_cap.encode("utf-8")), MODULE.RECEIPT_BYTE_CEILING + 1)
+        # Both are otherwise valid: the signature is still the final line.
+        self.assertIsNone(MODULE.denial(at_cap, HEAD, "pull-request"))
+        self.assertEqual(
+            MODULE.denial(over_cap, HEAD, "pull-request"),
+            f"receipt exceeds the {MODULE.RECEIPT_BYTE_CEILING}-byte ceiling",
+        )
 
     def test_cli_validates_shape_without_an_author_context(self):
         with tempfile.TemporaryDirectory() as temporary:

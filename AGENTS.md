@@ -493,8 +493,11 @@ scope that changed since the last verdict; after two repair rounds the third
 answer is a design reset — author and coordinator simplify instead of adding
 defensive machinery, and the reviewer names that reset rather than more
 findings. `scripts/ready_check.py` is the Ready rule in code and the only
-place it is expressed outside this file; NO TOOL FLIPS READY, promoter
-included. The commission states an estimate (files, net lines, review rounds)
+place it is expressed outside this file: it proves the pull request is open,
+targets the default branch, is not behind it, carries an App-posted exact-head
+APPROVE with no REQUEST-CHANGES at that head, and has green required checks
+and intact labels. It judges no approving lane against a risk tier — that
+match is the coordinator's. NO TOOL FLIPS READY, promoter included. The commission states an estimate (files, net lines, review rounds)
 and the PR body the actuals; a material overrun — a doubling — takes a design
 reset before Ready, and green gates alone never make a PR Ready.
 
