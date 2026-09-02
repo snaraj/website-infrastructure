@@ -210,7 +210,8 @@ class PrePushSecurityContractTests(unittest.TestCase):
             )
             for module in (
                 "validate_image_release", "validate_release_state",
-                "validate_release_transition", "validate_signature_policy",
+                "validate_release_transition", "workload_registry",
+                "validate_signature_policy",
             ):
                 (repo / "scripts" / (module + ".py")).write_text(
                     "# exact synthetic dependency\n", encoding="utf-8"

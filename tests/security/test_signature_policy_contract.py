@@ -16,42 +16,16 @@ MODULE = load_script("validate_signature_policy.py")
 REPOSITORY_MODULE = load_script(
     "validate_repository.py", module_name="signature_validate_repository"
 )
-ACQUISITION_EXTRAS = {
-    "naranjo-online": {
-        "chartConfigDigest": "sha256:edf0881bb6ee872ae744905fd57a3c10d53d2b039aaf561b82e802a3a8e2d0a2",
-        "chartLayerDigest": "sha256:419e5b6ae64969ace4e090ca5f9550495e7655dfa7c529d81a15a2d06d3b6e95",
-        "workloadImage": "ghcr.io/snaraj/naranjo-online:v0.1.71@sha256:3e6057bce0a81fdefb50f563715d50b84d5eb008abae5cd5265c1c64d2b5ba99",
-        "arm64Digest": "sha256:773b2d8c50f6369ed5597ed3bc474fe81885ff55d93803892ba5b350a04e934e",
-        "matchingChartLayerCount": 1,
-        "release": {
-            "assetDigest": "sha256:cced275fe71a95c0a953123974589bea3a69134c7f5937207e6c3b9ef28875c6",
-            "sourceSha": "62e1572c1b443f388e82da0d6bc0043b54ddd38f",
-        },
-    },
-    "lidersea-com": {
-        "chartConfigDigest": "sha256:ae045bde722060e04ae5f8b6c3fc4135386068026d787692c055852ade98f289",
-        "chartLayerDigest": "sha256:2c2b92acd6488afe16b1deb034e445ce3064256c1971415f8600eb601fdd09cc",
-        "workloadImage": "ghcr.io/snaraj/lidersea-com:v0.1.41@sha256:f661cdf9e33e8b36389b7f2d130a6fff6cbc1bbcb1c460968de416a831fdd86d",
-        "arm64Digest": "sha256:39929c6aaf5cc3c4feca57a7eac12858e83cc84505b99fdf0e0b57d6752d88e9",
-        "matchingChartLayerCount": 1,
-        "release": {
-            "assetDigest": "sha256:34404bf9c348f50c0f4d0ff0a3a6efbe8b41eedf40d9ab58b1b3fa3eb4ff26d9",
-            "sourceSha": "382272756fafe6b7e7f52602fd6263299b5c2589",
-        },
-    },
-}
 
 
 def write_chart_sources(root):
     """Copy the two reviewed immutable chart-source contracts."""
 
     for slug in MODULE.CHART_REPOSITORIES:
-        destination = root / "kubernetes" / "websites" / slug / "source.yaml"
+        relative = MODULE.MANIFESTS[slug]["path"]
+        destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(
-            REPO_ROOT.joinpath("kubernetes", "websites", slug, "source.yaml")
-            .read_bytes()
-        )
+        destination.write_bytes((REPO_ROOT / relative).read_bytes())
     return root
 
 
@@ -73,9 +47,9 @@ class ChartSourceContractTests(unittest.TestCase):
     def test_committed_chart_sources_match_their_closed_contract(self):
         for slug in MODULE.CHART_REPOSITORIES:
             with self.subTest(slug=slug):
-                text = REPO_ROOT.joinpath(
-                    "kubernetes", "websites", slug, "source.yaml"
-                ).read_text(encoding="utf-8")
+                text = (REPO_ROOT / MODULE.MANIFESTS[slug]["path"]).read_text(
+                    encoding="utf-8"
+                )
                 self.assertEqual(MODULE.chart_source_errors(text, slug), [])
 
     def test_every_site_tuple_binds_only_its_own_publisher(self):
@@ -221,7 +195,7 @@ class ChartSourceContractTests(unittest.TestCase):
                         self.canonical(slug),
                     )
                     self.assertIn("    digest: {}\n".format(digest), self.canonical(slug))
-            missing = root / "kubernetes/websites/naranjo-online/source.yaml"
+            missing = root / MODULE.MANIFESTS["naranjo-online"]["path"]
             missing.unlink()
             self.assertIn(
                 "naranjo-online chart source is missing or symbolic",
@@ -230,14 +204,8 @@ class ChartSourceContractTests(unittest.TestCase):
 
     def test_reviewed_tag_digest_pairs_are_exact_and_mutations_fail(self):
         expected = {
-            "naranjo-online": (
-                "0.1.71",
-                "sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3",
-            ),
-            "lidersea-com": (
-                "0.1.41",
-                "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
-            ),
+            slug: (manifest["version"], manifest["digest"])
+            for slug, manifest in MODULE.MANIFESTS.items()
         }
         for slug, reviewed in expected.items():
             with self.subTest(slug=slug):
@@ -282,27 +250,38 @@ class ChartSourceContractTests(unittest.TestCase):
         self.assertEqual(receipt["schema"], "dev.snaraj.chart-acquisition-receipt/v2")
         self.assertEqual(receipt["tools"], {"cosign": "3.1.3", "oras": "1.3.3"})
         self.assertEqual(receipt["chartLayerMediaType"], MODULE.CHART_LAYER_MEDIA_TYPE)
-        expected = {}
+        self.assertEqual(set(receipt["records"]), set(MODULE.WORKLOADS))
         for slug in MODULE.CHART_REPOSITORIES:
             tag, manifest_digest = MODULE.chart_source_release(slug)
-            expected[slug] = {
-                **ACQUISITION_EXTRAS[slug],
-                "chart": {"appVersion": tag, "name": slug, "version": tag},
-                "chartRepository": MODULE.CHART_REPOSITORIES[slug].removeprefix(
-                    "oci://"
-                ),
-                "chartTag": tag,
-                "manifestDigest": manifest_digest,
-                "signer": {
-                    "issuer": "https://token.actions.githubusercontent.com",
-                    "subject": (
-                        "https://github.com/snaraj/"
-                        + MODULE.SIGNATURE_REPOSITORIES[slug]
-                        + "/.github/workflows/release-publisher.yml@refs/heads/main"
-                    ),
+            entry = MODULE.WORKLOADS[slug]
+            record = receipt["records"][slug]
+            self.assertEqual(
+                record["chart"],
+                {"appVersion": tag, "name": slug, "version": tag},
+            )
+            self.assertEqual(record["chartRepository"], entry["chartRepository"])
+            self.assertEqual(record["chartTag"], tag)
+            self.assertEqual(record["manifestDigest"], manifest_digest)
+            self.assertEqual(
+                record["signer"],
+                {
+                    "issuer": entry["publisher"]["oidcIssuer"],
+                    "subject": entry["publisher"]["workflowRef"],
                 },
-            }
-        self.assertEqual(receipt["records"], expected)
+            )
+            self.assertTrue(
+                record["workloadImage"].startswith(
+                    entry["workloadRepository"] + ":v" + tag + "@sha256:"
+                )
+            )
+            self.assertEqual(
+                set(
+                    {"linux/arm64": record["arm64Digest"]}
+                    if "arm64Digest" in record
+                    else record["platformDigests"]
+                ),
+                set(entry["platforms"]),
+            )
 
     @unittest.skipUnless(CONFTEST, "conftest is required")
     def test_conftest_rejects_mutable_or_changed_chart_selectors(self):

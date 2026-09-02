@@ -17,6 +17,16 @@ from pathlib import Path
 from typing import Mapping
 
 
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+from workload_registry import (
+    MAX_WORKLOADS,
+    RegistryError,
+    parse_registry_bytes,
+)
+
+
 SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 TAG_RE = re.compile(
     r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
@@ -47,6 +57,7 @@ RELEASE_IDENTITY_BUNDLE_ASSET_NAME = (
 RELEASE_IDENTITY_RECEIPT_PATH = (
     "docs/assurance/195-chart-acquisition-receipt.json"
 )
+WORKLOAD_REGISTRY_PATH = "policies/workload-registry.json"
 MAX_RELEASE_IDENTITY_BYTES = 64 * 1024
 MAX_RELEASE_IDENTITY_BUNDLE_BYTES = 1024 * 1024
 PROTECTED_REF = "refs/heads/main"
@@ -304,6 +315,34 @@ def _file_bytes(repository: Path, revision: str, path: str) -> bytes:
     return _git_bytes(repository, "show", f"{revision}:{path}")
 
 
+def _optional_regular_file_bytes(
+    repository: Path, revision: str, path: str
+) -> bytes | None:
+    """Read an optional regular blob from one exact Git tree."""
+
+    raw = _git_bytes(
+        repository, "ls-tree", "-z", "--full-tree", revision, "--", path
+    )
+    if raw == b"":
+        return None
+    if not raw.endswith(b"\0") or raw.count(b"\0") != 1:
+        raise ContractError(f"{path} tree entry is duplicated or malformed")
+    try:
+        metadata, encoded_path = raw[:-1].split(b"\t", 1)
+        mode, object_type, object_id = metadata.split(b" ", 2)
+        decoded_path = encoded_path.decode("utf-8", errors="strict")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ContractError(f"{path} tree entry is malformed") from exc
+    if (
+        mode != b"100644"
+        or object_type != b"blob"
+        or re.fullmatch(rb"[0-9a-f]{40,64}", object_id) is None
+        or decoded_path != path
+    ):
+        raise ContractError(f"{path} is not one regular non-executable blob")
+    return _file_bytes(repository, revision, path)
+
+
 def _require_regular_fragment_entry(
     repository: Path, revision: str, path: str
 ) -> None:
@@ -346,6 +385,37 @@ def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
     if result.returncode == 1:
         return False
     raise ContractError("git ancestry check failed")
+
+
+def _workload_registry_legacy_ceiling(repository: Path) -> str:
+    """Return the immutable first-parent immediately before registry birth."""
+
+    raw = _git(
+        repository,
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        "HEAD",
+        "--",
+        WORKLOAD_REGISTRY_PATH,
+    )
+    changes = raw.splitlines() if raw else []
+    if not changes:
+        raise ContractError("workload registry has no introduction commit")
+    introduction = changes[0]
+    parent = _git(repository, "rev-parse", "--verify", f"{introduction}^1")
+    if (
+        parent is None
+        or re.fullmatch(r"[0-9a-f]{40}", parent) is None
+        or _optional_regular_file_bytes(
+            repository, introduction, WORKLOAD_REGISTRY_PATH
+        )
+        is None
+        or _optional_regular_file_bytes(repository, parent, WORKLOAD_REGISTRY_PATH)
+        is not None
+    ):
+        raise ContractError("workload registry introduction is malformed")
+    return parent
 
 
 def _nul_paths(repository: Path, *args: str) -> tuple[str, ...]:
@@ -749,7 +819,12 @@ def _decode_json_object(payload: bytes, label: str) -> Mapping[str, object]:
     return _object(decoded, label)
 
 
-def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
+def _site_identities_from_receipt(
+    payload: bytes,
+    registry_payload: bytes | None,
+    *,
+    allow_legacy_registry: bool = False,
+) -> Mapping[str, object]:
     receipt = _decode_json_object(payload, "chart acquisition receipt")
     if set(receipt) != {
         "capturedDate",
@@ -778,23 +853,64 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
     ):
         raise ContractError("chart acquisition tool identity is incomplete")
     records = _object(receipt.get("records"), "chart acquisition records")
-    expected_sites = {
-        "lidersea-com": "https://github.com/snaraj/lidersea.com/"
-        ".github/workflows/release-publisher.yml@refs/heads/main",
-        "naranjo-online": "https://github.com/snaraj/naranjo.online/"
-        ".github/workflows/release-publisher.yml@refs/heads/main",
-    }
-    if set(records) != set(expected_sites):
-        raise ContractError("chart acquisition receipt must bind exactly both sites")
+    if registry_payload is None:
+        if not allow_legacy_registry:
+            raise ContractError(
+                "workload registry is absent after its migration ceiling"
+            )
+        # Immutable releases before the registry migration derive their set
+        # from the acquisition receipt committed at that exact source SHA.
+        # This is a migration bridge, not a caller-supplied allowlist.
+        if not 1 <= len(records) <= MAX_WORKLOADS:
+            raise ContractError("legacy acquisition workload count is invalid")
+        registry = {}
+        subject_pattern = re.compile(
+            r"^https://github\.com/(snaraj/[A-Za-z0-9._-]{1,100})/"
+            r"\.github/workflows/release-publisher\.yml@refs/heads/main$"
+        )
+        for slug in sorted(records):
+            if (
+                not isinstance(slug, str)
+                or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug) is None
+            ):
+                raise ContractError("legacy acquisition workload slug is invalid")
+            record = _object(records[slug], f"{slug} acquisition record")
+            signer = _object(record.get("signer"), f"{slug} chart signer")
+            subject = signer.get("subject")
+            match = subject_pattern.fullmatch(subject) if isinstance(subject, str) else None
+            if match is None:
+                raise ContractError(f"{slug} legacy publisher identity is invalid")
+            registry[slug] = {
+                "chartRepository": "ghcr.io/snaraj/charts/" + slug,
+                "platforms": ["linux/arm64"],
+                "publisher": {
+                    "oidcIssuer": "https://token.actions.githubusercontent.com",
+                    "workflowRef": subject,
+                },
+                "sourceRepository": match.group(1),
+                "workloadRepository": "ghcr.io/snaraj/" + slug,
+            }
+    else:
+        try:
+            registry = parse_registry_bytes(
+                registry_payload, "platform release workload registry"
+            )
+        except RegistryError as exc:
+            raise ContractError(str(exc)) from exc
+    if set(records) != set(registry):
+        raise ContractError("chart acquisition receipt must equal the workload registry")
     identities: dict[str, object] = {}
     digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
     version_pattern = re.compile(
         r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
     )
-    for slug, signer_subject in expected_sites.items():
+    for slug, declared in registry.items():
         record = _object(records[slug], f"{slug} acquisition record")
+        platforms = declared["platforms"]
+        platform_field = (
+            "arm64Digest" if platforms == ["linux/arm64"] else "platformDigests"
+        )
         if set(record) != {
-            "arm64Digest",
             "chart",
             "chartConfigDigest",
             "chartLayerDigest",
@@ -805,6 +921,7 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
             "release",
             "signer",
             "workloadImage",
+            platform_field,
         }:
             raise ContractError(f"{slug} acquisition fields are incomplete or foreign")
         chart = _object(record.get("chart"), f"{slug} chart metadata")
@@ -817,11 +934,16 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
         ):
             raise ContractError(f"{slug} nested acquisition fields are foreign")
         version = record.get("chartTag")
-        repository = f"ghcr.io/snaraj/charts/{slug}"
+        repository = declared["chartRepository"]
         manifest_digest = record.get("manifestDigest")
         config_digest = record.get("chartConfigDigest")
         layer_digest = record.get("chartLayerDigest")
-        arm64_digest = record.get("arm64Digest")
+        if platform_field == "arm64Digest":
+            platform_digests = {"linux/arm64": record.get("arm64Digest")}
+        else:
+            platform_digests = _object(
+                record.get("platformDigests"), f"{slug} platform digests"
+            )
         release_asset_digest = release.get("assetDigest")
         release_source_sha = release.get("sourceSha")
         workload_image = record.get("workloadImage")
@@ -834,8 +956,8 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
             or record.get("matchingChartLayerCount") != 1
             or signer
             != {
-                "issuer": SELECTOR_CERTIFICATE_ISSUER,
-                "subject": signer_subject,
+                "issuer": declared["publisher"]["oidcIssuer"],
+                "subject": declared["publisher"]["workflowRef"],
             }
             or not isinstance(manifest_digest, str)
             or digest_pattern.fullmatch(manifest_digest) is None
@@ -849,17 +971,21 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
             or digest_pattern.fullmatch(release_asset_digest) is None
             or not isinstance(release_source_sha, str)
             or re.fullmatch(r"[0-9a-f]{40}", release_source_sha) is None
-            or not isinstance(arm64_digest, str)
-            or digest_pattern.fullmatch(arm64_digest) is None
+            or set(platform_digests) != set(platforms)
+            or any(
+                not isinstance(value, str)
+                or digest_pattern.fullmatch(value) is None
+                for value in platform_digests.values()
+            )
             or not isinstance(workload_image, str)
         ):
             raise ContractError(f"{slug} acquisition identity is invalid")
-        image_prefix = f"ghcr.io/snaraj/{slug}:v{version}@"
+        image_prefix = f"{declared['workloadRepository']}:v{version}@"
         workload_digest = workload_image.removeprefix(image_prefix)
         if (
             not workload_image.startswith(image_prefix)
             or digest_pattern.fullmatch(workload_digest) is None
-            or workload_digest == arm64_digest
+            or workload_digest in set(platform_digests.values())
         ):
             raise ContractError(f"{slug} workload identity is invalid")
         identities[slug] = {
@@ -869,12 +995,39 @@ def _site_identities_from_receipt(payload: bytes) -> Mapping[str, object]:
                 "repository": repository,
                 "version": version,
             },
-            "workload": {
-                "arm64_digest": arm64_digest,
-                "image": workload_image,
-            },
+            "workload": {"image": workload_image},
         }
+        if platform_field == "arm64Digest":
+            identities[slug]["workload"]["arm64_digest"] = platform_digests[
+                "linux/arm64"
+            ]
+        else:
+            identities[slug]["workload"]["platform_digests"] = platform_digests
     return identities
+
+
+def _source_site_identities(repository: Path, source_sha: str) -> Mapping[str, object]:
+    """Derive the release workload evidence from its exact committed source."""
+
+    registry_payload = _optional_regular_file_bytes(
+        repository, source_sha, WORKLOAD_REGISTRY_PATH
+    )
+    allow_legacy_registry = False
+    if registry_payload is None:
+        allow_legacy_registry = _is_ancestor(
+            repository,
+            source_sha,
+            _workload_registry_legacy_ceiling(repository),
+        )
+        if not allow_legacy_registry:
+            raise ContractError(
+                "workload registry is absent after its migration ceiling"
+            )
+    return _site_identities_from_receipt(
+        _file_bytes(repository, source_sha, RELEASE_IDENTITY_RECEIPT_PATH),
+        registry_payload,
+        allow_legacy_registry=allow_legacy_registry,
+    )
 
 
 def render_release_identity(
@@ -980,7 +1133,8 @@ def render_release_identity(
             },
         },
         "sites": _site_identities_from_receipt(
-            _file_bytes(repository, head_sha, RELEASE_IDENTITY_RECEIPT_PATH)
+            _file_bytes(repository, head_sha, RELEASE_IDENTITY_RECEIPT_PATH),
+            _file_bytes(repository, head_sha, WORKLOAD_REGISTRY_PATH),
         ),
         "source": {
             "merge_sha": head_sha,
@@ -2368,6 +2522,7 @@ def selector_image_from_release(
     expected_tag_object_sha: str | None = None,
     expected_tree_sha: str | None = None,
     staged: bool = False,
+    repository: Path = Path("."),
 ) -> str:
     """Validate the identity asset and carry its immutable selector digest."""
     expected_sha = require_sha(expected_sha, "selector predecessor SHA")
@@ -2589,46 +2744,10 @@ def selector_image_from_release(
         "subject_digest": digest,
     }:
         raise ContractError("selector predecessor provenance identity is foreign")
-    sites = exact(
-        evidence["sites"], {"lidersea-com", "naranjo-online"}, "sites"
-    )
-    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
-    version_pattern = re.compile(
-        r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
-    )
-    for slug in ("lidersea-com", "naranjo-online"):
-        site = exact(sites[slug], {"chart", "workload"}, f"{slug} site")
-        chart = exact(
-            site["chart"],
-            {"layer_digest", "manifest_digest", "repository", "version"},
-            f"{slug} chart",
+    if evidence["sites"] != _source_site_identities(repository, expected_sha):
+        raise ContractError(
+            "selector predecessor workloads differ from its exact source receipt"
         )
-        workload = exact(
-            site["workload"], {"arm64_digest", "image"}, f"{slug} workload"
-        )
-        version = chart.get("version")
-        manifest_digest = chart.get("manifest_digest")
-        layer_digest = chart.get("layer_digest")
-        arm64_digest = workload.get("arm64_digest")
-        image = workload.get("image")
-        image_prefix = f"ghcr.io/snaraj/{slug}:v{version}@"
-        if (
-            chart.get("repository") != f"ghcr.io/snaraj/charts/{slug}"
-            or not isinstance(version, str)
-            or version_pattern.fullmatch(version) is None
-            or not isinstance(manifest_digest, str)
-            or digest_pattern.fullmatch(manifest_digest) is None
-            or not isinstance(layer_digest, str)
-            or digest_pattern.fullmatch(layer_digest) is None
-            or manifest_digest == layer_digest
-            or not isinstance(arm64_digest, str)
-            or digest_pattern.fullmatch(arm64_digest) is None
-            or not isinstance(image, str)
-            or not image.startswith(image_prefix)
-            or digest_pattern.fullmatch(image.removeprefix(image_prefix)) is None
-            or image.removeprefix(image_prefix) == arm64_digest
-        ):
-            raise ContractError(f"selector predecessor {slug} identity is foreign")
     return digest
 
 

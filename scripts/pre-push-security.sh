@@ -69,7 +69,7 @@ reject_ambient_python
 isolated_repository_loader='import pathlib, sys, types
 root = pathlib.Path(sys.argv[1]).resolve()
 scripts = root / "scripts"
-for name in ("validate_image_release", "validate_release_state", "validate_release_transition", "validate_signature_policy"):
+for name in ("workload_registry", "validate_image_release", "validate_release_state", "validate_release_transition", "validate_signature_policy"):
     path = scripts / (name + ".py")
     module = types.ModuleType(name)
     module.__file__ = str(path)

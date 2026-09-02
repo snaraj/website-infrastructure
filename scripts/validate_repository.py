@@ -47,9 +47,18 @@ from validate_release_transition import (
 )
 from validate_signature_policy import (
     CHART_REPOSITORIES,
+    WORKLOADS,
     chart_source_errors,
     flux_sync_errors,
     flux_system_kustomization_errors,
+)
+from workload_registry import (
+    RegistryError,
+    bind_registry_to_manifests,
+    deploy_path,
+    deployment_ignore_lines,
+    load_registry,
+    rego_binding_errors,
 )
 # dependabot_contract intentionally is not validate_-prefixed: it runs only
 # through the CHECKS registry below (issue #131), never as its own CLI
@@ -171,9 +180,14 @@ DIGEST_IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 # The third element is the publisher workflow inside each STANDALONE site
 # repository, dispatched from that repository's protected `main` branch; it
 # feeds the pinned signature identities.
-SITE_RELEASE_CONTRACTS = (
-    ("naranjo.online", "naranjo-online", "release-publisher.yml"),
-    ("lidersea.com", "lidersea-com", "release-publisher.yml"),
+SITE_RELEASE_CONTRACTS = tuple(
+    (
+        entry["deploy"]["domain"],
+        slug,
+        entry["acquisitionProfile"] + ".yml",
+    )
+    for slug, entry in WORKLOADS.items()
+    if entry["deploy"]["shape"] == "site"
 )
 
 # Owner-reviewed capacity is one closed decision, not merely a syntactically
@@ -1072,12 +1086,8 @@ def check_media(root):
         "!/.sourceignore",
         "!/kubernetes/",
         "/kubernetes/*",
-        "!/kubernetes/websites/",
-        "/kubernetes/websites/*",
-        "!/kubernetes/websites/naranjo-online/",
-        "!/kubernetes/websites/naranjo-online/**",
-        "!/kubernetes/websites/lidersea-com/",
-        "!/kubernetes/websites/lidersea-com/**",
+    ) + deployment_ignore_lines(
+        WORKLOADS[slug] for slug in sorted(WORKLOADS, reverse=True)
     )
     if not sourceignore.is_file():
         errors.append("Flux source artifact boundary is missing: .sourceignore")
@@ -1088,7 +1098,7 @@ def check_media(root):
             if line.strip() and not line.lstrip().startswith("#")
         )
         if source_lines != source_required:
-            errors.append("Flux source artifact allowlist is not the exact two-site boundary")
+            errors.append("Flux source artifact allowlist is not the exact workload boundary")
 
     for path in live_kubernetes_files(root):
         text = read(path)
@@ -2446,6 +2456,7 @@ def check_kubernetes(root):
         errors.extend(flux_install_ceremony_errors(root))
         errors.extend(flux_rbac_contract_errors(root))
     errors.extend(signed_chart_source_errors(root))
+    errors.extend(workload_registry_contract_errors(root))
     return errors
 
 
@@ -2534,7 +2545,11 @@ def chart_source_contract_errors(root):
 
     errors = []
     for slug in sorted(CHART_REPOSITORIES):
-        source = root / "kubernetes" / "websites" / slug / "source.yaml"
+        source = (
+            root
+            / deploy_path(WORKLOADS[slug]).removeprefix("./")
+            / "source.yaml"
+        )
         if source.is_symlink() or not source.is_file():
             errors.append("{} chart source is missing or symbolic".format(slug))
             continue
@@ -2546,6 +2561,17 @@ def chart_source_contract_errors(root):
         if chart_source_errors(text, slug):
             errors.append("{} chart source is non-canonical".format(slug))
     return errors
+
+
+def workload_registry_contract_errors(root):
+    """Bind the sole declared workload inventory to manifests and Rego."""
+
+    try:
+        entries = load_registry(root)
+        bind_registry_to_manifests(root, entries)
+    except (OSError, RegistryError) as error:
+        return ["workload registry is invalid: {}".format(error)]
+    return rego_binding_errors(root, entries)
 
 
 def signed_chart_source_errors(root):

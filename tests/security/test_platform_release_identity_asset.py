@@ -38,6 +38,15 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
     RELEASE_ID = 300
     ASSET_ID = 900
 
+    def setUp(self) -> None:
+        source = mock.patch.object(
+            MODULE,
+            "_source_site_identities",
+            return_value=self.evidence()["sites"],
+        )
+        source.start()
+        self.addCleanup(source.stop)
+
     def test_v0142_incident_constants_are_exact_and_closed(self) -> None:
         self.assertEqual(
             {
@@ -87,6 +96,10 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
         return (
             ROOT / "docs" / "assurance" / "195-chart-acquisition-receipt.json"
         ).read_bytes()
+
+    @classmethod
+    def registry_bytes(cls) -> bytes:
+        return (ROOT / MODULE.WORKLOAD_REGISTRY_PATH).read_bytes()
 
     @classmethod
     def evidence(cls) -> dict[str, object]:
@@ -141,7 +154,9 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
                     "oidc_issuer": MODULE.SELECTOR_CERTIFICATE_ISSUER,
                 },
             },
-            "sites": MODULE._site_identities_from_receipt(cls.receipt_bytes()),
+            "sites": MODULE._site_identities_from_receipt(
+                cls.receipt_bytes(), cls.registry_bytes()
+            ),
             "source": {
                 "merge_sha": cls.SOURCE,
                 "protected_ref": MODULE.PROTECTED_REF,
@@ -251,57 +266,38 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
         }
 
     def test_receipt_derives_exact_current_site_identities(self) -> None:
-        sites = MODULE._site_identities_from_receipt(self.receipt_bytes())
-        self.assertEqual(set(sites), {"lidersea-com", "naranjo-online"})
-        self.assertEqual(
-            sites["naranjo-online"]["chart"],
-            {
-                "layer_digest": (
-                    "sha256:419e5b6ae64969ace4e090ca"
-                    "5f9550495e7655dfa7c529d81"
-                    "a15a2d06d3b6e95"
-                ),
-                "manifest_digest": (
-                    "sha256:d19bb1bd7e357d47d6676e9d"
-                    "e2d2817864762ffd539ac55dd"
-                    "d0246dc0ef770b3"
-                ),
-                "repository": "ghcr.io/snaraj/charts/naranjo-online",
-                "version": "0.1.71",
-            },
+        receipt = json.loads(self.receipt_bytes())
+        registry = json.loads(self.registry_bytes())
+        entries = {entry["slug"]: entry for entry in registry["workloads"]}
+        sites = MODULE._site_identities_from_receipt(
+            self.receipt_bytes(), self.registry_bytes()
         )
-        self.assertEqual(
-            sites["naranjo-online"]["workload"],
-            {
-                "arm64_digest": (
-                    "sha256:773b2d8c50f6369ed5597ed3"
-                    "bc474fe81885ff55d9380389"
-                    "2ba5b350a04e934e"
+        self.assertEqual(set(sites), set(entries))
+        for slug, entry in entries.items():
+            record = receipt["records"][slug]
+            platforms = (
+                {"linux/arm64": record["arm64Digest"]}
+                if "arm64Digest" in record
+                else record["platformDigests"]
+            )
+            self.assertEqual(
+                sites[slug]["chart"],
+                {
+                    "layer_digest": record["chartLayerDigest"],
+                    "manifest_digest": record["manifestDigest"],
+                    "repository": entry["chartRepository"],
+                    "version": record["chartTag"],
+                },
+            )
+            self.assertEqual(
+                sites[slug]["workload"],
+                {"image": record["workloadImage"]}
+                | (
+                    {"arm64_digest": platforms["linux/arm64"]}
+                    if set(platforms) == {"linux/arm64"}
+                    else {"platform_digests": platforms}
                 ),
-                "image": (
-                    "ghcr.io/snaraj/naranjo-online:v0.1.71@"
-                    "sha256:3e6057bce0a81fdefb50f56"
-                    "3715d50b84d5eb008abae5cd"
-                    "5265c1c64d2b5ba99"
-                ),
-            },
-        )
-        self.assertEqual(
-            sites["lidersea-com"]["workload"],
-            {
-                "arm64_digest": (
-                    "sha256:39929c6aaf5cc3c4feca57a7"
-                    "eac12858e83cc84505b99fdf"
-                    "0e0b57d6752d88e9"
-                ),
-                "image": (
-                    "ghcr.io/snaraj/lidersea-com:v0.1.41@"
-                    "sha256:f661cdf9e33e8b36389b7f2"
-                    "d130a6fff6cbc1bbcb1c4609"
-                    "68de416a831fdd86d"
-                ),
-            },
-        )
+            )
 
     def test_receipt_v2_rejects_partial_or_conflicting_acquisition_evidence(self) -> None:
         exact = json.loads(self.receipt_bytes())
@@ -327,7 +323,9 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             changed = copy.deepcopy(exact)
             mutate(changed)
             with self.subTest(name=name), self.assertRaises(MODULE.ContractError):
-                MODULE._site_identities_from_receipt(self.canonical(changed))
+                MODULE._site_identities_from_receipt(
+                    self.canonical(changed), self.registry_bytes()
+                )
 
     def test_canonical_signed_pair_is_exact_in_draft_and_immutable_states(self) -> None:
         identity = self.canonical(self.evidence())
@@ -376,6 +374,22 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             tag=self.TAG,
             source_sha=self.SOURCE,
         )
+
+    def test_signed_workload_set_must_equal_the_exact_source_projection(self) -> None:
+        identity = self.canonical(self.evidence())
+        bundle = self.bundle(identity)
+        with mock.patch.object(MODULE, "_source_site_identities", return_value={}):
+            with self.assertRaisesRegex(
+                MODULE.ContractError, "workloads differ from its exact source receipt"
+            ):
+                MODULE.selector_image_from_release(
+                    self.release(identity, bundle),
+                    identity=identity,
+                    bundle=bundle,
+                    expected_tag=self.TAG,
+                    expected_sha=self.SOURCE,
+                    expected_selector_build_sha=self.SOURCE,
+                )
 
     def test_staged_urls_and_asset_labels_accept_only_github_normalization(self) -> None:
         identity = self.canonical(self.evidence())
@@ -859,11 +873,16 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             fragment_path="changelog.d/189-195-platform-gitops-activation.md",
             fragment_sha256="e" * 64,
         )
+        def committed_file(_repository, _head, path):
+            if path == MODULE.WORKLOAD_REGISTRY_PATH:
+                return self.registry_bytes()
+            return self.receipt_bytes()
+
         with (
             mock.patch.object(MODULE, "_exact_commit", return_value=self.SOURCE),
             mock.patch.object(MODULE, "_git", return_value=self.TREE),
             mock.patch.object(MODULE, "discover_transition_window", return_value=window),
-            mock.patch.object(MODULE, "_file_bytes", return_value=self.receipt_bytes()),
+            mock.patch.object(MODULE, "_file_bytes", side_effect=committed_file),
         ):
             first = MODULE.render_release_identity(
                 ROOT,
@@ -1065,9 +1084,8 @@ class AcquisitionReceiptViewCoherenceTests(unittest.TestCase):
     """The Markdown receipt is an explanatory view of the canonical JSON
     record, and nothing checked it: a digest edited in the .md alone
     left every gate green (PR #283 round-1 review carry-forward). The
-    JSON schema is closed by the release contract, so the layer
-    inspection hashes the .md legitimately adds are pinned here by
-    value instead of widening that schema."""
+    JSON schema is closed by the release contract, so the layer inspection
+    rows the .md legitimately adds are required once per registered workload."""
 
     RECEIPT_DIR = ROOT / "docs" / "assurance"
     LAYER_INSPECTION_HASHES = {
@@ -1090,6 +1108,29 @@ class AcquisitionReceiptViewCoherenceTests(unittest.TestCase):
         canonical = (
             self.RECEIPT_DIR / "195-chart-acquisition-receipt.json"
         ).read_text(encoding="utf-8")
+        registry = json.loads((ROOT / MODULE.WORKLOAD_REGISTRY_PATH).read_text())
+        short_names = {
+            entry["slug"].split("-", 1)[0] for entry in registry["workloads"]
+        }
+        inspection = {}
+        for short, filename, value in re.findall(
+            r"^- ([a-z0-9-]+) `(Chart\.yaml|values\.yaml)`: "
+            r"`sha256:([0-9a-f]{64})`$",
+            markdown,
+            re.MULTILINE,
+        ):
+            inspection.setdefault(short, {})[filename] = value
+        self.assertEqual(set(inspection), short_names)
+        self.assertTrue(
+            all(
+                set(files) == {"Chart.yaml", "values.yaml"}
+                for files in inspection.values()
+            )
+        )
+        inspection_hashes = {
+            value for files in inspection.values() for value in files.values()
+        }
+        self.assertEqual(inspection_hashes, self.LAYER_INSPECTION_HASHES)
         self.assertEqual(
             self.hex_tokens(markdown, 64),
             self.hex_tokens(canonical, 64) | self.LAYER_INSPECTION_HASHES,

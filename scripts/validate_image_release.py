@@ -8,6 +8,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from workload_registry import load_registry
+
+
+WORKLOADS = load_registry(ROOT)
 SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 )
@@ -25,14 +32,12 @@ POLICY_FILE = "release-policy.env"
 # contract: which sites exist, and the tracked production-graduation gates
 # that bound which SemVer majors may be promoted into desired state.
 SITE_CONTRACTS = {
-    "naranjo-online": {
-        "domain": "naranjo.online",
-        "gate": "NARANJO_ONLINE_PRODUCTION_GRADUATED",
-    },
-    "lidersea-com": {
-        "domain": "lidersea.com",
-        "gate": "LIDERSEA_COM_PRODUCTION_GRADUATED",
-    },
+    slug: {
+        "domain": entry["deploy"]["domain"],
+        "gate": slug.replace("-", "_").upper() + "_PRODUCTION_GRADUATED",
+    }
+    for slug in sorted(WORKLOADS, reverse=True)
+    if (entry := WORKLOADS[slug])["deploy"]["shape"] == "site"
 }
 
 

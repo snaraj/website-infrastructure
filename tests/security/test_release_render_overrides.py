@@ -994,7 +994,7 @@ class SiteRenderStateTests(unittest.TestCase):
             "a render without chart signature verification was accepted",
         )
         self.assertIn(
-            "must verify chart signatures against this site's exact keyless "
+            "must verify chart signatures against this workload's exact keyless "
             "publisher identity",
             completed.stdout + completed.stderr,
         )

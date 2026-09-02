@@ -1,0 +1,49 @@
+{
+  "schema": "dev.snaraj.workload-registry/v1",
+  "workloads": [
+    {
+      "acquisitionProfile": "release-publisher",
+      "chartRepository": "ghcr.io/snaraj/charts/lidersea-com",
+      "deploy": {
+        "domain": "lidersea.com",
+        "shape": "site"
+      },
+      "namespace": "lidersea-com",
+      "platforms": [
+        "linux/arm64"
+      ],
+      "publisher": {
+        "oidcIssuer": "https://token.actions.githubusercontent.com",
+        "workflowRef": "https://github.com/snaraj/lidersea.com/.github/workflows/release-publisher.yml@refs/heads/main"
+      },
+      "slug": "lidersea-com",
+      "sourceRepository": "snaraj/lidersea.com",
+      "targetClusters": [
+        "pie5"
+      ],
+      "workloadRepository": "ghcr.io/snaraj/lidersea-com"
+    },
+    {
+      "acquisitionProfile": "release-publisher",
+      "chartRepository": "ghcr.io/snaraj/charts/naranjo-online",
+      "deploy": {
+        "domain": "naranjo.online",
+        "shape": "site"
+      },
+      "namespace": "naranjo-online",
+      "platforms": [
+        "linux/arm64"
+      ],
+      "publisher": {
+        "oidcIssuer": "https://token.actions.githubusercontent.com",
+        "workflowRef": "https://github.com/snaraj/naranjo.online/.github/workflows/release-publisher.yml@refs/heads/main"
+      },
+      "slug": "naranjo-online",
+      "sourceRepository": "snaraj/naranjo.online",
+      "targetClusters": [
+        "pie5"
+      ],
+      "workloadRepository": "ghcr.io/snaraj/naranjo-online"
+    }
+  ]
+}

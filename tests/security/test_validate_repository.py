@@ -1390,6 +1390,8 @@ class RepositoryPolicyTests(unittest.TestCase):
             )
             with mock.patch.object(
                 MODULE, "signed_chart_source_errors", return_value=[]
+            ), mock.patch.object(
+                MODULE, "workload_registry_contract_errors", return_value=[]
             ):
                 self.assertEqual(MODULE.check_kubernetes(root), [])
 

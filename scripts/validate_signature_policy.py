@@ -15,7 +15,24 @@ import sys
 from pathlib import Path
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from workload_registry import (
+    OIDC_ISSUER_PATTERN,
+    bind_registry_to_manifests,
+    deploy_path,
+    deployment_ignore_lines,
+    load_registry,
+    reconciler,
+    workflow_subject_pattern,
+)
+
+
 MAX_POLICY_BYTES = 64 * 1024
+ROOT = Path(__file__).resolve().parents[1]
+WORKLOADS = load_registry(ROOT)
+MANIFESTS = bind_registry_to_manifests(ROOT, WORKLOADS)
 # Publisher identities live in the standalone site repositories. Each site's
 # release-publisher workflow is selected by workflow_dispatch from the
 # protected `main` branch and refuses any other event or ref in its own
@@ -32,39 +49,32 @@ MAX_POLICY_BYTES = 64 * 1024
 # it — whereas a `refs/heads/main` identity can only be minted by a definition
 # that already passed the protected-branch gate.
 SIGNATURE_CONTRACTS = {
-    "naranjo-online": "release-publisher.yml",
-    "lidersea-com": "release-publisher.yml",
+    slug: entry["acquisitionProfile"] + ".yml"
+    for slug, entry in WORKLOADS.items()
 }
 SIGNATURE_REPOSITORIES = {
-    "naranjo-online": "naranjo.online",
-    "lidersea-com": "lidersea.com",
+    slug: entry["sourceRepository"].split("/", 1)[1]
+    for slug, entry in WORKLOADS.items()
 }
 # The published chart repository each site's release publisher pushes to. It is
 # part of the site's identity tuple exactly like its image repository is; the
 # platform never renames or shares these paths.
 CHART_REPOSITORIES = {
-    "naranjo-online": "oci://ghcr.io/snaraj/charts/naranjo-online",
-    "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
+    slug: "oci://" + entry["chartRepository"] for slug, entry in WORKLOADS.items()
 }
 # One reviewed human release label paired with the immutable OCI manifest
 # digest Flux actually consumes. The annotation is audit metadata; only the
 # digest is load-bearing. Publication must independently prove tag -> digest
 # and the exact-site keyless signature before changing either value.
 CHART_RELEASES = {
-    "naranjo-online": {
-        "tag": "0.1.71",
-        "digest": "sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3",
-    },
-    "lidersea-com": {
-        "tag": "0.1.41",
-        "digest": "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
-    },
+    slug: {"tag": manifest["version"], "digest": manifest["digest"]}
+    for slug, manifest in MANIFESTS.items()
 }
 # Helm charts pushed with `helm push` carry exactly this layer media type.
 # Pinning it means a non-chart layer smuggled into the same artifact is not
 # what source-controller extracts.
 CHART_LAYER_MEDIA_TYPE = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
-CHART_OIDC_ISSUER_PATTERN = r"^https://token\.actions\.githubusercontent\.com$"
+CHART_OIDC_ISSUER_PATTERN = OIDC_ISSUER_PATTERN
 # The protected `main` branch ref only. This is ONE fully anchored literal ref
 # — `$` closes it — so it is exactly as narrow as the stable-tag pattern it
 # replaces: any tag ref, any other branch, any `refs/heads/*` wildcard, and any
@@ -82,6 +92,37 @@ resources:
   - controllers
   - access.yaml
 """
+DECLARED_WORKLOADS = tuple(
+    WORKLOADS[slug]
+    for slug in sorted(WORKLOADS, reverse=True)
+)
+FLUX_SYNC_WORKLOAD_IGNORE = "\n".join(
+    "    " + line for line in deployment_ignore_lines(DECLARED_WORKLOADS)
+)
+FLUX_SYNC_WORKLOAD_RECONCILERS = "---\n".join(
+    """apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: {reconciler}
+  namespace: flux-system
+spec:
+  deletionPolicy: Orphan
+  force: false
+  interval: 10m0s
+  path: {path}
+  prune: false
+  retryInterval: 1m0s
+  serviceAccountName: {reconciler}
+  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE
+  suspend: false
+  timeout: 5m0s
+  wait: true
+""".format(
+        reconciler=reconciler(entry),
+        path=deploy_path(entry),
+    )
+    for entry in DECLARED_WORKLOADS
+)
 EXPECTED_FLUX_SYNC = """apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -111,12 +152,7 @@ spec:
     /*
     !/kubernetes/
     /kubernetes/*
-    !/kubernetes/websites/
-    /kubernetes/websites/*
-    !/kubernetes/websites/naranjo-online/
-    !/kubernetes/websites/naranjo-online/**
-    !/kubernetes/websites/lidersea-com/
-    !/kubernetes/websites/lidersea-com/**
+{workload_ignore}
   interval: 1m0s
   ref:
     branch: main
@@ -124,42 +160,10 @@ spec:
   timeout: 60s
   url: https://github.com/snaraj/website-infrastructure.git
 ---
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: naranjo-online-reconciler
-  namespace: flux-system
-spec:
-  deletionPolicy: Orphan
-  force: false
-  interval: 10m0s
-  path: ./kubernetes/websites/naranjo-online
-  prune: false
-  retryInterval: 1m0s
-  serviceAccountName: naranjo-online-reconciler
-  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE
-  suspend: false
-  timeout: 5m0s
-  wait: true
----
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: lidersea-com-reconciler
-  namespace: flux-system
-spec:
-  deletionPolicy: Orphan
-  force: false
-  interval: 10m0s
-  path: ./kubernetes/websites/lidersea-com
-  prune: false
-  retryInterval: 1m0s
-  serviceAccountName: lidersea-com-reconciler
-  sourceRef: BOOTSTRAP_RENDERS_VERIFIED_SOURCE
-  suspend: false
-  timeout: 5m0s
-  wait: true
-"""
+{workload_reconcilers}""".format(
+    workload_ignore=FLUX_SYNC_WORKLOAD_IGNORE,
+    workload_reconcilers=FLUX_SYNC_WORKLOAD_RECONCILERS,
+)
 
 
 def _canonical_text_errors(text, label):
@@ -197,15 +201,7 @@ def chart_source_certificate_subject(slug):
 
     if slug not in SIGNATURE_CONTRACTS:
         raise ValueError("site is outside the closed signature allowlist")
-    domain = SIGNATURE_REPOSITORIES[slug].replace(".", r"\.")
-    workflow = SIGNATURE_CONTRACTS[slug].replace(".", r"\.")
-    return (
-        r"^https://github\.com/snaraj/"
-        + domain
-        + r"/\.github/workflows/"
-        + workflow
-        + CHART_BRANCH_REF_PATTERN
-    )
+    return workflow_subject_pattern(WORKLOADS[slug])
 
 
 def chart_source_release(slug):

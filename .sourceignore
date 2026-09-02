@@ -1,8 +1,8 @@
-# Flux needs only declared site state. Signed charts arrive through the two
-# site-local OCIRepositories; this repository supplies their source/release
-# objects and default-deny policies. The GitRepository's own ignore and sparse
-# checkout independently narrow this broad directory exception to those exact
-# two website roots.
+# Flux needs only declared workload state. Signed charts arrive through the
+# registry-bound OCIRepositories; this repository supplies their source and
+# release objects plus the surrounding policy. The GitRepository's own ignore
+# and sparse checkout independently narrow this directory exception to the
+# exact declared roots.
 /*
 !/.sourceignore
 !/kubernetes/

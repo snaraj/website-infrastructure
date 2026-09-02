@@ -246,7 +246,30 @@ class FakeFleet:
         return MODULE.Cosign(run=self.run, pinned_version="v3.1.3")
 
     def selection(self, committed="0.1.69"):
-        return MODULE.Selection(self.slug, f"kubernetes/websites/{self.slug}/source.yaml", committed, "sha256:" + "0" * 64, self.chart_repo, self.site, self.subject)
+        domain = self.site.split("/", 1)[1]
+        declared = {
+            "acquisitionProfile": "release-publisher",
+            "deploy": {
+                "domain": domain,
+                "path": f"./kubernetes/websites/{self.slug}",
+                "reconciler": f"{self.slug}-reconciler",
+                "shape": "site",
+            },
+            "namespace": self.slug,
+            "platforms": ["linux/arm64"],
+            "targetClusters": ["pie5"],
+            "workloadRepository": self.image_repo,
+        }
+        return MODULE.Selection(
+            self.slug,
+            f"kubernetes/websites/{self.slug}/source.yaml",
+            committed,
+            "sha256:" + "0" * 64,
+            self.chart_repo,
+            self.site,
+            self.subject,
+            declared,
+        )
 
     def acquire(self):
         return MODULE.acquire(self.selection(), self.version, self.registry(), self.github(), self.cosign())
@@ -279,25 +302,36 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(selection.chart_repository, record["chartRepository"])
             self.assertEqual(selection.subject, record["signer"]["subject"])
             self.assertEqual(selection.source_repository, "snaraj/" + selection.domain)
-            self.assertEqual(MODULE.profile_for(selection.subject), "release-publisher")
+            self.assertEqual(MODULE.profile_for(selection), "release-publisher")
 
     def test_unannotated_documents_are_ignored_and_ambiguous_ones_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            shutil.copytree(REPO_ROOT / "kubernetes", root / "kubernetes")
+            registry = root / MODULE.WORKLOADS.REGISTRY_PATH
+            registry.parent.mkdir(parents=True)
+            shutil.copyfile(REPO_ROOT / MODULE.WORKLOADS.REGISTRY_PATH, registry)
+            policy = root / "policies/conftest/kubernetes.rego"
+            policy.parent.mkdir(parents=True)
+            shutil.copyfile(REPO_ROOT / "policies/conftest/kubernetes.rego", policy)
             manifests = root / "kubernetes" / "x"
             manifests.mkdir(parents=True)
             source = (REPO_ROOT / "kubernetes/websites/naranjo-online/source.yaml").read_text()
             (manifests / "plain.yaml").write_text("kind: OCIRepository\nmetadata:\n  name: other-chart\n")
-            self.assertEqual(MODULE.discover_selections(root), {})
-            (manifests / "twice.yaml").write_text(source.replace("  ref:\n    digest:", "  ref:\n    digest: sha256:" + "a" * 64 + "\n    digest:", 1))
-            with self.assertRaisesRegex(MODULE.Refusal, "not a closed selection"):
+            self.assertEqual(
+                set(MODULE.discover_selections(root)),
+                set(MODULE.WORKLOADS.load_registry(REPO_ROOT)),
+            )
+            target = root / "kubernetes/websites/naranjo-online/source.yaml"
+            target.write_text(source.replace("  ref:\n    digest:", "  ref:\n    digest: sha256:" + "a" * 64 + "\n    digest:", 1))
+            with self.assertRaisesRegex(MODULE.Refusal, "workload registry"):
                 MODULE.discover_selections(root)
 
-    def test_unknown_publisher_identity_has_no_profile(self):
-        with self.assertRaisesRegex(MODULE.Refusal, "no acquisition profile"):
-            MODULE.profile_for("https://github.com/someone-else/nas/.github/workflows/release.yml@refs/heads/main")
-        with self.assertRaisesRegex(MODULE.Refusal, "no acquisition profile"):
-            MODULE.profile_for(SUBJECT.replace("refs/heads/main", "refs/heads/feature"))
+    def test_unknown_registry_profile_is_refused(self):
+        selection = FakeFleet().selection()
+        selection.acquisition_profile = "foreign-profile"
+        with self.assertRaisesRegex(MODULE.Refusal, "unknown acquisition profile"):
+            MODULE.profile_for(selection)
 
 
 class CeremonyTests(unittest.TestCase):
@@ -308,6 +342,7 @@ class CeremonyTests(unittest.TestCase):
                 record, inspection = fleet.acquire()
                 self.assertEqual(record, fleet.expected_record())
                 self.assertEqual(inspection, {"Chart.yaml": sha(fleet.chart_yaml), "values.yaml": sha(fleet.values_yaml)})
+
                 verify = [c for c in fleet.calls if c[0] == "run" and c[1][:2] == ("cosign", "verify")]
                 attest = [c for c in fleet.calls if c[0] == "run" and c[1][:2] == ("cosign", "verify-attestation")]
                 self.assertEqual(len(verify), 1)
@@ -329,6 +364,51 @@ class CeremonyTests(unittest.TestCase):
                     if call[0] == "run" and call[1][0] == "cosign":
                         self.assertNotIn(f":{fleet.version}", call[1][-1])
                         self.assertNotIn(f":v{fleet.version}", call[1][-1])
+
+    def test_declared_platform_set_is_exactly_acquired(self):
+        fleet = FakeFleet()
+        selection = fleet.selection()
+
+        # The fixture's signed index also publishes linux/amd64 and an
+        # unknown/unknown attestation descriptor. Neither is target evidence
+        # while the registry declares only linux/arm64.
+        record, _inspection = MODULE.acquire(
+            selection,
+            fleet.version,
+            fleet.registry(),
+            fleet.github(),
+            fleet.cosign(),
+        )
+        self.assertEqual(record["arm64Digest"], fleet.arm64_digest)
+        self.assertNotIn("platformDigests", record)
+
+        selection.platforms = ("linux/amd64", "linux/arm64")
+        record, _inspection = MODULE.acquire(
+            selection,
+            fleet.version,
+            fleet.registry(),
+            fleet.github(),
+            fleet.cosign(),
+        )
+        expected = {
+            child["platform"]["os"] + "/" + child["platform"]["architecture"]: child[
+                "digest"
+            ]
+            for child in fleet.index_children
+            if child["platform"]["os"] == "linux"
+        }
+        self.assertEqual(record["platformDigests"], expected)
+        self.assertNotIn("arm64Digest", record)
+
+        selection.platforms = ("linux/arm64", "linux/s390x")
+        with self.assertRaisesRegex(MODULE.Refusal, "exactly one linux/s390x child"):
+            MODULE.acquire(
+                selection,
+                fleet.version,
+                fleet.registry(),
+                fleet.github(),
+                fleet.cosign(),
+            )
 
     def refusal(self, mutate, message):
         fleet = FakeFleet()
@@ -389,6 +469,18 @@ class CeremonyTests(unittest.TestCase):
 
         def two_arm64(f):
             f.overrides["index_children"] = f.index_children + [dict(f.index_children[1], digest="sha256:" + "4" * 64)]
+            f.build()
+
+        def malformed_platform(f):
+            children = json.loads(json.dumps(f.index_children))
+            children[1]["platform"] = "linux/arm64"
+            f.overrides["index_children"] = children
+            f.build()
+
+        def platform_media_type_off(f):
+            children = json.loads(json.dumps(f.index_children))
+            children[1]["mediaType"] = MODULE.IN_TOTO
+            f.overrides["index_children"] = children
             f.build()
 
         def signature_binds_other_digest(f):
@@ -544,6 +636,14 @@ class CeremonyTests(unittest.TestCase):
             "values pin is not the index": (values_pin_off, "is not the embedded pin"),
             "no arm64 child": (no_arm64, "exactly one linux/arm64 child"),
             "two arm64 children": (two_arm64, "exactly one linux/arm64 child"),
+            "malformed platform descriptor": (
+                malformed_platform,
+                "exactly one linux/arm64 child",
+            ),
+            "platform child media type": (
+                platform_media_type_off,
+                "exactly one linux/arm64 child",
+            ),
             "signature binds another digest": (signature_binds_other_digest, "signature binds"),
             "attestation subject": (attestation_subject_off, "provenance subject is not exactly"),
             "attestation predicate": (attestation_not_slsa, "not SLSA v1"),
@@ -754,11 +854,9 @@ def pr_record(number: int, branch: str, head: str, draft: bool = True, labels=MO
 PINNED = (
     "kubernetes/websites/naranjo-online/source.yaml",
     "policies/conftest/kubernetes.rego",
-    "scripts/validate_signature_policy.py",
-    "tests/security/test_platform_release_identity_asset.py",
-    "tests/security/test_signature_policy_contract.py",
     "docs/assurance/195-chart-acquisition-receipt.json",
     "docs/assurance/195-chart-acquisition-receipt.md",
+    "tests/security/test_platform_release_identity_asset.py",
     "README.md",
 )
 
@@ -800,25 +898,28 @@ class RewriteTests(unittest.TestCase):
         for name, text in self.tracked_text():
             if name.startswith("changelog.d/"):
                 continue
-            logical = MODULE.join_literal_runs(text) if name.endswith(".py") else text
             for token in old_tokens:
-                self.assertNotIn(token, logical, f"{token[:16]} survives in {name}")
+                self.assertNotIn(token, text, f"{token[:16]} survives in {name}")
         new_json = json.loads((self.root / MODULE.RECEIPT_JSON).read_text())
         self.assertEqual(new_json["records"]["naranjo-online"], record)
         self.assertEqual(new_json["records"]["lidersea-com"], self.receipt["records"]["lidersea-com"])
         self.assertEqual(new_json["capturedDate"], "2026-09-02")
-        CONTRACT._site_identities_from_receipt((self.root / MODULE.RECEIPT_JSON).read_bytes())
+        CONTRACT._site_identities_from_receipt(
+            (self.root / MODULE.RECEIPT_JSON).read_bytes(),
+            (self.root / CONTRACT.WORKLOAD_REGISTRY_PATH).read_bytes(),
+        )
         markdown = (self.root / MODULE.RECEIPT_MD).read_text()
         self.assertEqual(MODULE.parse_inspection(markdown)["naranjo"], inspection)
         self.assertEqual(MODULE.parse_capture_header(markdown), ("2026-09-02", "#990"))
         previous_date, previous_issues = MODULE.parse_capture_header(self.markdown)
         self.assertIn(f"supersedes the issues {previous_issues} capture of {previous_date}", markdown.replace("\n", " "))
         self.assertEqual(hex_tokens(markdown, 64), hex_tokens(json.dumps(new_json), 64) | {v.split(":")[1] for h in MODULE.parse_inspection(markdown).values() for v in h.values()})
-        for name in ("tests/security/test_platform_release_identity_asset.py", "tests/security/test_signature_policy_contract.py", "scripts/validate_signature_policy.py"):
+        for name in (
+            "tests/security/test_platform_release_identity_asset.py",
+            "tests/security/test_signature_policy_contract.py",
+            "scripts/validate_signature_policy.py",
+        ):
             compile((self.root / name).read_text(), name, "exec")
-        identity_test = (self.root / "tests/security/test_platform_release_identity_asset.py").read_text()
-        self.assertIn(inspection["Chart.yaml"].split(":")[1], identity_test)
-        self.assertIn('"version": "0.1.99"', identity_test)
         source = (self.root / "kubernetes/websites/naranjo-online/source.yaml").read_text()
         self.assertIn('chart-release: "0.1.99"', source)
         self.assertIn(f"digest: {record['manifestDigest']}", source)
@@ -888,32 +989,53 @@ class RewriteTests(unittest.TestCase):
 
     def test_stale_rewrite_grammar_is_refused(self):
         receipt = json.loads(json.dumps(self.receipt))
-        receipt["records"]["naranjo-online"]["arm64Digest"] = "sha256:" + "5" * 64
+        receipt["records"]["naranjo-online"]["manifestDigest"] = "sha256:" + "5" * 64
         (self.root / MODULE.RECEIPT_JSON).write_text(MODULE.render_receipt_json(receipt))
-        with self.assertRaisesRegex(MODULE.Refusal, "pinned nowhere in the tree"):
+        with self.assertRaisesRegex(MODULE.Refusal, "exact selector rewrite matched 0"):
             self.promote(issue=993)
 
+    def test_stale_inspection_oracle_is_refused_before_any_write(self):
+        oracle = self.root / MODULE.INSPECTION_ORACLE
+        old_hash = self.inspection["naranjo"]["Chart.yaml"].removeprefix("sha256:")
+        oracle.write_text(oracle.read_text().replace(old_hash, "0" * 64))
+        self.originals[MODULE.INSPECTION_ORACLE.as_posix()] = oracle.read_bytes()
+        with self.assertRaisesRegex(MODULE.Refusal, "oracle is not exact"):
+            self.promote(issue=994)
+        self.assert_tree_untouched()
+
+    def test_unchanged_inspection_hash_still_requires_its_oracle(self):
+        oracle = self.root / MODULE.INSPECTION_ORACLE
+        old_hash = self.inspection["naranjo"]["Chart.yaml"].removeprefix("sha256:")
+        oracle.write_text(oracle.read_text().replace(old_hash, "0" * 64))
+        self.originals[MODULE.INSPECTION_ORACLE.as_posix()] = oracle.read_bytes()
+        record = promoted_record(
+            self.receipt["records"]["naranjo-online"], "0.1.99", "same-chart"
+        )
+        inspection = {
+            "Chart.yaml": self.inspection["naranjo"]["Chart.yaml"],
+            "values.yaml": sha(b"changed values"),
+        }
+        with self.assertRaisesRegex(MODULE.Refusal, "oracle is not exact"):
+            MODULE.apply_promotion(
+                self.root,
+                self.selections,
+                {"naranjo-online": (record, inspection)},
+                995,
+                "#995",
+                "2026-09-02",
+            )
+        self.assert_tree_untouched()
+
     def test_stale_version_shape_is_refused(self):
-        contract = self.root / "tests/security/test_signature_policy_contract.py"
+        contract = self.root / "policies/conftest/kubernetes.rego"
         text = contract.read_text()
         version = self.receipt["records"]["naranjo-online"]["chartTag"]
-        needle = '"naranjo-online": (\n                "' + version + '",'
+        needle = '"tag": "' + version + '"'
         self.assertEqual(text.count(needle), 1)
-        contract.write_text(text.replace(needle, '"naranjo-online": (\n                "0.0.0",'))
+        contract.write_text(text.replace(needle, '"tag": "0.0.0"'))
         subprocess.run(["git", "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}", "commit", "-qam", "drift"], cwd=self.root, check=True, env=quiet_git_environment())
-        with self.assertRaisesRegex(MODULE.Refusal, "version pin shape 3 matched nowhere"):
+        with self.assertRaisesRegex(MODULE.Refusal, "not byte-exact"):
             self.promote(issue=994)
-
-    def test_literal_run_rewriter_re_splits_at_the_original_chunk_lengths(self):
-        old = "sha256:" + "a" * 64
-        new = "sha256:" + "b" * 64
-        text = '    x = (\n        "sha256:aaaaaaaaaaaaaaaaaaaaaaaa"\n        "' + "a" * 25 + '"\n        "' + "a" * 15 + '"\n    )\n    y = "unrelated"\n'
-        self.assertEqual(MODULE.join_literal_runs(text).count(old), 1)
-        rewritten = MODULE.rewrite_literal_runs(text, {old: new})
-        self.assertEqual(MODULE.join_literal_runs(rewritten).count(new), 1)
-        self.assertNotIn("a" * 15, MODULE.join_literal_runs(rewritten))
-        self.assertEqual([len(p) for p in re.findall(r'"([^"]*)"', rewritten)], [len(p) for p in re.findall(r'"([^"]*)"', text)])
-        self.assertEqual(MODULE.rewrite_literal_runs(text, {"zzz": "yyy"}), text)
 
 
 class ReadyRuleTests(unittest.TestCase):
@@ -1029,8 +1151,22 @@ class PlanningTests(unittest.TestCase):
     def test_branch_grammar_round_trips_and_rejects_foreign_names(self):
         targets = {"naranjo-online": "0.1.71", "lidersea-com": "0.1.42"}
         branch = MODULE.branch_name("8369bf7a6e487ea3", 285, targets)
-        self.assertEqual(branch, "promoter/8369bf7/285-lidersea-com-0.1.42_naranjo-online-0.1.71")
-        self.assertEqual(MODULE.parse_branch(branch), ("8369bf7", 285, targets))
+        fingerprint = MODULE.promotion_target_fingerprint(targets)
+        self.assertEqual(branch, f"promoter/8369bf7/285-{fingerprint}")
+        self.assertEqual(MODULE.parse_branch(branch), ("8369bf7", 285, fingerprint))
+        legacy = (
+            "promoter/8369bf7/285-"
+            "lidersea-com-0.1.42_naranjo-online-0.1.71"
+        )
+        self.assertEqual(MODULE.parse_branch(legacy), ("8369bf7", 285, fingerprint))
+        self.assertNotEqual(
+            branch,
+            MODULE.branch_name(
+                "8369bf7a6e487ea3",
+                285,
+                dict(targets, **{"naranjo-online": "0.1.72"}),
+            ),
+        )
         for bad in ("promoter/285-naranjo-online-0.1.71", "promoter/8369bf7/x-naranjo-online-0.1.71", "fable5-high/286-tool", "promoter/8369bf7/285-naranjo-online-latest"):
             with self.subTest(branch=bad):
                 self.assertIsNone(MODULE.parse_branch(bad))
@@ -1381,7 +1517,12 @@ class TickTests(unittest.TestCase):
         reports = self.writes("/issues/285/comments")
         self.assertEqual(len(reports), 1)
         body = json.loads(reports[0][2])["body"]
-        self.assertIn(f"promoter-failure naranjo-online={self.next} step=cut", body)
+        self.assertIn(
+            "promoter-failure targets="
+            + MODULE.promotion_target_fingerprint({"naranjo-online": self.next})
+            + " step=cut",
+            body,
+        )
         self.assertIn("not an immutable final release", body)
         self.assertEqual(self.commits, [])
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout

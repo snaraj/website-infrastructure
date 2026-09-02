@@ -2,11 +2,53 @@ package main
 
 import rego.v1
 
+# BEGIN GENERATED WORKLOAD REGISTRY -- scripts/workload_registry.py
+workload_registry := {
+  "lidersea-com": {
+    "chart_repository": "oci://ghcr.io/snaraj/charts/lidersea-com",
+    "deploy_path": "./kubernetes/websites/lidersea-com",
+    "deploy_shape": "site",
+    "namespace": "lidersea-com",
+    "oidc_issuer_pattern": "^https://token\\.actions\\.githubusercontent\\.com$",
+    "publisher_subject_pattern": "^https://github\\.com/snaraj/lidersea\\.com/\\.github/workflows/release-publisher\\.yml@refs/heads/main$",
+    "reconciler": "lidersea-com-reconciler",
+    "release": {
+      "digest": "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
+      "tag": "0.1.41"
+    },
+    "workload_repository_pattern": "ghcr[.]io/snaraj/lidersea-com(:v[0-9]+[.][0-9]+[.][0-9]+)?"
+  },
+  "naranjo-online": {
+    "chart_repository": "oci://ghcr.io/snaraj/charts/naranjo-online",
+    "deploy_path": "./kubernetes/websites/naranjo-online",
+    "deploy_shape": "site",
+    "namespace": "naranjo-online",
+    "oidc_issuer_pattern": "^https://token\\.actions\\.githubusercontent\\.com$",
+    "publisher_subject_pattern": "^https://github\\.com/snaraj/naranjo\\.online/\\.github/workflows/release-publisher\\.yml@refs/heads/main$",
+    "reconciler": "naranjo-online-reconciler",
+    "release": {
+      "digest": "sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3",
+      "tag": "0.1.71"
+    },
+    "workload_repository_pattern": "ghcr[.]io/snaraj/naranjo-online(:v[0-9]+[.][0-9]+[.][0-9]+)?"
+  }
+}
+# END GENERATED WORKLOAD REGISTRY
+
 workload_kinds := {"Pod", "Deployment", "ReplicaSet", "DaemonSet", "StatefulSet", "Job", "CronJob"}
 
-tenant_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com"}
+declared_namespaces := {entry.namespace |
+  some slug, entry in workload_registry
+}
 
-restricted_role_namespaces := {"cloudflare-public", "naranjo-online", "lidersea-com"}
+site_namespaces := {entry.namespace |
+  some slug, entry in workload_registry
+  entry.deploy_shape == "site"
+}
+
+tenant_namespaces := {"cloudflare-public"} | declared_namespaces
+
+restricted_role_namespaces := tenant_namespaces
 
 # Every private, loopback, link-local, carrier-grade-NAT, multicast, and
 # reserved block that a "public destinations only" egress rule must exclude.
@@ -22,8 +64,6 @@ private_and_reserved_ranges := {
   "224.0.0.0/4",
   "240.0.0.0/4",
 }
-
-site_namespaces := {"naranjo-online", "lidersea-com"}
 
 gateway_kinds := {
   "GatewayClass",
@@ -162,24 +202,20 @@ containers := array.concat(
   is_workload
 }
 
-approved_kustomization_accounts := {
-  "naranjo-online-reconciler": "naranjo-online-reconciler",
-  "lidersea-com-reconciler": "lidersea-com-reconciler",
+approved_kustomization_accounts := {entry.reconciler: entry.reconciler |
+  some slug, entry in workload_registry
 }
 
-approved_kustomization_paths := {
-  "naranjo-online-reconciler": "./kubernetes/websites/naranjo-online",
-  "lidersea-com-reconciler": "./kubernetes/websites/lidersea-com",
+approved_kustomization_paths := {entry.reconciler: entry.deploy_path |
+  some slug, entry in workload_registry
 }
 
-approved_kustomization_dependencies := {
-  "naranjo-online-reconciler": set(),
-  "lidersea-com-reconciler": set(),
+approved_kustomization_dependencies := {entry.reconciler: set() |
+  some slug, entry in workload_registry
 }
 
-site_workload_accounts := {
-  "naranjo-online": "naranjo-online",
-  "lidersea-com": "lidersea-com",
+declared_workload_accounts := {entry.namespace: slug |
+  some slug, entry in workload_registry
 }
 
 # Only the connector release still resolves its chart from a Git source; both
@@ -195,52 +231,39 @@ tenant_chart_paths := {
 
 git_chart_namespaces := {"cloudflare-public"}
 
-# Each site's Helm chart is published by that site's own release publisher at a
-# stable version tag, so the published version tag is the release identity Flux
+# Each declared workload's Helm chart is published by its own release
+# publisher at a stable version tag, so the published version tag is the release identity Flux
 # follows. The publisher itself is dispatched from protected `main`, which is a
 # separate thing from the version it publishes under — see
 # `site_chart_identities` below.
-site_chart_sources := {
-  "naranjo-online": "naranjo-online-chart",
-  "lidersea-com": "lidersea-com-chart",
+site_chart_sources := {entry.namespace: sprintf("%s-chart", [slug]) |
+  some slug, entry in workload_registry
 }
 
-site_chart_urls := {
-  "naranjo-online": "oci://ghcr.io/snaraj/charts/naranjo-online",
-  "lidersea-com": "oci://ghcr.io/snaraj/charts/lidersea-com",
+site_chart_urls := {entry.namespace: entry.chart_repository |
+  some slug, entry in workload_registry
 }
 
 # The audit tag is paired with the immutable manifest digest Flux consumes.
 # The annotation is not a selector; exact ref.digest is load-bearing.
-site_chart_releases := {
-  "naranjo-online": {
-    "tag": "0.1.71",
-    "digest": "sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3",
-  },
-  "lidersea-com": {
-    "tag": "0.1.41",
-    "digest": "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
-  },
+site_chart_releases := {entry.namespace: entry.release |
+  some slug, entry in workload_registry
 }
 
 site_chart_layer_media_type := "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
 
-# The exact keyless certificate identity of each site's chart publisher. These
-# two tuples must never couple: a chart signed by the other site's workflow, by
-# another workflow in the same repository, or by a run at any ref other than
+# The exact keyless certificate identity of each workload's chart publisher.
+# These tuples must never couple: a chart signed by another workload's
+# workflow, by another workflow in the same repository, or by a run at any ref other than
 # that repository's protected `main` — a tag ref included — is denied. The
 # branch ref is the anchor because a run at a ref executes the workflow
 # definition AT that ref, and `main` is the only ref those repositories gate on
 # creation and update with no bypass actors (ADR 0016 amendment 2026-08-22).
-site_chart_identities := {
-  "naranjo-online": {
-    "issuer": `^https://token\.actions\.githubusercontent\.com$`,
-    "subject": `^https://github\.com/snaraj/naranjo\.online/\.github/workflows/release-publisher\.yml@refs/heads/main$`,
-  },
-  "lidersea-com": {
-    "issuer": `^https://token\.actions\.githubusercontent\.com$`,
-    "subject": `^https://github\.com/snaraj/lidersea\.com/\.github/workflows/release-publisher\.yml@refs/heads/main$`,
-  },
+site_chart_identities := {entry.namespace: {
+    "issuer": entry.oidc_issuer_pattern,
+    "subject": entry.publisher_subject_pattern,
+  } |
+  some slug, entry in workload_registry
 }
 
 approved_git_source_scopes := {
@@ -559,7 +582,7 @@ valid_tenant_volume(namespace, volume) if {
 # pi-websites-tunnel-token matches no connector instance and is denied.
 valid_tenant_volume(namespace, volume) if {
   namespace == "cloudflare-public"
-  connector_instance in {"naranjo-online-tunnel", "lidersea-com-tunnel"}
+  connector_instance in connector_deployments
   volume == {
     "name": "tunnel-token",
     "secret": {
@@ -570,7 +593,9 @@ valid_tenant_volume(namespace, volume) if {
   }
 }
 
-# The reviewed connector Deployment inventory (ADR 0015): one per website.
+# The reviewed connector Deployment inventory (ADR 0015). This is an
+# independent Cloudflare secret/exposure authorization boundary: declaring a
+# site must not automatically authorize another tunnel-token consumer.
 connector_deployments := {"naranjo-online-tunnel", "lidersea-com-tunnel"}
 
 public_connector_deployment if {
@@ -859,7 +884,7 @@ deny contains msg if {
   is_workload
   restricted_namespace
   namespace := input.metadata.namespace
-  expected := object.union(site_workload_accounts, {"cloudflare-public": "cloudflared"})[namespace]
+  expected := object.union(declared_workload_accounts, {"cloudflare-public": "cloudflared"})[namespace]
   object.get(pod_spec, "serviceAccountName", "") != expected
   msg := sprintf("%s %s must use only ServiceAccount %s", [input.kind, input.metadata.name, expected])
 }
@@ -961,18 +986,18 @@ deny contains msg if {
   msg := sprintf("GitRepository %s/%s must use canonical identity %s", [input.metadata.namespace, input.metadata.name, expected_name])
 }
 
-# Site charts are published, signed OCI artifacts. Any Git chart source in a
-# site namespace would reintroduce branch-head tracking with no signature
-# verification at all, so the kind itself is denied there.
+# Declared workload charts are published, signed OCI artifacts. Any Git chart
+# source in a declared namespace would reintroduce branch-head tracking with
+# no signature verification at all, so the kind itself is denied there.
 deny contains msg if {
   input.kind == "GitRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   msg := sprintf("GitRepository %s/%s is forbidden; site charts arrive as cosign-verified OCI artifacts", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   expected_name := site_chart_sources[input.metadata.namespace]
   input.metadata.name != expected_name
   msg := sprintf("OCIRepository %s/%s must use canonical identity %s", [input.metadata.namespace, input.metadata.name, expected_name])
@@ -980,13 +1005,13 @@ deny contains msg if {
 
 deny contains msg if {
   input.kind == "OCIRepository"
-  not input.metadata.namespace in site_namespaces
+  not input.metadata.namespace in declared_namespaces
   msg := sprintf("OCIRepository %s/%s is outside the exact chart-source identity allowlist", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(input.spec, "url", "") != site_chart_urls[input.metadata.namespace]
   msg := sprintf("OCIRepository %s/%s must pull the canonical published chart repository", [input.metadata.namespace, input.metadata.name])
 }
@@ -995,14 +1020,14 @@ deny contains msg if {
 # deletion, or replacement cannot change what Flux pulls.
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(input.spec, "ref", {}) != {"digest": site_chart_releases[input.metadata.namespace].digest}
   msg := sprintf("OCIRepository %s/%s must select the exact reviewed immutable chart digest", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(object.get(input.metadata, "annotations", {}), "platform.snaraj.dev/chart-release", "") != site_chart_releases[input.metadata.namespace].tag
   msg := sprintf("OCIRepository %s/%s must carry the reviewed audit-only chart release annotation", [input.metadata.namespace, input.metadata.name])
 }
@@ -1012,14 +1037,14 @@ deny contains msg if {
 # becomes an artifact.
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   not valid_site_chart_verification(input.metadata.namespace)
-  msg := sprintf("OCIRepository %s/%s must verify chart signatures against this site's exact keyless publisher identity", [input.metadata.namespace, input.metadata.name])
+  msg := sprintf("OCIRepository %s/%s must verify chart signatures against this workload's exact keyless publisher identity", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "OCIRepository"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(object.get(input.spec, "layerSelector", {}), "mediaType", "") != site_chart_layer_media_type
   msg := sprintf("OCIRepository %s/%s must extract only the Helm chart layer media type", [input.metadata.namespace, input.metadata.name])
 }
@@ -1229,9 +1254,7 @@ deny contains msg if {
   msg := sprintf("HelmRelease %s/%s must use source %s", [input.metadata.namespace, input.metadata.name, expected_name])
 }
 
-# A site release is bound to its published chart artifact and to nothing else.
-# An inline chart block would reintroduce branch-head tracking beside the
-# digest-selected source and give the release two competing chart identities.
+# A public site has one exact readiness value envelope.
 valid_site_release_values if {
   spec := object.get(input, "spec", null)
   is_object(spec)
@@ -1249,15 +1272,15 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(input.spec, "chart", null) != null
-  msg := sprintf("HelmRelease %s/%s must not carry an inline chart; site charts arrive as published OCI artifacts", [input.metadata.namespace, input.metadata.name])
+  msg := sprintf("HelmRelease %s/%s must not carry an inline chart; declared workload charts arrive as published OCI artifacts", [input.metadata.namespace, input.metadata.name])
 }
 
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(object.get(input.spec, "chartRef", {}), "kind", "") != "OCIRepository"
   msg := sprintf("HelmRelease %s/%s must resolve its chart through an OCIRepository chartRef", [input.metadata.namespace, input.metadata.name])
 }
@@ -1265,19 +1288,19 @@ deny contains msg if {
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   expected_name := site_chart_sources[input.metadata.namespace]
   object.get(object.get(input.spec, "chartRef", {}), "name", "") != expected_name
   msg := sprintf("HelmRelease %s/%s must use chart source %s", [input.metadata.namespace, input.metadata.name, expected_name])
 }
 
-# An explicit chartRef namespace is the one way a site could be pointed at the
-# other site's published chart even with helm-controller's cross-namespace
+# An explicit chartRef namespace is the one way a workload could be pointed at
+# another workload's published chart even with helm-controller's cross-namespace
 # refs disabled at some future date; deny it in desired state too.
 deny contains msg if {
   input.kind == "HelmRelease"
   input.apiVersion == "helm.toolkit.fluxcd.io/v2"
-  input.metadata.namespace in site_namespaces
+  input.metadata.namespace in declared_namespaces
   object.get(object.get(input.spec, "chartRef", {}), "namespace", input.metadata.namespace) != input.metadata.namespace
   msg := sprintf("HelmRelease %s/%s must not reference a cross-namespace chart source", [input.metadata.namespace, input.metadata.name])
 }
@@ -1833,11 +1856,12 @@ deny contains msg if {
   is_workload
   restricted_namespace
   namespace := input.metadata.namespace
-  expected_repository := {
-    "naranjo-online": "ghcr[.]io/snaraj/naranjo-online(:v[0-9]+[.][0-9]+[.][0-9]+)?",
-    "lidersea-com": "ghcr[.]io/snaraj/lidersea-com(:v[0-9]+[.][0-9]+[.][0-9]+)?",
+  site_repositories := {entry.namespace: entry.workload_repository_pattern |
+    some slug, entry in workload_registry
+  }
+  expected_repository := object.union(site_repositories, {
     "cloudflare-public": "cloudflare/cloudflared:[A-Za-z0-9._-]+",
-  }[namespace]
+  })[namespace]
   some container in containers
   not regex.match(sprintf("^%s@sha256:[0-9a-f]{64}$", [expected_repository]), container.image)
   msg := sprintf("container %s must use the canonical image repository for namespace %s", [container.name, namespace])
@@ -1982,7 +2006,7 @@ deny contains msg if {
 flux_aggregation_roles := {"flux-edit-flux-system", "flux-view-flux-system"}
 
 # Namespaces whose Roles are part of the Flux authorization surface.
-flux_rbac_namespaces := {"flux-system", "cloudflare-public", "naranjo-online", "lidersea-com"}
+flux_rbac_namespaces := {"flux-system", "cloudflare-public"} | declared_namespaces
 
 rbac_binding_kinds := {"RoleBinding", "ClusterRoleBinding"}
 

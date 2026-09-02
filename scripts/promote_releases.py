@@ -18,13 +18,10 @@ reviewer App and is a lift, not this file.
 
 Design, in the order the ``tick`` runs it:
 
-* **Discovery.** Promotable workloads are read from the manifests, never from
-  a table in this file: every ``OCIRepository`` under ``kubernetes/`` that
-  carries the ``platform.snaraj.dev/chart-release`` annotation and a cosign
-  ``matchOIDCIdentity`` is a selection, and its identity tuple (chart
-  repository, source repository, publisher subject) comes from that
-  document. Adding a workload — a NAS, a vault, a mesh, a GPU operator —
-  means committing its manifest; this file does not change.
+* **Discovery.** The declared workload registry and every annotated
+  ``OCIRepository`` under ``kubernetes/`` must have equal sets and exact
+  identity tuples. Adding a workload means one registry entry plus its
+  manifests; an entry or manifest missing from the other side is refused.
 * **Acquisition profiles.** How a release is verified depends on who
   publishes it. The publisher identity selects the profile; a workload whose
   identity has no profile is refused, never guessed. One profile exists
@@ -36,16 +33,14 @@ Design, in the order the ``tick`` runs it:
   byte identity, config and sole Helm layer fetched by their own digests and
   hash-verified, ``Chart.yaml`` and ``values.yaml`` inspected, the embedded
   workload pin resolved twice and bound to the exact index digest, exactly
-  one ``linux/arm64`` child, cosign verification of the chart AT ITS DIGEST,
+  one child for every declared platform, cosign verification at ITS DIGEST,
   SLSA v1 provenance AT THE INDEX DIGEST, the Release asset hashed and bound
   to GitHub's own digest, and the annotated tag dereferenced to the very
   commit the asset names. The pinned cosign version is required, not assumed.
 * **Rewrite.** The receipt is regenerated from the record (the JSON renderer
-  is byte-exact against the committed file) and every other pinned copy of a
-  tag or digest is rewritten by counted substitution across the whole
-  tracked tree — including split string literals in the security batteries —
-  so no two surfaces can disagree. An unexpected occurrence count refuses
-  the entire rewrite.
+  is byte-exact against the committed file); the manifest and generated Rego
+  copies of its selector move by counted substitution. An unexpected count
+  or a non-byte-exact regenerated projection refuses the entire rewrite.
 * **Ready rule.** A promotion pull request is flipped Ready only when its
   exact head carries two distinct adversarial ``VERDICT: APPROVE`` receipts
   posted by the reviews App, no REQUEST-CHANGES at that head, both required
@@ -97,7 +92,9 @@ IN_TOTO = "application/vnd.in-toto+json"
 RECEIPT_SCHEMA = "dev.snaraj.chart-acquisition-receipt/v2"
 RECEIPT_JSON = Path("docs/assurance/195-chart-acquisition-receipt.json")
 RECEIPT_MD = Path("docs/assurance/195-chart-acquisition-receipt.md")
-MANIFEST_ROOT = Path("kubernetes")
+INSPECTION_ORACLE = Path(
+    "tests/security/test_platform_release_identity_asset.py"
+)
 README = Path("README.md")
 FRAGMENTS = Path("changelog.d")
 VERSIONS_ENV = Path("versions.env")
@@ -140,14 +137,22 @@ CHART_FILE_CEILING = 1024 * 1024
 TIMEOUT = 60
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+VERSION_RE = re.compile(
+    r"^(?=.{1,32}$)(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 FRAGMENT_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 BRANCH_RE = re.compile(
     r"^promoter/([0-9a-f]{7})/([1-9][0-9]*)-"
+    r"([0-9a-f]{64})$"
+)
+LEGACY_BRANCH_RE = re.compile(
+    r"^promoter/([0-9a-f]{7})/([1-9][0-9]*)-"
     r"((?:[a-z0-9-]+-\d+\.\d+\.\d+)(?:_[a-z0-9-]+-\d+\.\d+\.\d+)*)$"
 )
-TARGET_RE = re.compile(r"^([a-z0-9]+(?:-[a-z0-9]+)*)-(\d+\.\d+\.\d+)$")
+LEGACY_TARGET_RE = re.compile(
+    r"^([a-z0-9]+(?:-[a-z0-9]+)*)-(\d+\.\d+\.\d+)$"
+)
 CAPTURE_HEADER_RE = re.compile(
     r"^Captured (\d{4}-\d{2}-\d{2}) for (?:the )?issues? (#\d+(?:/#\d+)*)", re.MULTILINE
 )
@@ -202,6 +207,7 @@ ASSURANCE = _load_sibling("ci/deploy_assurance.py", "promoter_deploy_assurance")
 # The receipt shape is the repository's canonical one, so a receipt this tool
 # counts is exactly a receipt the coordinator's validator accepts.
 RECEIPTS = _load_sibling("validate_review_receipt.py", "promoter_review_receipt")
+WORKLOADS = _load_sibling("workload_registry.py", "promoter_workload_registry")
 
 
 def sha256_hex(data: bytes) -> str:
@@ -226,17 +232,32 @@ class Selection:
     """One promotable workload as its committed manifest states it."""
 
     __slots__ = (
+        "acquisition_profile",
         "slug",
         "path",
         "version",
         "digest",
         "chart_repository",
+        "deploy_shape",
         "source_repository",
         "subject",
         "domain",
+        "platforms",
+        "target_clusters",
+        "workload_repository",
     )
 
-    def __init__(self, slug, path, version, digest, chart_repository, source_repository, subject):
+    def __init__(
+        self,
+        slug,
+        path,
+        version,
+        digest,
+        chart_repository,
+        source_repository,
+        subject,
+        declared,
+    ):
         self.slug = slug
         self.path = path
         self.version = version
@@ -244,73 +265,38 @@ class Selection:
         self.chart_repository = chart_repository
         self.source_repository = source_repository
         self.subject = subject
-        # The human name is the source repository's own name (naranjo.online).
-        self.domain = source_repository.split("/", 1)[1]
-
-
-DIGEST_LINE_RE = re.compile(r"^\s*digest:\s*(sha256:[0-9a-f]{64})\s*$", re.MULTILINE)
-URL_LINE_RE = re.compile(r"^\s*url:\s*oci://([^\s]+)\s*$", re.MULTILINE)
-NAME_LINE_RE = re.compile(r"^\s*name:\s*([a-z0-9-]+)-chart\s*$", re.MULTILINE)
-
-
-def _oci_repository_documents(text: str):
-    for document in re.split(r"^---\s*$", text, flags=re.MULTILINE):
-        if re.search(r"^kind:\s*OCIRepository\s*$", document, re.MULTILINE):
-            yield document
+        self.acquisition_profile = declared["acquisitionProfile"]
+        self.deploy_shape = declared["deploy"]["shape"]
+        self.domain = declared["deploy"].get("domain", slug)
+        self.platforms = tuple(declared["platforms"])
+        self.target_clusters = tuple(declared["targetClusters"])
+        self.workload_repository = declared["workloadRepository"]
 
 
 def discover_selections(root: Path) -> dict:
-    """Return ``{slug: Selection}`` for every annotated OCIRepository.
+    """Return the registry's byte-exact, manifest-bound selections."""
 
-    The slug is the manifest's own ``<slug>-chart`` name; the annotation,
-    subject, exact digest and chart URL must all be present and singular, or
-    the document is refused rather than half-read. Sorted by slug so every
-    downstream artifact is deterministic.
-    """
-
-    found = {}
-    for path in sorted((root / MANIFEST_ROOT).rglob("*.yaml")):
-        text = path.read_text(encoding="utf-8")
-        for document in _oci_repository_documents(text):
-            if ANNOTATION not in document:
-                continue
-            parsed = ASSURANCE.parse_site_selection(document)
-            names = NAME_LINE_RE.findall(document)
-            digests = DIGEST_LINE_RE.findall(document)
-            urls = URL_LINE_RE.findall(document)
-            relative = path.relative_to(root).as_posix()
-            if parsed is None or len(names) != 1 or len(digests) != 1 or len(urls) != 1:
-                raise Refusal(f"{relative}: annotated OCIRepository is not a closed selection")
-            version, source_repository = parsed
-            slug = names[0]
-            subject = _subject_from_document(document)
-            if slug in found:
-                raise Refusal(f"{relative}: duplicate selection for {slug}")
-            found[slug] = Selection(
-                slug, relative, version, digests[0], urls[0], source_repository, subject
-            )
-    return dict(sorted(found.items()))
-
-
-SUBJECT_LINE_RE = re.compile(r"^\s*subject:\s*(\^?\S+)\s*$", re.MULTILINE)
-
-
-def _subject_from_document(document: str) -> str:
-    """The exact publisher identity the cluster verifies, un-escaped.
-
-    The manifest carries cosign's anchored regular expression
-    (``^https://github\\.com/...$``); the identity cosign is asked to match
-    is that string with the anchors and escapes removed. Exactly one is
-    required.
-    """
-
-    subjects = SUBJECT_LINE_RE.findall(document)
-    if len(subjects) != 1:
-        raise Refusal("selection must carry exactly one cosign subject")
-    subject = subjects[0].strip('"').strip("'")
-    subject = subject[1:] if subject.startswith("^") else subject
-    subject = subject[:-1] if subject.endswith("$") else subject
-    return subject.replace("\\.", ".")
+    try:
+        declared = WORKLOADS.load_registry(root)
+        manifests = WORKLOADS.bind_registry_to_manifests(root, declared)
+        rego_errors = WORKLOADS.rego_binding_errors(root, declared)
+    except (OSError, WORKLOADS.RegistryError) as error:
+        raise Refusal(f"workload registry: {error}") from None
+    if rego_errors:
+        raise Refusal("workload registry: " + "; ".join(rego_errors))
+    return {
+        slug: Selection(
+            slug,
+            manifests[slug]["path"],
+            manifests[slug]["version"],
+            manifests[slug]["digest"],
+            entry["chartRepository"],
+            entry["sourceRepository"],
+            entry["publisher"]["workflowRef"],
+            entry,
+        )
+        for slug, entry in declared.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -744,19 +730,20 @@ def chart_members(layer: bytes, names: tuple) -> dict:
     return found
 
 
-def profile_for(subject: str) -> str:
+def profile_for(selection: Selection) -> str:
     """Select the acquisition profile from the publisher identity.
 
     A subject this file has no profile for is refused: the promoter never
     guesses how an unknown publisher should be verified.
     """
 
-    if re.fullmatch(
-        r"https://github\.com/snaraj/[^/]+/\.github/workflows/release-publisher\.yml@refs/heads/main",
-        subject,
-    ):
-        return "release-publisher"
-    raise Refusal(f"no acquisition profile for publisher identity {subject}")
+    profile = selection.acquisition_profile
+    if profile not in PROFILES:
+        raise Refusal(
+            f"{selection.slug}: unknown acquisition profile {profile!r} for "
+            f"publisher identity {selection.subject}"
+        )
+    return profile
 
 
 def release_manifest_statements(asset: dict) -> dict:
@@ -821,8 +808,7 @@ def acquire_release_publisher(
     """
 
     slug, chart_repo, subject = selection.slug, selection.chart_repository, selection.subject
-    # The site publisher contract names the workload image after the chart.
-    image_repo = f"{REGISTRY_HOST}/snaraj/{slug}"
+    image_repo = selection.workload_repository
     tag = f"v{version}"
 
     manifest_digest, manifest_bytes = resolve_twice(registry, chart_repo, version, OCI_MANIFEST)
@@ -846,7 +832,9 @@ def acquire_release_publisher(
     layer_bytes = registry.blob(chart_repo, layer["digest"])
     if layer.get("size") != len(layer_bytes):
         raise Refusal(f"{chart_repo}:{version}: layer size disagrees with its bytes")
-    members = chart_members(layer_bytes, (f"{slug}/Chart.yaml", f"{slug}/values.yaml"))
+    members = chart_members(
+        layer_bytes, (f"{slug}/Chart.yaml", f"{slug}/values.yaml")
+    )
     chart_yaml = members[f"{slug}/Chart.yaml"]
     values_yaml = members[f"{slug}/values.yaml"]
     if chart_identity(chart_yaml.decode("utf-8")) != expected_chart:
@@ -863,14 +851,29 @@ def acquire_release_publisher(
     index = json.loads(index_bytes)
     if index.get("mediaType") != OCI_INDEX:
         raise Refusal(f"{image_repo}:{tag}: not an OCI image index")
-    arm64 = [
-        child["digest"]
-        for child in index.get("manifests", [])
-        if child.get("platform", {}).get("os") == "linux"
-        and child.get("platform", {}).get("architecture") == "arm64"
-    ]
-    if len(arm64) != 1 or DIGEST_RE.fullmatch(arm64[0]) is None:
-        raise Refusal(f"{image_repo}:{tag}: expected exactly one linux/arm64 child")
+    platform_digests = {}
+    children = index.get("manifests", [])
+    if not isinstance(children, list):
+        raise Refusal(f"{image_repo}:{tag}: index manifests are not a list")
+    for platform in selection.platforms:
+        operating_system, architecture = platform.split("/", 1)
+        matches = [
+            child
+            for child in children
+            if isinstance(child, dict)
+            and isinstance(child.get("platform"), dict)
+            and child.get("platform", {}).get("os") == operating_system
+            and child.get("platform", {}).get("architecture") == architecture
+        ]
+        if (
+            len(matches) != 1
+            or matches[0].get("mediaType") != OCI_MANIFEST
+            or DIGEST_RE.fullmatch(matches[0].get("digest") or "") is None
+        ):
+            raise Refusal(
+                f"{image_repo}:{tag}: expected exactly one {platform} child"
+            )
+        platform_digests[platform] = matches[0]["digest"]
 
     cosign.verify_chart(chart_repo, manifest_digest, subject)
     cosign.verify_provenance(image_repo, index_digest, subject)
@@ -921,7 +924,6 @@ def acquire_release_publisher(
         raise Refusal(f"{selection.source_repository} {tag}: source {source_sha} is not reachable from protected main ({ancestry})")
 
     record = {
-        "arm64Digest": arm64[0],
         "chart": expected_chart,
         "chartConfigDigest": config["digest"],
         "chartLayerDigest": layer["digest"],
@@ -933,6 +935,13 @@ def acquire_release_publisher(
         "signer": {"issuer": ACTIONS_ISSUER, "subject": subject},
         "workloadImage": f"{image_repo}:{tag}@{index_digest}",
     }
+    # Preserve the byte-exact v2 receipt while today's declaration remains the
+    # legacy singleton. A future multi-platform declaration uses the generic
+    # map; the registry schema and acquisition loop already need no rewrite.
+    if selection.platforms == ("linux/arm64",):
+        record["arm64Digest"] = platform_digests["linux/arm64"]
+    else:
+        record["platformDigests"] = platform_digests
     inspection = {"Chart.yaml": sha256_hex(chart_yaml), "values.yaml": sha256_hex(values_yaml)}
     return record, inspection
 
@@ -943,7 +952,7 @@ PROFILES = {"release-publisher": acquire_release_publisher}
 def acquire(selection: Selection, version: str, registry, github, cosign) -> tuple:
     if VERSION_RE.fullmatch(version) is None:
         raise Refusal(f"{selection.slug}: version {version!r} is not a plain semantic version")
-    profile = PROFILES[profile_for(selection.subject)]
+    profile = PROFILES[profile_for(selection)]
     try:
         return profile(selection, version, registry, github, cosign)
     except (KeyError, TypeError, ValueError, tarfile.TarError, OSError) as error:
@@ -995,6 +1004,18 @@ def load_receipt(root: Path) -> dict:
     return json.loads((root / RECEIPT_JSON).read_text(encoding="utf-8"))
 
 
+def record_platform_digests(record: dict) -> dict:
+    """Return the declared-platform map from a legacy or generic record."""
+
+    if "arm64Digest" in record and "platformDigests" not in record:
+        return {"linux/arm64": record["arm64Digest"]}
+    if "platformDigests" in record and "arm64Digest" not in record:
+        value = record["platformDigests"]
+        if isinstance(value, dict):
+            return value
+    raise Refusal("acquisition record platform evidence is ambiguous")
+
+
 def parse_inspection(markdown: str) -> dict:
     """``{short-name: {"Chart.yaml": digest, "values.yaml": digest}}`` from
     the committed view; the JSON does not carry these four values."""
@@ -1013,7 +1034,7 @@ def parse_capture_header(markdown: str) -> tuple:
 
 
 def short_name(slug: str) -> str:
-    return slug.split("-", 1)[0]
+    return WORKLOADS.receipt_inspection_label(slug)
 
 
 def tool_pins(root: Path) -> dict:
@@ -1049,15 +1070,28 @@ def render_receipt_markdown(receipt: dict, selections: dict, inspection: dict, c
     bindings = []
     subjects = []
     hashes = []
+    legacy_platform_rows = all(
+        set(record_platform_digests(receipt["records"][slug])) == {"linux/arm64"}
+        for slug in ordered
+    )
     for slug in ordered:
         record = receipt["records"][slug]
         domain = selections[slug].domain
         chart = record["chart"]
+        platform_digests = record_platform_digests(record)
+        platform_summary = (
+            "`{}`".format(platform_digests["linux/arm64"])
+            if legacy_platform_rows
+            else ", ".join(
+                "{} `{}`".format(platform, digest)
+                for platform, digest in sorted(platform_digests.items())
+            )
+        )
         rows.append(
             f"| {domain} — `{record['chartRepository']}` | `{record['chartTag']}` | "
             f"`{record['manifestDigest']}` / `{record['chartConfigDigest']}` / `{record['chartLayerDigest']}` | "
             f"name/version/appVersion `{chart['name']}` / `{chart['version']}` / `{chart['appVersion']}` | "
-            f"`{record['workloadImage']}` | `{record['arm64Digest']}` |"
+            f"`{record['workloadImage']}` | {platform_summary} |"
         )
         bindings.append(
             f"- {domain}: protected-main source `{record['release']['sourceSha']}`; "
@@ -1088,7 +1122,9 @@ def render_receipt_markdown(receipt: dict, selections: dict, inspection: dict, c
         "agreed. The immutable Release asset and protected-main source commit were\n"
         "also bound for each acquisition. Public SLSA v1 attestations bound the exact\n"
         "workload indexes; chart trust remains each chart's exact Cosign signature.\n\n"
-        "| workload and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |\n"
+        "| workload and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | "
+        + ("Linux ARM64 child" if legacy_platform_rows else "declared platform children")
+        + " |\n"
         "| --- | --- | --- | --- | --- | --- |\n"
         + "\n".join(rows)
         + "\n\nPublisher Release bindings:\n\n"
@@ -1130,152 +1166,115 @@ def _wrap(text: str, width: int = 78) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Rewrite: counted substitution across the tracked tree.
+# Rewrite: exact manifest selectors plus generated policy projection.
 # ---------------------------------------------------------------------------
 
-STRING_RUN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"(?:\s*"(?:[^"\\\n]|\\.)*")*')
+def rewrite_tree(
+    root: Path,
+    selections: dict,
+    old_receipt: dict,
+    new_receipt: dict,
+    old_inspection: dict,
+    new_inspection: dict,
+) -> list:
+    """Prepare, validate, then write selectors and the inspection oracle."""
 
-
-def rewrite_literal_runs(text: str, tokens: dict) -> str:
-    """Rewrite tokens inside Python string literals, including a value split
-    across adjacent literals (the batteries wrap long digests that way). A
-    run of adjacent literals is joined, rewritten, and re-split at the
-    original chunk lengths so the file's shape is preserved."""
-
-    def rewrite(match):
-        run = match.group(0)
-        pieces = re.findall(r'"((?:[^"\\\n]|\\.)*)"', run)
-        gaps = re.split(r'"(?:[^"\\\n]|\\.)*"', run)
-        joined = "".join(pieces)
-        rewritten = joined
-        for old, new in tokens.items():
-            rewritten = rewritten.replace(old, new)
-        if rewritten == joined:
-            return run
-        chunks = []
-        cursor = 0
-        for piece in pieces[:-1]:
-            chunks.append(rewritten[cursor : cursor + len(piece)])
-            cursor += len(piece)
-        chunks.append(rewritten[cursor:])
-        out = gaps[0]
-        for chunk, gap in zip(chunks, gaps[1:]):
-            out += f'"{chunk}"{gap}'
-        return out
-
-    return STRING_RUN_RE.sub(rewrite, text)
-
-
-def _tracked_text_files(root: Path, run=run_command):
-    listing = run(["git", "ls-files", "-z"], cwd=root)
-    for name in listing.split("\0"):
-        if not name or name.startswith(FRAGMENTS.as_posix() + "/"):
-            continue
-        path = root / name
-        if path.is_symlink() or not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        yield name, path, text
-
-
-def join_literal_runs(text: str) -> str:
-    """The logical view of a Python file: adjacent string literals joined
-    into one, so a value split across literals counts as one token."""
-
-    return STRING_RUN_RE.sub(
-        lambda match: '"' + "".join(re.findall(r'"((?:[^"\\\n]|\\.)*)"', match.group(0))) + '"',
-        text,
-    )
-
-
-def version_shapes(selection: Selection, old: str, new: str) -> list:
-    """The closed grammar of where a version is pinned by value, keyed by
-    slug (or by the selection's own manifest) so two workloads sharing a
-    version string never clobber each other. Each entry is ``(pattern,
-    replacement, path-or-None, required)``: the three pin surfaces every
-    workload carries (its manifest annotation, the policy maps, the contract
-    tuple) must match or the grammar is stale; the release-manifest fixture
-    shape is a per-workload test fixture that need not exist."""
-
-    slug, escaped = selection.slug, re.escape(old)
-    replacement = rf"\g<1>{new}\g<2>"
-    return [
-        (re.compile(rf'({re.escape(ANNOTATION)}: "){escaped}(")'), replacement, selection.path, True),
-        (re.compile(rf'("{slug}":\s*\{{\s*"tag":\s*"){escaped}(")'), replacement, None, True),
-        (re.compile(rf'("{slug}":\s*\(\s*"){escaped}(",)'), replacement, None, True),
-        (
-            re.compile(rf'("repository": "{re.escape(selection.chart_repository)}",\s*"version": "){escaped}(")'),
-            replacement,
-            None,
-            False,
-        ),
-    ]
-
-
-def rewrite_tree(root: Path, selections: dict, old_receipt: dict, new_receipt: dict, old_inspection: dict, new_inspection: dict, run=run_command) -> list:
-    """Apply every value change between the two receipts to every tracked
-    file. Returns the changed paths. Every old digest must vanish from the
-    tree and every new one must appear exactly as often as the old did —
-    counted on the logical view, so a digest split across literals cannot
-    survive unseen."""
-
-    tokens = {}
-    shapes = []
+    pending = []
     for slug, new_record in new_receipt["records"].items():
         old_record = old_receipt["records"][slug]
         if old_record == new_record:
             continue
-        for key in ("manifestDigest", "chartConfigDigest", "chartLayerDigest", "arm64Digest"):
-            tokens[old_record[key]] = new_record[key]
-        tokens[old_record["release"]["assetDigest"]] = new_record["release"]["assetDigest"]
-        tokens[old_record["release"]["sourceSha"]] = new_record["release"]["sourceSha"]
-        tokens[old_record["workloadImage"]] = new_record["workloadImage"]
-        short = short_name(slug)
+        old_platforms = record_platform_digests(old_record)
+        new_platforms = record_platform_digests(new_record)
+        if set(old_platforms) != set(new_platforms):
+            raise Refusal(f"{slug}: acquired platform set differs from the registry")
+        old_version, new_version = old_record["chartTag"], new_record["chartTag"]
+        old_digest = old_record["manifestDigest"]
+        new_digest = new_record["manifestDigest"]
+        if old_version == new_version or old_digest == new_digest:
+            raise Refusal(f"{slug}: promotion did not move both tag and digest")
+        name = selections[slug].path
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise Refusal(f"{name}: selection is not one regular file")
+        rewritten = path.read_text(encoding="utf-8")
+        replacements = (
+            (
+                re.compile(
+                    rf'(^\s*{re.escape(ANNOTATION)}:\s*"){re.escape(old_version)}("\s*$)',
+                    re.MULTILINE,
+                ),
+                rf"\g<1>{new_version}\g<2>",
+            ),
+            (
+                re.compile(
+                    rf'(^\s{{4}}digest:\s*){re.escape(old_digest)}(\s*$)',
+                    re.MULTILINE,
+                ),
+                rf"\g<1>{new_digest}\g<2>",
+            ),
+        )
+        for pattern, replacement in replacements:
+            rewritten, count = pattern.subn(replacement, rewritten)
+            if count != 1:
+                raise Refusal(f"{name}: exact selector rewrite matched {count} times")
+        pending.append((name, path, rewritten))
+
+    oracle = root / INSPECTION_ORACLE
+    if oracle.is_symlink() or not oracle.is_file():
+        raise Refusal(f"{INSPECTION_ORACLE}: inspection oracle is not one regular file")
+    original_oracle = oracle.read_text(encoding="utf-8")
+    rewritten_oracle = original_oracle
+    if set(old_inspection) != set(new_inspection):
+        raise Refusal("inspection workload set changed during promotion")
+    for short in sorted(old_inspection):
+        if set(old_inspection[short]) != {"Chart.yaml", "values.yaml"} or set(
+            new_inspection[short]
+        ) != {"Chart.yaml", "values.yaml"}:
+            raise Refusal(f"{short}: inspection evidence is incomplete")
         for filename in ("Chart.yaml", "values.yaml"):
-            old_hash = old_inspection[short][filename].split(":", 1)[1]
-            tokens[old_hash] = new_inspection[short][filename].split(":", 1)[1]
-        if old_record["chartTag"] != new_record["chartTag"]:
-            shapes += version_shapes(selections[slug], old_record["chartTag"], new_record["chartTag"])
-    for old, new in tokens.items():
-        if old == new:
-            raise Refusal(f"token {old} is unchanged between receipts")
-    changed = []
-    counts = {old: 0 for old in tokens}
-    shape_hits = [0] * len(shapes)
-    for name, path, text in _tracked_text_files(root, run):
-        if name in {RECEIPT_JSON.as_posix(), RECEIPT_MD.as_posix()}:
-            continue
-        logical = join_literal_runs(text) if name.endswith(".py") else text
-        before = text
-        for old in tokens:
-            counts[old] += logical.count(old)
-        if name.endswith(".py"):
-            text = rewrite_literal_runs(text, tokens)
-        for old, new in tokens.items():
-            text = text.replace(old, new)
-        for position, (pattern, replacement, only, _required) in enumerate(shapes):
-            if only is None or only == name:
-                text, hits = pattern.subn(replacement, text)
-                shape_hits[position] += hits
-        if text != before:
-            after = join_literal_runs(text) if name.endswith(".py") else text
-            for old, new in tokens.items():
-                if old in after:
-                    raise Refusal(f"{name}: {old} survives the rewrite")
-                if after.count(new) != logical.count(old) + logical.count(new):
-                    raise Refusal(f"{name}: {new} occurrence count changed unexpectedly")
-            path.write_text(text, encoding="utf-8")
-            changed.append(name)
-    for old, count in counts.items():
-        if count == 0:
-            raise Refusal(f"{old} was pinned nowhere in the tree; the rewrite grammar is stale")
-    for position, hits in enumerate(shape_hits):
-        if hits == 0 and shapes[position][3]:
-            raise Refusal(f"version pin shape {position + 1} matched nowhere in the tree; the rewrite grammar is stale")
-    return changed
+            old_digest = old_inspection[short][filename]
+            new_digest = new_inspection[short][filename]
+            if (
+                DIGEST_RE.fullmatch(old_digest or "") is None
+                or DIGEST_RE.fullmatch(new_digest or "") is None
+            ):
+                raise Refusal(f"{short}: inspection digest is malformed")
+            old_hash = old_digest.removeprefix("sha256:")
+            new_hash = new_digest.removeprefix("sha256:")
+            if rewritten_oracle.count(old_hash) != 1:
+                raise Refusal(
+                    f"{INSPECTION_ORACLE}: {short} {filename} oracle is not exact"
+                )
+            if old_hash == new_hash:
+                continue
+            if new_hash in rewritten_oracle:
+                raise Refusal(
+                    f"{INSPECTION_ORACLE}: {short} {filename} oracle is not exact"
+                )
+            rewritten_oracle = rewritten_oracle.replace(old_hash, new_hash)
+    if rewritten_oracle != original_oracle:
+        pending.append((INSPECTION_ORACLE.as_posix(), oracle, rewritten_oracle))
+    for _name, path, rewritten in pending:
+        path.write_text(rewritten, encoding="utf-8")
+    return [name for name, _path, _rewritten in pending]
+
+
+def refresh_rego_projection(root: Path) -> bool:
+    """Regenerate the byte-exact policy projection after manifest movement."""
+
+    path = root / "policies/conftest/kubernetes.rego"
+    text = path.read_text(encoding="utf-8")
+    if text.count(WORKLOADS.REGO_BEGIN) != 1 or text.count(WORKLOADS.REGO_END) != 1:
+        raise Refusal("kubernetes.rego has no single workload-registry projection")
+    start = text.index(WORKLOADS.REGO_BEGIN)
+    end = text.index(WORKLOADS.REGO_END, start) + len(WORKLOADS.REGO_END)
+    expected = WORKLOADS.render_rego_block(root)
+    rewritten = text[:start] + expected + text[end:]
+    if rewritten == text:
+        return False
+    path.write_text(rewritten, encoding="utf-8")
+    return True
 
 
 def rewrite_readme(root: Path, selections: dict, receipt: dict, issues: str) -> bool:
@@ -1298,6 +1297,11 @@ def rewrite_readme(root: Path, selections: dict, receipt: dict, issues: str) -> 
 
 def fragment_path(issue: int, targets: dict) -> Path:
     slug = "promote-" + "-".join(f"{s}-{v.replace('.', '-')}" for s, v in sorted(targets.items()))
+    filename = f"{issue}-{slug}.md"
+    if len(filename.encode("utf-8")) > 240:
+        count = len(targets)
+        noun = "workload" if count == 1 else "workloads"
+        slug = f"promote-{count}-{noun}-{promotion_target_fingerprint(targets)[:24]}"
     if FRAGMENT_SLUG_RE.fullmatch(slug) is None:
         raise Refusal(f"fragment slug {slug!r} violates the fragment grammar")
     return FRAGMENTS / f"{issue}-{slug}.md"
@@ -1316,9 +1320,8 @@ def render_fragment(selections: dict, targets: dict, issues: str) -> str:
         "index digest, and binding the protected-main source commit and immutable Release asset before "
         "the annotation and digest moved together.\n"
         "- Recapture `docs/assurance/195-chart-acquisition-receipt.{json,md}` for that acquisition, keeping "
-        "every reviewed tag/digest pair identical across the receipt, `scripts/validate_signature_policy.py`, "
-        "`policies/conftest/kubernetes.rego`, every `kubernetes/**` selection and the security batteries "
-        "that pin them, so no two can disagree.\n"
+        "the canonical receipt, exact manifest selector, and generated policy projection in agreement "
+        "with the declared workload registry.\n"
     )
 
 
@@ -1327,6 +1330,18 @@ def apply_promotion(root: Path, selections: dict, acquired: dict, issue: int, is
     Returns the changed and created paths."""
 
     old_receipt = load_receipt(root)
+    try:
+        declared = WORKLOADS.load_registry(root)
+        WORKLOADS.bind_registry_to_manifests(root, declared)
+        rego_errors = WORKLOADS.rego_binding_errors(root, declared)
+    except (OSError, WORKLOADS.RegistryError) as error:
+        raise Refusal(f"workload registry: {error}") from None
+    if rego_errors:
+        raise Refusal("workload registry: " + "; ".join(rego_errors))
+    if set(selections) != set(declared) or set(old_receipt.get("records", {})) != set(
+        declared
+    ):
+        raise Refusal("registry, promoter discovery, and receipt sets must be equal")
     old_markdown = (root / RECEIPT_MD).read_text(encoding="utf-8")
     old_inspection = parse_inspection(old_markdown)
     previous = parse_capture_header(old_markdown)
@@ -1347,7 +1362,16 @@ def apply_promotion(root: Path, selections: dict, acquired: dict, issue: int, is
         raise Refusal(f"{fragment} already exists; fragments are immutable")
     if len(README_ROW_RE.findall((root / README).read_text(encoding="utf-8"))) != 1:
         raise Refusal("README carries no single machine-maintained current-selection sentence")
-    changed = rewrite_tree(root, selections, old_receipt, new_receipt, old_inspection, new_inspection, run)
+    changed = rewrite_tree(
+        root,
+        selections,
+        old_receipt,
+        new_receipt,
+        old_inspection,
+        new_inspection,
+    )
+    if refresh_rego_projection(root) and "policies/conftest/kubernetes.rego" not in changed:
+        changed.append("policies/conftest/kubernetes.rego")
     (root / RECEIPT_JSON).write_text(render_receipt_json(new_receipt), encoding="utf-8")
     context = {"issues": issues, "advanced": set(acquired), "previous": previous}
     (root / RECEIPT_MD).write_text(
@@ -1526,25 +1550,61 @@ def ready_decision(
 
 
 def parse_branch(branch: str) -> tuple | None:
-    """``(base, issue, {slug: version})`` from a promoter branch, or ``None``."""
+    """``(base, issue, target fingerprint)`` from a promoter branch."""
 
     match = BRANCH_RE.match(branch)
-    if match is None:
+    if match is not None:
+        return match.group(1), int(match.group(2)), match.group(3)
+    legacy = LEGACY_BRANCH_RE.match(branch)
+    if legacy is None:
         return None
     targets = {}
-    for part in match.group(3).split("_"):
-        target = TARGET_RE.match(part)
-        if target is None:
+    for part in legacy.group(3).split("_"):
+        target = LEGACY_TARGET_RE.match(part)
+        if target is None or target.group(1) in targets:
             return None
         targets[target.group(1)] = target.group(2)
-    return match.group(1), int(match.group(2)), targets
+    try:
+        fingerprint = promotion_target_fingerprint(targets)
+    except Refusal:
+        return None
+    return legacy.group(1), int(legacy.group(2)), fingerprint
+
+
+def promotion_target_fingerprint(targets: dict) -> str:
+    """Hash one canonical, bounded target set for ref and alert identity."""
+
+    if (
+        not isinstance(targets, dict)
+        or not targets
+        or len(targets) > WORKLOADS.MAX_WORKLOADS
+    ):
+        raise Refusal("promotion target set is empty or malformed")
+    for slug, version in targets.items():
+        if (
+            not isinstance(slug, str)
+            or SLUG_RE.fullmatch(slug) is None
+            or not isinstance(version, str)
+            or VERSION_RE.fullmatch(version) is None
+        ):
+            raise Refusal("promotion target identity is outside the closed grammar")
+    canonical = json.dumps(
+        {slug: targets[slug] for slug in sorted(targets)},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(b"promotion-targets/v1\n" + canonical).hexdigest()
 
 
 def branch_name(base: str, issue: int, targets: dict) -> str:
-    """``promoter/<base7>/<issue>-<slug>-<version>[_<slug>-<version>]``: the
-    base segment keeps a re-cut from colliding with a superseded branch."""
+    """Return a bounded ref whose digest commits to the complete target set."""
 
-    return BRANCH_PREFIX + f"{base[:7]}/{issue}-" + "_".join(f"{s}-{v}" for s, v in sorted(targets.items()))
+    return (
+        BRANCH_PREFIX
+        + f"{base[:7]}/{issue}-"
+        + promotion_target_fingerprint(targets)
+    )
 
 
 def plan(report: dict, open_prs: list) -> dict:
@@ -1564,12 +1624,17 @@ def plan(report: dict, open_prs: list) -> dict:
         if entry["verdict"] == "behind":
             targets[slug] = entry["latest"]
     keep, supersede = [], []
+    target_fingerprint = promotion_target_fingerprint(targets) if targets else None
     for pr in open_prs:
         parsed = parse_branch(pr["branch"])
         if parsed is None:
             continue
         _, _, pr_targets = parsed
-        if pr_targets == targets and not pr["behind_by"] and not keep:
+        if (
+            pr_targets == target_fingerprint
+            and not pr["behind_by"]
+            and not keep
+        ):
             keep.append(pr["number"])
         else:
             supersede.append(pr["number"])
@@ -1654,7 +1719,13 @@ class Workspace:
 
 def pr_title(selections: dict, targets: dict) -> str:
     moved = ", ".join(f"{selections[s].domain} {v}" for s, v in sorted(targets.items()))
-    return f"Promote {moved} to the published release by receipted ceremony"
+    title = f"Promote {moved} to the published release by receipted ceremony"
+    if len(title) <= 240:
+        return title
+    return (
+        f"Promote {len(targets)} declared workloads by receipted ceremony "
+        f"({promotion_target_fingerprint(targets)[:12]})"
+    )
 
 
 def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, gates: list, cosign_version: str) -> str:
@@ -1668,13 +1739,17 @@ def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, gate
     lines += [f"Closes #{number}" for number in issues]
     lines += ["", "## Evidence", ""]
     for slug, (record, inspection) in sorted(acquired.items()):
+        platform_evidence = ", ".join(
+            f"{platform} child `{digest}`"
+            for platform, digest in sorted(record_platform_digests(record).items())
+        )
         lines += [
             f"### {selections[slug].domain} → `{record['chartTag']}`",
             "",
             f"- chart `{record['chartRepository']}` manifest `{record['manifestDigest']}` (resolved twice, byte-identical, `docker-content-digest` == bytes)",
             f"- config `{record['chartConfigDigest']}`, sole Helm layer `{record['chartLayerDigest']}` (both hash-verified by digest)",
             f"- `Chart.yaml` `{inspection['Chart.yaml']}`, `values.yaml` `{inspection['values.yaml']}`",
-            f"- workload `{record['workloadImage']}` (index resolved twice == embedded pin), linux/arm64 child `{record['arm64Digest']}`",
+            f"- workload `{record['workloadImage']}` (index resolved twice == embedded pin), {platform_evidence}",
             f"- cosign {cosign_version} verified the chart at its digest and SLSA v1 provenance at the index digest for `{record['signer']['subject']}`",
             f"- Release asset `{record['release']['assetDigest']}` (== GitHub's stated digest) names source `{record['release']['sourceSha']}` == the annotated tag's commit",
             "",
@@ -2062,7 +2137,11 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     withdrawal or flip that failed) stays in the local log and the tick's
     exit status."""
 
-    marker = "promoter-failure " + " ".join(f"{s}={v}" for s, v in sorted(targets.items())) + f" step={step}"
+    marker = (
+        "promoter-failure targets="
+        + promotion_target_fingerprint(targets)
+        + f" step={step}"
+    )
     try:
         issues = drift_issues(github, targets)
     except Refusal:
