@@ -1465,6 +1465,9 @@ def ready_decision(
         reasons.append(f"{len(approvals)} distinct adversarial APPROVE receipt(s) at this head; two are required")
     if "requires-review" in labels:
         reasons.append("requires-review is still armed")
+    for name in PR_LABELS:
+        if name not in labels:
+            reasons.append(f"promoter label {name} is missing")
     for name in REQUIRED_CHECKS:
         candidates = [check for check in checks if check.get("name") == name]
         if len(candidates) != 1:
@@ -1647,9 +1650,12 @@ def owned_pull_request(pr: dict) -> dict | None:
     """The identity tuple every promoter pull request must satisfy before any
     read-derived decision or write: opened by the owner's credential, from a
     promoter branch in THIS repository, against ``main`` of this repository,
-    Draft state known, carrying the promoter labels. Anything else — a fork
-    with a ``promoter/`` head above all — is never planned, superseded or
-    flipped by the owner's unattended process."""
+    Draft state known. Every part is immutable or owner-only. Labels are
+    NOT identity — anyone with triage can remove one, and a pull request the
+    tool once flipped Ready must stay in its view so it can be withdrawn —
+    they are authorization inputs judged by ``authorization``. Anything
+    else — a fork with a ``promoter/`` head above all — is never planned,
+    superseded or flipped by the owner's unattended process."""
 
     head, base = pr.get("head") or {}, pr.get("base") or {}
     branch = head.get("ref") or ""
@@ -1660,7 +1666,6 @@ def owned_pull_request(pr: dict) -> dict | None:
         or base.get("ref") != "main"
         or (pr.get("user") or {}).get("login") != ASSIGNEE
         or parse_branch(branch) is None
-        or not set(PR_LABELS) <= set(labels)
         or SHA_RE.fullmatch(head.get("sha") or "") is None
         or not isinstance(pr.get("draft"), bool)
         or not isinstance(pr.get("number"), int)
@@ -1682,7 +1687,11 @@ def open_promoter_prs(github: GitHub) -> list:
         compare = github.api(f"repos/{REPOSITORY}/compare/main...{owned['head']}")
         behind_by = compare.get("behind_by")
         if not isinstance(behind_by, int):
-            raise Refusal(f"PR #{owned['number']}: base freshness is unknown; refusing to assume current")
+            # Unknown freshness is neither current nor behind: the planner
+            # keeps the pull request (no cut, no supersede) and the Ready
+            # judgment names the unknown as a blocker.
+            log(f"PR #{owned['number']}: base freshness is unknown; kept, not judged current")
+            behind_by = None
         owned["behind_by"] = behind_by
         found.append(owned)
     return found
@@ -1699,16 +1708,21 @@ def ready_snapshot(github: GitHub, number: int) -> dict | None:
 
     GitHub has no transaction spanning a pull request, comments, checks and
     base comparison. Callers therefore take this complete snapshot on both
-    sides of the Ready mutation and refuse if either view is partial.
-    """
+    sides of the Ready mutation. An input that cannot be proven (unknown
+    base freshness, a truncated check-run listing) is not an error here but
+    an entry in ``unknowns``: a Draft pull request is then not judged, and a
+    Ready one is withdrawn, because an authorization that cannot be read is
+    not one."""
 
     pr = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
     if pr is None:
         return None
+    unknowns = []
     compare = github.api(f"repos/{REPOSITORY}/compare/main...{pr['head']}")
     behind_by = compare.get("behind_by")
     if not isinstance(behind_by, int):
-        raise Refusal(f"PR #{number}: base freshness is unknown; refusing to assume current")
+        unknowns.append("base freshness is unknown")
+        behind_by = None
     comments = [
         {
             "user": (comment.get("user") or {}).get("login"),
@@ -1726,9 +1740,7 @@ def ready_snapshot(github: GitHub, number: int) -> dict | None:
     )
     check_runs = listing.get("check_runs", [])
     if listing.get("total_count") != len(check_runs):
-        raise Refusal(
-            f"PR #{number}: check-run listing is truncated; refusing to judge a partial view"
-        )
+        unknowns.append("check-run listing is truncated")
     checks = [
         {
             "name": check.get("name"),
@@ -1738,7 +1750,7 @@ def ready_snapshot(github: GitHub, number: int) -> dict | None:
         }
         for check in check_runs
     ]
-    return dict(pr, behind_by=behind_by, comments=comments, checks=checks)
+    return dict(pr, behind_by=behind_by, comments=comments, checks=checks, unknowns=unknowns)
 
 
 class UnresolvedReady(Refusal):
@@ -1823,9 +1835,13 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
     again after `gh pr ready` and once more after the security routing
     label leaves; any changed authorization is compensated, and restoration
     is claimed only from a final read showing Draft plus both review lanes.
-    Ready never outlives its authorization: an open Ready promoter pull
-    request whose head no longer carries it is withdrawn to Draft with both
-    lanes re-armed on the tick that sees it."""
+    An open Ready promoter pull request whose head no longer carries its
+    authorization — a lapsed receipt, a renewed lane, a removed promoter
+    label, a check that regressed, or any input that can no longer be read
+    — is withdrawn to Draft with both lanes re-armed on the tick that sees
+    it. That bounds how long Ready can outlive its authorization to ONE
+    tick period; it does not make the bound zero, which only an
+    authoritative status computed at the head (the #289 lift) can."""
 
     pr = ready_snapshot(github, number)
     if pr is None:
@@ -1834,6 +1850,8 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
     authorized, reasons = ready_decision(
         pr["head"], pr["labels"], pr["comments"], pr["checks"], pr["behind_by"], pr["draft"], require_draft=False
     )
+    reasons = pr["unknowns"] + reasons
+    authorized = authorized and not pr["unknowns"]
     if not pr["draft"]:
         if authorized:
             log(f"PR #{number} is already Ready and its authorization holds at head {pr['head']}")
@@ -1841,6 +1859,8 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
         if dry_run:
             log(f"PR #{number} WOULD be withdrawn from Ready (dry run): " + "; ".join(reasons))
             return False
+        # Intent first, never a result: the outcome is proven by the read
+        # inside compensate_ready, which alerts when it cannot be.
         github.mutate(
             f"repos/{REPOSITORY}/issues/{number}/comments",
             "POST",
@@ -1848,12 +1868,15 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
                 "body": (
                     f"`promoter-note ready-withdrawn head={pr['head']}`\n\nReady no longer holds at this head: "
                     + "; ".join(reasons)
-                    + f". Returned to Draft with both review lanes re-armed.\n\n{SIGNATURE}"
+                    + ". Withdrawing now: returning to Draft and re-arming both review lanes; the outcome is "
+                    f"proven by a read, and an `unresolved-ready` alert follows if it cannot be.\n\n{SIGNATURE}"
                 )
             },
         )
         log(compensate_ready(github, number, pr["head"], Refusal("Ready authorization lapsed: " + "; ".join(reasons))))
         return False
+    if pr["unknowns"]:
+        raise Refusal(f"PR #{number}: " + "; ".join(pr["unknowns"]) + "; refusing to judge a partial view")
     if not authorized:
         log(f"PR #{number} not flipped: " + "; ".join(reasons))
         return False
@@ -1867,6 +1890,8 @@ def consider_ready(github: GitHub, number: int, dry_run: bool) -> bool:
             raise Refusal(f"the head moved {stage}")
         if after["draft"]:
             raise Refusal(f"GitHub still reports Draft {stage}")
+        if after["unknowns"]:
+            raise Refusal(f"authorization could not be read {stage}: " + "; ".join(after["unknowns"]))
         still_ready, post_reasons = ready_decision(
             after["head"], after["labels"], after["comments"], after["checks"], after["behind_by"], after["draft"], require_draft=False
         )

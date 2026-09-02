@@ -17,10 +17,15 @@ changes across those reads is compensated: Draft is restored and both lanes
 re-armed, and the restore is claimed only from a read that shows Draft with
 both lanes. A restore that cannot be proven posts a
 `promoter-alert unresolved-ready` comment stating exactly what was observed
-and fails loudly for the operator. Ready never outlives its authorization:
-every tick re-judges an open Ready promotion pull request and withdraws it
-to Draft with both lanes re-armed (`promoter-note ready-withdrawn`) the
-moment its head no longer carries it. The owner alone merges. The deploy-assurance watchdog stays the loud
+and fails loudly for the operator. Every tick re-judges an open Ready
+promotion pull request and withdraws it to Draft with both lanes re-armed
+(`promoter-note ready-withdrawn`) when its head no longer carries the
+authorization or any input of it can no longer be read; a promoter label
+someone removed is a blocker, not an escape from the tool's view. That
+bounds the time Ready can outlive a lapsed authorization to one tick
+period (15 minutes); the receipts stay visible on the pull request for the
+merge click, and only an authoritative status computed at the head (the
+#289 lift) can make the bound zero. The owner alone merges. The deploy-assurance watchdog stays the loud
 backstop: a promotion the tool cannot open leaves the watchdog's drift issue
 open, with one comment naming the failed step.
 

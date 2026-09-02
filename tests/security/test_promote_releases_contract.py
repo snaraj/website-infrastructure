@@ -928,7 +928,7 @@ class ReadyRuleTests(unittest.TestCase):
         return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": "neutral", "app": "github-code-scanning"}]
 
     def test_two_distinct_exact_head_approvals_with_green_checks_flip(self):
-        ready, reasons = MODULE.ready_decision(self.HEAD, ["release"], [self.receipt(self.HEAD, "APPROVE", "Opus5"), self.receipt(self.HEAD, "APPROVE", "Codex")], self.checks(), 0, True)
+        ready, reasons = MODULE.ready_decision(self.HEAD, list(MODULE.PR_LABELS), [self.receipt(self.HEAD, "APPROVE", "Opus5"), self.receipt(self.HEAD, "APPROVE", "Codex")], self.checks(), 0, True)
         self.assertEqual((ready, reasons), (True, []))
 
     def test_every_single_failure_keeps_the_draft(self):
@@ -1022,7 +1022,6 @@ class PlanningTests(unittest.TestCase):
             "foreign base repository": {"base": {"ref": "main", "repo": {"full_name": "mallory/website-infrastructure"}}},
             "base is not main": {"base": {"ref": "release", "repo": {"full_name": MODULE.REPOSITORY}}},
             "not the owner": {"user": {"login": "mallory"}},
-            "labels missing": {"labels": [{"name": "release"}]},
             "unknown draft state": {"draft": None},
             "branch outside the grammar": {"head": dict(owned["head"], ref="promoter/not-a-branch")},
         }
@@ -1030,11 +1029,23 @@ class PlanningTests(unittest.TestCase):
             with self.subTest(variant=name):
                 self.assertIsNone(MODULE.owned_pull_request(dict(owned, **override)))
         self.assertEqual(MODULE.owned_pull_request(owned)["number"], 300)
+        # Labels are mutable, so they are not identity: a promoter pull
+        # request stripped of one stays in view (to be withdrawn), and the
+        # missing label is an authorization blocker.
+        stripped = MODULE.owned_pull_request(dict(owned, labels=[{"name": "release"}]))
+        self.assertEqual(stripped["labels"], ["release"])
+        self.assertIn("promoter label promoter is missing", MODULE.ready_decision(head, stripped["labels"], [], [], 0, True)[1])
         foreign = dict(owned, number=301, **variants["fork head"])
         fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[foreign, owned]]
         fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 0}
         found = MODULE.open_promoter_prs(fleet.github())
         self.assertEqual([pr["number"] for pr in found], [300], "a fork with a promoter head is never adopted")
+        # Unknown freshness keeps the pull request in view with no verdict.
+        fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {}
+        found = MODULE.open_promoter_prs(fleet.github())
+        self.assertEqual([(pr["number"], pr["behind_by"]) for pr in found], [(300, None)])
+        decision = MODULE.plan({"naranjo-online": {"verdict": "behind", "committed": "0.1.71", "latest": "0.1.99"}}, found)
+        self.assertEqual((decision["keep"], decision["supersede"]), ([300], []), "unknown freshness is never superseded on")
 
     def test_fragment_path_obeys_the_release_contract_grammar(self):
         for targets in ({"naranjo-online": "0.1.71"}, {"naranjo-online": "0.2.0", "lidersea-com": "1.0.0"}):
@@ -1542,7 +1553,7 @@ class TickTests(unittest.TestCase):
                 self.assertEqual(json.loads(rearmed[0][2])["labels"], list(MODULE.REVIEW_LABELS), "compensation restores the routing label it removed")
                 self.assertEqual(self.writes("/issues/300/comments"), [], "no READY note, no alert: the restore was proven")
 
-    def test_ready_never_outlives_its_authorization(self):
+    def test_ready_is_withdrawn_when_its_authorization_lapses_or_cannot_be_read(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
         head = "d" * 40
         branch = MODULE.branch_name("8" * 40, 285, {"naranjo-online": self.next})
@@ -1576,16 +1587,53 @@ class TickTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertTrue(notes[0].startswith(f"`promoter-note ready-withdrawn head={head}`"))
         self.assertIn("REQUEST-CHANGES receipt binds this head", notes[0])
+        self.assertIn("Withdrawing now", notes[0])
+        self.assertNotIn("Returned to Draft", notes[0], "the note states intent; the result is proven by the read")
         self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
         self.assertLess(self.mutations.index(self.writes("/issues/300/comments")[0]), kinds.index("pr-ready-undo"), "the note precedes the withdrawal")
-        # An unprovable withdrawal is the same operator-blocking state.
+        # An unprovable withdrawal is the same operator-blocking state, and
+        # nothing posted before it claimed success.
         self.mutations.clear()
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([ready, ready])
         with self.assertRaisesRegex(MODULE.UnresolvedReady, "OPERATOR ACTION REQUIRED"):
             MODULE.consider_ready(github, 300, False)
         bodies = [json.loads(m[2])["body"] for m in self.writes("/issues/300/comments")]
         self.assertEqual(len(bodies), 2)
+        self.assertNotIn("Returned to Draft", bodies[0])
         self.assertIn("promoter-alert unresolved-ready", bodies[1])
+        # A removed promoter label, a truncated check listing or unknown base
+        # freshness: an authorization that cannot be read is not one, and a
+        # Ready pull request is withdrawn on it rather than dropped from view.
+        good_checks = self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"]
+        lapses = {
+            "promoter label removed": ({"pr": dict(ready, labels=[{"name": "release"}, {"name": "delivery-lane"}])}, "promoter label promoter is missing"),
+            "check-run listing truncated": ({"checks": dict(good_checks, total_count=150)}, "check-run listing is truncated"),
+            "base freshness unknown": ({"compare": {}}, "base freshness is unknown"),
+        }
+        for name, (broken, expected) in lapses.items():
+            with self.subTest(lapse=name):
+                self.mutations.clear()
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [approvals]
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = collections.deque([broken.get("pr", ready), restored])
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = broken.get("checks", good_checks)
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = broken.get("compare", {"behind_by": 0})
+                self.assertFalse(MODULE.consider_ready(github, 300, False))
+                self.assertEqual([m[0] for m in self.mutations if m[0].startswith("pr-ready")], ["pr-ready-undo"])
+                note = json.loads(self.writes("/issues/300/comments")[0][2])["body"]
+                self.assertIn(expected, note)
+                self.assertEqual(json.loads(self.writes("/issues/300/labels")[0][2])["labels"], list(MODULE.REVIEW_LABELS))
+        # The same unreadable inputs never let a Draft pull request flip.
+        for name, (broken, expected) in lapses.items():
+            if "pr" in broken:
+                continue
+            with self.subTest(draft=name):
+                self.mutations.clear()
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pr_record(300, branch, head, labels=MODULE.PR_LABELS + ("cybersecurity-review-requested",))
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{head}/check-runs?per_page=100"] = broken.get("checks", good_checks)
+                self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = broken.get("compare", {"behind_by": 0})
+                with self.assertRaisesRegex(MODULE.Refusal, expected + ".*partial view"):
+                    MODULE.consider_ready(github, 300, False)
+                self.assertEqual(self.mutations, [])
 
     def test_ready_undo_response_loss_never_claims_unproven_restoration(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
