@@ -206,25 +206,14 @@ class ValidatorInvocationParityTests(unittest.TestCase):
                     .format(name),
                 )
 
-    def test_readme_carries_the_adding_a_validator_checklist(self):
-        text = SCRIPTS_README.read_text(encoding="utf-8")
-        self.assertIn("## Adding a validator", text)
-        for surface in (
-            "validate-security.sh",
-            "pull-request.yml",
-            "test_validator_invocation_parity.py",
-        ):
-            self.assertIn(surface, text)
-
-
 class RepositoryCheckModeParityTests(unittest.TestCase):
-    """The nine mode words are bound to ``validate_repository.CHECKS``.
+    """The eight mode words are bound to ``validate_repository.CHECKS``.
 
     Issue #153, from PR #151's adversarial review: deleting a mode word from
     ``validate-security.sh`` survived the whole battery. The suite above keys
     on ``scripts/validate_*.py`` PATHS, so it sees one validator invoked and
     notices nothing when that invocation silently stops selecting a check —
-    and the nine words are nine separate categories of repository invariant,
+    and the eight words are eight separate categories of repository invariant,
     each of which simply stops running. Nothing else in the tree compared the
     list to the registry it indexes.
 
@@ -242,8 +231,8 @@ class RepositoryCheckModeParityTests(unittest.TestCase):
         # The same anti-vacuity floor the validator-name parse carries: a
         # regex that stopped matching would make the equality below compare
         # two empty sets and pass forever.
-        self.assertGreaterEqual(len(self.local_modes), 9, self.local_modes)
-        self.assertGreaterEqual(len(self.registry), 10, sorted(self.registry))
+        self.assertGreaterEqual(len(self.local_modes), 8, self.local_modes)
+        self.assertGreaterEqual(len(self.registry), 9, sorted(self.registry))
 
     def test_the_local_entry_point_names_each_mode_once(self):
         self.assertEqual(

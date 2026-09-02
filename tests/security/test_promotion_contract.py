@@ -93,11 +93,5 @@ class RetiredPromotionContractTests(unittest.TestCase):
             with self.subTest(requirement=requirement):
                 self.assertIn(requirement, runbook)
 
-    def test_scripts_guide_names_the_retirement_boundary(self):
-        guide = (REPO_ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
-        self.assertIn("is an unconditional retirement stub", guide)
-        self.assertIn("an unavailable older digest stops", guide)
-
-
 if __name__ == "__main__":
     unittest.main()

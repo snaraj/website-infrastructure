@@ -104,10 +104,6 @@ install_archive_binary \
   '2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b' \
   'trivy' 'trivy' 'trivy'
 install_archive_binary \
-  'https://github.com/anchore/syft/releases/download/v1.50.0/syft_1.50.0_linux_amd64.tar.gz' \
-  'bf7b29ff57f06da30918266a0e1c2885a8f99784798d1bdb1628886aa015d788' \
-  'syft' 'syft' 'syft'
-install_archive_binary \
   'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz' \
   '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' \
   'gitleaks' 'gitleaks' 'gitleaks'
@@ -164,15 +160,6 @@ install_archive_binary \
   "https://github.com/oras-project/oras/releases/download/v1.3.3/${oras_filename}" \
   "${oras_sha256}" \
   'oras' 'oras' 'oras'
-
-# Hadolint ships as one executable rather than an archive, but it crosses the
-# same checksum boundary before installation.
-hadolint_file="${download_root}/hadolint"
-fetch \
-  'https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64' \
-  'c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507' \
-  "${hadolint_file}"
-install -m 0755 "${hadolint_file}" "${install_root}/hadolint"
 
 # The release publisher signs its selector image and canonical identity asset.
 # Ubuntu runner images do not promise Cosign, so those release-critical calls

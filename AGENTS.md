@@ -8,9 +8,7 @@ A new agent operates from this repository alone; nothing is relayed by
 the owner. In order:
 
 1. Read this file end to end — the safety invariants and the lane split
-   before anything else; CLAUDE.md only imports it. Then read
-   `skills/gh-pr-flow/SKILL.md` and all of its linked references before any
-   GitHub issue/branch/PR/review action.
+   before anything else; CLAUDE.md only imports it.
 2. `git fetch origin` and work from `origin/main`. Never trust a local
    `main`, a stale worktree, or another agent's summary of remote state —
    verify remote facts directly (`gh pr view`, `git ls-remote`).
@@ -100,7 +98,6 @@ the owner. In order:
 - Do not install tools, authenticate, plan, apply, deploy, commit, push, or
   mutate the Pi/router/GitHub/Cloudflare without explicit authorization.
 - A claim that a Kubernetes workload is ephemeral is load-bearing only after
-  `skills/gh-pr-flow/references/destructive-workloads.md` is satisfied and
   `scripts/validate_destructive_test_ledger.py` accepts the exact evidence.
   The ledger uses the closed namespaced workload allowlist, exact cardinalities,
   and one fault target; unknown or cluster-scoped API/kinds fail closed. Its
@@ -140,13 +137,6 @@ The owner's 2026-08-20 ruling for release fragments, GitHub intake templates,
 and dependency-governed Draft capacity is recorded durably in
 [issue #164 comment 5360347849](https://github.com/snaraj/website-infrastructure/issues/164#issuecomment-5360347849).
 
-- `skills/**` — SHARED AGENT GOVERNANCE (peer/platform ruling, 2026-08-13),
-  not the exclusive property of either implementation lane. Either lane may
-  author there under one-writer-per-branch, but review comes from a different
-  context and, where a skill touches a lane-specific security boundary, from
-  the other lane. A skill never supersedes AGENTS.md and never grants
-  credential, live-mutation, or merge authority; any change that expands
-  permission requires an owner ruling.
 - `changelog.d/**` — SHARED RELEASE INPUT (owner ruling, 2026-08-20, source
   above). Every implementation lane adds its own exactly one issue-namespaced
   fragment under delivery-lane requirement 8. This mandatory shared write does
@@ -191,9 +181,8 @@ and dependency-governed Draft capacity is recorded durably in
   executable expression of the gates this lane already owns. Every other
   file under `policies/` — the pinned secret-scan policy
   `policies/gitleaks.toml` among them — is unchanged by this ruling and
-  reached only through the rule below. Issue #195 retired Kyverno entirely;
-  Conftest is a pre-merge static control and must never be described as live
-  admission.
+  reached only through the rule below. Conftest is a pre-merge static
+  control and must never be described as live admission.
 - `.githooks/**` — DELIVERY: the pre-push hook implements delivery-lane
   requirements 2 and 3. Changing what it PERMITS is a security-control
   change and needs an owner decision, not a lane call (issue #83).
@@ -295,10 +284,8 @@ and dependency-governed Draft capacity is recorded durably in
   measurement, and add a closed Darwin/arm64 renderer pin without changing
   the Linux live-install tuple. That is a DECLARED CROSSING under the rule
   below, not a lane transfer, and grants no standing claim on these paths.
-  Issue #195 subsequently retired the Kyverno capacity policy and its install
-  overlay rather than preserving them as restoration inputs. The reviewed
-  quota and evidence binding remain enforced by Conftest and repository
-  validators.
+  The reviewed quota and evidence binding are enforced by Conftest and the
+  repository validators.
 
 **A path in neither list is not implicitly delivery.** Silence is not
 permission. Declare the crossing in the pull request body before touching
@@ -440,12 +427,7 @@ retroactive approval.
 no separate Main Worker pass: after an exact-head `APPROVE` and green required
 checks at that head, the coordinator flips Ready and the owner merges. No
 `ROLE: MAIN-WORKER` receipt is required, none is a Ready input, and no lane may
-reintroduce one as a local convention. Machinery for the retired receipt still
-exists and is transitional rather than authority — the `main-worker` receipt
-kind in `scripts/validate_review_receipt.py`, the Main Worker sections of
-`skills/gh-pr-flow/**`, and the `ROLE: MAIN-WORKER` rows of
-`.github/PULL_REQUEST_TEMPLATE.md` — and issue #188 owns removing it. Until
-that lands this file governs, because a skill never supersedes AGENTS.md.
+reintroduce one as a local convention.
 
 **The review must** — items 1–3 in the ordinary-code and security tiers;
 documentation and metadata runs items 5 and 6 only:
@@ -462,13 +444,10 @@ documentation and metadata runs items 5 and 6 only:
 3. Probe for vacuity: a guard that cannot fail is no guard. For each new
    or changed assertion, demonstrate at least one input that turns it
    red (the kill matrix usually supplies it); an assertion no input can
-   fail is decorative, and decorative checks are findings. Work through
-   `skills/gh-pr-flow/references/evidence-doctrine.md` rather than
-   re-deriving it: it catalogues the distinct, reproducible mechanisms
-   by which a fully green run proves nothing — coverage that a policy
-   suite cannot see, fixtures and gates that disable themselves, and the
-   ways a fix written to close a finding is itself vacuous — each with
-   its general correction.
+   fail is decorative, and decorative checks are findings. The recurring
+   mechanisms by which a fully green run proves nothing are coverage a
+   policy suite cannot see, fixtures and gates that disable themselves,
+   and a fix written to close a finding that is itself vacuous.
 4. Probe for flakes: the author runs the complete local gate once on the
    final head; the reviewer runs the focused checks its findings need,
    plus the race detector where the language has one, and MAY re-run the

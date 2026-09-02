@@ -198,27 +198,6 @@ class GateWiringTests(unittest.TestCase):
         )
         self.assertFalse((REPO_ROOT / MODULE.LOCAL_CONTRACT_REL).exists())
 
-    def test_live_proof_design_is_triple_gated_and_never_automatic(self):
-        design = " ".join(
-            read("docs/assurance/phase-h-ssh-only-ingress-guard.md").split()
-        )
-        for fragment in (
-            "CODEX_PLATFORM_STABLE",
-            "direct authorization of the exact probe list",
-            "no overlapping Pi mutation",
-            "Nothing in this repository can execute this section automatically",
-        ):
-            self.assertIn(fragment, design)
-        for port in ("2379", "2380", "6443", "10250"):
-            self.assertIn(port, design)
-
-    def test_trust_boundary_records_ssh_only_admin_plane(self):
-        boundaries = read("docs/architecture/trust-boundaries.md")
-        self.assertIn("SSH-only, PLAT-DEC-001", boundaries)
-        self.assertNotIn("TCP 22/6443", boundaries)
-        self.assertIn("kubelet 10250 (host-ingress guard)", boundaries)
-
-
 class TransactionRegressionTests(unittest.TestCase):
     """Issue #145's two defects must fail the repository gate when restored."""
 

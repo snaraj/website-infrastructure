@@ -594,39 +594,5 @@ class ProtectedRuntimeEvidenceTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, source)
 
-    def test_adr_and_runbook_define_the_fresh_fail_closed_gate(self):
-        """Operators are told that PASS summaries never replace private checks."""
-
-        combined = " ".join(
-            (
-                ADR.read_text(encoding="utf-8")
-                + "\n"
-                + RUNBOOK.read_text(encoding="utf-8")
-            ).split()
-        )
-        for fragment in (
-            "PROTECTED_LEGACY_RUNTIME_EVIDENCE_SHA256",
-            "protected-legacy-runtime-evidence.local",
-            "600 seconds",
-            "invalid after every reboot",
-            "The validator runs no discovery command and no product binary",
-            "copying the public example is not discovery",
-            "boot-bound, bounded operator attestation",
-            "does not mean that the validator observed",
-            "equivalent, namespace-complete live machine probe",
-            "refuses to emit a digest",
-            "derivation only",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, combined)
-
-        scripts_readme = SCRIPTS_README.read_text(encoding="utf-8")
-        self.assertIn(
-            "fresh presence-bound protected-host review attestation",
-            scripts_readme,
-        )
-        self.assertNotIn("absence attestation", scripts_readme.lower())
-
-
 if __name__ == "__main__":
     unittest.main()

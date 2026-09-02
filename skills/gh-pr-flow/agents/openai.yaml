@@ -1,6 +1,0 @@
-interface:
-  display_name: "GitHub PR Flow"
-  short_description: "Owner-only merge flow with exact-head review and releases"
-  default_prompt: "Use $gh-pr-flow to handle this GitHub change with issue-first metadata, isolated append-only authoring, exact-head adversarial review, an enforced release consequence, and absolute NEVER MERGE authority."
-policy:
-  allow_implicit_invocation: true

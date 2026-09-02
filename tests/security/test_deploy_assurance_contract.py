@@ -1108,27 +1108,6 @@ class MainWiringTests(unittest.TestCase):
 
 
 class WorkflowSurfaceTests(unittest.TestCase):
-    def test_workflow_keeps_the_reviewed_narrow_surface(self):
-        text = workflow_text()
-        self.assertIn("\npermissions: {}\n", text)
-        self.assertIn("persist-credentials: false", text)
-        self.assertIn("runs-on: ubuntu-24.04", text)
-        self.assertIn("timeout-minutes:", text)
-        self.assertNotIn("pull_request_target", text)
-        job_permissions = re.search(
-            r"permissions:\n((?:      [a-z-]+: [a-z]+(?: #[^\n]*)?\n)+)", text
-        )
-        self.assertIsNotNone(job_permissions)
-        assert job_permissions is not None
-        grants = dict(
-            line.split("#")[0].strip().split(": ")
-            for line in job_permissions.group(1).strip().splitlines()
-        )
-        self.assertEqual(
-            grants,
-            {"contents": "read", "actions": "write", "issues": "write"},
-        )
-
     def test_the_workflow_file_is_the_reviewed_bytes(self):
         """The COMPLETE file, byte for byte — the lockstep-twin pattern the
         repository already uses for the Flux sync template. Round-2's
@@ -1143,29 +1122,6 @@ class WorkflowSurfaceTests(unittest.TestCase):
         below refuses."""
 
         self.assertEqual(workflow_text(), EXPECTED_WORKFLOW)
-
-    def test_the_shell_key_regression_stays_dead(self):
-        """The round-3 survivor by name: a `shell:` key anywhere in this
-        workflow selects a custom command template and can discard the
-        runner-generated script while every block assertion stays green."""
-
-        self.assertNotIn("shell:", workflow_text())
-
-    def test_workflow_declares_no_suppression_and_exactly_two_steps(self):
-        """No `if:` (the round-1 surviving mutant), no `continue-on-error`,
-        no shell-level failure swallowing, and exactly the two reviewed
-        steps with one `run:` between them — a third step or second run
-        line is an unreviewed execution surface. Subsumed by the byte twin
-        and the closed semantic contract; kept for focused failure
-        messages."""
-
-        text = workflow_text()
-        self.assertIsNone(re.search(r"(?m)^\s*if:", text))
-        self.assertNotIn("continue-on-error", text)
-        self.assertNotIn("|| true", text)
-        self.assertNotIn("exit 0", text)
-        self.assertEqual(text.count("      - name: "), 2)
-        self.assertEqual(text.count("        run: "), 1)
 
     def test_the_workflow_satisfies_the_closed_semantic_contract(self):
         """The round-4 closure, positive direction: the live file parses

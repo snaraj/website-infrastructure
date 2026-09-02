@@ -39,7 +39,6 @@ class CiToolPinTests(unittest.TestCase):
 
         keys = (
             "TRIVY_VERSION",
-            "SYFT_VERSION",
             "GITLEAKS_VERSION",
             "ACTIONLINT_VERSION",
             "KUBECONFORM_VERSION",
@@ -48,7 +47,6 @@ class CiToolPinTests(unittest.TestCase):
             "OPENTOFU_VERSION",
             "HELM_VERSION",
             "ORAS_VERSION",
-            "HADOLINT_VERSION",
             "COSIGN_VERSION",
             "SHELLCHECK_VERSION",
             "KUBERNETES_VERSION",
@@ -86,13 +84,6 @@ class CiToolPinTests(unittest.TestCase):
         expected_asset = "actionlint_{}_linux_amd64.tar.gz".format(version)
         self.assertIn(expected_asset, self.installer)
         self.assertNotIn("actionlint_{}_linux_x86_64.tar.gz".format(version), self.installer)
-
-        hadolint = self.versions["HADOLINT_VERSION"].lstrip("v")
-        self.assertIn(
-            "hadolint/releases/download/v{}/hadolint-linux-x86_64".format(hadolint),
-            self.installer,
-        )
-        self.assertNotIn("hadolint-Linux-x86_64", self.installer)
 
         cosign = self.versions["COSIGN_VERSION"]
         self.assertIn(

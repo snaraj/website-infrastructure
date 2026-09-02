@@ -107,7 +107,6 @@ infrastructure/        credential-free OpenTofu for Cloudflare
 kubernetes/            desired state for the single environment
 policies/              Conftest static controls
 scripts/               the "prove it first" validator suite
-skills/                reusable agent/operator workflows
 tests/                 allow/deny fixtures collected by canonical unittest discovery
 ```
 
@@ -153,8 +152,7 @@ can never claim a number the gate did not measure.
   and [zero-spend Cloudflare](docs/adr/0006-cloudflare-zero-spend.md).
 - **Operating it?** The [runbooks](docs/runbooks/), each with explicit stop
   points; no script here is permission to touch a live system.
-- **An AI agent?** The [skills](skills/) directory, especially
-  [gh-pr-flow](skills/gh-pr-flow/SKILL.md); audits under
+- **An AI agent?** `AGENTS.md` is the whole contract; audits under
   [docs/audits](docs/audits/) map the current state honestly.
 
 ## Forking this
@@ -172,7 +170,6 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Gate | State |
 | --- | --- |
 | Repository and policies | Credential-free scaffold + negative-policy tests implemented; live evidence pending |
-| Kyverno | Retired: absent live, no installer, controller desired state, policy tree, or webhook claim |
 | Pi discovery | Read-only discovery completed; private evidence stays off Git |
 | Independent recovery drill | Not proven; host/network/cluster mutation blocked |
 | Protected legacy archive | Local archive exists; off-device restore proof pending |

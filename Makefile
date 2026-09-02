@@ -4,7 +4,7 @@ SHELL := /usr/bin/env bash
 PYTHON ?= python3
 .DEFAULT_GOAL := help
 
-.PHONY: help check check-fast release-check pre-push-security check-layout check-privacy check-secrets check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-tofu check-determinism check-ingress-guard flux-rbac-kind-acceptance coverage coverage-refresh
+.PHONY: help check check-fast release-check pre-push-security check-gitleaks check-workflows check-kubernetes check-cloudflare check-shell check-determinism check-ingress-guard flux-rbac-kind-acceptance coverage coverage-refresh
 
 help:
 	@printf '%s\n' \
@@ -12,15 +12,11 @@ help:
 	  'check-fast       Run repository checks requiring only Python and Git' \
 	  'release-check    Reject every deployment sentinel/suspension' \
 	  'pre-push-security Rehearse the origin/main..HEAD publication gate' \
-	  'check-layout     Reject local-only or forbidden repository layout content' \
-	  'check-privacy    Reject private workstation, identity, and host context' \
-	  'check-secrets    Reject committed secret material and plaintext config' \
 	  'check-gitleaks   Scan the working tree with the pinned gitleaks policy' \
 	  'check-shell      Shellcheck every tracked shell entry point' \
 	  'check-workflows  Actionlint the GitHub Actions workflows' \
 	  'check-kubernetes Render/schema/policy-test Kubernetes desired state' \
 	  'check-cloudflare Validate OpenTofu formatting and plan fixtures' \
-	  'check-tofu       Alias for check-cloudflare' \
 	  'check-determinism Prove two renders of the selected mode are identical' \
 	  'check-ingress-guard Verify the SSH-only admin-ingress guard artifacts' \
 	  'flux-rbac-kind-acceptance Run full Flux RBAC/Kustomize/Helm acceptance in a new isolated owned kind cluster' \
@@ -42,15 +38,6 @@ release-check:
 
 pre-push-security:
 	@./scripts/pre-push-security.sh "$$(git rev-parse --verify refs/remotes/origin/main^{commit})" "$$(git rev-parse --verify HEAD^{commit})"
-
-check-layout:
-	@$(PYTHON) scripts/validate_repository.py layout
-
-check-privacy:
-	@$(PYTHON) scripts/validate_repository.py privacy
-
-check-secrets:
-	@$(PYTHON) scripts/validate_repository.py secrets
 
 check-gitleaks:
 	@gitleaks dir --no-banner --redact --config policies/gitleaks.toml .
@@ -125,8 +112,6 @@ flux-rbac-kind-acceptance:
 	  "$${FLUX_RBAC_PYTHON}" -I -B -S "$${harness}" \
 	    --expected-commit "$${FLUX_RBAC_EXPECTED_COMMIT}" \
 	    --receipt "$${FLUX_RBAC_RECEIPT_PATH}"
-
-check-tofu: check-cloudflare
 
 # Coverage measurement writes its data outside the checkout (measurement
 # artifacts in the tree would trip the ambient-artifact checks) and needs the

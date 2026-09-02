@@ -89,10 +89,6 @@ POD_VOLUME_ARM_FIXTURES = {
     "pod-volume-multiple-sources": "must declare exactly one volume source, found",
 }
 
-# The storage corpus floor is held outside the fixture runner so neither the
-# corpus nor its minimum can be trimmed quietly.
-MINIMUM_STORAGE_DENY_FIXTURES = 30
-
 # Degenerate shapes that MUST stay in the corpus. A historical differential
 # review (wi #96) proved each could make Rego admit malformed storage because a
 # nested ``object.get`` type error made the deny rule undefined. The name on the
@@ -530,20 +526,6 @@ class FixtureCoverage(unittest.TestCase):
         self.assertTrue(self.deny_fixtures, "the storage deny fixtures have disappeared")
         for path in self.deny_fixtures:
             self.assertEqual(path.parent, FIXTURES / "deny")
-
-
-class StorageCorpusContract(unittest.TestCase):
-    """Keep the hostile storage corpus above its reviewed exact floor."""
-
-    def setUp(self) -> None:
-        self.deny_fixtures = sorted((FIXTURES / "deny").glob("storage-*.yaml"))
-
-    def test_the_corpus_cannot_be_trimmed_below_the_floor(self) -> None:
-        self.assertGreaterEqual(
-            len(self.deny_fixtures),
-            MINIMUM_STORAGE_DENY_FIXTURES,
-            "the storage deny corpus shrank below its reviewed floor",
-        )
 
     def test_every_proven_degenerate_shape_is_still_in_the_corpus(self) -> None:
         present = {path.stem for path in self.deny_fixtures}

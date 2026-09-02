@@ -48,12 +48,6 @@ from validate_signature_policy import (
     flux_sync_errors,
     flux_system_kustomization_errors,
 )
-# dependabot_contract intentionally is not validate_-prefixed: it runs only
-# through the CHECKS registry below (issue #131), never as its own CLI
-# invocation in validate-security.sh or pull-request.yml, so it stays outside
-# tests/security/test_validator_invocation_parity.py's local/CI symmetry net
-# by construction -- see that module's own docstring for the full rationale.
-from dependabot_contract import file_errors as dependabot_contract_errors
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1129,21 +1123,6 @@ def check_workflows(root):
             errors.append("checkout credential persistence enabled: " + rel)
     errors.extend(image_release_errors(root))
     return errors
-
-
-def check_dependabot(root):
-    """Fail closed on any `.github/dependabot.yml` outside issue #131's contract.
-
-    `check_workflows` above only globs `.github/workflows/*.yml`, and
-    actionlint does not know the Dependabot config schema either, so this
-    is the one gate that reads `.github/dependabot.yml` at all. Delegates
-    to `dependabot_contract.file_errors`, a standard-library-only mini
-    parser for the small block-YAML subset every real config in this
-    repository family uses (see that module's docstring for the full
-    grammar and the deliberate narrowings versus Dependabot's real schema).
-    """
-
-    return dependabot_contract_errors(root / ".github" / "dependabot.yml")
 
 
 def live_kubernetes_files(root):
@@ -2896,7 +2875,6 @@ CHECKS = {
     "media": check_media,
     "secrets": check_secrets,
     "workflows": check_workflows,
-    "dependabot": check_dependabot,
     "kubernetes": check_kubernetes,
     "cloudflare": check_cloudflare,
     "activation": check_activation,

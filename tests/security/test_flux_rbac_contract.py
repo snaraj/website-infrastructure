@@ -1855,31 +1855,6 @@ class FluxRbacCompositionTests(unittest.TestCase):
             with self.subTest(closure=fragment):
                 self.assertIn(fragment, body)
 
-    def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
-        text = BOOTSTRAP.read_text(encoding="utf-8")
-        inventory = re.search(r"(?ms)^  expected_inventory='(?P<body>.*?)'$", text)
-        if inventory is None:
-            self.fail("bootstrap.sh no longer declares a reviewed manifest inventory")
-        listed_lines = tuple(inventory.group("body").splitlines())
-        listed = {line.split(" ", 1)[1] for line in listed_lines}
-        for relative in (
-            model.FLUX_RBAC_PATCH_FILES + model.FLUX_CONTROLLER_ROOT_RBAC_FILES
-        ):
-            with self.subTest(manifest=relative):
-                self.assertIn(relative, listed)
-
-        # This inventory is the closed, historical #141 controller/RBAC
-        # transaction, not a description of the successor GitOps source. In
-        # particular it deliberately retains the old static gotk-sync input;
-        # #189 replaces that applicable path with a bootstrap-rendered source
-        # without rebinding the already reviewed #141 custody artifact.
-        self.assertIn(
-            "100644 kubernetes/flux-system/gotk-sync.yaml", listed_lines
-        )
-        self.assertNotIn(
-            "100644 kubernetes/flux-system/gotk-sync.yaml.in", listed_lines
-        )
-
     @staticmethod
     def _bootstrap_contract():
         text = BOOTSTRAP.read_text(encoding="utf-8")

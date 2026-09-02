@@ -76,7 +76,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -460,84 +459,6 @@ class CriHealthContractMatrixTests(unittest.TestCase):
         # CRI API and must fail the three-row contract. Xfail until the
         # shipped probe set says so.
         self.assertFalse(self.accepts(FRONTEND_MISSING["frontend_unhealthy_error"]))
-
-
-class ShippedPatternExtractionTests(unittest.TestCase):
-    """The extraction path itself, exercised on spellings nobody ships.
-
-    ``_SHIPPED`` keys on one spelling, so every assertion in the matrix above
-    is only as good as what reaches it. These cases drive the real extraction
-    helper — the same function ``setUpClass`` calls — over probes written the
-    ways a rewrite could reach for, and they are what turns "the canonicaliser
-    is imported" into "the canonicaliser is wired in" (issue #51). Deleting
-    the ``canonicalize_probe_spellings`` call from ``script_text`` turns these
-    red; the matrix above, reading only today's byte-identical scripts, would
-    not notice.
-    """
-
-    # Each entry is a functionally identical probe for the stale 1.x row,
-    # written a way ``_SHIPPED`` cannot see on its own.
-    EVASIVE = {
-        "escaped dots in double quotes": (
-            'grep -Eq "^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]" <<<"$rows"'
-        ),
-        "escaped dots, flags joined the other way": (
-            "grep -qE '^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]' <<<\"$rows\""
-        ),
-        "escaped dots, flags written separately": (
-            "grep -E -q '^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]' <<<\"$rows\""
-        ),
-        "long option names": (
-            "grep --extended-regexp --quiet "
-            "'^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]' <<<\"$rows\""
-        ),
-        "ansi-c quoting": (
-            "grep -Eq $'^io\\.containerd\\.grpc\\.v1[[:space:]]+cri[[:space:]]' <<<\"$rows\""
-        ),
-    }
-    REVIEWED = "^io[.]containerd[.]grpc[.]v1[[:space:]]+cri[[:space:]]"
-
-    def scratch_script(self, body):
-        """Stage one throwaway script; private directory, removed after."""
-
-        directory = tempfile.mkdtemp(
-            prefix="cri-extract-", dir=os.environ.get("TMPDIR")
-        )
-        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
-        script = Path(directory) / "verify.sh"
-        script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n")
-        return script
-
-    def test_todays_scripts_extract_exactly_what_they_did_before(self):
-        """The canonicaliser must not invent or drop a shipped probe."""
-
-        for path in SCRIPTS:
-            with self.subTest(script=path.name):
-                raw = frozenset(_SHIPPED.findall(path.read_text(encoding="utf-8")))
-                self.assertEqual(_extract_shipped_patterns(path), raw)
-                self.assertTrue(raw, path.name)
-
-    def test_every_evasive_spelling_reaches_the_extractor(self):
-        for label, body in self.EVASIVE.items():
-            with self.subTest(spelling=label):
-                script = self.scratch_script(body)
-                raw = script.read_text(encoding="utf-8")
-                # Vacuity: the case is only a test if the raw bytes really do
-                # hide the probe from the pattern this battery keys on.
-                self.assertEqual(_SHIPPED.findall(raw), [], label)
-                self.assertEqual(
-                    _extract_shipped_patterns(script), frozenset({self.REVIEWED})
-                )
-
-    def test_the_reviewed_spelling_is_extracted_unchanged(self):
-        """The other direction, so the probe above is not merely permissive."""
-
-        script = self.scratch_script(
-            "grep -Eq '" + self.REVIEWED + "' <<<\"$rows\""
-        )
-        self.assertEqual(
-            _extract_shipped_patterns(script), frozenset({self.REVIEWED})
-        )
 
 
 if __name__ == "__main__":

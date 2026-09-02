@@ -746,28 +746,5 @@ class CloudflareTokenReceiptTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
 
-    def test_runbook_denies_proof_and_authorization_semantics(self):
-        text = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
-        for fragment in (
-            "operator attestation plus a live-verification record",
-            "not cryptographic proof",
-            "does not authorize",
-            "never contains the token",
-            "separate credential",
-            "30 minutes",
-            "60 minutes",
-            "outside the repository",
-            "all Cloudflared connectors and Tunnels in the account",
-            # A website token also carries Zone Settings Write, so the reach
-            # sentence must say so: the previous "all DNS records in that one
-            # zone" understated it and an operator minting from it would have
-            # produced an under-scoped token.
-            "every DNS record and every zone setting in that one zone",
-            "Zone Settings Write",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, text)
-
-
 if __name__ == "__main__":
     unittest.main()

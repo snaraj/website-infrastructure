@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Validate exact-head adversarial-review and Main Worker receipt shapes.
+"""Validate the exact-head adversarial-review receipt shape.
 
 This validator proves TEXT SHAPE and nothing else. It never sees who posted a
 comment, which is where AGENTS.md locates reviewer independence, and it never
-confers Ready or merge authority. The `main-worker` receipt kind below is
-contract-retired and kept only until issue #188 removes its remaining call
-sites; see its docstring.
+confers Ready or merge authority.
 """
 
 import argparse
@@ -16,14 +14,9 @@ from pathlib import Path
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SIGNATURE = re.compile(r"^- (.+?) \(adversarial reviewer\)$")
-MAIN_WORKER_SIGNATURE = re.compile(r"^- (.+?) \(Main Worker\)$")
 VERDICTS = frozenset({"APPROVE", "REQUEST-CHANGES"})
 # A verdict the owner reads in one sitting: AGENTS.md caps a receipt here.
 RECEIPT_BYTE_CEILING = 6000
-MAIN_WORKER_VERDICTS = frozenset({"BLOCK", "PASS"})
-MAIN_WORKER_SCOPE = (
-    "architecture,merge-order,authority,settings,base-freshness,required-checks"
-)
 
 
 def denial(text, expected_head, resource_kind):
@@ -74,81 +67,17 @@ def denial(text, expected_head, resource_kind):
     return None
 
 
-def main_worker_denial(
-    text,
-    expected_head,
-    author_context,
-    reviewer_context,
-    resource_kind,
-    required_verdict="PASS",
-):
-    """Require one fresh, role-separated, bounded Ready-coordination receipt.
-
-    TRANSITIONAL. The Main Worker Ready receipt is RETIRED in contract: per
-    AGENTS.md the coordinator flips Ready straight after an exact-head
-    APPROVE, and no receipt of this kind is a Ready input. This kind stays
-    executable only so the skill, template, and gate rows that still name it
-    are removed together by issue #188's machinery pass, rather than leaving
-    documented call sites pointing at an absent capability. Do not build new
-    call sites on it.
-    """
-    if resource_kind != "pull-request":
-        return "Main Worker receipts apply only to pull requests"
-    if not SHA.fullmatch(expected_head):
-        return "expected head is not one lowercase 40-hex SHA"
-    if required_verdict not in MAIN_WORKER_VERDICTS:
-        return "required Main Worker verdict is unsupported"
-    lines = text.replace("\r\n", "\n").splitlines()
-    heads = [line[6:] for line in lines if line.startswith("HEAD: ")]
-    roles = [line[6:] for line in lines if line.startswith("ROLE: ")]
-    verdicts = [line[9:] for line in lines if line.startswith("VERDICT: ")]
-    scopes = [line[7:] for line in lines if line.startswith("SCOPE: ")]
-    if heads != [expected_head]:
-        return "Main Worker receipt must bind exactly one expected HEAD line"
-    if roles != ["MAIN-WORKER"]:
-        return "Main Worker receipt must contain exactly ROLE: MAIN-WORKER"
-    if verdicts != [required_verdict]:
-        return "Main Worker receipt does not carry the exact required verdict"
-    if scopes != [MAIN_WORKER_SCOPE]:
-        return "Main Worker receipt scope is missing, widened, or reordered"
-    nonempty = [line for line in lines if line.strip()]
-    if not nonempty:
-        return "Main Worker receipt is empty"
-    match = MAIN_WORKER_SIGNATURE.fullmatch(nonempty[-1])
-    if not match:
-        return "final non-empty line must be Main Worker signature"
-    worker = match.group(1).strip().casefold()
-    excluded = {
-        author_context.strip().casefold(),
-        reviewer_context.strip().casefold(),
-    }
-    if (
-        not worker
-        or not all(excluded)
-        or len(excluded) != 2
-        or worker in excluded
-    ):
-        return "Main Worker context must differ textually from author and reviewer"
-    return None
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("receipt", type=Path)
     parser.add_argument("--head", required=True)
-    # Optional for adversarial-review receipts since issue #203 retired the
-    # textual author/reviewer comparison; documented call sites that still
-    # pass it keep working. The retired main-worker kind still requires it.
+    # Accepted but ignored since issue #203 retired the textual
+    # author/reviewer comparison; documented call sites that still pass it
+    # keep working.
     parser.add_argument("--author-context")
     parser.add_argument("--resource-kind", required=True)
     parser.add_argument(
-        "--receipt-kind",
-        choices=("adversarial-review", "main-worker"),
-        default="adversarial-review",
-    )
-    parser.add_argument("--reviewer-context")
-    parser.add_argument(
-        "--required-verdict", choices=("APPROVE", "REQUEST-CHANGES", "PASS", "BLOCK")
+        "--required-verdict", choices=("APPROVE", "REQUEST-CHANGES")
     )
     args = parser.parse_args(argv)
     try:
@@ -156,37 +85,13 @@ def main(argv=None):
     except OSError as exc:
         print(f"DENY: {exc}", file=sys.stderr)
         return 1
-    if args.receipt_kind == "adversarial-review":
-        if args.reviewer_context is not None or args.required_verdict not in (
-            None,
-            "APPROVE",
-            "REQUEST-CHANGES",
-        ):
-            reason = "adversarial-review receipt options are inconsistent"
-        else:
-            reason = denial(text, args.head, args.resource_kind)
-            if reason is None and args.required_verdict is not None:
-                lines = text.replace("\r\n", "\n").splitlines()
-                if [line[9:] for line in lines if line.startswith("VERDICT: ")] != [
-                    args.required_verdict
-                ]:
-                    reason = "adversarial-review receipt does not carry the required verdict"
-    else:
-        if args.author_context is None:
-            reason = "Main Worker receipt requires the author context"
-        elif args.reviewer_context is None:
-            reason = "Main Worker receipt requires the adversarial reviewer context"
-        elif args.required_verdict not in (None, "PASS", "BLOCK"):
-            reason = "Main Worker receipt options are inconsistent"
-        else:
-            reason = main_worker_denial(
-                text,
-                args.head,
-                args.author_context,
-                args.reviewer_context,
-                args.resource_kind,
-                args.required_verdict or "PASS",
-            )
+    reason = denial(text, args.head, args.resource_kind)
+    if reason is None and args.required_verdict is not None:
+        lines = text.replace("\r\n", "\n").splitlines()
+        if [line[9:] for line in lines if line.startswith("VERDICT: ")] != [
+            args.required_verdict
+        ]:
+            reason = "receipt does not carry the required verdict"
     if reason:
         print(f"DENY: {reason}", file=sys.stderr)
         return 1

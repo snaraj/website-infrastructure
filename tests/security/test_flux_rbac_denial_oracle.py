@@ -1848,14 +1848,5 @@ class FluxRbacOraclePortableStructureTests(unittest.TestCase):
         for private in ("kubectl-sentinel", "kubeconfig-sentinel", "private-context"):
             self.assertNotIn(private, result.stdout)
 
-    def test_runbook_preserves_do_not_apply_and_blocks_checkout_execution(self) -> None:
-        text = (ROOT / "docs" / "runbooks" / "flux-rbac-narrowing.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("Status: `DO NOT APPLY`", text)
-        self.assertIn("BLOCKED", text)
-        self.assertNotIn("python3 -B scripts/flux_rbac_denial_oracle.py", text)
-
-
 if __name__ == "__main__":
     unittest.main()

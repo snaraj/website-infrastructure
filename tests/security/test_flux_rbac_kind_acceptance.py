@@ -2381,7 +2381,7 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("$(value EXPECTED_COMMIT)", makefile)
         self.assertIn("GIT_NO_LAZY_FETCH=1", target)
         self.assertIn("fsck --strict --full --no-reflogs", target)
-        recipe = target.split("check-tofu:", 1)[0]
+        recipe = target.split("# Coverage measurement", 1)[0]
         self.assertNotIn('"$(EXPECTED_COMMIT)"', recipe)
         self.assertNotIn('"$(FLUX_RBAC_KIND_RECEIPT)"', recipe)
 
