@@ -115,6 +115,7 @@ REQUIRED_CHECKS = ("dependency-review", "repository-and-infrastructure")
 # other writer is never a required check, and two runs of one name at one
 # head are ambiguous, so both fail closed.
 REQUIRED_CHECK_APP = "github-actions"
+ACCEPTABLE_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
@@ -1373,6 +1374,9 @@ def status_exit_code(report: dict) -> int:
     return 3 if any(entry["verdict"] != "current" for entry in report.values()) else 0
 
 
+NOT_FOUND_RE = re.compile(r"\(HTTP 404\)")
+
+
 def latest_release(github: GitHub, repository: str) -> tuple:
     """``(version-without-v, tag)`` of the latest published Release, or
     ``(None, None)`` when the repository publishes nothing."""
@@ -1380,7 +1384,10 @@ def latest_release(github: GitHub, repository: str) -> tuple:
     try:
         release = github.api(f"repos/{repository}/releases/latest")
     except Refusal as error:
-        if "404" in str(error):
+        # Only gh's own anchored status marker for Not Found means "publishes
+        # nothing"; any other refusal (a transport failure that happens to
+        # mention 4040, a 403, a 5xx) propagates with its real classification.
+        if NOT_FOUND_RE.search(str(error)):
             return None, None
         raise
     tag = release.get("tag_name", "")
@@ -1499,8 +1506,14 @@ def ready_decision(
             reasons.append(f"required check {name} was not produced by {REQUIRED_CHECK_APP}")
         elif check.get("status") != "completed" or check.get("conclusion") != "success":
             reasons.append(f"required check {name} has not succeeded at this head")
-    if any(check.get("conclusion") in {"failure", "timed_out", "cancelled", "action_required"} for check in checks):
-        reasons.append("a check at this head failed")
+    # Every completed check at the head, required or not, must have ended in
+    # one of the conclusions that mean "nothing went wrong": an explicit
+    # allowlist, so GitHub's other terminal conclusions (failure, timed_out,
+    # cancelled, action_required, stale) and any value this code has never
+    # seen all fail closed. A check still running is not a conclusion.
+    for check in checks:
+        if check.get("status") == "completed" and check.get("conclusion") not in ACCEPTABLE_CONCLUSIONS:
+            reasons.append(f"a check at this head did not succeed: {check.get('name')} ended {check.get('conclusion')}")
     if behind_by:
         reasons.append(f"branch is {behind_by} commit(s) behind main")
     if require_draft and not is_draft:

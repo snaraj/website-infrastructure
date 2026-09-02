@@ -927,6 +927,17 @@ class ReadyRuleTests(unittest.TestCase):
     def checks(self, conclusion="success", app=MODULE.REQUIRED_CHECK_APP, other="neutral"):
         return [{"name": name, "status": "completed", "conclusion": conclusion, "app": app} for name in MODULE.REQUIRED_CHECKS] + [{"name": "CodeQL", "status": "completed", "conclusion": other, "app": "github-code-scanning"}]
 
+    def test_skipped_and_still_running_checks_that_are_not_required_do_not_block(self):
+        good = [self.receipt(self.HEAD, "APPROVE", "Opus5"), self.receipt(self.HEAD, "APPROVE", "Codex")]
+        for extra in (
+            {"name": "CodeQL", "status": "completed", "conclusion": "skipped", "app": "github-code-scanning"},
+            {"name": "CodeQL", "status": "in_progress", "conclusion": None, "app": "github-code-scanning"},
+        ):
+            with self.subTest(extra=extra):
+                checks = self.checks()[:-1] + [extra]
+                self.assertEqual(MODULE.ready_decision(self.HEAD, list(MODULE.PR_LABELS), good, checks, 0, True), (True, []))
+        self.assertEqual(MODULE.ACCEPTABLE_CONCLUSIONS, frozenset({"success", "neutral", "skipped"}), "the allowlist is the contract; widen it only with a case here")
+
     def test_two_distinct_exact_head_approvals_with_green_checks_flip(self):
         # Both receipts come from the ONE reviews App principal and differ
         # only by lane signature: that is the repository's manual Ready rule
@@ -956,8 +967,12 @@ class ReadyRuleTests(unittest.TestCase):
             "required check name duplicated by another app": (["release"], good, self.checks() + [{"name": MODULE.REQUIRED_CHECKS[0], "status": "completed", "conclusion": "success", "app": "mallory-ci"}], 0, True, "appears 2 times"),
             "requires-review armed": (["requires-review"], good, self.checks(), 0, True, "still armed"),
             "check failed": (["release"], good, self.checks("failure"), 0, True, "has not succeeded"),
-            "a check that is not required failed": (list(MODULE.PR_LABELS), good, self.checks(other="failure"), 0, True, "a check at this head failed"),
-            "a check that is not required timed out": (list(MODULE.PR_LABELS), good, self.checks(other="timed_out"), 0, True, "a check at this head failed"),
+            "a check that is not required failed": (list(MODULE.PR_LABELS), good, self.checks(other="failure"), 0, True, "a check at this head did not succeed: CodeQL ended failure"),
+            "a check that is not required timed out": (list(MODULE.PR_LABELS), good, self.checks(other="timed_out"), 0, True, "did not succeed: CodeQL ended timed_out"),
+            "a check that is not required is stale": (list(MODULE.PR_LABELS), good, self.checks(other="stale"), 0, True, "did not succeed: CodeQL ended stale"),
+            "a check that is not required was cancelled": (list(MODULE.PR_LABELS), good, self.checks(other="cancelled"), 0, True, "did not succeed: CodeQL ended cancelled"),
+            "a check that is not required needs action": (list(MODULE.PR_LABELS), good, self.checks(other="action_required"), 0, True, "did not succeed: CodeQL ended action_required"),
+            "a check that is not required ended in a conclusion this code has never seen": (list(MODULE.PR_LABELS), good, self.checks(other="mystery"), 0, True, "did not succeed: CodeQL ended mystery"),
             "check pending": (["release"], good, [{"name": n, "status": "in_progress", "conclusion": None, "app": MODULE.REQUIRED_CHECK_APP} for n in MODULE.REQUIRED_CHECKS], 0, True, "has not succeeded"),
             "check missing": (["release"], good, [], 0, True, "appears 0 times"),
             "behind main": (["release"], good, self.checks(), 2, True, "behind main"),
@@ -1915,11 +1930,18 @@ class RunbookAndLaunchdTests(unittest.TestCase):
         fleet = FakeFleet()
         self.assertEqual(MODULE.latest_release(fleet.github(), "snaraj/publishes-nothing"), (None, None), "the API's 404 means the repository publishes nothing")
 
-        def down(argv, cwd=None, input_text=None, env=None, timeout=None):
-            raise MODULE.Refusal("`gh api` exited 1: transport failure")
+        for text in (
+            "`gh api` exited 1: transport failure",
+            "`gh api` exited 1: proxy port 4040 refused the connection",
+            "`gh api` exited 1: gh: Forbidden (HTTP 403)",
+            "`gh api` exited 1: gh: Bad Gateway (HTTP 5404)",
+        ):
+            with self.subTest(refusal=text):
+                def down(argv, cwd=None, input_text=None, env=None, timeout=None, text=text):
+                    raise MODULE.Refusal(text)
 
-        with self.assertRaisesRegex(MODULE.Refusal, "transport failure"):
-            MODULE.latest_release(MODULE.GitHub(run=down, fetch=fleet.fetch), "snaraj/publishes-nothing")
+                with self.assertRaisesRegex(MODULE.Refusal, re.escape(text)):
+                    MODULE.latest_release(MODULE.GitHub(run=down, fetch=fleet.fetch), "snaraj/publishes-nothing")
 
 
 if __name__ == "__main__":  # pragma: no cover
