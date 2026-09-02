@@ -558,6 +558,15 @@ authority: the owner alone merges.
   repository owner's behalf`. Treat older model-specific umbrella descriptions
   as coordinator/server-metadata cleanup across all repositories; keep the
   per-model label as provenance.
+  The receipted release-promotion automation (`scripts/promote_releases.py`,
+  issue #286, runbook `docs/runbooks/release-promotion.md`) is NOT an agent:
+  its pull requests carry `promoter` in place of the agent pair, its commit
+  and pull-request bodies end with `- Promoter`, and it runs under the
+  owner's own keyring credential and signing key. Its standing authority is
+  exactly: open Draft promotion pull requests from a receipted acquisition,
+  arm `requires-review` and `cybersecurity-review-requested`, and flip Ready
+  only when the exact head carries two distinct adversarial APPROVE
+  receipts with green required checks and a current base. It never merges.
   Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep
