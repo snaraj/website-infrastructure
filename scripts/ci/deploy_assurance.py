@@ -169,17 +169,22 @@ def preserved_estimate(body):
     added was gone before the next review handoff and the pull request's
     actuals had nothing to be measured against (PR #303, findings 4 and 3).
 
-    Exactly one appended block survives, and only from this heading to the end:
-    the evidence sentence above it is still rewritten wholesale, so no text a
-    reader could mistake for the watchdog's own finding can be smuggled into
-    its report. The trailing lane signature is dropped because the caller
+    What survives is ONE terminal estimate section and nothing else, because
+    anything looser is a channel for writing the watchdog's own report: the
+    heading must be a whole line equal to the constant (not a mention inside a
+    sentence), must occur exactly once, and must be the last `## ` heading in
+    the body (a sibling section appended after a real estimate would ride along
+    otherwise). Every other shape is ambiguous, and ambiguity preserves NOTHING
+    — the regenerated evidence wins, which is the fail-closed direction (PR #305
+    finding 2). The trailing lane signature is dropped because the caller
     re-adds it, keeping exactly one at the end of the recomposed body.
     """
 
-    _, marker, tail = body.partition(ESTIMATE_HEADING)
-    if not marker:
+    lines = body.splitlines()
+    marks = [i for i, line in enumerate(lines) if line == ESTIMATE_HEADING]
+    if len(marks) != 1 or any(line.startswith("## ") for line in lines[marks[0] + 1:]):
         return ""
-    block = (marker + tail).rstrip()
+    block = "\n".join(lines[marks[0]:]).rstrip()
     if block.endswith(SIGNATURE):
         block = block[: -len(SIGNATURE)].rstrip()
     return "\n\n" + block

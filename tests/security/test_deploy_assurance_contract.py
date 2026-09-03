@@ -585,6 +585,33 @@ class IssueReconciliationTests(unittest.TestCase):
         assurance.reconcile_issues(fresh, {drift: "fresh evidence"}, apply=True)
         self.assertEqual(assurance.preserved_estimate(""), "")
 
+    def test_every_ambiguous_estimate_shape_preserves_nothing(self):
+        """PR #305 finding 2: a substring match carrying everything after it let
+        an inline mention, and a sibling section appended after a real estimate,
+        ride into the regenerated report. Each shape below preserved a forged
+        tail; each must now preserve nothing, so the watchdog's own text wins."""
+
+        estimate = "## Estimate\n\n13 files, net about +80 lines, two rounds."
+        for reason, existing in (
+            # The marker inside a sentence, with the forgery after it.
+            ("inline mention", "evidence mentioning ## Estimate inline\nforged tail"),
+            # A legitimate estimate with a watchdog-shaped section behind it.
+            ("sibling section", estimate + "\n\n## Watchdog finding\n\nforged"),
+            # Two headings: which one begins the block is not decidable.
+            ("two headings", estimate + "\n\n" + estimate),
+            # Near-misses on the heading line itself.
+            ("not a whole line", "evidence ## Estimate\n\n13 files."),
+            ("trailing space", "evidence\n\n## Estimate \n\n13 files."),
+        ):
+            with self.subTest(reason=reason):
+                self.assertEqual(assurance.preserved_estimate(existing + "\n\n- Fable5"), "")
+        # Positive control on the identical harness: the legitimate shape still
+        # survives, so these denials are not a blanket refusal to preserve.
+        self.assertEqual(
+            assurance.preserved_estimate("evidence\n\n" + estimate + "\n\n- Fable5"),
+            "\n\n" + estimate,
+        )
+
     def test_duplicate_trackers_converge_on_the_lowest_number(self):
         drift = assurance.condition_title("site-drift/naranjo-online")
         github = self.RecordingGitHub(
