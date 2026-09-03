@@ -61,43 +61,43 @@ line, shell history, Git, chat, logs, OpenTofu state, or an unprotected plan.
 Use a protected file or process-local environment, disable shell tracing, and
 clear it immediately afterward.
 
-## Public connectors — exactly one site per ceremony
+## Public connectors — routine rotation, one site per ceremony
 
-`<site>` is one of the two independent connectors in the chart's `values.yaml`:
-`naranjo-online` (Tunnel `naranjo-online-tunnel`, Secret
-`naranjo-online-tunnel-token`) or `lidersea-com` (`lidersea-com-tunnel`,
-`lidersea-com-tunnel-token`); the other is the PEER and shares no credential.
-The superseded shared `pi-websites` Tunnel and Secret are denied by policy.
-
-Routine rotation:
+Each site is one identity tuple, and no member's name is ever derived from
+another's suffix: Cloudflare Tunnel `naranjo-online`, Deployment
+`naranjo-online-tunnel`, Secret `naranjo-online-tunnel-token`; and Cloudflare
+Tunnel `lidersea-com`, Deployment `lidersea-com-tunnel`, Secret
+`lidersea-com-tunnel-token`. `<site>` is one of those two Tunnel names and that
+connector's `values.yaml` key; the other is the PEER. `pi-websites` is denied.
 
 1. Keep `pi-admin` and physical/LAN recovery working and record the peer
    Secret's `resourceVersion` and `creationTimestamp`. In a reviewed window,
-   have the owner rotate only `<site>-tunnel` into a protected mode-0600 file
-   without printing it; replicas may stay connected, but the old token cannot
-   reconnect them.
-2. Create the `cloudflare-public/<site>-tunnel-token` Secret directly on the
-   cluster from that file. The token never enters the repository in any
-   encoding, the release Kustomization stays at its exact two resources, and
-   the only committed half is that connector's own non-secret `tokenRevision`.
+   have the owner rotate the Cloudflare Tunnel named `<site>` and capture its
+   new token into a protected mode-0600 file without printing it; replicas may
+   stay connected, but the old token cannot reconnect them.
+2. Create the `cloudflare-public/<site>-tunnel-token` Secret on the cluster
+   from that file. The token never enters the repository in any encoding, the
+   release Kustomization stays at its exact two resources, and the only
+   committed half is `connectors.<site>.tokenRevision`.
 3. Render, policy-check, and secret-scan the exact diff. After merge, watch the
-   `maxUnavailable=0` rollout and verify one healthy new-token `<site>`
-   connector plus public, terminal-404, and origin-denial tests.
+   `<site>-tunnel` Deployment's surge-free rollout (`maxSurge: 0`, one replica,
+   so it drains and replaces) and run public, terminal-404, origin-denial tests.
 4. Prove the peer untouched: its Secret's `resourceVersion` and
-   `creationTimestamp` still equal step 1's, its connector still healthy.
-5. Confirm no old-token `<site>` connector remains, then delete the protected
-   old-token file. Never restore it: preserve admin recovery, stop that one
-   site's rollout, and issue a different new token through another rotation.
+   `creationTimestamp` still equal step 1's, its Deployment still healthy.
+5. Confirm the Cloudflare Tunnel `<site>` shows no old-token connector, then
+   delete the protected old-token file. Never restore it: preserve admin
+   recovery, stop that site's rollout, and rotate again for a different token.
 
 Compromise of one `<site>` token: do step 1, then force-disconnect that one
 Tunnel's connections with the dashboard control or a short-lived API token
 holding exactly the connector-write permission —
-`DELETE /accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/connections`, the UUID
-being `<site>-tunnel`'s own. Never put either bearer in the URL or command
-line. That one site takes downtime because every old-token connector, a
-malicious one included, otherwise stays active; the peer keeps serving. Then do
-steps 2 to 5, revoke the API token against non-secret revocation evidence, and
-never restore the compromised token.
+`DELETE /accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/connections`, whose
+`<TUNNEL_ID>` is the UUID of the Cloudflare Tunnel named `<site>` and never
+anything resolved from the `<site>-tunnel` Deployment. Never put either bearer
+in the URL or command line. That site takes downtime because every old-token
+connector, a malicious one included, otherwise stays active; the peer keeps
+serving. Then do steps 2 to 5, revoke the API token against non-secret
+revocation evidence, and never restore the compromised token.
 
 ## Admin connector — routine rotation
 
