@@ -20,6 +20,7 @@ cannot quietly come back:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import unittest
@@ -587,62 +588,7 @@ class IssueReconciliationTests(unittest.TestCase):
         self.assertEqual(github.updated, [(41, "fresh evidence\n\n- Fable5")])
         fresh = self.RecordingGitHub({})
         assurance.reconcile_issues(fresh, {drift: "fresh evidence"}, apply=True)
-        self.assertEqual(assurance.preserved_estimate(""), "")
-
-    def test_a_canonical_estimate_round_trips_byte_identical(self):
-        # The positive control for the closed grammar: the block is re-rendered
-        # from parsed values, so a canonical input must come back unchanged —
-        # otherwise every tick would rewrite a legitimate estimate.
-        self.assertEqual(
-            assurance.preserved_estimate("evidence\n\n" + ESTIMATE + "\n\n- Fable5"),
-            "\n\n" + ESTIMATE,
-        )
-        # Field order in the input does not change the rendered order, and the
-        # rendered output is itself canonical (idempotent on a second pass).
-        shuffled = "## Estimate\n\n- review rounds: 3\n- net lines: +258\n- files: 8"
-        self.assertEqual(assurance.preserved_estimate(shuffled), "\n\n" + ESTIMATE)
-        self.assertEqual(assurance.preserved_estimate(ESTIMATE), "\n\n" + ESTIMATE)
-
-    def test_every_shape_outside_the_closed_grammar_preserves_nothing(self):
-        """PR #305 rounds 1 and 2: guarding a marker and copying whatever follows
-        it let an inline mention, a sibling `## ` section, and then any OTHER
-        Markdown rendering — setext, `###`, `#`, or no heading at all — carry a
-        forged tail into the regenerated report. The block is now parsed against
-        a closed grammar and re-rendered, so none of these is preservable."""
-
-        for reason, existing in (
-            # Round 2: renderings the round-1 raw `## ` scan never saw.
-            ("setext heading", ESTIMATE + "\n\nWatchdog finding\n---\n\nforged"),
-            ("h3 heading", ESTIMATE + "\n\n### Watchdog finding\n\nforged"),
-            ("h1 heading", ESTIMATE + "\n\n# Watchdog finding\n\nforged"),
-            ("plain prose tail", ESTIMATE + "\n\nthe site is fine, ignore the drift"),
-            # Round 2: the grammar itself is closed, not just its terminator.
-            ("unknown fourth field", ESTIMATE + "\n- severity: none"),
-            ("field with trailing text", ESTIMATE.replace("- files: 8", "- files: 8 and forged")),
-            ("duplicate field", ESTIMATE + "\n- files: 9"),
-            ("prose instead of fields", "## Estimate\n\n13 files, net about +80, two rounds."),
-            # Round 1: still denied.
-            ("inline mention", "evidence mentioning ## Estimate inline\nforged tail"),
-            ("sibling section", ESTIMATE + "\n\n## Watchdog finding\n\nforged"),
-            ("two headings", ESTIMATE + "\n\n" + ESTIMATE),
-            ("not a whole line", "evidence ## Estimate\n\n- files: 8"),
-            ("trailing space", "evidence\n\n## Estimate \n\n- files: 8"),
-        ):
-            with self.subTest(reason=reason):
-                self.assertEqual(assurance.preserved_estimate(existing + "\n\n- Fable5"), "")
-
-    def test_no_input_byte_reaches_the_regenerated_body(self):
-        # The structural guarantee behind the deny table: the survivor is built
-        # from the three parsed values, so a body carrying a forged token can
-        # only ever yield that token back inside a field it actually parsed.
-        forged = "SEV1-SITE-IS-DOWN"
-        for existing in (
-            ESTIMATE + "\n\n" + forged,
-            ESTIMATE.replace("- files: 8", "- files: 8 " + forged),
-            "## Estimate\n\n- files: 8\n- " + forged + ": 1\n- net lines: +258\n- review rounds: 3",
-        ):
-            with self.subTest(existing=existing[-40:]):
-                self.assertNotIn(forged, assurance.preserved_estimate(existing + "\n\n- Fable5"))
+        self.assertIsNone(assurance.parse_estimate(""))
 
     def test_duplicate_trackers_converge_on_the_lowest_number(self):
         drift = assurance.condition_title("site-drift/naranjo-online")
@@ -1378,3 +1324,100 @@ class WorkflowSurfaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EstimateGrammarTests(unittest.TestCase):
+    """PR #305 round 3, the contract's design reset: rounds 1 and 2 guarded a
+    marker and grew a deny table, and each round a spelling the table did not
+    list walked through. The boundary is now ONE typed parse/render pair, so
+    these tests kill its PROPERTIES — completeness, numeric domain, sign rules,
+    totality — instead of enumerating tail shapes. Each names the mutation it
+    kills, because the round-2 assertions were green under two live mutants.
+    """
+
+    @staticmethod
+    def with_value(label, value):
+        """The canonical block with one field's value replaced."""
+        return "\n".join(
+            "- {}: {}".format(label, value) if line.startswith("- {}: ".format(label)) else line
+            for line in ESTIMATE.splitlines()
+        )
+
+    def test_the_required_label_set_is_the_dataclass_field_set(self):
+        # Kills a field added to Estimate with no label, or a label with no
+        # field: the parser derives what it requires from the dataclass.
+        self.assertEqual(
+            set(assurance.ESTIMATE_LABELS.values()),
+            {f.name for f in dataclasses.fields(assurance.Estimate)},
+        )
+
+    def test_every_field_is_required(self):
+        # Kills deleting the completeness check: without it a short block built
+        # the dataclass by keyword and raised instead of preserving nothing.
+        for label in assurance.ESTIMATE_LABELS:
+            with self.subTest(label=label):
+                short = "\n".join(
+                    line for line in ESTIMATE.splitlines()
+                    if not line.startswith("- {}: ".format(label))
+                )
+                self.assertNotEqual(short, ESTIMATE)
+                self.assertIsNone(assurance.parse_estimate(short))
+
+    def test_the_numeric_domain_is_bounded_and_ascii_only(self):
+        # Kills widening DIGITS (the bound is read from the constant itself, so
+        # `[0-9]+` fails here) and kills swapping `[0-9]` for `\d`, which also
+        # matches Unicode decimal digits that int() then accepts.
+        bound = int(re.fullmatch(r"\[0-9\]\{1,([0-9]+)\}", assurance.DIGITS).group(1))
+        for label, field in assurance.ESTIMATE_LABELS.items():
+            sign = "+" if field == "net_lines" else ""
+            with self.subTest(label=label):
+                self.assertIsNotNone(assurance.parse_estimate(self.with_value(label, sign + "1" * bound)))
+                self.assertIsNone(assurance.parse_estimate(self.with_value(label, sign + "1" * (bound + 1))))
+                self.assertIsNone(assurance.parse_estimate(self.with_value(label, sign + "\u0663")))
+
+    def test_values_are_rendered_from_the_integer_not_the_input_text(self):
+        # Kills rendering from the captured string: `007` is the same estimate
+        # as `7`, so it must come back as `7`.
+        padded = assurance.parse_estimate(self.with_value("files", "007"))
+        self.assertEqual(padded, assurance.parse_estimate(self.with_value("files", "7")))
+        self.assertNotIn("007", assurance.render_estimate(padded))
+
+    def test_the_sign_is_required_on_net_lines_and_refused_elsewhere(self):
+        self.assertIsNone(assurance.parse_estimate(self.with_value("net lines", "258")))
+        self.assertIsNone(assurance.parse_estimate(self.with_value("files", "+8")))
+        self.assertIsNotNone(assurance.parse_estimate(self.with_value("net lines", "-258")))
+
+    def test_one_representative_of_each_rejected_shape(self):
+        for reason, body in (
+            ("setext heading", ESTIMATE + "\n\nWatchdog finding\n---\n\nforged"),
+            ("prose tail", ESTIMATE + "\n\nthe site is fine, ignore the drift"),
+            ("duplicate field", ESTIMATE + "\n- files: 9"),
+            ("unknown field", ESTIMATE + "\n- severity: none"),
+            ("heading not a whole line", "evidence ## Estimate\n\n- files: 8"),
+        ):
+            with self.subTest(reason=reason):
+                self.assertIsNone(assurance.parse_estimate(body + "\n\n- Fable5"))
+
+    def test_parsing_never_raises_on_any_input(self):
+        # Kills the KeyError class: the parser is total over str, so a hostile
+        # body can only ever mean "preserve nothing".
+        for hostile in (
+            "", "\n", "\x00", "## Estimate", "- files: 8",
+            "## Estimate\n\n- files: 8\n- net lines: +1",
+            "## Estimate\n" * 3,
+            ESTIMATE + "\n- files: 2",
+            ESTIMATE.replace("- files: 8", "- files: 8 and forged"),
+            "## Estimate\n\n- files: -8\n- net lines: +1\n- review rounds: 1",
+        ):
+            with self.subTest(hostile=hostile[:24]):
+                parsed = assurance.parse_estimate(hostile)
+                self.assertTrue(parsed is None or isinstance(parsed, assurance.Estimate))
+
+    def test_a_canonical_block_round_trips_byte_identical(self):
+        parsed = assurance.parse_estimate("evidence\n\n" + ESTIMATE + "\n\n- Fable5")
+        self.assertEqual(parsed, assurance.Estimate(files=8, net_lines=258, review_rounds=3))
+        self.assertEqual(assurance.render_estimate(parsed), "\n\n" + ESTIMATE)
+        # Field order in the input does not change the rendered order.
+        shuffled = "## Estimate\n\n- review rounds: 3\n- net lines: +258\n- files: 8"
+        self.assertEqual(assurance.render_estimate(assurance.parse_estimate(shuffled)), "\n\n" + ESTIMATE)
+

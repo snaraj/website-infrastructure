@@ -41,6 +41,7 @@ registry, or external service is contacted.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -55,26 +56,15 @@ API_VERSION = "2022-11-28"
 SITES_DIR = Path("kubernetes/websites")
 ISSUE_MARKER = "deploy-assurance["
 ISSUE_LABELS = ["ci", "delivery-lane", "agent-authored", "fable5"]
-# The lane line this tool's issue bodies end with, and the CLOSED grammar of the
-# one block that survives a body rewrite (see preserved_estimate). Both live here
-# because the composer and the preserver must agree byte for byte: two copies of
-# either is how the estimate went missing in the first place.
-#
-# AGENTS.md requires the commission to state files, net lines and review rounds
-# but fixes no rendering for them, so this is the fixed one. It is a grammar and
-# not a marker deliberately: "this heading, then everything after it" is a
-# channel for writing the watchdog's own report in whatever Markdown the last
-# guard forgot — a setext heading, a `###` or `#` heading, or no heading at all
-# (PR #305 rounds 1 and 2). Only these three fields parse, each exactly once,
-# and the survivor is RE-RENDERED from the parsed values, so no input byte
-# reaches the regenerated issue.
 SIGNATURE = "- Fable5"
 ESTIMATE_HEADING = "## Estimate"
-ESTIMATE_FIELDS = (
-    ("files", re.compile(r"- files: (\d{1,6})")),
-    ("net lines", re.compile(r"- net lines: ([+-]\d{1,7})")),
-    ("review rounds", re.compile(r"- review rounds: (\d{1,3})")),
-)
+# ASCII only and bounded. `\d` also matches Unicode decimal digits — Arabic-Indic
+# ٣ among them — which `int` then accepts, so a label could round-trip through a
+# spelling no reader typed.
+DIGITS = "[0-9]{1,6}"
+# The one place a label is tied to a field. The set the parser requires is
+# DERIVED from the dataclass below, so a field cannot be half-added.
+ESTIMATE_LABELS = {"files": "files", "net lines": "net_lines", "review rounds": "review_rounds"}
 GATE_WORKFLOW = "pull-request.yml"
 PUBLISH_WORKFLOW = "platform-release.yml"
 # A publish run that has not appeared this soon after its gate completed is
@@ -172,29 +162,39 @@ def condition_title(key):
     return "{}{}]".format(ISSUE_MARKER, key)
 
 
-def preserved_estimate(body):
-    """The `## Estimate` block appended to an existing tracking issue, or "".
+@dataclasses.dataclass(frozen=True)
+class Estimate:
+    """The estimate AGENTS.md requires of a commission, as integers.
 
-    This tool regenerates a tracking issue's body from the evidence on every
-    tick — hourly — and until now that rewrite erased everything else the issue
-    had grown. AGENTS.md requires the commission to state an estimate (files,
-    net lines, review rounds), and one of these trackers IS the commission for
-    the promotion pull request that answers it, so the estimate a coordinator
-    added was gone before the next review handoff and the pull request's
-    actuals had nothing to be measured against (PR #303, findings 4 and 3).
+    A tracking issue this tool opens IS the commission for the pull request
+    answering it, and the hourly rewrite erased the estimate a coordinator added.
+    Preserving it as TEXT failed twice, so it is parsed into this type and
+    rendered back from it: nothing from the issue is on the output path, which
+    closes "another spelling rides along" by construction rather than by
+    enumerating spellings (PR #303; PR #305 rounds 1-3, design reset).
+    """
 
-    Nothing is preserved as TEXT. The block is parsed against the closed
-    grammar above — the exact heading line, then the three fields, each exactly
-    once, one per line, blank lines allowed only between them, and nothing else
-    to the end of the body — and the survivor is re-rendered from the parsed
-    values. Two earlier attempts guarded a marker and copied whatever followed
-    it, and each time a rendering the guard did not enumerate walked straight
-    through: a substring mention with a forged tail, then a setext heading, a
-    `###`/`#` heading, or a bare prose tail (PR #305 rounds 1 and 2). Re-rendering
-    ends that class outright, because no input byte is on the output path.
-    Anything that does not parse preserves NOTHING and the regenerated evidence
-    wins, which is the fail-closed direction. The trailing lane signature is
-    dropped because the caller re-adds it, keeping exactly one at the end.
+    files: int
+    net_lines: int
+    review_rounds: int
+
+
+# The sign is required on net lines and refused elsewhere; `fullmatch` below
+# means a field carrying trailing text is not a field.
+ESTIMATE_PATTERNS = {
+    label: re.compile("- " + re.escape(label) + ": ("
+                      + ("[+-]" if field == "net_lines" else "") + DIGITS + ")")
+    for label, field in ESTIMATE_LABELS.items()
+}
+
+
+def parse_estimate(body):
+    """One ``Estimate``, or ``None`` for every other body. Never raises.
+
+    Exactly one whole-line heading, then one line per field — blank lines
+    ignored, the trailing lane signature dropped, labels unique, the label set
+    equal to the dataclass's own. Any deviation preserves nothing and the
+    regenerated evidence wins: the fail-closed direction.
     """
 
     lines = body.splitlines()
@@ -202,23 +202,31 @@ def preserved_estimate(body):
         lines.pop()
     if lines and lines[-1] == SIGNATURE:
         lines.pop()
-    marks = [i for i, line in enumerate(lines) if line == ESTIMATE_HEADING]
-    if len(marks) != 1:
-        return ""
+    if [line for line in lines if line == ESTIMATE_HEADING] != [ESTIMATE_HEADING]:
+        return None
     values = {}
-    for line in lines[marks[0] + 1:]:
+    for line in lines[lines.index(ESTIMATE_HEADING) + 1:]:
         if not line.strip():
             continue
-        # fullmatch, so a known field carrying trailing text is not a field.
-        matched = [(n, p.fullmatch(line)) for n, p in ESTIMATE_FIELDS]
-        found = [(n, m) for n, m in matched if m is not None and n not in values]
-        if len(found) != 1:
-            return ""
-        values[found[0][0]] = found[0][1].group(1)
-    if len(values) != len(ESTIMATE_FIELDS):
-        return ""
-    rendered = "\n".join(f"- {name}: {values[name]}" for name, _ in ESTIMATE_FIELDS)
-    return "\n\n" + ESTIMATE_HEADING + "\n\n" + rendered
+        hits = [(f, m) for label, f in ESTIMATE_LABELS.items()
+                for m in [ESTIMATE_PATTERNS[label].fullmatch(line)] if m]
+        if len(hits) != 1 or hits[0][0] in values:
+            return None
+        values[hits[0][0]] = int(hits[0][1].group(1))
+    if values.keys() != {f.name for f in dataclasses.fields(Estimate)}:
+        return None
+    return Estimate(**values)
+
+
+def render_estimate(estimate):
+    """The canonical block, built from the integers — so leading zeros and any
+    other spelling the writer used normalise away instead of being copied."""
+
+    fields = "\n".join(
+        "- {}: {}".format(label, format(getattr(estimate, field), "+d" if field == "net_lines" else "d"))
+        for label, field in ESTIMATE_LABELS.items()
+    )
+    return "\n\n" + ESTIMATE_HEADING + "\n\n" + fields
 
 
 def iso_age_seconds(stamp):
@@ -547,7 +555,8 @@ def reconcile_issues(github, conditions, apply):
     open_issues = github.open_assurance_issues()
     for title, body in conditions.items():
         entry = open_issues.get(title)
-        desired = body + preserved_estimate(entry["body"] if entry else "") + "\n\n" + SIGNATURE
+        estimate = parse_estimate(entry["body"] if entry else "")
+        desired = body + (render_estimate(estimate) if estimate else "") + "\n\n" + SIGNATURE
         if entry is None:
             actions.append("open: " + title)
             if apply:

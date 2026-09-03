@@ -167,7 +167,21 @@ def _load_sibling(name, module_name):
     if spec is None or spec.loader is None:
         raise AssertionError(f"{name} is unloadable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The module must be in ``sys.modules`` WHILE its body runs — the documented
+    # importlib recipe. Anything resolving a PEP 563 string annotation looks its
+    # defining module up there, so a sibling with `from __future__ import
+    # annotations` and a dataclass would otherwise abort the whole tick with a
+    # bare AttributeError on None. Removed again immediately, so the sibling
+    # stays a private copy rather than an importable name.
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
     return module
 
 

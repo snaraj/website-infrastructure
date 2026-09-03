@@ -73,7 +73,22 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
             "usable spec/loader for {}".format(path)
         )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The module must be visible in ``sys.modules`` WHILE its body runs, which
+    # is the documented importlib recipe and not optional: anything resolving a
+    # PEP 563 string annotation looks its defining module up there, so a script
+    # with `from __future__ import annotations` and a ``@dataclasses.dataclass``
+    # fails at class-creation time with a bare ``AttributeError`` on ``None``.
+    # It is removed again immediately, so the "copies stay visibly independent"
+    # property above is unchanged: nothing observes the name after this returns.
+    previous = sys.modules.get(spec.name)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
     return module
 
 
