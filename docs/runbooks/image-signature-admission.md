@@ -1,8 +1,8 @@
-# Signed artifact verification (Kyverno retired)
+# Signed artifact verification — Flux `spec.verify` and Conftest
 
-Kyverno is not installed and is no longer desired state. This repository does
-not claim image-signature admission. The live artifact boundary is the signed
-site chart selected by an exact OCI manifest digest and verified by Flux
+This repository does not claim image-signature admission: no webhook evaluates
+these rules in the cluster. The live artifact boundary is the signed site chart
+selected by an exact OCI manifest digest and verified by Flux
 `OCIRepository.spec.verify`.
 
 For each site, one closed identity tuple binds:
@@ -22,27 +22,20 @@ references, and noncanonical Flux source verification.
 
 ## Safe change procedure
 
-1. Acquire the intended chart without credentials and bind its human release
-   label to the exact OCI manifest digest.
-2. Verify its one Helm layer, chart identity, protected-main certificate
-   subject and issuer, embedded workload index image, and Linux ARM64 child.
-3. Repeat resolution after inspection and require the same digest.
-4. Update the acquisition receipt and the site's annotation/digest pair
-   atomically. Never use a bare tag or SemVer selector.
-5. Run:
+The credential-free acquisition, the repeated resolution, and the atomic
+annotation/digest update are the "Required rollback receipt" and "Reviewed Git
+change" sections of [image-rollback.md](image-rollback.md); a forward change
+follows the same ceremony against the intended newer digest, and both fail
+closed when the bytes or their expected signature are unavailable. Then run:
 
-   ```sh
-   python3 -B -m unittest \
-     tests.security.test_signature_policy_contract \
-     tests.security.test_signature_policy_cli
-   python3 -B scripts/validate_repository.py kubernetes
-   ```
-
-Rollback repeats the same acquisition and verification against the older exact
-digest. If those bytes or their expected signature are unavailable, rollback
-fails closed.
+```sh
+python3 -B -m unittest \
+  tests.security.test_signature_policy_contract \
+  tests.security.test_signature_policy_cli
+python3 -B scripts/validate_repository.py kubernetes
+```
 
 A material trust-boundary expansion, including another independent tenant or
 untrusted/third-party workload, triggers reconsideration of runtime
 admission. That trigger requires a new threat model and ADR; it does not
-authorize reinstalling Kyverno or weakening the current Flux/Conftest controls.
+authorize weakening the current Flux/Conftest controls.

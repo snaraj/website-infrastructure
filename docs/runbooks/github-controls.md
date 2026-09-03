@@ -22,8 +22,8 @@ token.
 
 Posting source to GitHub remains a workstation responsibility. Authenticate Git
 with the dedicated passphrase-protected SSH agent or the OS credential manager/
-passkey; never copy that GitHub authority to the Pi, Flux, SOPS documents, or a
-Cloudflare credential store. Before every push, review the exact index rather
+passkey; never copy that GitHub authority to the Pi, Flux, or a Cloudflare
+credential store. Before every push, review the exact index rather
 than the whole working directory, run the repository secret/privacy gates over
 the index and full Git history, and push only the reviewed commit. Ignored files
 are not a confidentiality boundary, and a force-added local artifact/state path
@@ -208,10 +208,9 @@ claim to prove the empty-bypass state.
 An authentication, pagination, schema, missing, extra, duplicated,
 foreign-integration, inverted, update-restricted, or bypass-bearing result emits
 no receipt. A successful receipt is necessary but not sufficient for Ready:
-exact-head CI, current base, resolved findings, a fresh independent approval,
-and the bounded Main Worker `PASS` receipt remain required. The receipt grants
-no settings-write or merge authority; only the coordinator changes Draft/Ready
-and only the repository owner merges.
+exact-head CI, current base, resolved findings, and a fresh independent approval
+remain required. The receipt grants no settings-write or merge authority; only
+the coordinator changes Draft/Ready and only the repository owner merges.
 
 ## Release App provisioning and job separation
 

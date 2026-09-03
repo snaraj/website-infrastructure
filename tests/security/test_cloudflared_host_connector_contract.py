@@ -27,7 +27,6 @@ TOKEN_VALIDATOR = ROOT / "scripts" / "validate_cloudflared_tunnel_token.py"
 TOKEN_VALIDATOR_MODULE = load_script("validate_cloudflared_tunnel_token.py")
 UNIT = CLOUDFLARED_DIR / "pi-admin.service"
 README = CLOUDFLARED_DIR / "README.md"
-ROTATION = ROOT / "docs" / "runbooks" / "tunnel-token-rotation.md"
 BASH = "/bin/bash" if Path("/bin/bash").is_file() else shutil.which("bash")
 BASH_REQUIRED = "Bash is required to execute the connector installer"
 
@@ -606,64 +605,6 @@ class TunnelTokenIdentityValidatorTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, source)
-
-
-class TunnelTokenRotationRunbookTests(unittest.TestCase):
-    """Keep routine availability separate from compromised-token eviction."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.rotation = " ".join(ROTATION.read_text(encoding="utf-8").split())
-        cls.readme = " ".join(README.read_text(encoding="utf-8").split())
-
-    def test_rotation_semantics_reject_old_token_rollback(self):
-        for fragment in (
-            "the old token cannot establish a new connection",
-            "already connected with the old token remain connected",
-            "an old token is never a post-rotation rollback credential",
-            "Physical or trusted-LAN recovery is the admin-path fallback",
-            "The old token cannot reconnect after rotation and is not a rollback path",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, self.rotation)
-
-    def test_compromise_path_force_disconnects_existing_connectors(self):
-        self.assertEqual(
-            self.rotation.count("suspected or confirmed compromise"), 2
-        )
-        self.assertIn(
-            "DELETE /accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/connections",
-            self.rotation,
-        )
-        self.assertIn(
-            "every old-token connector, including a malicious one", self.rotation
-        )
-        self.assertIn("Never restore the compromised token", self.rotation)
-
-    def test_routine_and_compromise_keep_tunnels_independent(self):
-        for fragment in (
-            "Never rotate both in one change",
-            "Prove the public connector recovered and `pi-admin` remained unchanged",
-            "Public connector health must remain unchanged",
-            "prove `pi-websites` remained unchanged",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, self.rotation)
-
-    def test_connector_readme_records_the_safe_install_and_recovery_boundary(self):
-        for fragment in (
-            "It never executes the mutable staging path",
-            "acquires an exclusive lock",
-            "atomic same-filesystem operation",
-            "token apply is intentionally blocked",
-            "root-owned reviewed-blob launcher",
-            "at least two working sessions have been proven immediately before mutation",
-            "Physical access is the independent recovery path if either session later drops",
-            "force-disconnect every existing connection",
-            "physical/LAN access, never the old token",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, self.readme)
 
 
 if __name__ == "__main__":

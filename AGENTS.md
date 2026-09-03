@@ -8,9 +8,7 @@ A new agent operates from this repository alone; nothing is relayed by
 the owner. In order:
 
 1. Read this file end to end — the safety invariants and the lane split
-   before anything else; CLAUDE.md only imports it. Then read
-   `skills/gh-pr-flow/SKILL.md` and all of its linked references before any
-   GitHub issue/branch/PR/review action.
+   before anything else; CLAUDE.md only imports it.
 2. `git fetch origin` and work from `origin/main`. Never trust a local
    `main`, a stale worktree, or another agent's summary of remote state —
    verify remote facts directly (`gh pr view`, `git ls-remote`).
@@ -40,8 +38,8 @@ the owner. In order:
 5. Never give Flux a Git credential or write capability. The source is public
    anonymous HTTPS and reconciliation is pull-only.
 6. Never deploy a mutable image tag. Workloads use a full `sha256` digest.
-7. Every committed Kubernetes Secret must be a valid SOPS document whose
-   `data` and `stringData` values are ciphertext.
+7. The repository carries no secrets; runtime secrets are created on the
+   cluster by an owner ceremony.
 8. Direct `kubectl apply` is limited to documented bootstrap or recovery. Once
    Flux owns a resource, normal changes flow through a reviewed Git commit.
 9. Dashboard mutations are break-glass only and must be recorded and reconciled
@@ -54,8 +52,7 @@ the owner. In order:
     policy/redaction tooling and must never enter a production image.
 12. Treat the Git index as public. Real host/service inventory, account or zone
    IDs, emails, IPs, machine IDs, user/workspace paths, plans, state, and local
-   evidence remain ignored/local unless an explicitly designed SOPS/age Secret
-   flow requires ciphertext in Git.
+   evidence remain ignored/local.
 13. Keep heavyweight media out of Git, OCI images, Flux, ConfigMaps,
     Secrets, and etcd. Before Pi discovery, reject every
     hostPath/PV/PVC/storage-profile activation; current zero-spend Cloudflare
@@ -101,16 +98,15 @@ the owner. In order:
 - Do not install tools, authenticate, plan, apply, deploy, commit, push, or
   mutate the Pi/router/GitHub/Cloudflare without explicit authorization.
 - A claim that a Kubernetes workload is ephemeral is load-bearing only after
-  `skills/gh-pr-flow/references/destructive-workloads.md` is satisfied and
   `scripts/validate_destructive_test_ledger.py` accepts the exact evidence.
   The ledger uses the closed namespaced workload allowlist, exact cardinalities,
   and one fault target; unknown or cluster-scoped API/kinds fail closed. Its
   disposable fixture must prove a mode-0600 pre-mutation recovery journal,
   repeated/mixed-signal-safe single rollback, bounded receipt, and zero residue.
   Stateful/PV/PVC/database/operator resources remain supported but never
-  inherit deletion permission. Protected tokens, Secrets, SOPS/age material,
-  private keys, etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and
-  Git history are excluded from destructive tests.
+  inherit deletion permission. Protected tokens, Secrets, private keys,
+  etcd/PKI, DNS/domain/Tunnel/provider identities, custody, and Git history
+  are excluded from destructive tests.
 - Use official upstream documentation to revalidate versions, schemas,
   entitlements, and billing immediately before any external change.
 
@@ -141,13 +137,6 @@ The owner's 2026-08-20 ruling for release fragments, GitHub intake templates,
 and dependency-governed Draft capacity is recorded durably in
 [issue #164 comment 5360347849](https://github.com/snaraj/website-infrastructure/issues/164#issuecomment-5360347849).
 
-- `skills/**` — SHARED AGENT GOVERNANCE (peer/platform ruling, 2026-08-13),
-  not the exclusive property of either implementation lane. Either lane may
-  author there under one-writer-per-branch, but review comes from a different
-  context and, where a skill touches a lane-specific security boundary, from
-  the other lane. A skill never supersedes AGENTS.md and never grants
-  credential, live-mutation, or merge authority; any change that expands
-  permission requires an owner ruling.
 - `changelog.d/**` — SHARED RELEASE INPUT (owner ruling, 2026-08-20, source
   above). Every implementation lane adds its own exactly one issue-namespaced
   fragment under delivery-lane requirement 8. This mandatory shared write does
@@ -173,11 +162,9 @@ and dependency-governed Draft capacity is recorded durably in
   covering the delivery-owned `kubernetes/flux-system/**` manifests, and
   that model is the mechanism that proves the cluster matches them. Its
   live-apply custody surface stays PLATFORM-owned and stays blocked: the
-  `--apply-controllers` / `--apply-sync` / `--verify` stop, the four
-  sibling entry points `install-sops-age-secret.sh`,
-  `verify-sops-age-secret.sh`, `verify-sops-ciphertext.sh`, and
-  `verify.sh` in their entirety — each blocked by the same reviewed-blob
-  stop — the trusted reviewed-blob launcher requirement, and the
+  `--apply-controllers` / `--apply-sync` / `--verify` stop, the sibling
+  entry point `verify.sh` in its entirety — blocked by the same
+  reviewed-blob stop — the trusted reviewed-blob launcher requirement, and the
   credential-custody preconditions. The split is by responsibility, not
   by line range — a delivery-lane change may correct what the model
   asserts about reviewed state, never what the custody surface above
@@ -194,9 +181,8 @@ and dependency-governed Draft capacity is recorded durably in
   executable expression of the gates this lane already owns. Every other
   file under `policies/` — the pinned secret-scan policy
   `policies/gitleaks.toml` among them — is unchanged by this ruling and
-  reached only through the rule below. Issue #195 retired Kyverno entirely;
-  Conftest is a pre-merge static control and must never be described as live
-  admission.
+  reached only through the rule below. Conftest is a pre-merge static
+  control and must never be described as live admission.
 - `.githooks/**` — DELIVERY: the pre-push hook implements delivery-lane
   requirements 2 and 3. Changing what it PERMITS is a security-control
   change and needs an owner decision, not a lane call (issue #83).
@@ -298,10 +284,8 @@ and dependency-governed Draft capacity is recorded durably in
   measurement, and add a closed Darwin/arm64 renderer pin without changing
   the Linux live-install tuple. That is a DECLARED CROSSING under the rule
   below, not a lane transfer, and grants no standing claim on these paths.
-  Issue #195 subsequently retired the Kyverno capacity policy and its install
-  overlay rather than preserving them as restoration inputs. The reviewed
-  quota and evidence binding remain enforced by Conftest and repository
-  validators.
+  The reviewed quota and evidence binding are enforced by Conftest and the
+  repository validators.
 
 **A path in neither list is not implicitly delivery.** Silence is not
 permission. Declare the crossing in the pull request body before touching
@@ -368,6 +352,9 @@ Delivery-lane requirements, explicit and numbered:
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
    or update restriction before this release policy is Ready.
 
+**Promoter feature freeze.** No new `scripts/promote_releases.py` feature
+lands until one real promotion has run and been reviewed; security fixes do.
+
 ## Adversarial review protocol
 
 Every substantive PR receives an independent adversarial review BEFORE it
@@ -380,23 +367,25 @@ Neither gets a different protocol.)
 **Review depth is risk-based** (owner reduction, 2026-08-22). Ceremony is
 spent where a mistake reaches something real; spending security-grade
 attention on a comment fix costs the attention a trust boundary needs.
-Three tiers, and a change takes the highest tier any of its paths earns:
+Four tiers, and a change takes the highest tier any of its paths earns:
 
 - **Security-surface changes** — credentials, authorization, public exposure,
   signing, digests, immutable artifacts, destructive operations, workflows,
   policies, validators, the safety invariants, and anything the delivery-lane
-  requirements gate — take focused tests, one full CI cycle at the exact head,
-  live validation where runtime behavior moves, ONE independent adversarial
-  review, and owner merge.
+  requirements gate — take focused tests, a mutation kill matrix, one full CI
+  cycle at the exact head, ONE independent adversarial review, and owner
+  merge.
 - **Normal code changes** take focused tests and one full local gate; a live
   check only when runtime behavior changes; one review.
-- **Documentation, comments, and formatting** run the relevant checks, and
-  adversarial review is the coordinator's routing decision rather than a
-  mandate. No tier ever skips the secret scans or the publication gate.
+- **Documentation and metadata** run the relevant checks and take one
+  lightweight review: hygiene and doctrine only, no claim-audit table and no
+  mutation matrix.
+- **Live or destructive work** adds an owner checkpoint to the tier it earns.
+  No tier ever skips the secret scans or the publication gate.
 
 Nothing here relaxes a fail-closed control at a real trust boundary: the
 safety invariants, owner-only merge, commit identity and signing, digest-only
-deploys, SOPS-only secrets, protected-branch settings, and the release
+deploys, the secretless repository, protected-branch settings, and the release
 transition gates are the same in every tier. Exact-head discipline is also
 unchanged for whatever review DOES run — a verdict binds the head it names.
 
@@ -438,18 +427,16 @@ retroactive approval.
 no separate Main Worker pass: after an exact-head `APPROVE` and green required
 checks at that head, the coordinator flips Ready and the owner merges. No
 `ROLE: MAIN-WORKER` receipt is required, none is a Ready input, and no lane may
-reintroduce one as a local convention. Machinery for the retired receipt still
-exists and is transitional rather than authority — the `main-worker` receipt
-kind in `scripts/validate_review_receipt.py`, the Main Worker sections of
-`skills/gh-pr-flow/**`, and the `ROLE: MAIN-WORKER` rows of
-`.github/PULL_REQUEST_TEMPLATE.md` — and issue #188 owns removing it. Until
-that lands this file governs, because a skill never supersedes AGENTS.md.
+reintroduce one as a local convention.
 
-**The review must:**
+**The review must** — items 1–3 in the ordinary-code and security tiers;
+documentation and metadata runs items 5 and 6 only:
 
 1. Audit every claim in the PR body and commit messages against the
-   actual diffs, reproducing every number the body cites. Overstatement
-   is a finding even when the code is right.
+   actual diffs, reproducing every number the body cites. Severity decides
+   what blocks: cosmetic metadata and evidence-placement problems are notes
+   the author corrects in metadata; a false security claim, an unsafe
+   runbook step, leaked data, and exploitable behaviour block in any tier.
 2. Build a mutation kill matrix: for each guard or test the PR adds or
    changes, apply the exact regression it claims to prevent — the suite
    must go red. Revert between mutations. A surviving mutant is a
@@ -457,13 +444,10 @@ that lands this file governs, because a skill never supersedes AGENTS.md.
 3. Probe for vacuity: a guard that cannot fail is no guard. For each new
    or changed assertion, demonstrate at least one input that turns it
    red (the kill matrix usually supplies it); an assertion no input can
-   fail is decorative, and decorative checks are findings. Work through
-   `skills/gh-pr-flow/references/evidence-doctrine.md` rather than
-   re-deriving it: it catalogues the distinct, reproducible mechanisms
-   by which a fully green run proves nothing — coverage that a policy
-   suite cannot see, fixtures and gates that disable themselves, and the
-   ways a fix written to close a finding is itself vacuous — each with
-   its general correction.
+   fail is decorative, and decorative checks are findings. The recurring
+   mechanisms by which a fully green run proves nothing are coverage a
+   policy suite cannot see, fixtures and gates that disable themselves,
+   and a fix written to close a finding that is itself vacuous.
 4. Probe for flakes: the author runs the complete local gate once on the
    final head; the reviewer runs the focused checks its findings need,
    plus the race detector where the language has one, and MAY re-run the
@@ -501,6 +485,21 @@ performs that flip. The flip happens only once the verdict is APPROVE
 outstanding, and every check is green at the exact head. A coordination
 action never confers merge authority; the owner alone merges. The evidence
 comment remains on the PR as the permanent record.
+
+A receipt is at most 6,000 bytes, enforced by
+`scripts/validate_review_receipt.py`; a PR body is at most 6,000 bytes. The
+first review of a head is comprehensive and every later one covers only the
+scope that changed since the last verdict; after two repair rounds the third
+answer is a design reset — author and coordinator simplify instead of adding
+defensive machinery, and the reviewer names that reset rather than more
+findings. `scripts/ready_check.py` is the Ready rule in code and the only
+place it is expressed outside this file: it proves the pull request is open,
+targets the default branch, is not behind it, carries an App-posted exact-head
+APPROVE with no REQUEST-CHANGES at that head, and has green required checks
+and intact labels. It judges no approving lane against a risk tier — that
+match is the coordinator's. NO TOOL FLIPS READY, promoter included. The commission states an estimate (files, net lines, review rounds)
+and the PR body the actuals; a material overrun — a doubling — takes a design
+reset before Ready, and green gates alone never make a PR Ready.
 
 A green check, a peer approval, or a ready state is evidence, never
 authority: the owner alone merges.
@@ -563,10 +562,9 @@ authority: the owner alone merges.
   its pull requests carry `promoter` in place of the agent pair, its commit
   and pull-request bodies end with `- Promoter`, and it runs under the
   owner's own keyring credential and signing key. Its standing authority is
-  exactly: open Draft promotion pull requests from a receipted acquisition,
-  arm `requires-review` and `cybersecurity-review-requested`, and flip Ready
-  only when the exact head carries two distinct adversarial APPROVE
-  receipts with green required checks and a current base. It never merges.
+  exactly: open Draft promotion pull requests from a receipted acquisition
+  and arm `requires-review` and `cybersecurity-review-requested`. It never
+  flips Ready and never merges.
   Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep
@@ -812,6 +810,11 @@ required only for a real code or semantic dependency, conflict, or current-main
 repair; port only the residual diff. Every PR that eventually targets main
 independently adds one fragment and passes the release gate.
 
+**Serialize review, not authoring.** Drafts may be authored in parallel, but a
+reviewer claims a PR only once every predecessor it depends on has merged and
+its base is current with `main`; a claim on a stale-base or blocked PR is void
+and the coordinator says so, and the body's scope field states that order.
+
 **Stale concurrent Drafts are re-cut, never rewritten.** A Draft that has
 fallen far behind current protected `main`, or that has absorbed repeated
 REQUEST-CHANGES rounds against a moving base until its published history no
@@ -934,6 +937,9 @@ is the consolidated command view:
   Runbooks and assurance documents are
   delivery-lane and follow the same evidence standard as PR bodies —
   their cross-references are pinned by tests.
+- **Process evidence out of product files.** Review evidence and process text
+  — comparison commands, round histories, reviewer instructions — never enter
+  product files; PR bodies, commit messages and receipts carry them.
 - **Attribution.** No third-party creative assets exist here. Any that
   ever arrive land with their reviewed license alongside the asset; the
   site repositories carry their own asset-policy notices.

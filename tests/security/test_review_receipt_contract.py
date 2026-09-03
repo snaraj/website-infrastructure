@@ -21,18 +21,6 @@ def receipt(head=HEAD, verdict="APPROVE", reviewer="fresh-context"):
     )
 
 
-def main_worker_receipt(
-    head=HEAD, role="MAIN-WORKER", verdict="PASS", worker="coordinator-context"
-):
-    return (
-        f"HEAD: {head}\n"
-        f"ROLE: {role}\n"
-        f"VERDICT: {verdict}\n"
-        f"SCOPE: {MODULE.MAIN_WORKER_SCOPE}\n\n"
-        f"- {worker} (Main Worker)\n"
-    )
-
-
 class ReviewReceiptTests(unittest.TestCase):
     def test_accepts_exact_head_signed_normal_comment_shape(self):
         self.assertIsNone(MODULE.denial(receipt(), HEAD, "pull-request"))
@@ -88,6 +76,34 @@ class ReviewReceiptTests(unittest.TestCase):
                 self.assertIsNotNone(MODULE.denial(text, HEAD, "pull-request"))
         self.assertIsNotNone(MODULE.denial(receipt(), "B" * 40, "pull-request"))
 
+    def test_the_byte_ceiling_denies_for_SIZE_at_the_exact_boundary(self):
+        """The padding goes BEFORE the signature, so only size can deny it.
+
+        Appending the extra byte after the final signature line would make the
+        receipt invalid for a second reason — the signature would no longer be
+        the last non-empty line — and the case would still deny with the
+        ceiling removed, proving nothing. Padding the body keeps the receipt
+        otherwise perfectly valid, so the ONLY thing separating the two
+        assertions below is one byte crossing the cap.
+        """
+
+        def sized(total):
+            base = receipt()
+            pad = total - len(base.encode("utf-8"))
+            self.assertGreater(pad, 0)
+            return base.replace("Claim audit: supported.", "Claim audit: supported." + "x" * pad)
+
+        at_cap = sized(MODULE.RECEIPT_BYTE_CEILING)
+        over_cap = sized(MODULE.RECEIPT_BYTE_CEILING + 1)
+        self.assertEqual(len(at_cap.encode("utf-8")), MODULE.RECEIPT_BYTE_CEILING)
+        self.assertEqual(len(over_cap.encode("utf-8")), MODULE.RECEIPT_BYTE_CEILING + 1)
+        # Both are otherwise valid: the signature is still the final line.
+        self.assertIsNone(MODULE.denial(at_cap, HEAD, "pull-request"))
+        self.assertEqual(
+            MODULE.denial(over_cap, HEAD, "pull-request"),
+            f"receipt exceeds the {MODULE.RECEIPT_BYTE_CEILING}-byte ceiling",
+        )
+
     def test_cli_validates_shape_without_an_author_context(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "receipt.txt"
@@ -112,88 +128,5 @@ class ReviewReceiptTests(unittest.TestCase):
                 )
             self.assertEqual(output.getvalue().strip(), "ALLOW")
             path.write_text(receipt(verdict="REQUEST-CHANGES"), encoding="utf-8")
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(MODULE.main(args), 1)
-
-    def test_cli_main_worker_mode_still_requires_an_author_context(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "receipt.txt"
-            path.write_text(main_worker_receipt(), encoding="utf-8")
-            with contextlib.redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(
-                    MODULE.main(
-                        [
-                            str(path),
-                            "--head",
-                            HEAD,
-                            "--resource-kind",
-                            "pull-request",
-                            "--receipt-kind",
-                            "main-worker",
-                            "--reviewer-context",
-                            "reviewer-context",
-                        ]
-                    ),
-                    1,
-                )
-            self.assertIn("requires the author context", errors.getvalue())
-
-
-class MainWorkerReceiptTests(unittest.TestCase):
-    def test_exact_head_role_scope_and_pass_are_ready_gate_inputs(self):
-        self.assertIsNone(
-            MODULE.main_worker_denial(
-                main_worker_receipt(),
-                HEAD,
-                "author-context",
-                "fresh-reviewer-context",
-                "pull-request",
-            )
-        )
-
-    def test_head_role_verdict_scope_resource_and_role_mutants_are_denied(self):
-        cases = (
-            (main_worker_receipt(head="b" * 40), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt() + f"HEAD: {HEAD}\n", "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt(role="REVIEWER"), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt(verdict="BLOCK"), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt().replace(MODULE.MAIN_WORKER_SCOPE, "architecture"), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt(), "author-context", "reviewer-context", "issue", "PASS"),
-            (main_worker_receipt(worker="author-context"), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt(worker="reviewer-context"), "author-context", "reviewer-context", "pull-request", "PASS"),
-            (main_worker_receipt(), "same-context", "same-context", "pull-request", "PASS"),
-            (main_worker_receipt().replace(" (Main Worker)", ""), "author-context", "reviewer-context", "pull-request", "PASS"),
-        )
-        for index, (text, author, reviewer, resource, verdict) in enumerate(cases):
-            with self.subTest(receipt_mutant=index):
-                self.assertIsNotNone(
-                    MODULE.main_worker_denial(
-                        text, HEAD, author, reviewer, resource, verdict
-                    )
-                )
-
-    def test_cli_requires_main_worker_mode_reviewer_context_and_pass(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "receipt.txt"
-            path.write_text(main_worker_receipt(), encoding="utf-8")
-            args = [
-                str(path),
-                "--head",
-                HEAD,
-                "--author-context",
-                "author-context",
-                "--reviewer-context",
-                "reviewer-context",
-                "--resource-kind",
-                "pull-request",
-                "--receipt-kind",
-                "main-worker",
-                "--required-verdict",
-                "PASS",
-            ]
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(MODULE.main(args), 0)
-            self.assertEqual(output.getvalue().strip(), "ALLOW")
-            path.write_text(main_worker_receipt(verdict="BLOCK"), encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(MODULE.main(args), 1)

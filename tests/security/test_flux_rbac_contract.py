@@ -22,9 +22,8 @@ battery is the evidence that removing it is safe in both directions:
 
 What is modelled rather than observed is stated in the module docstring of
 ``testsupport/rbac_model.py``. The live half is the live-state comparison in
-``bootstrap/flux/bootstrap.sh --verify`` plus the custody-bound, fail-closed
-authorization oracle and disposable real-API-server matrix described in
-``docs/runbooks/flux-rbac-narrowing.md``.
+``bootstrap/flux/bootstrap.sh --verify``; the convergence ceremony that once
+supplied a second live oracle was retired by the owner (issue #299).
 """
 
 from __future__ import annotations
@@ -37,8 +36,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import NamedTuple
-
-from scripts import flux_rbac_denial_oracle as denial_oracle
 
 from .support import load_script
 from .testsupport import rbac_model as model
@@ -1191,41 +1188,6 @@ class FluxRbacNarrownessTests(unittest.TestCase):
                     self.authorizer.allows(subject, verb, group, resource, namespace, name),
                     "{} may {} {}/{}: {}".format(subject, verb, group or "core", resource, why),
                 )
-
-    def test_all_18_issue_98_rows_fit_the_closed_live_oracle(self):
-        """The readable deputy matrix is executable evidence, not prose.
-
-        #184 deliberately closed the oracle over reviewed verbs and resource
-        identities. Issue #98 adds no second authorization path: every one of
-        its literal crossing rows must fit that existing closed contract, with
-        the exact ServiceAccount grammar and the one declared finalizer
-        discovery exception.
-        """
-
-        self.assertEqual(len(ISSUE_98_CROSS_CONTROLLER_REQUESTS), 18)
-        for subject, verb, group, resource, namespace, name, _ in (
-            ISSUE_98_CROSS_CONTROLLER_REQUESTS
-        ):
-            with self.subTest(subject=str(subject), verb=verb, resource=resource):
-                denial_oracle.canonical_service_account(str(subject))
-                self.assertIn(verb, denial_oracle.VERBS)
-                self.assertIn((group, resource), denial_oracle.RESOURCE_IDENTITIES)
-                identity = denial_oracle.RESOURCE_IDENTITIES[(group, resource)]
-                self.assertTrue(identity.namespaced)
-                self.assertIsNone(namespace)
-                self.assertIsNone(name)
-                request = (verb, group, identity.resource, identity.subresource)
-                if identity.subresource == "finalizers":
-                    self.assertIn(
-                        request,
-                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
-                    )
-                else:
-                    self.assertNotIn(
-                        request,
-                        denial_oracle.AUTHORIZATION_ONLY_RESOURCES,
-                    )
-
     def test_the_shared_controller_role_grants_no_flux_api_group(self):
         """The structural half of the split (issue #98).
 
@@ -1855,31 +1817,6 @@ class FluxRbacCompositionTests(unittest.TestCase):
             with self.subTest(closure=fragment):
                 self.assertIn(fragment, body)
 
-    def test_reviewed_manifest_inventory_lists_every_narrowing_patch(self):
-        text = BOOTSTRAP.read_text(encoding="utf-8")
-        inventory = re.search(r"(?ms)^  expected_inventory='(?P<body>.*?)'$", text)
-        if inventory is None:
-            self.fail("bootstrap.sh no longer declares a reviewed manifest inventory")
-        listed_lines = tuple(inventory.group("body").splitlines())
-        listed = {line.split(" ", 1)[1] for line in listed_lines}
-        for relative in (
-            model.FLUX_RBAC_PATCH_FILES + model.FLUX_CONTROLLER_ROOT_RBAC_FILES
-        ):
-            with self.subTest(manifest=relative):
-                self.assertIn(relative, listed)
-
-        # This inventory is the closed, historical #141 controller/RBAC
-        # transaction, not a description of the successor GitOps source. In
-        # particular it deliberately retains the old static gotk-sync input;
-        # #189 replaces that applicable path with a bootstrap-rendered source
-        # without rebinding the already reviewed #141 custody artifact.
-        self.assertIn(
-            "100644 kubernetes/flux-system/gotk-sync.yaml", listed_lines
-        )
-        self.assertNotIn(
-            "100644 kubernetes/flux-system/gotk-sync.yaml.in", listed_lines
-        )
-
     @staticmethod
     def _bootstrap_contract():
         text = BOOTSTRAP.read_text(encoding="utf-8")
@@ -2438,18 +2375,25 @@ class FluxRbacStructuralValidatorTests(unittest.TestCase):
                 )
 
     def test_flux_system_secret_authority_cannot_reappear(self):
+        """Even a read of one named Secret in flux-system is refused."""
+
         anchor = "rules:\n  # Leader election is per-controller"
-        injected = (
-            "rules:\n"
-            '  - apiGroups: [""]\n'
-            "    resources: [secrets]\n"
-            "    verbs: [get, update]\n"
-            "  # Leader election is per-controller"
-        )
-        errors = self.mutate("kubernetes/flux-system/access.yaml", anchor, injected)
-        self.assertTrue(
-            any("Secret grant must be read-only" in error for error in errors), errors
-        )
+        for verbs in ("[get]", "[get, update]"):
+            injected = (
+                "rules:\n"
+                '  - apiGroups: [""]\n'
+                "    resources: [secrets]\n"
+                "    verbs: {}\n".format(verbs)
+                + "  # Leader election is per-controller"
+            )
+            with self.subTest(verbs=verbs):
+                errors = self.mutate(
+                    "kubernetes/flux-system/access.yaml", anchor, injected
+                )
+                self.assertTrue(
+                    any("must not grant Secret access" in error for error in errors),
+                    errors,
+                )
 
     def test_per_controller_roles_cannot_gain_cluster_secret_access(self):
         relative = "kubernetes/flux-system/controllers/per-controller-rbac.yaml"
@@ -2920,7 +2864,7 @@ class YamlSubsetReaderTests(unittest.TestCase):
             "    resources: [secrets, configmaps]\n"
             "    verbs: [get]\n"
             "    resourceNames:\n"
-            "      - sops-age\n"
+            "      - example-name\n"
             "---\n"
             "kind: Other\n"
             "spec:\n"
@@ -2937,7 +2881,7 @@ class YamlSubsetReaderTests(unittest.TestCase):
                     "apiGroups": [""],
                     "resources": ["secrets", "configmaps"],
                     "verbs": ["get"],
-                    "resourceNames": ["sops-age"],
+                    "resourceNames": ["example-name"],
                 }
             ],
         )

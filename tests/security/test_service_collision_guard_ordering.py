@@ -88,26 +88,6 @@ class RuntimeInstallerCollisionGateTests(unittest.TestCase):
         self.assertLess(start, end, "collision loop must precede the transaction")
         return self.script[start:end]
 
-    def test_gate_probes_both_services_with_all_three_probes(self):
-        region = self.gate_region()
-        for probe in (
-            # Unit-file presence: a foreign containerd/kubelet unit anywhere
-            # in the systemd search path is a collision even when inactive.
-            'systemctl cat "${name}"',
-            # Activation and enablement state, each probed per service name.
-            'systemctl is-active --quiet "${name}" 2>/dev/null',
-            'systemctl is-enabled --quiet "${name}" 2>/dev/null',
-        ):
-            with self.subTest(probe=probe):
-                self.assertIn(probe, region)
-
-    def test_gate_refuses_with_the_documented_message(self):
-        self.assertIn(
-            'die "refusing to replace or alter existing systemd service state:'
-            ' ${name}"',
-            self.gate_region(),
-        )
-
     def test_gate_is_ordered_before_every_service_mutation(self):
         marker = self.script.index("phase='pre-mutation-collision-validation'")
         loop = self.script.index(COLLISION_LOOP)

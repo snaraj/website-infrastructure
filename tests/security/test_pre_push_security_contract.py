@@ -77,55 +77,6 @@ def run_history_validator(repository, baseline, candidate, *options):
     )
 
 
-def synthetic_sops_documents():
-    recipient = "age1pq1" + ("q" * 58)
-
-    def envelope(value):
-        encoded = base64.b64encode(value).decode("ascii")
-        iv = base64.b64encode(b"i" * 12).decode("ascii")
-        tag = base64.b64encode(b"t" * 16).decode("ascii")
-        return "ENC[AES256_GCM,data:{},iv:{},tag:{},type:str]".format(
-            encoded, iv, tag
-        )
-
-    age_payload = base64.b64encode(
-        b"age-encryption.org/v1\n-> X25519 synthetic\n--- synthetic\n"
-    ).decode("ascii")
-    armored_lines = "\n".join(
-        "        " + age_payload[index:index + 64]
-        for index in range(0, len(age_payload), 64)
-    )
-    config = (
-        "creation_rules:\n"
-        "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
-        "    encrypted_regex: ^(data|stringData)$\n"
-        "    age:\n"
-        "      - " + recipient + "\n"
-    )
-    secret = (
-        "apiVersion: v1\n"
-        "kind: Secret\n"
-        "metadata:\n"
-        "  name: pi-websites-tunnel-token\n"
-        "  namespace: cloudflare-public\n"
-        "type: Opaque\n"
-        "stringData:\n"
-        "  token: " + envelope(b"synthetic-token-value") + "\n"
-        "sops:\n"
-        "  age:\n"
-        "    - recipient: " + recipient + "\n"
-        "      enc: |\n"
-        "        -----BEGIN AGE ENCRYPTED FILE-----\n"
-        + armored_lines + "\n"
-        "        -----END AGE ENCRYPTED FILE-----\n"
-        '  lastmodified: "2026-08-09T00:00:00Z"\n'
-        "  mac: " + envelope(b"synthetic-mac") + "\n"
-        "  encrypted_regex: ^(data|stringData)$\n"
-        "  version: 3.13.3\n"
-    )
-    return config, secret
-
-
 def synthetic_api_encryption_configuration(secret):
     return (
         "apiVersion: apiserver.config.k8s.io/v1\n"
@@ -384,7 +335,9 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             self.assertEqual(pull_request_result.returncode, 0, pull_request_result.stderr)
             self.assertIn("1 outgoing commit(s) scanned", pull_request_result.stdout)
 
-    def test_allows_encrypted_values_in_the_exact_approved_sops_path(self):
+    def test_rejects_every_sops_ciphertext_path(self):
+        """Encryption is not an exemption: the repository carries no secrets."""
+
         with tempfile.TemporaryDirectory() as directory:
             repository, baseline = initialize_history_repository(directory)
             relative = Path(
@@ -393,18 +346,17 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             )
             path = repository / relative
             path.parent.mkdir(parents=True)
-            config, secret = synthetic_sops_documents()
-            path.write_text(secret, encoding="utf-8")
-            (repository / ".sops.yaml").write_text(config, encoding="utf-8")
-            run_git(repository, "add", relative.as_posix(), ".sops.yaml")
-            run_git(repository, "commit", "-m", "encrypted synthetic fixture")
+            path.write_text("placeholder: value\n", encoding="utf-8")
+            run_git(repository, "add", relative.as_posix())
+            run_git(repository, "commit", "-m", "ciphertext path")
             candidate = run_git(
                 repository, "rev-parse", "HEAD", text=True
             ).stdout.strip()
 
             result = run_history_validator(repository, baseline, candidate)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("forbidden SOPS ciphertext path", result.stderr)
 
     def test_allows_only_the_exact_inert_tunnel_token_structural_example(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -443,7 +395,7 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
 
             self.assertNotEqual(mutated_result.returncode, 0)
             self.assertIn(
-                "unencrypted Kubernetes Secret manifest", mutated_result.stderr
+                "committed Kubernetes Secret manifest", mutated_result.stderr
             )
             self.assertNotIn(relative.name, mutated_result.stderr)
 
@@ -687,7 +639,7 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             result = run_history_validator(repository, baseline, candidate)
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("unencrypted Kubernetes Secret manifest", result.stderr)
+            self.assertIn("committed Kubernetes Secret manifest", result.stderr)
             for name in documents:
                 self.assertNotIn(name, result.stderr)
 
@@ -781,28 +733,27 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             self.assertIn("blob exceeds publication size ceiling", result.stderr)
             self.assertNotIn("oversized.txt", result.stderr)
 
-    def test_rejects_plaintext_in_the_approved_sops_path_then_deleted(self):
+    def test_rejects_a_committed_secret_manifest_then_deleted(self):
+        """A later deletion does not unpublish the tree that carried it."""
+
         with tempfile.TemporaryDirectory() as directory:
             repository, baseline = initialize_history_repository(directory)
             relative = Path(
                 "kubernetes/platform/cloudflare-public/release/"
-                "tunnel-token.sops.yaml"
+                "tunnel-token.yaml"
             )
             path = repository / relative
             path.parent.mkdir(parents=True)
-            config, _valid_secret = synthetic_sops_documents()
-            (repository / ".sops.yaml").write_text(config, encoding="utf-8")
             path.write_text(
                 "apiVersion: v1\nkind: Secret\nmetadata:\n"
-                "  name: synthetic\nstringData:\n  token: ENC[synthetic]\n"
-                "sops:\n  age: []\n",
+                "  name: synthetic\nstringData:\n  token: synthetic\n",
                 encoding="utf-8",
             )
-            run_git(repository, "add", relative.as_posix(), ".sops.yaml")
-            run_git(repository, "commit", "-m", "temporary malformed ciphertext")
+            run_git(repository, "add", relative.as_posix())
+            run_git(repository, "commit", "-m", "temporary Secret manifest")
             path.unlink()
             run_git(repository, "add", "-u")
-            run_git(repository, "commit", "-m", "remove malformed ciphertext")
+            run_git(repository, "commit", "-m", "remove Secret manifest")
             candidate = run_git(
                 repository, "rev-parse", "HEAD", text=True
             ).stdout.strip()
@@ -810,7 +761,7 @@ class PublicationHistoryValidatorTests(unittest.TestCase):
             result = run_history_validator(repository, baseline, candidate)
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("invalid historical SOPS Secret", result.stderr)
+            self.assertIn("committed Kubernetes Secret manifest", result.stderr)
             self.assertNotIn(relative.as_posix(), result.stderr)
 
     @unittest.skipUnless(GITLEAKS, "pinned Gitleaks is required for policy behavior")

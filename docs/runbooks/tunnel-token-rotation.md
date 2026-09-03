@@ -36,16 +36,13 @@ runs with the old credential.
 The persistent root-only token is not encrypted at rest, so loss or offline
 theft of the Pi triggers immediate force-disconnect and rotation.
 
-The public `pi-websites` SOPS path is also `NO-GO`: its protected ciphertext
-verifier and the Flux age-secret/live-sync entrypoints are code-blocked until
-the same class of separately installed reviewed-blob launcher exists. Public
-token rotation instructions below are a future acceptance contract only. Do
-not generate the production age identities or Tunnel ciphertext, and do not
-bypass the guards.
+Both public paths are also `NO-GO` until the same class of separately installed
+reviewed-blob launcher exists. Public token rotation instructions below are a
+future acceptance contract only; do not bypass the guards.
 
-The admin and public Tunnel tokens are separate. Never rotate both in one
-change. A remotely managed Tunnel token is a bearer credential: anyone holding
-it can run a connector for that Tunnel.
+`pi-admin` and each public site hold separate Tunnel tokens. Never rotate more
+than one in a single change. A remotely managed Tunnel token is a bearer
+credential: anyone holding it can run a connector for that Tunnel.
 
 Cloudflare rotation has two important semantics:
 
@@ -64,48 +61,43 @@ line, shell history, Git, chat, logs, OpenTofu state, or an unprotected plan.
 Use a protected file or process-local environment, disable shell tracing, and
 clear it immediately afterward.
 
-## Public connector — routine rotation
+## Public connectors — routine rotation, one site per ceremony
 
-1. Keep `pi-admin` and physical/LAN recovery working. During a reviewed window,
-   have the owner rotate `pi-websites` and capture the new runtime token directly
-   into a protected mode-0600 file without printing it. Existing replicas may
-   remain connected, but the old token can no longer reconnect them.
-2. Generate the same Kubernetes Secret name/key, encrypt with the one public age
-   recipient selected by `.sops.yaml`, list `tunnel-token.sops.yaml` exactly once
-   in the public release Kustomization, and update the chart's non-secret
-   `tokenRevision` in one feature-branch PR. The gate accepts this as staged only
-   when the file, listing, ciphertext structure, Secret identity/key, recipient,
-   and revision all agree. Before the file enters the repository, run the
-   protected Linux `bootstrap/flux/verify-sops-ciphertext.sh` ceremony. A PASS
-   authenticates the SOPS MAC and proves the decrypted bearer matches the
-   independently reviewed account and `pi-websites` Tunnel-ID digests without
-   printing it; CI structural validation cannot provide that proof. Initial
-   state requires the Secret both absent and
-   unlisted; never commit a latent listing or split these fields across PRs.
+Each site is one identity tuple, and no member's name is ever derived from
+another's suffix: Cloudflare Tunnel `naranjo-online`, Deployment
+`naranjo-online-tunnel`, Secret `naranjo-online-tunnel-token`; and Cloudflare
+Tunnel `lidersea-com`, Deployment `lidersea-com-tunnel`, Secret
+`lidersea-com-tunnel-token`. `<site>` is one of those two Tunnel names and that
+connector's `values.yaml` key; the other is the PEER. `pi-websites` is denied.
+
+1. Keep `pi-admin` and physical/LAN recovery working and record the peer
+   Secret's `resourceVersion` and `creationTimestamp`. In a reviewed window,
+   have the owner rotate the Cloudflare Tunnel named `<site>` and capture its
+   new token into a protected mode-0600 file without printing it; replicas may
+   stay connected, but the old token cannot reconnect them.
+2. Create the `cloudflare-public/<site>-tunnel-token` Secret on the cluster
+   from that file. The token never enters the repository in any encoding, the
+   release Kustomization stays at its exact two resources, and the only
+   committed half is `connectors.<site>.tokenRevision`.
 3. Render, policy-check, and secret-scan the exact diff. After merge, watch the
-   `maxUnavailable=0` rollout and verify two healthy new-token connectors plus
-   public, terminal-404, and origin-denial tests.
-4. Audit the connector inventory and confirm no old-token connector remains.
-   Delete the protected old-token file. Do not restore it if rollout fails;
-   preserve admin recovery, stop the public rollout if necessary, and issue a
-   different new token through another reviewed rotation.
+   `<site>-tunnel` Deployment's surge-free rollout (`maxSurge: 0`, one replica,
+   so it drains and replaces) and run public, terminal-404, origin-denial tests.
+4. Prove the peer untouched: its Secret's `resourceVersion` and
+   `creationTimestamp` still equal step 1's, its Deployment still healthy.
+5. Confirm the Cloudflare Tunnel `<site>` shows no old-token connector, then
+   delete the protected old-token file. Never restore it: preserve admin
+   recovery, stop that site's rollout, and rotate again for a different token.
 
-## Public connector — suspected or confirmed compromise
-
-1. Preserve `pi-admin` and physical/LAN recovery, then immediately rotate only
-   `pi-websites`.
-2. Using the dashboard control or a short-lived API token with the exact
-   connector-write permission, force-disconnect all existing connections for
-   that Tunnel. The API operation is
-   `DELETE /accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/connections`. Never put
-   either bearer value in the URL or command line. Downtime is required because
-   every old-token connector, including a malicious one, can otherwise remain
-   active.
-3. Install the new token through the same SOPS/age, review, merge, rollout, and
-   verification path above. Revoke the short-lived API token after recording
-   non-secret revocation evidence.
-4. Prove the public connector recovered and `pi-admin` remained unchanged.
-   Never restore the compromised token or skip the force-disconnect step.
+Compromise of one `<site>` token: do step 1, then force-disconnect that one
+Tunnel's connections with the dashboard control or a short-lived API token
+holding exactly the connector-write permission —
+`DELETE /accounts/<ACCOUNT_ID>/cfd_tunnel/<TUNNEL_ID>/connections`, whose
+`<TUNNEL_ID>` is the UUID of the Cloudflare Tunnel named `<site>` and never
+anything resolved from the `<site>-tunnel` Deployment. Never put either bearer
+in the URL or command line. That site takes downtime because every old-token
+connector, a malicious one included, otherwise stays active; the peer keeps
+serving. Then do steps 2 to 5, revoke the API token against non-secret
+revocation evidence, and never restore the compromised token.
 
 ## Admin connector — routine rotation
 
@@ -137,8 +129,8 @@ clear it immediately afterward.
    credential, restart `pi-admin`, and run every WARP and
    control-plane-stopped test before relying on it.
 4. Revoke the short-lived API token, remove protected copies of the compromised
-   Tunnel token, and prove `pi-websites` remained unchanged. Never restore a
-   compromised token.
+   Tunnel token, and prove both public connectors are unchanged. Never restore
+   a compromised token.
 
 Revalidate the current behavior immediately before live rotation:
 

@@ -1,8 +1,8 @@
 """Pin the shared no-follow walk helpers byte-identical across validators.
 
-Four validators read owner-private files (tunnel token, Cloudflare token
-receipt, kubeconfig snapshot, SOPS ciphertext snapshot) through a private
-copy of the same TOCTOU-hardened helper family. Before this pin the four
+Three validators read owner-private files (tunnel token, Cloudflare token
+receipt, kubeconfig snapshot) through a private copy of the same
+TOCTOU-hardened helper family. Before this pin those
 copies had silently diverged — two of them compared a narrower custody
 tuple that ignored st_uid/st_gid, so a concurrent chown inside the read
 window passed unnoticed. A fix applied to one copy must now land in every
@@ -14,7 +14,7 @@ The carrier sets below are deliberate, explicit allowlists — but they are
 enforced by discovery, not assumption: every tracked ``*.py`` under
 ``scripts/`` is swept for definitions of the helper names, the set of
 files found must equal the pinned set exactly, and every found copy must
-be byte-identical to the canonical carrier's. A fifth tracked copy (or a
+be byte-identical to the canonical carrier's. A fourth tracked copy (or a
 divergent one) therefore fails by file name, and adding a legitimate new
 carrier is a conscious edit to the explicit sets in this file.
 """
@@ -36,7 +36,6 @@ FAMILY_CARRIERS = {
     "scripts/validate_cloudflared_tunnel_token.py": "InvalidToken",
     "scripts/validate_cloudflare_token_receipt.py": "ReceiptError",
     "scripts/validate_kubeconfig_snapshot.py": "SnapshotError",
-    "scripts/validate_sops_ciphertext_snapshot.py": "SnapshotError",
 }
 FAMILY_FUNCTIONS = (
     "_path_state",

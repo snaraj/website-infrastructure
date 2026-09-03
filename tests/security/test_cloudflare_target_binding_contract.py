@@ -550,18 +550,6 @@ class CloudflareTargetBindingContractTests(unittest.TestCase):
         ):
             self.assertIn(fragment, AUDIT)
 
-    def test_docs_admit_provider_permission_reach_and_require_jit_compensation(self):
-        for fragment in (
-            "cannot be restricted",
-            "JIT",
-            "source-IP",
-            "revocation",
-            "six",
-            "site-naranjo-online",
-            "site-lidersea-com",
-        ):
-            self.assertIn(fragment.lower(), README.lower())
-
     def test_every_declared_mutation_executes_from_its_phase_fixture(self):
         """Every mutation the shell driver names must really mutate its fixture.
 

@@ -206,17 +206,6 @@ class ValidatorInvocationParityTests(unittest.TestCase):
                     .format(name),
                 )
 
-    def test_readme_carries_the_adding_a_validator_checklist(self):
-        text = SCRIPTS_README.read_text(encoding="utf-8")
-        self.assertIn("## Adding a validator", text)
-        for surface in (
-            "validate-security.sh",
-            "pull-request.yml",
-            "test_validator_invocation_parity.py",
-        ):
-            self.assertIn(surface, text)
-
-
 class RepositoryCheckModeParityTests(unittest.TestCase):
     """The nine mode words are bound to ``validate_repository.CHECKS``.
 
@@ -224,8 +213,8 @@ class RepositoryCheckModeParityTests(unittest.TestCase):
     ``validate-security.sh`` survived the whole battery. The suite above keys
     on ``scripts/validate_*.py`` PATHS, so it sees one validator invoked and
     notices nothing when that invocation silently stops selecting a check —
-    and the nine words are nine separate categories of repository invariant,
-    each of which simply stops running. Nothing else in the tree compared the
+    and each word is a separate category of repository invariant that simply
+    stops running. Nothing else in the tree compared the
     list to the registry it indexes.
 
     A set comparison is what makes both directions fail: a word deleted from

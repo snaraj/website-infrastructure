@@ -1,4 +1,10 @@
-# Remote administration — Draft / unverified
+# Remote administration — Draft / unverified, not the decided plane
+
+The decided admin plane is WireGuard/SSH only (PLAT-DEC-001), and
+[practical-security-model.md](../security/practical-security-model.md) keeps
+Cloudflare WARP in its standing REJECTED set as a launch or recovery
+requirement. What remains is the staged, unapplied design of ADR 0007; the WARP
+enrolment and Gateway-policy procedure is removed rather than left runnable.
 
 ## Preconditions
 
@@ -12,7 +18,7 @@
 
 ## Traffic and credential decision
 
-The initial remote path uses the administrator's self-managed, passphrase-
+The design's remote path would use the administrator's self-managed, passphrase-
 protected SSH key end-to-end over an enrolled Cloudflare One client and a
 private WARP-to-Tunnel route. Cloudflare Gateway narrows which identity/device
 may reach TCP 22, while sshd still authenticates the key. Do not add a public
@@ -28,33 +34,6 @@ that `cloudflared` reaches Cloudflare through the selected privacy route and
 that VPN loss fails closed; physical/LAN recovery is the availability fallback,
 not a direct-WAN exception.
 
-## Staged procedure
-
-1. Create/import `pi-admin` with no public hostname, DNS, or tunnel config; add
-   exactly the Pi private `/32` route.
-2. Install its distinct token into the root-owned systemd credential source
-   without printing it. Start the host service and prove it remains available
-   while kubelet, containerd, and the Kubernetes control plane are stopped.
-3. Enroll only the administrator device in WARP Traffic+DNS/Traffic mode,
-   include the Pi `/32`, enable TCP proxying, and require exact identity and
-   device posture. If MFA is part of this phase, enforce it at the IdP-backed
-   WARP enrollment/session boundary, record the maximum session and
-   reauthentication behavior, and test expiry/revocation. Do not describe the
-   Gateway network policy as per-SSH MFA; sshd still authenticates the
-   self-managed key for each SSH connection.
-4. Apply the TCP 22 allow followed by a lower-priority all-other-TCP/UDP
-   block. The admin plane is SSH-only (PLAT-DEC-001): 6443 and every other
-   control-plane listener stay terminally denied from the admin path, so no
-   6443 allow exists to apply. Keep host firewall default deny because
-   Gateway does not prove ICMP or all-protocol denial.
-5. From an external network, prove WARP-on SSH succeeds, WARP-off fails,
-   kubectl against the admin path is refused (PLAT-DEC-001 — cluster
-   administration happens on-host over SSH), unauthorized identity/device
-   and an expired/revoked enrollment session fail, and LAN recovery still
-   works.
-6. Only then run the recovery-gated SSH hardening script. Keep the old sessions
-   open and prove a third login before logout.
-
 ## Saturation acceptance before public media
 
 Run these only after capacity, storage, and rollback profiles are reviewed.
@@ -62,8 +41,8 @@ Generate bounded load that cannot intentionally fill the production root disk,
 and retain physical/LAN recovery throughout.
 
 1. While website Pods consume their allowed CPU, confirm an interactive SSH
-   session and Kubernetes API health check remain responsive over the approved
-   WARP identity/device path.
+   session and Kubernetes API health check remain responsive over the admin
+   path.
 2. Exercise application memory limits and eviction without OOM-killing sshd,
    `pi-admin`, kubelet, or the control plane.
 3. Drive the dedicated data filesystem through reviewed warning behavior and
@@ -82,9 +61,8 @@ and retain physical/LAN recovery throughout.
 ## Rollback
 
 If SSH hardening fails, restore the timestamped drop-in backup through the old
-session and validate/reload sshd. If WARP/Tunnel fails, retain LAN access, stop
-the new host service, and revert only the reviewed route/policies. Do not add a
-public hostname or router forwarding as fallback. A compromised token is rotated
+session and validate/reload sshd, retaining LAN access. Do not add a public
+hostname or router forwarding as fallback. A compromised token is rotated
 forward, never restored.
 
 Current official behavior must be revalidated before the live step:

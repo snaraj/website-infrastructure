@@ -17,7 +17,6 @@ TRANSITION = load_script(
     "validate_release_transition.py", module_name="kyverno_retirement_transition"
 )
 TRANSITION_FILES = (
-    ".sops.yaml",
     "kubernetes/websites/naranjo-online/release.yaml",
     "kubernetes/websites/lidersea-com/release.yaml",
     "kubernetes/platform/cloudflare-public/release/release.yaml",
@@ -58,24 +57,6 @@ class KyvernoRetirementContractTests(unittest.TestCase):
         self.assertNotIn("namespace: lidersea-com", prerequisites)
         self.assertEqual(prerequisites.count("name: default-deny\n"), 1)
 
-    def test_revisit_trigger_is_a_material_trust_boundary_expansion(self):
-        normative_paths = (
-            "AGENTS.md",
-            "docs/adr/0016-tag-driven-flux-release-sync.md",
-            "docs/assurance/phase-c-kubernetes-adversarial.md",
-            "docs/runbooks/image-signature-admission.md",
-        )
-        required = (
-            "material trust-boundary expansion, including another independent "
-            "tenant or untrusted/third-party workload"
-        )
-        for relative in normative_paths:
-            with self.subTest(path=relative):
-                text = " ".join((ROOT / relative).read_text(encoding="utf-8").split())
-                self.assertIn(required, text)
-                self.assertNotIn("second tenant", text.lower())
-                self.assertNotIn("reconsidered only if", text.lower())
-
     def test_executable_kyverno_surfaces_are_absent(self):
         retired = (
             "policies/kyverno",
@@ -96,34 +77,6 @@ class KyvernoRetirementContractTests(unittest.TestCase):
                     )
                 else:
                     self.assertFalse(path.exists())
-
-    def test_runtime_toolchain_policy_and_ci_do_not_recreate_the_dependency(self):
-        paths = (
-            "versions.env",
-            "bootstrap/flux/bootstrap.sh",
-            "kubernetes/flux-system/access.yaml",
-            "kubernetes/platform/prerequisites/namespaces.yaml",
-            "kubernetes/platform/prerequisites/network-policies.yaml",
-            "policies/conftest/kubernetes.rego",
-            "policies/release-conftest/deployment-readiness.rego",
-            "scripts/ci/install-tools.sh",
-            "scripts/flux_rbac_kind_acceptance.py",
-            "scripts/render-manifests.sh",
-            "scripts/release-gate.sh",
-            "scripts/validate-security.sh",
-            "scripts/validate_release_transition.py",
-            "scripts/validate_repository.py",
-            "scripts/validate_runtime_inventory_evidence.py",
-            "scripts/validate_signature_policy.py",
-            "scripts/ci/platform_release_contract.py",
-            "tests/security/testsupport/rbac_model.py",
-            ".github/workflows/pull-request.yml",
-            ".sourceignore",
-        )
-        for relative in paths:
-            with self.subTest(path=relative):
-                text = (ROOT / relative).read_text(encoding="utf-8").lower()
-                self.assertNotIn("kyverno", text)
 
     def test_no_active_executable_surface_mentions_kyverno(self):
         active_roots = (

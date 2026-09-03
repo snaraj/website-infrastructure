@@ -344,7 +344,7 @@ phaseCustody:
     providerAuthenticationSource: CLOUDFLARE_API_TOKEN
     providerDataSourceForRuntimeTokens: forbidden
     plaintextCredentialInTerraformVariable: forbidden
-    decryptedSopsMaterialInGitOrLogs: forbidden
+    decryptedCredentialMaterialInGitOrLogs: forbidden
     shortExplicitTtl: required
     trustedSourceIpRestriction: required
     immediatePostWindowRevocation: required

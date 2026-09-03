@@ -24,7 +24,7 @@ control-plane Pods through the reviewed procedure, restore with the pinned etcd
 restore tool to the reviewed SSD path, update only the exact static-Pod data path
 required by that procedure, and restart/verify. Prove member, API, node, CoreDNS,
 Pod Security, audit, and API encryption health; prove authorized Secret reads and
-unauthorized denial; then create and verify a new snapshot. Restore SOPS/Flux and
+unauthorized denial; then create and verify a new snapshot. Restore Flux and
 reconcile prerequisites before any application release.
 
 After member/API health is restored, create the new acceptance snapshot with

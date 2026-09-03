@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - source.yaml
   - release.yaml
-  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.

@@ -57,7 +57,7 @@ remain mandatory but do not reduce token reach.
 - Keep the read-only audit token and both Tunnel runtime tokens separate from
   every import token.
 - Put variables, state, plans, plan JSON, command transcripts containing IDs,
-  and decrypted SOPS material outside Git.
+  and decrypted credential material outside Git.
 - Import one object, then run a refresh-only plan and the future dedicated
   import/reconciliation gate before touching another object.
 - Stop on any create, update, replacement, delete, unknown critical value,

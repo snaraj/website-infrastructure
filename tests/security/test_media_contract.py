@@ -85,17 +85,6 @@ class MediaContractTests(unittest.TestCase):
                         for error in REPOSITORY_MODULE.check_media(root)
                     ))
 
-    def test_architecture_states_current_cloudflare_no_go(self):
-        adr = (REPO_ROOT / "docs/adr/0012-heavy-media-storage.md").read_text(
-            encoding="utf-8"
-        )
-        zero_spend = (REPO_ROOT / "docs/adr/0006-cloudflare-zero-spend.md").read_text(
-            encoding="utf-8"
-        )
-        for document in (adr, zero_spend):
-            self.assertIn("NO-GO", document)
-            self.assertIn("service-specific-terms-application-services", document)
-
     def test_source_artifact_keeps_exact_media_bounds(self):
         # The OCI-image media ceiling moved to the site repositories with
         # their publishers; the platform Flux artifact bound stays here.

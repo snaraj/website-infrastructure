@@ -57,7 +57,7 @@ Cloudflare and cluster mutations are manual, local, exit-gated operations.
   disabled independently from code readiness.
 - Private databases and encrypted, off-device, restore-tested backups when any
   database is introduced.
-- SOPS/age in Git and Kubernetes API Secret encryption at rest.
+- No secret in Git, and Kubernetes API Secret encryption at rest.
 - Signed/attested immutable images, SBOM, vulnerability scan, secret scan, SAST,
   manifest validation, and IaC policy gates.
 - Authentication, authorization, schema/body/time limits, safe CORS/CSRF,

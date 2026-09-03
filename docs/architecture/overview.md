@@ -76,10 +76,10 @@ resources.
 
 ## Desired state
 
-Flux anonymously reads `main`, decrypts approved SOPS documents with the
-out-of-band cluster age identity, and applies them through explicit reconciliation
-ServiceAccounts. Public GHCR images are pulled by digest. Cloudflare configuration
-is manual OpenTofu with deny-by-default policy and plan-hash approval.
+Flux anonymously reads `main` and applies it through explicit reconciliation
+ServiceAccounts; the repository carries no Secret and Flux decrypts nothing.
+Public GHCR images are pulled by digest. Cloudflare configuration is manual
+OpenTofu with deny-by-default policy and plan-hash approval.
 
 ## Failure posture
 

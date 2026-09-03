@@ -36,7 +36,6 @@ SIGNAL_CASES = {
 PROTECTED = frozenset(
     {
         "secrets-and-tokens",
-        "sops-age-keys-and-ciphertext",
         "private-keys-etcd-pki",
         "provider-dns-domain-tunnel-identities",
         "protected-custody",

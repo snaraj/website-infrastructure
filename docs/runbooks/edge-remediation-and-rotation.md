@@ -72,24 +72,14 @@ settings per zone and nothing else.
 2. The current edge-to-origin encryption mode is `full` or `strict`. Confirm it
    with ceremony C first (`zone-setting[<zone>/ssl]`). This matters: the loop
    hazard described in A.4 is real only under the `flexible` mode.
-3. The application-side redirect behaviour has two halves, and they are **not
-   equally true today**. Read both before relying on either:
-
-   a. **Merged in Git — verifiable now.** Each site's application answers a
-      request carrying an `X-Forwarded-Proto: http` header with a 308 to the
-      same URL over https, and gates `Strict-Transport-Security` to https
-      responses. Confirm by reading each site repository at its current
-      default branch.
-   b. **Not yet observable at the edge.** The images currently running predate
-      those merges. Today both origins answer plaintext with `200` and emit
-      HSTS over cleartext; `scripts/edge-probe.sh` records that as
-      `hsts-over-cleartext present`. The behaviour ships with the next
-      application release. **Do not read (a) as a statement about the live
-      origin** until that deploy has landed and the probe's record item flips
-      to `absent`.
-
-   This split matters because A.4's loop-safety conclusion must not lean on a
-   behaviour that is merged but undeployed. It does not — see A.4.
+3. The application-side redirect behaviour is merged in Git: each site's
+   application answers a request carrying an `X-Forwarded-Proto: http` header
+   with a 308 to the same URL over https, and gates
+   `Strict-Transport-Security` to https responses. Confirm by reading each site
+   repository at its current default branch. Whether the running images carry
+   it is a live observation — read it from the probe's
+   `hsts-over-cleartext` record item (A.1), never from this page. A.4's
+   loop-safety conclusion does not lean on it.
 4. Nobody is mid-rotation on either Tunnel. Ceremonies A and B never overlap.
 
 ### A.1 Pre-toggle probe — expect gaps, and record them
@@ -98,7 +88,7 @@ settings per zone and nothing else.
 scripts/edge-probe.sh --rounds 2 --round-gap 20 | tee edge-probe-before.txt
 ```
 
-Expected today, per the 2026-08-12 attestation and reproduced by this script:
+Expected at the 2026-08-12 attestation, and reproduced by this script:
 `GAP` on `http-redirect-root`, `http-redirect-path-query`, `tls10-refused` and
 `tls11-refused` for **both** zones — eight gaps — and `PASS` on everything else,
 including `zero-rtt-off`, `hsts-exact`, `tls13-accepted`, `readyz`,
@@ -115,11 +105,10 @@ Read four things before continuing:
 - the capability preflight block: all four protocols must read `capable`.
 - the `dnssec` rows: `naranjo.online` signed and validating, `lidersea.com`
   unsigned. `lidersea.com` unsigned is the recorded expectation, not a defect.
-- the `hsts-over-cleartext` record rows. `present` means the running
-  application build still predates the https-gated HSTS change (precondition
-  A.0.3b), which is the expected state until that release deploys. It is a
-  deployed-state signal only; browsers ignore HSTS received over cleartext, so
-  it is neither a control nor a blocker for this ceremony.
+- the `hsts-over-cleartext` record rows. `present` means the running build
+  still predates the https-gated HSTS change. It is a deployed-state signal
+  only; browsers ignore HSTS received over cleartext, so it is neither a
+  control nor a blocker for this ceremony.
 
 Keep `edge-probe-before.txt` outside the repository. It contains no credential
 and no private identifier, but it is a point-in-time observation, not a
@@ -207,14 +196,10 @@ application build is deployed:
    request survives to the origin, so whatever the origin would have done with
    one cannot close a loop.
 
-2. **Defence in depth, and not yet deployed.** On the https path the connector
-   presents the request to the application with `X-Forwarded-Proto: https`, so
-   the application's fail-closed exact-match redirect does not fire; that
-   redirect only ever fires on an explicit `http` forwarded-proto. This is
-   precondition A.0.3a — merged in Git, **not** running at the edge yet
-   (A.0.3b). It is written here because it will matter after the next
-   application release, and because a reader must not mistake it for part of
-   today's safety argument. Reason 1 does not depend on it.
+2. **Defence in depth.** On the https path the connector presents the request
+   to the application with `X-Forwarded-Proto: https`, so the application's
+   fail-closed exact-match redirect does not fire; that redirect only ever
+   fires on an explicit `http` forwarded-proto. Reason 1 does not depend on it.
 
 The check that keeps reason 1 true is precondition A.0.2: the `flexible` edge-
 to-origin mode is the one that would manufacture the loop, and ceremony C fails
@@ -281,14 +266,11 @@ off, and clear it immediately afterwards.
    holding the old token — including one an attacker controls — keeps serving.
 5. **Install the new token through the approved workflow.** The connector reads
    its token from a Kubernetes Secret through `secretKeyRef`, never as a literal
-   manifest value; the Secret is SOPS/age ciphertext under the recipient
-   selected by `.sops.yaml`, staged in one feature-branch pull request together
-   with the non-secret revision field the chart uses to trigger a rollout. The
-   per-site Secret paths for the two-Tunnel shape are platform-lane
-   reconciliation work and are not yet in Git; until they land, the exact
-   staging contract, its ciphertext ceremony, and its blockers are the ones in
-   `docs/runbooks/tunnel-token-rotation.md`. Never commit a latent listing, and
-   never split the Secret and its listing across two pull requests.
+   manifest value; the Secret is created directly on the cluster by the owner's
+   ceremony and never enters Git, while the non-secret revision field the chart
+   uses to trigger a rollout is the only part that moves through a pull request.
+   The exact ceremony and its blockers are in
+   `docs/runbooks/tunnel-token-rotation.md`.
 6. **Prove the old token cannot reconnect.** After the rollout completes, the
    audit must show that Tunnel healthy with `idle=0` and no connector that
    predates the rotation. An old-token connector that reappears means the

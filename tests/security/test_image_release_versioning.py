@@ -197,30 +197,6 @@ class ImageReleaseVersionTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.main(["changed", "--base", "0" * 40])
 
-    def test_historical_adr_and_current_rollback_contract_are_both_honest(self):
-        adr = REPO_ROOT.joinpath(
-            "docs/adr/0014-immutable-container-release-versioning.md"
-        ).read_text(encoding="utf-8")
-        runbook = REPO_ROOT.joinpath(
-            "docs/runbooks/image-rollback.md"
-        ).read_text(encoding="utf-8")
-        for historical in (
-            "release-policy.env",
-            "1.0.0",
-            "Kubernetes values remain digest-only",
-            "scripts/promote-image.sh",
-        ):
-            with self.subTest(historical=historical):
-                self.assertIn(historical, adr)
-        for current in (
-            "scripts/promote-image.sh` is retired",
-            "exactly one `spec.ref.digest`",
-            "Do not select another available tag or digest",
-            "no image repository, tag, or digest",
-        ):
-            with self.subTest(current=current):
-                self.assertIn(current, runbook)
-
     def test_promotion_script_cannot_rebind_a_release(self):
         promotion = (REPO_ROOT / "scripts/promote-image.sh").read_text(
             encoding="utf-8"

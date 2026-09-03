@@ -6,7 +6,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import time
 import types
 import unittest
@@ -19,7 +18,6 @@ from .support import load_script
 MODULE = load_script("validate_repository.py")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ACTIVATION_FIXTURE_FILES = (
-    ".sops.yaml",
     "kubernetes/websites/naranjo-online/release.yaml",
     "kubernetes/websites/lidersea-com/release.yaml",
     "kubernetes/platform/cloudflare-public/release/release.yaml",
@@ -28,61 +26,6 @@ ACTIVATION_FIXTURE_FILES = (
     path.as_posix()
     for path in sorted(MODULE.CLOUDFLARE_TERRAFORM_REVIEW_FILES)
 )
-SYNTHETIC_RECIPIENT = "age1pq1" + ("q" * 80)
-
-
-def synthetic_sops_envelope(payload):
-    return "ENC[AES256_GCM,data:{},iv:{},tag:{},type:str]".format(
-        base64.b64encode(payload).decode("ascii"),
-        base64.b64encode(b"i" * 12).decode("ascii"),
-        base64.b64encode(b"t" * 16).decode("ascii"),
-    )
-
-
-SYNTHETIC_TOKEN_ENVELOPE = synthetic_sops_envelope(b"synthetic encrypted token")
-SYNTHETIC_MAC_ENVELOPE = synthetic_sops_envelope(b"synthetic authenticated mac")
-SYNTHETIC_AGE_BODY = "\n".join(
-    "        " + line
-    for line in textwrap.wrap(
-        base64.b64encode(
-            b"age-encryption.org/v1\n-> X25519 synthetic\n"
-            b"c3ludGhldGlj\n--- synthetic-mac\nciphertext\n"
-        ).decode("ascii"),
-        64,
-    )
-)
-
-
-def synthetic_sops_metadata(recipient=SYNTHETIC_RECIPIENT):
-    return (
-        "sops:\n"
-        "  age:\n"
-        "    - recipient: {}\n"
-        "      enc: |\n"
-        "        -----BEGIN AGE ENCRYPTED FILE-----\n"
-        "{}\n"
-        "        -----END AGE ENCRYPTED FILE-----\n"
-        "  lastmodified: \"2026-08-09T00:00:00Z\"\n"
-        "  mac: {}\n"
-        "  encrypted_regex: ^(data|stringData)$\n"
-        "  version: 3.13.3\n"
-    ).format(recipient, SYNTHETIC_AGE_BODY, SYNTHETIC_MAC_ENVELOPE)
-
-
-def synthetic_tunnel_secret(recipient=SYNTHETIC_RECIPIENT):
-    return (
-        "apiVersion: v1\n"
-        "kind: Secret\n"
-        "metadata:\n"
-        "  name: pi-websites-tunnel-token\n"
-        "  namespace: cloudflare-public\n"
-        "type: Opaque\n"
-        "stringData:\n"
-        "  token: {}\n"
-        + synthetic_sops_metadata(recipient)
-    ).format(SYNTHETIC_TOKEN_ENVELOPE)
-
-
 def synthetic_api_encryption_configuration(secret):
     return (
         "apiVersion: apiserver.config.k8s.io/v1\n"
@@ -167,27 +110,6 @@ def resolve_connector_revisions(root, revision="rev-reviewed-test"):
             before, "        tokenRevision: {}\n".format(revision)
         ).encode("utf-8")
     )
-
-
-def configure_cloudflare_fixture(root):
-    """Create the exact synthetic staged encrypted-Secret lifecycle."""
-
-    resolve_connector_revisions(root)
-    replace_once(
-        root,
-        "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
-        "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
-        "  - tunnel-token.sops.yaml\n",
-    )
-    root.joinpath(".sops.yaml").write_bytes((
-        "creation_rules:\n"
-        "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
-        "    encrypted_regex: ^(data|stringData)$\n"
-        "    age:\n"
-        "      - {}\n".format(SYNTHETIC_RECIPIENT)
-    ).encode("utf-8"))
-    secret = root / "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
-    secret.write_bytes(synthetic_tunnel_secret().encode("utf-8"))
 
 
 def write_site_release(
@@ -993,7 +915,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             errors = MODULE.check_secrets(root)
-            self.assertTrue(any("unencrypted Kubernetes Secret" in error for error in errors))
+            self.assertTrue(any("committed Kubernetes Secret" in error for error in errors))
 
     def test_rejects_plaintext_secret_with_quoted_kind_key(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1005,7 +927,7 @@ class RepositoryPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             errors = MODULE.check_secrets(root)
-            self.assertTrue(any("unencrypted Kubernetes Secret" in error for error in errors))
+            self.assertTrue(any("committed Kubernetes Secret" in error for error in errors))
 
     def test_rejects_renamed_api_encryption_config_from_exact_index(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1056,155 +978,25 @@ class RepositoryPolicyTests(unittest.TestCase):
                 (root / "review.txt").write_text(candidate + "\n", encoding="utf-8")
                 self.assertTrue(MODULE.check_secrets(root))
 
-    def test_rejects_mixed_plaintext_sops_secret(self):
+    def test_a_sops_filename_no_longer_exempts_a_secret_manifest(self):
+        """The `*.sops.yaml` name was the one exemption; it is gone."""
+
+        relative_path = (
+            "kubernetes/platform/cloudflare-public/release/tunnel-token.sops.yaml"
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            recipient = "age1pq1" + ("q" * 80)
-            root.joinpath(".sops.yaml").write_text(
-                "creation_rules:\n"
-                "  - path_regex: ^kubernetes/.+\\.sops\\.ya?ml$\n"
-                "    encrypted_regex: ^(data|stringData)$\n"
-                "    age:\n"
-                "      - {}\n".format(recipient),
+            target = root / relative_path
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "apiVersion: v1\nkind: Secret\nmetadata:\n"
+                "  name: synthetic\nstringData:\n  token: synthetic\n",
                 encoding="utf-8",
             )
-            target = root / "kubernetes/platform/cloudflare-public/release"
-            target.mkdir(parents=True)
-            (target / "tunnel-token.sops.yaml").write_text(
-                synthetic_tunnel_secret(recipient).replace(
-                    "  token: {}\n".format(SYNTHETIC_TOKEN_ENVELOPE),
-                    "  token: {}\n  plaintext: forbidden\n".format(
-                        SYNTHETIC_TOKEN_ENVELOPE
-                    ),
-                ),
-                encoding="utf-8",
+            self.assertIn(
+                "committed Kubernetes Secret manifest: " + relative_path,
+                MODULE.check_secrets(root),
             )
-            errors = MODULE.check_secrets(root)
-            self.assertTrue(any(
-                "payload" in error or "only the token key" in error
-                for error in errors
-            ))
-
-    def test_rejects_unapproved_sops_secret_path(self):
-        for relative_path in (
-            "kubernetes/site/secret.sops.yaml",
-            "docs/opaque-archive.sops.yaml",
-        ):
-            with self.subTest(path=relative_path), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory).resolve()
-                target = root / relative_path
-                target.parent.mkdir(parents=True)
-                target.write_text("synthetic\n", encoding="utf-8")
-                self.assertIn(
-                    "unapproved SOPS Secret path: " + relative_path,
-                    MODULE.check_secrets(root),
-                )
-
-    def test_accepts_structurally_encrypted_sops_secret(self):
-        recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
-        text = (
-            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE
-            )
-            + synthetic_sops_metadata(recipient)
-        )
-        self.assertEqual(MODULE.sops_secret_errors(text), [])
-
-    def test_sops_requires_real_envelopes_complete_metadata_and_age_armor(self):
-        valid = (
-            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE
-            )
-            + synthetic_sops_metadata()
-        )
-        mutations = (
-            valid.replace(SYNTHETIC_TOKEN_ENVELOPE, "ENC[not-ciphertext]", 1),
-            valid.replace("  lastmodified: \"2026-08-09T00:00:00Z\"\n", ""),
-            valid.replace(SYNTHETIC_AGE_BODY, "        synthetic-test-ciphertext"),
-            valid.replace(SYNTHETIC_MAC_ENVELOPE, "ENC[not-a-mac]"),
-        )
-        for mutation in mutations:
-            with self.subTest(mutation=mutation[-80:]):
-                self.assertTrue(MODULE.sops_secret_errors(mutation))
-
-    def test_sops_rejects_hidden_recipient_and_alternate_key_backends(self):
-        """Only one canonically spelled age master-key backend is permitted."""
-
-        recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp5hcal"
-        base = (
-            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE
-            )
-            + synthetic_sops_metadata(recipient)
-        )
-        for before, after in (
-            (
-                "    - recipient: {}\n".format(recipient),
-                "    - recipient: {}\n    - \"recipient\": {}\n".format(
-                    recipient, recipient
-                ),
-            ),
-            (
-                "  lastmodified:",
-                "  pgp:\n    - fp: {}\n  lastmodified:".format("A" * 40),
-            ),
-            ("  lastmodified:", '  "age": []\n  lastmodified:'),
-            ("  lastmodified:", "  key_groups:\n    - age: []\n  lastmodified:"),
-        ):
-            with self.subTest(after=after):
-                errors = MODULE.sops_secret_errors(base.replace(before, after, 1))
-                self.assertTrue(errors)
-                self.assertTrue(any(
-                    marker in error
-                    for error in errors
-                    for marker in (
-                        "canonical", "ambiguous", "unapproved",
-                        "duplicate", "malformed", "complete",
-                    )
-                ))
-
-    def test_sops_rejects_extra_age_recipient_controls(self):
-        text = (
-            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE
-            )
-            + synthetic_sops_metadata().replace(
-                "      enc: |\n",
-                "      enc: |\n      created_at: now\n",
-                1,
-            )
-        )
-        self.assertTrue(MODULE.sops_secret_errors(text))
-
-    def test_sops_rejects_nested_or_noncanonical_scalar_metadata(self):
-        base = (
-            "apiVersion: v1\nkind: Secret\nstringData:\n  token: {}\n".format(
-                SYNTHETIC_TOKEN_ENVELOPE
-            )
-            + synthetic_sops_metadata()
-        )
-        for before, after in (
-            (
-                '  lastmodified: "2026-08-09T00:00:00Z"',
-                "  lastmodified:\n    pgp: hidden",
-            ),
-            ('  lastmodified: "2026-08-09T00:00:00Z"', "  lastmodified: yesterday"),
-            ("  encrypted_regex: ^(data|stringData)$", "  encrypted_regex: .*"),
-            ("  version: 3.13.3", "  version: 3.12.0"),
-        ):
-            with self.subTest(after=after):
-                self.assertTrue(MODULE.sops_secret_errors(base.replace(before, after, 1)))
-
-    def test_sops_rejects_nested_ciphertext_bait_and_flow_plaintext(self):
-        text = (
-            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: synthetic\n"
-            "  annotations:\n    data:\n      bait: {}\n"
-            "stringData: {{password: plaintext}}\n".format(SYNTHETIC_TOKEN_ENVELOPE)
-            + synthetic_sops_metadata()
-        )
-        errors = MODULE.sops_secret_errors(text)
-        self.assertTrue(any("top-level data/stringData" in error for error in errors))
-        self.assertTrue(any("no encrypted data/stringData" in error for error in errors))
 
     def test_secret_detection_rejects_tagged_aliased_and_escaped_kind(self):
         for text in (
@@ -1215,31 +1007,12 @@ class RepositoryPolicyTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(MODULE.contains_secret_document(text))
 
-    def test_tunnel_secret_requires_exact_identity_namespace_key_and_recipient(self):
-        recipient = "age1pq1" + ("q" * 80)
-        valid = synthetic_tunnel_secret(recipient)
-        self.assertEqual(MODULE.tunnel_secret_errors(valid, recipient), [])
-        invalid = valid.replace("namespace: cloudflare-public", "namespace: default").replace(
-            "  token: {}\n".format(SYNTHETIC_TOKEN_ENVELOPE),
-            "  token: {}\n  extra: plaintext\n".format(SYNTHETIC_TOKEN_ENVELOPE),
-        )
-        errors = MODULE.tunnel_secret_errors(invalid, recipient)
-        self.assertTrue(any("namespace" in error for error in errors))
-        self.assertTrue(any("only the token key" in error for error in errors))
-
-        quoted_override = valid.replace(
-            "sops:\n",
-            '"stringData":\n  token: plaintext-override\nsops:\n',
-        )
-        errors = MODULE.tunnel_secret_errors(quoted_override, recipient)
-        self.assertTrue(any("top-level" in error for error in errors))
-
     def test_active_kustomization_resource_ignores_comments(self):
         self.assertFalse(MODULE.active_kustomization_resource(
-            "resources:\n  # - tunnel-token.sops.yaml\n", "tunnel-token.sops.yaml"
+            "resources:\n  # - network-policies.yaml\n", "network-policies.yaml"
         ))
         self.assertTrue(MODULE.active_kustomization_resource(
-            "resources:\n  - tunnel-token.sops.yaml # encrypted\n", "tunnel-token.sops.yaml"
+            "resources:\n  - network-policies.yaml # egress\n", "network-policies.yaml"
         ))
 
     def test_site_default_denies_are_owned_by_the_two_direct_roots(self):
@@ -1622,37 +1395,46 @@ class RepositoryPolicyTests(unittest.TestCase):
             with mock.patch.object(MODULE, "check_release", return_value=synthetic):
                 self.assertEqual(MODULE.check_activation(root), synthetic[1:])
 
-    def test_configured_connector_without_secret_fails_before_filtering(self):
+    def test_half_configured_connector_fails_before_filtering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
-            resolve_connector_revisions(root)
+            replace_once(
+                root,
+                "kubernetes/platform/cloudflare-public/release/release.yaml",
+                "      {}:\n        tokenRevision: not-configured\n".format(
+                    MODULE.PUBLIC_CONNECTOR_SITES[0]
+                ),
+                "      {}:\n        tokenRevision: rev-reviewed-test\n".format(
+                    MODULE.PUBLIC_CONNECTOR_SITES[0]
+                ),
+            )
             self.assertEqual(
                 MODULE.check_activation(root),
                 ["release transition state is unavailable or unsafe"],
             )
 
-    def test_initial_connector_rejects_latent_secret_resource_listing(self):
+    def test_connector_rejects_a_latent_secret_resource_listing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
             replace_once(
                 root,
                 "kubernetes/platform/cloudflare-public/release/kustomization.yaml",
-                "  # Add tunnel-token.sops.yaml only after the user-run encryption ceremony.\n",
-                "  - tunnel-token.sops.yaml\n",
+                "  - release.yaml\n",
+                "  - release.yaml\n  - tunnel-token.yaml\n",
             )
             self.assertEqual(
                 MODULE.check_activation(root),
                 ["release transition state is unavailable or unsafe"],
             )
 
-    def test_staged_connector_never_filters_invalid_secret_contract(self):
+    def test_staged_connector_never_filters_a_real_release_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
-            configure_cloudflare_fixture(root)
-            error = "invalid production tunnel Secret: encrypted payload is missing"
+            resolve_connector_revisions(root)
+            error = "public tunnel release state is unavailable or non-canonical"
             with mock.patch.object(MODULE, "check_release", return_value=[error]):
                 self.assertEqual(MODULE.check_activation(root), [error])
 
@@ -1722,7 +1504,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             copy_activation_fixture(root)
-            configure_cloudflare_fixture(root)
+            resolve_connector_revisions(root)
             replace_once(
                 root,
                 "kubernetes/platform/cloudflare-public/release/release.yaml",

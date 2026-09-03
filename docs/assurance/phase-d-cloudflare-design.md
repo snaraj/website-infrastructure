@@ -82,8 +82,8 @@ the origin, and only post-launch with owner awareness.
 Root: serve attacker content or reach the origin.
 1. DNS takeover → registrar/Cloudflare custody + DNSSEC review + IaC-pinned
    records (drift visible in plan).
-2. Tunnel credential theft → each site's token lives only in its
-   SOPS-encrypted Secret path; rotation ceremony documented; compromise of
+2. Tunnel credential theft → each site's token lives only in the cluster
+   Secret an owner ceremony creates; rotation ceremony documented; compromise of
    one token yields only the ability to serve that one site's hostname
    (per-site Tunnels, ADR 0015) — which signature-gated workloads limit.
 3. Access policy bypass → no such policies exist for public sites (nothing

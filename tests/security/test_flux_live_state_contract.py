@@ -82,7 +82,6 @@ class FluxLiveStateStaticContractTests(unittest.TestCase):
             "PY_FLUX_LIVE_STATE",
             "verify_reviewed_live_state controllers || fail",
             "verify_reviewed_live_state full || fail",
-            "/bin/bash \"${repo_root}/bootstrap/flux/verify-sops-age-secret.sh\"",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)

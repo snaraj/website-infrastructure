@@ -24,9 +24,7 @@ ClusterRoleBinding crd-controller-source-flux-system must bind ClusterRole crd-c
 ClusterRoleBinding cluster-reconciler-flux-system must not bind cluster-admin
 ClusterRoleBinding flux-operator-view must not bind a wildcard aggregation role
 Role flux-controller-impersonation must restrict impersonate to named accounts
-Role flux-system/flux-controller-decryption must grant only exact sops-age Secret get
-Role flux-system/flux-controller-decryption must grant only exact sops-age Secret get
-Role flux-system/flux-controller-decryption must not write Secrets
+Role flux-system/flux-controller-decryption must not grant Secret access
 Role flux-system/flux-controller-runtime must not grant a wildcard verbs
 Role lidersea-com/helm-reconciler must grant PVC lifecycle only as the exact naranjo-online helm-reconciler rule
 Role naranjo-online/helm-reconciler must not grant direct pods workload control outside the exact Helm readiness read-back

@@ -2,12 +2,12 @@
 
 ## Present-state truth
 
-This is a repository-side Conftest control, not runtime admission. Kyverno is
-retired and no webhook evaluates these rules in the cluster. The committed
-Rego and hostile fixtures still fail closed before merge: unknown volume
-sources, network storage, `hostPath`, unenumerated classes or provisioners,
-path traversal, missing node affinity, data-source imports, CSI drivers, and
-degenerate/null shapes are rejected.
+This is a repository-side Conftest control, not runtime admission: no webhook
+evaluates these rules in the cluster. The committed Rego and hostile fixtures
+still fail closed before merge: unknown volume sources, network storage,
+`hostPath`, unenumerated classes or provisioners, path traversal, missing node
+affinity, data-source imports, CSI drivers, and degenerate/null shapes are
+rejected.
 
 The sanitized live inventory currently contains only an older, unbound
 `hostPath` PersistentVolume and no PVC or StorageClass. That object is

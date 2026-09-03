@@ -19,7 +19,7 @@ fi
 # Every repository mode except the deliberate release gate runs here; the
 # short entry point previously omitted media and activation, so it could pass
 # while the terminal CI gate ('all') still failed.
-"${python_command}" -B "${repo_root}/scripts/validate_repository.py" layout privacy media secrets workflows dependabot kubernetes cloudflare activation
+"${python_command}" -B "${repo_root}/scripts/validate_repository.py" layout dependabot privacy media secrets workflows kubernetes cloudflare activation
 bash "${repo_root}/scripts/test-policy-fixtures.sh"
 "${python_command}" -B "${repo_root}/scripts/validate_assurance_ledger.py" "${repo_root}/docs/assurance/evidence-ledger.jsonl"
 "${python_command}" -B "${repo_root}/scripts/validate_no_security_toggles.py" "${repo_root}"

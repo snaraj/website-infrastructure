@@ -109,10 +109,10 @@ an impossible self-hash. A file-set change after receipt construction is a
 ## Backup and recovery
 
 After every accepted state change, encrypt an opaque whole-file copy of the state
-to the separate operator-wrapping age recipient. SOPS is appropriate for
-structured local credential files, but it leaves document structure visible;
-use whole-file age encryption for state and saved-plan archives. Write the
-encrypted candidate on the protected volume, verify its ciphertext hash and a
+to the separate operator-wrapping age recipient. Use whole-file age encryption
+for state and saved-plan archives, so no document structure stays visible.
+Write the encrypted candidate on the protected volume, verify its ciphertext
+hash and a
 no-output restore into protected scratch, then copy it to two independent
 encrypted failure domains. Retain no plaintext archive.
 

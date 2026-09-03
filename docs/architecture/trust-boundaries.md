@@ -13,7 +13,6 @@
 | Flux source controller | Anonymous HTTPS Git fetch | Git write, deploy keys, cluster-wide tenant mutation |
 | Tenant reconciler | Named namespace resources | Other namespaces and cluster-scoped privilege |
 | Admin laptop | TCP 22 after identity/device policy — SSH-only, PLAT-DEC-001; `kubectl` runs on the Pi | Kubernetes API 6443, etcd 2379/2380, kubelet 10250 (host-ingress guard), other Pi traffic, WARP-off remote access |
-| Cluster SOPS identity | Decrypt exact Git-tracked Kubernetes ciphertext in `flux-system` | Cloudflare API/state, Git/GitHub authority, operator archives, other clusters |
 | Operator-wrapping identity | Encrypt/decrypt protected local recovery and state archives | Pi/cluster runtime, Git/CI, Cloudflare API authority by itself |
 | Git publishing identity | Reviewed workstation commit/push through protected `main` workflow | Pi/Flux/CI storage, Cloudflare or cluster deployment authority |
 | Local OpenTofu operator | One reviewed phase with one JIT token and protected state | Other phases, billing/Registrar write, subscriptions, Git/cluster authority, unknown products |
@@ -37,12 +36,8 @@ cache. Current self-serve terms remain incompatible with deliberate heavy-media
 delivery under this repository's zero-spend constraint, so no public
 large-media route may cross it.
 
-The in-cluster storage profile is the half that changed. It shipped ENABLED on
-2026-08-27 by owner directive, after the evidence the conditional was waiting on
-landed: a Bound claim on a `local` volume, the published tree, the delivery
-contract proven against the running binary, and a measured transfer budget. The
-no-go was lifted deliberately on that evidence, not weakened silently — the
-fail-closed conditional in the site chart's values schema is unchanged, so an
-incomplete enablement is still unrepresentable, and disabling media remains a
-values override rather than a code change. Serving that storage to the public
-across this boundary is still governed by the delivery clause above.
+The in-cluster storage profile is not active: this repository renders no
+StorageClass, PersistentVolume, or PersistentVolumeClaim, and the fail-closed
+conditional in the site chart's values schema keeps an incomplete enablement
+unrepresentable. Serving stored media to the public across this boundary
+remains governed by the delivery clause above.

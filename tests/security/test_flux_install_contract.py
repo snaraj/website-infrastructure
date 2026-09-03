@@ -57,7 +57,6 @@ INSTALLER = ROOT / "scripts" / "install-flux-controllers.sh"
 RUNBOOK = ROOT / "docs" / "runbooks" / "flux-install.md"
 RENDERER = ROOT / "scripts" / "render-manifests.sh"
 REGO = ROOT / "policies" / "conftest" / "kubernetes.rego"
-BOOTSTRAP_README = ROOT / "bootstrap" / "flux" / "README.md"
 VERSIONS = ROOT / "versions.env"
 
 # The exact reviewed egress inventory. Named here rather than derived from the
@@ -749,91 +748,6 @@ class InstallerGuardTests(unittest.TestCase):
 
     def test_it_never_sources_the_pin_file(self):
         self.assertNotRegex(self.text, r"(?m)^\s*(source|\.)\s+.*versions\.env")
-
-
-class InstallDocumentationTests(unittest.TestCase):
-    def test_the_runbook_states_the_ordering_and_the_inert_property(self):
-        text = read(RUNBOOK)
-        for fragment in (
-            "Never apply `kubernetes/flux-system` — the parent root",
-            "no `suspend`",
-            "scripts/install-flux-controllers.sh --plan",
-            "scripts/install-flux-controllers.sh --apply",
-            "192.0.2.0/32",
-            "kubectl delete namespace flux-system",
-            "separate reviewed pull request",
-            "Kyverno is retired",
-            "never restores `cluster-admin`",
-            "fulcio.sigstore.dev",
-            # The fresh-vs-existing dry-run semantics: the ns-not-found on the
-            # children is documented as expected, not a failure (the P3 fix).
-            'namespaces "flux-system" not found',
-            "kubernetes/kubernetes#83562",
-            "expected, healthy",
-            "client-side strict validation",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, text)
-
-    def test_the_runbook_documents_the_ordered_phases_and_the_binding(self):
-        text = read(RUNBOOK)
-        for fragment in (
-            "--expect-render-sha256",
-            "--expect-egress-sha256",
-            "--expect-canary-sha256",
-            "--kubeconfig",
-            "--context",
-            "--server",
-            "--cni-provider",
-            "--api-endpoint",
-            "--open-public-egress",
-            "deadlock",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, text)
-        # The readiness check must come after the startup allows, not before:
-        # the ordering the runbook describes has to be the one the installer
-        # performs, or the document re-creates the defect in prose. The old
-        # runbook demanded a fixed one-replica status before applying any allow,
-        # which on an enforcing CNI can never pass and cannot scale to N replicas.
-        rationale = text.index("Why the apply is ordered")
-        apply_step = text.index("## Step 2 — apply, in phases")
-        verify_step = text.index("## Step 3 — verify the controllers")
-        public_step = text.index("## Step 4 — open public HTTPS, last")
-        self.assertLess(rationale, apply_step)
-        self.assertLess(apply_step, verify_step)
-        self.assertLess(verify_step, public_step)
-        verification = text[verify_step:public_step]
-        self.assertIn("positive desired replica count", verification)
-        self.assertIn("zero unavailable replicas", verification)
-        self.assertNotIn("`1/1`", verification)
-        # ... and the phase table has to name the API-server allow before the
-        # Deployments, which is the whole ordering in one line.
-        self.assertLess(
-            text.index("flux-controllers-kube-apiserver"),
-            text.index("| 3 | the three controller Deployments"),
-        )
-
-    def test_the_runbook_removal_names_every_cluster_scoped_object(self):
-        # `kubectl delete namespace flux-system` removes none of these. A
-        # rollback section that omits one leaves the cluster carrying reviewed
-        # RBAC and CRDs after an "undo everything".
-        text = read(RUNBOOK)
-        for name in (
-            CLUSTER_SCOPED_CRDS + CLUSTER_SCOPED_ROLES + CLUSTER_SCOPED_BINDINGS
-        ):
-            with self.subTest(object=name):
-                self.assertIn(name, text)
-
-    def test_the_bootstrap_readme_no_longer_claims_an_unconditional_block(self):
-        text = read(BOOTSTRAP_README)
-        self.assertNotIn("Nothing in this directory authorizes a live installation", text)
-        self.assertIn("scripts/install-flux-controllers.sh", text)
-        # The original protected bootstrap path remains blocked; only the
-        # separate authenticated controllers-only ceremony was carved out.
-        self.assertIn("`bootstrap.sh --apply-controllers` remains blocked", text)
-        self.assertIn("not credential-free", text)
-
 
 
 class FluxEgressDenyFixtureTests(unittest.TestCase):

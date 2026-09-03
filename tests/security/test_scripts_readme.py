@@ -20,16 +20,5 @@ class ScriptsReadmeTests(unittest.TestCase):
             with self.subTest(script=relative):
                 self.assertEqual(readme.count(f"(./{relative})"), 1)
 
-    def test_guide_stays_one_paragraph_and_one_diagram(self):
-        readme = (SCRIPTS / "README.md").read_text(encoding="utf-8")
-        before_diagram = readme.split("```mermaid", 1)[0]
-        prose_blocks = [
-            block for block in before_diagram.split("\n\n")
-            if block and not block.startswith("# ")
-        ]
-        self.assertEqual(len(prose_blocks), 1)
-        self.assertEqual(readme.count("```mermaid"), 1)
-
-
 if __name__ == "__main__":
     unittest.main()

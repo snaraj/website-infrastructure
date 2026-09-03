@@ -88,19 +88,17 @@ Exactly nine resources, no more and no fewer:
 | the site's Tunnel | `no operation` |
 | the site's Tunnel configuration | `no operation`, or an update only if live ingress differs from the committed single-origin plus terminal 404 |
 | the site's apex CNAME | `no operation` |
-| `always_use_https` | update to `on` (expected: the live zones do not redirect today) |
-| `min_tls_version` | update to `1.2` (expected: TLS 1.0 and 1.1 are accepted today) |
-| `tls_1_3` | `no operation` (expected: already on) |
-| `0rtt` | `no operation` (expected: already off) |
-| `http3` | `no operation` (expected: already on — HTTP/3 is advertised on every response) |
+| `always_use_https` | update to `on` |
+| `min_tls_version` | update to `1.2` |
+| `tls_1_3` | `no operation` |
+| `0rtt` | `no operation` |
+| `http3` | `no operation` |
 | `ssl` | `no operation` if the zone is already `full`; an update to `full` otherwise |
 
-The redirect gap, the TLS floor, the already-on TLS 1.3, and the already-off
-0-RTT are dated external observations from a credential-free probe, not config
-reads. Treat them as expectations to confirm in the plan, never as facts. The
-current `ssl` mode was **not** observable externally and is genuinely unknown
-until the plan prints it: read it, and if the plan proposes moving away from
-`full`, stop.
+Every expected action above rests on a dated credential-free external probe,
+never a config read: treat each as an expectation to confirm in the plan, never
+as a fact. The current `ssl` mode was **not** observable externally at all, so
+read it from the plan and stop if the plan proposes moving away from `full`.
 
 ## Hard stops
 

@@ -82,8 +82,8 @@ violations automatically:
   LoadBalancer, host network, Ingress controller, or public admin hostname.
   The only public path is an outbound-only tunnel.
 - **Nothing secret in the open.** Flux reads this public repo anonymously and
-  holds no write credential. Committed Secrets are SOPS ciphertext; the age
-  private identity never touches Git, CI, logs, or chat. Commit metadata
+  holds no write credential. The repository carries no secrets at all: runtime
+  Secrets are created on the cluster by an owner ceremony. Commit metadata
   itself is scanned — a real email address can't even ride along in a
   trailer.
 - **Only what was reviewed runs.** Signed charts are selected by immutable OCI
@@ -107,7 +107,6 @@ infrastructure/        credential-free OpenTofu for Cloudflare
 kubernetes/            desired state for the single environment
 policies/              Conftest static controls
 scripts/               the "prove it first" validator suite
-skills/                reusable agent/operator workflows
 tests/                 allow/deny fixtures collected by canonical unittest discovery
 ```
 
@@ -153,8 +152,7 @@ can never claim a number the gate did not measure.
   and [zero-spend Cloudflare](docs/adr/0006-cloudflare-zero-spend.md).
 - **Operating it?** The [runbooks](docs/runbooks/), each with explicit stop
   points; no script here is permission to touch a live system.
-- **An AI agent?** The [skills](skills/) directory, especially
-  [gh-pr-flow](skills/gh-pr-flow/SKILL.md); audits under
+- **An AI agent?** `AGENTS.md` is the whole contract; audits under
   [docs/audits](docs/audits/) map the current state honestly.
 
 ## Forking this
@@ -172,7 +170,6 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Gate | State |
 | --- | --- |
 | Repository and policies | Credential-free scaffold + negative-policy tests implemented; live evidence pending |
-| Kyverno | Retired: absent live, no installer, controller desired state, policy tree, or webhook claim |
 | Pi discovery | Read-only discovery completed; private evidence stays off Git |
 | Independent recovery drill | Not proven; host/network/cluster mutation blocked |
 | Protected legacy archive | Local archive exists; off-device restore proof pending |
@@ -181,13 +178,13 @@ evidence passes. It's a reference platform, not a one-command installer.
 | Cloudflare subscription audit | Not run |
 | kubeadm/containerd install | In progress on `deploy/pi-live-readiness` |
 | CNI + kube-proxy decision | Rendered (Calico VXLAN), install pending |
-| Cluster initialization | Historical repository evidence only. Terminal #141's protected `v0.1.40` merge/tag/Release publishes the frozen transaction source; its live receipt, not publication alone, is the initialization proof |
-| Flux controller install | Terminal #141's reviewed `v0.1.40` in-place convergence transaction does not install Flux; no live execution or current controller version is claimed here |
-| Flux live-vs-reviewed drift | Open serialization gate: `v0.1.40` publication alone is not #141 terminal execution/convergence evidence, which remains required before combined #195/#189 can advance |
-| `flux-system` egress policy | Committed desired state only. The #141 transaction explicitly excludes `kubernetes/flux-system/access.yaml`; no live application or health is claimed |
+| Cluster initialization | Historical repository evidence only; no live initialization receipt is claimed here |
+| Flux controller install | Not run. `scripts/install-flux-controllers.sh` is the reviewed owner-run installer; no repository install has been executed, and no live execution or current controller version is claimed here |
+| Flux live-vs-reviewed drift | Open. The live cluster still runs the stock upstream render; the #141 convergence ceremony was retired unexecuted (issue #299), so converging onto the reviewed narrowed RBAC needs a fresh owner decision and a separately reviewed design |
+| `flux-system` egress policy | Committed desired state only; no live application or health is claimed |
 | Flux site desired state | Combined #195/#189 candidate: both manifests are unsuspended at exact signed chart digests behind the protected-main-branch source (owner decoupling ruling 2026-09-01, issue #275; the tag-driven selector path retires per `docs/runbooks/site-sync-branch-flip.md`) and two direct `prune: false`, `deletionPolicy: Orphan` reconcilers. Current selections: lidersea.com `0.1.41` and naranjo.online `0.1.71`, captured 2026-09-01 for issues #285 in `docs/assurance/195-chart-acquisition-receipt.json`; acquisition receipts never assert live convergence, so no health claim of any kind attaches to the committed digests. No live equivalence, readiness, or traffic is claimed |
-| Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.43` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` and `v0.1.42` are never selected. It does not reconcile SOPS, controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
-| SOPS key ceremony | Not run |
+| Flux bootstrap (site sync only) | The recovery successor targets exact `v0.1.43` through an owner-attended create-or-exact transaction with suspended staging and containment; burned `v0.1.41` and `v0.1.42` are never selected. It does not reconcile controllers, controller RBAC, admission, or Cloudflare, and no live convergence is claimed here |
+| Tunnel-token ceremony | Not run |
 | Cloudflare plan/apply | Not authorized |
 | Public exposure | Not authorized |
 
