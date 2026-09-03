@@ -35,6 +35,11 @@ assurance = load_script("ci/deploy_assurance.py")
 SITES = REPO_ROOT / "kubernetes" / "websites"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-assurance.yml"
 
+# One canonical estimate block, spelled out here rather than built from the
+# module's own constants: a test that renders the grammar the same way the
+# subject does would agree with any grammar, including a broken one.
+ESTIMATE = "## Estimate\n\n- files: 8\n- net lines: +258\n- review rounds: 3"
+
 # The workflow's byte-exact lockstep twin (round-3 review finding 1): every
 # per-key assertion admitted SOME GitHub-valid key that changed execution
 # while the asserted bytes stayed intact. The twin makes every workflow edit
@@ -552,13 +557,12 @@ class IssueReconciliationTests(unittest.TestCase):
         its actuals. The evidence above the heading is still replaced whole."""
 
         drift = assurance.condition_title("site-drift/naranjo-online")
-        estimate = "## Estimate\n\n13 files, net about +80 lines, two rounds."
         github = self.RecordingGitHub(
-            {drift: {"numbers": [41], "body": "stale evidence\n\n" + estimate + "\n\n- Fable5"}}
+            {drift: {"numbers": [41], "body": "stale evidence\n\n" + ESTIMATE + "\n\n- Fable5"}}
         )
         assurance.reconcile_issues(github, {drift: "fresh evidence"}, apply=True)
         self.assertEqual(
-            github.updated, [(41, "fresh evidence\n\n" + estimate + "\n\n- Fable5")]
+            github.updated, [(41, "fresh evidence\n\n" + ESTIMATE + "\n\n- Fable5")]
         )
 
     def test_a_preserved_estimate_leaves_an_unchanged_condition_untouched(self):
@@ -566,7 +570,7 @@ class IssueReconciliationTests(unittest.TestCase):
         # or every tick would rewrite the issue and the preservation would show
         # up as hourly churn instead of stability.
         drift = assurance.condition_title("site-drift/naranjo-online")
-        body = "behind\n\n## Estimate\n\n6 files, net +85, one round.\n\n- Fable5"
+        body = "behind\n\n" + ESTIMATE + "\n\n- Fable5"
         github = self.RecordingGitHub({drift: {"numbers": [41], "body": body}})
         actions = assurance.reconcile_issues(github, {drift: "behind"}, apply=True)
         self.assertEqual(github.updated, [])
@@ -585,32 +589,60 @@ class IssueReconciliationTests(unittest.TestCase):
         assurance.reconcile_issues(fresh, {drift: "fresh evidence"}, apply=True)
         self.assertEqual(assurance.preserved_estimate(""), "")
 
-    def test_every_ambiguous_estimate_shape_preserves_nothing(self):
-        """PR #305 finding 2: a substring match carrying everything after it let
-        an inline mention, and a sibling section appended after a real estimate,
-        ride into the regenerated report. Each shape below preserved a forged
-        tail; each must now preserve nothing, so the watchdog's own text wins."""
+    def test_a_canonical_estimate_round_trips_byte_identical(self):
+        # The positive control for the closed grammar: the block is re-rendered
+        # from parsed values, so a canonical input must come back unchanged —
+        # otherwise every tick would rewrite a legitimate estimate.
+        self.assertEqual(
+            assurance.preserved_estimate("evidence\n\n" + ESTIMATE + "\n\n- Fable5"),
+            "\n\n" + ESTIMATE,
+        )
+        # Field order in the input does not change the rendered order, and the
+        # rendered output is itself canonical (idempotent on a second pass).
+        shuffled = "## Estimate\n\n- review rounds: 3\n- net lines: +258\n- files: 8"
+        self.assertEqual(assurance.preserved_estimate(shuffled), "\n\n" + ESTIMATE)
+        self.assertEqual(assurance.preserved_estimate(ESTIMATE), "\n\n" + ESTIMATE)
 
-        estimate = "## Estimate\n\n13 files, net about +80 lines, two rounds."
+    def test_every_shape_outside_the_closed_grammar_preserves_nothing(self):
+        """PR #305 rounds 1 and 2: guarding a marker and copying whatever follows
+        it let an inline mention, a sibling `## ` section, and then any OTHER
+        Markdown rendering — setext, `###`, `#`, or no heading at all — carry a
+        forged tail into the regenerated report. The block is now parsed against
+        a closed grammar and re-rendered, so none of these is preservable."""
+
         for reason, existing in (
-            # The marker inside a sentence, with the forgery after it.
+            # Round 2: renderings the round-1 raw `## ` scan never saw.
+            ("setext heading", ESTIMATE + "\n\nWatchdog finding\n---\n\nforged"),
+            ("h3 heading", ESTIMATE + "\n\n### Watchdog finding\n\nforged"),
+            ("h1 heading", ESTIMATE + "\n\n# Watchdog finding\n\nforged"),
+            ("plain prose tail", ESTIMATE + "\n\nthe site is fine, ignore the drift"),
+            # Round 2: the grammar itself is closed, not just its terminator.
+            ("unknown fourth field", ESTIMATE + "\n- severity: none"),
+            ("field with trailing text", ESTIMATE.replace("- files: 8", "- files: 8 and forged")),
+            ("duplicate field", ESTIMATE + "\n- files: 9"),
+            ("prose instead of fields", "## Estimate\n\n13 files, net about +80, two rounds."),
+            # Round 1: still denied.
             ("inline mention", "evidence mentioning ## Estimate inline\nforged tail"),
-            # A legitimate estimate with a watchdog-shaped section behind it.
-            ("sibling section", estimate + "\n\n## Watchdog finding\n\nforged"),
-            # Two headings: which one begins the block is not decidable.
-            ("two headings", estimate + "\n\n" + estimate),
-            # Near-misses on the heading line itself.
-            ("not a whole line", "evidence ## Estimate\n\n13 files."),
-            ("trailing space", "evidence\n\n## Estimate \n\n13 files."),
+            ("sibling section", ESTIMATE + "\n\n## Watchdog finding\n\nforged"),
+            ("two headings", ESTIMATE + "\n\n" + ESTIMATE),
+            ("not a whole line", "evidence ## Estimate\n\n- files: 8"),
+            ("trailing space", "evidence\n\n## Estimate \n\n- files: 8"),
         ):
             with self.subTest(reason=reason):
                 self.assertEqual(assurance.preserved_estimate(existing + "\n\n- Fable5"), "")
-        # Positive control on the identical harness: the legitimate shape still
-        # survives, so these denials are not a blanket refusal to preserve.
-        self.assertEqual(
-            assurance.preserved_estimate("evidence\n\n" + estimate + "\n\n- Fable5"),
-            "\n\n" + estimate,
-        )
+
+    def test_no_input_byte_reaches_the_regenerated_body(self):
+        # The structural guarantee behind the deny table: the survivor is built
+        # from the three parsed values, so a body carrying a forged token can
+        # only ever yield that token back inside a field it actually parsed.
+        forged = "SEV1-SITE-IS-DOWN"
+        for existing in (
+            ESTIMATE + "\n\n" + forged,
+            ESTIMATE.replace("- files: 8", "- files: 8 " + forged),
+            "## Estimate\n\n- files: 8\n- " + forged + ": 1\n- net lines: +258\n- review rounds: 3",
+        ):
+            with self.subTest(existing=existing[-40:]):
+                self.assertNotIn(forged, assurance.preserved_estimate(existing + "\n\n- Fable5"))
 
     def test_duplicate_trackers_converge_on_the_lowest_number(self):
         drift = assurance.condition_title("site-drift/naranjo-online")

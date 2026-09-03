@@ -55,12 +55,26 @@ API_VERSION = "2022-11-28"
 SITES_DIR = Path("kubernetes/websites")
 ISSUE_MARKER = "deploy-assurance["
 ISSUE_LABELS = ["ci", "delivery-lane", "agent-authored", "fable5"]
-# The lane line this tool's issue bodies end with, and the one heading whose
-# appended block survives a body rewrite (see preserved_estimate). Both live
-# here because the composer and the preserver must agree byte for byte: two
-# copies of either is how the estimate went missing in the first place.
+# The lane line this tool's issue bodies end with, and the CLOSED grammar of the
+# one block that survives a body rewrite (see preserved_estimate). Both live here
+# because the composer and the preserver must agree byte for byte: two copies of
+# either is how the estimate went missing in the first place.
+#
+# AGENTS.md requires the commission to state files, net lines and review rounds
+# but fixes no rendering for them, so this is the fixed one. It is a grammar and
+# not a marker deliberately: "this heading, then everything after it" is a
+# channel for writing the watchdog's own report in whatever Markdown the last
+# guard forgot — a setext heading, a `###` or `#` heading, or no heading at all
+# (PR #305 rounds 1 and 2). Only these three fields parse, each exactly once,
+# and the survivor is RE-RENDERED from the parsed values, so no input byte
+# reaches the regenerated issue.
 SIGNATURE = "- Fable5"
 ESTIMATE_HEADING = "## Estimate"
+ESTIMATE_FIELDS = (
+    ("files", re.compile(r"- files: (\d{1,6})")),
+    ("net lines", re.compile(r"- net lines: ([+-]\d{1,7})")),
+    ("review rounds", re.compile(r"- review rounds: (\d{1,3})")),
+)
 GATE_WORKFLOW = "pull-request.yml"
 PUBLISH_WORKFLOW = "platform-release.yml"
 # A publish run that has not appeared this soon after its gate completed is
@@ -169,25 +183,42 @@ def preserved_estimate(body):
     added was gone before the next review handoff and the pull request's
     actuals had nothing to be measured against (PR #303, findings 4 and 3).
 
-    What survives is ONE terminal estimate section and nothing else, because
-    anything looser is a channel for writing the watchdog's own report: the
-    heading must be a whole line equal to the constant (not a mention inside a
-    sentence), must occur exactly once, and must be the last `## ` heading in
-    the body (a sibling section appended after a real estimate would ride along
-    otherwise). Every other shape is ambiguous, and ambiguity preserves NOTHING
-    — the regenerated evidence wins, which is the fail-closed direction (PR #305
-    finding 2). The trailing lane signature is dropped because the caller
-    re-adds it, keeping exactly one at the end of the recomposed body.
+    Nothing is preserved as TEXT. The block is parsed against the closed
+    grammar above — the exact heading line, then the three fields, each exactly
+    once, one per line, blank lines allowed only between them, and nothing else
+    to the end of the body — and the survivor is re-rendered from the parsed
+    values. Two earlier attempts guarded a marker and copied whatever followed
+    it, and each time a rendering the guard did not enumerate walked straight
+    through: a substring mention with a forged tail, then a setext heading, a
+    `###`/`#` heading, or a bare prose tail (PR #305 rounds 1 and 2). Re-rendering
+    ends that class outright, because no input byte is on the output path.
+    Anything that does not parse preserves NOTHING and the regenerated evidence
+    wins, which is the fail-closed direction. The trailing lane signature is
+    dropped because the caller re-adds it, keeping exactly one at the end.
     """
 
     lines = body.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1] == SIGNATURE:
+        lines.pop()
     marks = [i for i, line in enumerate(lines) if line == ESTIMATE_HEADING]
-    if len(marks) != 1 or any(line.startswith("## ") for line in lines[marks[0] + 1:]):
+    if len(marks) != 1:
         return ""
-    block = "\n".join(lines[marks[0]:]).rstrip()
-    if block.endswith(SIGNATURE):
-        block = block[: -len(SIGNATURE)].rstrip()
-    return "\n\n" + block
+    values = {}
+    for line in lines[marks[0] + 1:]:
+        if not line.strip():
+            continue
+        # fullmatch, so a known field carrying trailing text is not a field.
+        matched = [(n, p.fullmatch(line)) for n, p in ESTIMATE_FIELDS]
+        found = [(n, m) for n, m in matched if m is not None and n not in values]
+        if len(found) != 1:
+            return ""
+        values[found[0][0]] = found[0][1].group(1)
+    if len(values) != len(ESTIMATE_FIELDS):
+        return ""
+    rendered = "\n".join(f"- {name}: {values[name]}" for name, _ in ESTIMATE_FIELDS)
+    return "\n\n" + ESTIMATE_HEADING + "\n\n" + rendered
 
 
 def iso_age_seconds(stamp):
