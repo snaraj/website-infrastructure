@@ -1322,10 +1322,6 @@ class WorkflowSurfaceTests(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class EstimateGrammarTests(unittest.TestCase):
     """PR #305 round 3, the contract's design reset: rounds 1 and 2 guarded a
     marker and grew a deny table, and each round a spelling the table did not
@@ -1421,3 +1417,6 @@ class EstimateGrammarTests(unittest.TestCase):
         shuffled = "## Estimate\n\n- review rounds: 3\n- net lines: +258\n- files: 8"
         self.assertEqual(assurance.render_estimate(assurance.parse_estimate(shuffled)), "\n\n" + ESTIMATE)
 
+
+if __name__ == "__main__":
+    unittest.main()

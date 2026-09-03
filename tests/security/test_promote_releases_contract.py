@@ -1352,5 +1352,46 @@ class RunbookAndLaunchdTests(unittest.TestCase):
                     MODULE.latest_release(MODULE.GitHub(run=down, fetch=fleet.fetch), "snaraj/publishes-nothing")
 
 
+class SiblingLoaderTests(unittest.TestCase):
+    """`_load_sibling` publishes the module under its own name so a PEP 563
+    annotation can resolve while the body runs (without it the promoter aborts
+    at import and every tick fails). Publishing is only half the contract: the
+    name must be gone again afterwards, or the promoter would leave an
+    importable alias for a private copy — and on the second call would find the
+    FIRST copy's leftovers instead of a clean slate. These pin the cleanup on
+    both exits (PR #305 round 4, finding 1)."""
+
+    def tearDown(self):
+        for name in ("promoter_loader_probe", "promoter_loader_sentinel"):
+            sys.modules.pop(name, None)
+
+    def test_an_absent_name_is_absent_again_after_a_successful_load(self):
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+        module = MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_probe")
+        self.assertTrue(hasattr(module, "drift_verdict"), "the sibling really did execute")
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+
+    def test_a_pre_existing_name_is_restored_after_a_successful_load(self):
+        sentinel = object()
+        sys.modules["promoter_loader_sentinel"] = sentinel
+        MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_sentinel")
+        self.assertIs(sys.modules["promoter_loader_sentinel"], sentinel)
+
+    def test_a_sibling_whose_body_fails_leaks_no_name(self):
+        # The exception path is the one a `finally` exists for: a sibling that
+        # raises must not leave its half-executed module published.
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+        with self.assertRaises(FileNotFoundError):
+            MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_probe")
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+
+    def test_a_sibling_whose_body_fails_restores_a_pre_existing_name(self):
+        sentinel = object()
+        sys.modules["promoter_loader_sentinel"] = sentinel
+        with self.assertRaises(FileNotFoundError):
+            MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_sentinel")
+        self.assertIs(sys.modules["promoter_loader_sentinel"], sentinel)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
