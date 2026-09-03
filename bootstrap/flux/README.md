@@ -129,13 +129,15 @@ and waits for all three deployments. Its `--apply-controllers` mode remains
 code-blocked by the missing launcher; this description is a future acceptance
 contract, not an instruction to bypass the stop.
 
-## Public Tunnel token
+## Public Tunnel tokens
 
-The `pi-websites` runtime token is a Cloudflare Tunnel bearer, not an API token.
-It never enters this repository: the owner creates the
-`cloudflare-public/pi-websites-tunnel-token` Secret directly on the cluster from
-a mode-0600 protected file, and the connector release stays suspended until that
-ceremony has run. Never source the token from OpenTofu state.
+Each site has its own Cloudflare Tunnel bearer, not an API token; the two share
+no credential. Neither enters this repository: the owner creates
+`cloudflare-public/naranjo-online-tunnel-token` and
+`cloudflare-public/lidersea-com-tunnel-token` directly on the cluster from
+separate mode-0600 files, one site at a time per
+`docs/runbooks/tunnel-token-rotation.md`, and the connector release stays
+suspended until that ceremony has run. Never source a token from OpenTofu state.
 
 `bootstrap.sh --apply-sync` remains blocked and is retired as a recovery path.
 Its dormant implementation predates the exact-consumer, authority-quarantine,

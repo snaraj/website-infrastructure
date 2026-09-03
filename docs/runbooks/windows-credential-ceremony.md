@@ -182,9 +182,10 @@ condition when the operator egress is stable. Record a bounded non-secret policy
 receipt and revoke each token immediately after its one job; verify revocation
 with a separate credential.
 
-The `pi-admin` and `pi-websites` Tunnel tokens are distinct bearer credentials.
-Never retrieve them through OpenTofu state. Keep both out of Git entirely: the
-public token is installed directly as a cluster Secret by its own ceremony.
+`pi-admin` and the two per-site public Tunnel tokens are distinct bearer
+credentials. Never retrieve them through OpenTofu state. Keep them all out of
+Git: each public token is installed as its own cluster Secret by its own
+ceremony.
 Follow the Tunnel rotation runbook after any suspected capture.
 
 ## Closeout

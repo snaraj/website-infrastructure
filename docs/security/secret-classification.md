@@ -20,9 +20,9 @@ revocation/rotation and history review; deleting a current file is insufficient.
 
 The safe Git boundary is deliberately narrow: no secret payload of any class
 is committed, in any encoding. Never commit an age private identity, the
-Cloudflare audit/apply token, the `pi-admin` token, the `pi-websites` runtime
-token, OpenTofu state/plan/private variables, kubeconfig/PKI/API-encryption
-keys, private inventory, or recovery locations.
+Cloudflare audit/apply token, the `pi-admin` token, either per-site public
+Tunnel token, OpenTofu state/plan/private variables, kubeconfig, PKI and
+API-encryption keys, private inventory, or recovery locations.
 
 A convenience archive catalog may contain only sanitized guidance, bounded
 hashes, and non-sensitive references. It is not a safe destination for wallet
