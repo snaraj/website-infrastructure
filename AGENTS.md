@@ -227,35 +227,36 @@ and dependency-governed Draft capacity is recorded durably in
   authorization. A material trust-boundary expansion, including another
   independent tenant or untrusted/third-party workload, triggers a new
   threat model and ADR; it is not standing install authority.
-- `kubernetes/websites/*/source.yaml` — NOT transferred, ruling PENDING.
-  The row above assigns `kubernetes/websites/*/release.yaml` to delivery
-  through the promotion surface and leaves the remaining
-  `kubernetes/websites/**` files unruled; these per-site chart
-  `OCIRepository` objects are among them. Each one carries a cosign
-  `matchOIDCIdentity` that the delivery-lane validators
-  (`scripts/validate_signature_policy.py`,
-  `policies/conftest/kubernetes.rego`) already assert byte for byte, so
-  the manifest and the gate that pins it cannot be changed from different
-  lanes without one of them going stale. The delivery lane touched these
-  two files under issue #185 to re-point that identity: a DECLARED
-  CROSSING under the rule below, not a lane transfer, and it grants no
-  standing claim on the tree. Issue #195 is a second DECLARED CROSSING: it
-  replaces mutable SemVer selection with one separately receipted audit-tag
-  and exact OCI manifest-digest pair per site, while retiring the former
-  HelmRelease promotion override. Future forward or rollback selection changes
-  require a new exact acquisition receipt and remain crossings until the owner
-  or platform (peer) records a lane ruling here. Issue #252 is the first such
-  forward selection and is DECLARED as a crossing on exactly those terms: it
+- `kubernetes/websites/*/source.yaml` — DELIVERY (owner ruling 2026-09-03,
+  recorded from PR #303). The rationale, verbatim: "the delivery lane already
+  owns, byte for byte, the validators (`scripts/validate_signature_policy.py`)
+  and the Conftest policy (`policies/conftest/kubernetes.rego`) that pin this
+  file's signature identity and its selection; forward and rollback selections
+  are routine delivery work under the receipted promotion ceremony (immutable
+  release + Cosign/SLSA + committed digest + two receipts + owner-only merge),
+  so they need no per-PR crossing declaration." A selection change still
+  requires its exact acquisition receipt; it no longer requires a DECLARED
+  CROSSING. Nothing else in `kubernetes/websites/**` moves with it.
+  History, kept because it is the reasoning the ruling adopted: the row above
+  assigned `release.yaml` to delivery through the promotion surface and left
+  these per-site chart `OCIRepository` objects unruled beside it, even though
+  each carries a cosign `matchOIDCIdentity` the delivery-lane validators named
+  above already assert byte for byte — so the manifest and the gate that pins
+  it could not be changed from different lanes without one going stale. Issue
+  #185 crossed here to re-point that identity; issue #195 crossed again,
+  replacing mutable SemVer selection with one separately receipted audit-tag
+  and exact OCI manifest-digest pair per site while retiring the former
+  HelmRelease promotion override. Issue #252 is the first such forward
+  selection and was DECLARED as a crossing on exactly those terms: it
   recaptured the receipt and moved both sites to their published releases
   without touching a fail-closed property, a signature contract, or
-  `release.yaml`. It is a worked precedent for the shape, not a ruling — the
-  row above stays PENDING, and the next selection declares its crossing too.
+  `release.yaml`. PR #303 is the last selection that declared one.
   The owner's 2026-09-01 decoupling ruling (issue #275) rebinds only the
   CONSUMPTION side: the `flux-system` GitRepository follows protected `main`
   rather than a selector-advanced platform tag, so a merged forward
   selection deploys with no platform release involved. The selection
-  grammar above — receipted audit-tag and exact manifest-digest pairs,
-  each change a declared crossing — is unchanged by that ruling.
+  grammar above — receipted audit-tag and exact manifest-digest pairs — is
+  unchanged by that ruling.
 - `docs/adr/0016-tag-driven-flux-release-sync.md` — NOT transferred,
   ruling PENDING. The lane split above assigns "the remaining ADRs" to
   the platform lane, and "Lane discipline in docs" says the delivery lane
@@ -562,9 +563,11 @@ authority: the owner alone merges.
   its pull requests carry `promoter` in place of the agent pair, its commit
   and pull-request bodies end with `- Promoter`, and it runs under the
   owner's own keyring credential and signing key. Its standing authority is
-  exactly: open Draft promotion pull requests from a receipted acquisition
-  and arm `requires-review` and `cybersecurity-review-requested`. It never
-  flips Ready and never merges.
+  exactly: open Draft promotion pull requests from a receipted acquisition,
+  labelled `release`, `security`, `delivery-lane` and `promoter` — the
+  `security` tier because a promotion advances a signed chart digest and the
+  identity pins that gate it — and arm `requires-review` and
+  `cybersecurity-review-requested`. It never flips Ready and never merges.
   Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep
