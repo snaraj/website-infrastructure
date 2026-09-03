@@ -207,14 +207,14 @@ class ValidatorInvocationParityTests(unittest.TestCase):
                 )
 
 class RepositoryCheckModeParityTests(unittest.TestCase):
-    """The eight mode words are bound to ``validate_repository.CHECKS``.
+    """The nine mode words are bound to ``validate_repository.CHECKS``.
 
     Issue #153, from PR #151's adversarial review: deleting a mode word from
     ``validate-security.sh`` survived the whole battery. The suite above keys
     on ``scripts/validate_*.py`` PATHS, so it sees one validator invoked and
     notices nothing when that invocation silently stops selecting a check —
-    and the eight words are eight separate categories of repository invariant,
-    each of which simply stops running. Nothing else in the tree compared the
+    and each word is a separate category of repository invariant that simply
+    stops running. Nothing else in the tree compared the
     list to the registry it indexes.
 
     A set comparison is what makes both directions fail: a word deleted from
@@ -231,8 +231,8 @@ class RepositoryCheckModeParityTests(unittest.TestCase):
         # The same anti-vacuity floor the validator-name parse carries: a
         # regex that stopped matching would make the equality below compare
         # two empty sets and pass forever.
-        self.assertGreaterEqual(len(self.local_modes), 8, self.local_modes)
-        self.assertGreaterEqual(len(self.registry), 9, sorted(self.registry))
+        self.assertGreaterEqual(len(self.local_modes), 9, self.local_modes)
+        self.assertGreaterEqual(len(self.registry), 10, sorted(self.registry))
 
     def test_the_local_entry_point_names_each_mode_once(self):
         self.assertEqual(

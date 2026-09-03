@@ -2869,8 +2869,70 @@ def check_activation(root):
     return list(dict.fromkeys(errors))
 
 
+DEPENDABOT_PATH = ".github/dependabot.yml"
+# Dependabot ignores keys it does not recognize and actionlint only globs
+# workflow YAML, so one typo silently disables a rule with every other gate
+# green: `patterns:` renamed to `paterns:` survived the whole `all` run. A
+# closed key allowlist per level; "*" is the one free-form level, a group name.
+DEPENDABOT_KEYS = {
+    (): ("version", "updates"),
+    ("updates",): ("package-ecosystem", "directory", "schedule",
+                   "open-pull-requests-limit", "groups"),
+    ("updates", "schedule"): ("interval",),
+    ("updates", "groups", "*"): ("patterns",),
+}
+_DEPENDABOT_ENTRY = re.compile(r"(?:- )?([A-Za-z0-9_.-]+):(?: (\S.*))?")
+
+
+def check_dependabot(root):
+    """Reject any key outside the closed Dependabot schema, at every level."""
+
+    try:
+        text = read(root / DEPENDABOT_PATH)
+    except OSError:
+        return ["{} is missing or unreadable".format(DEPENDABOT_PATH)]
+    errors = []
+    stack = []
+    version = None
+    updates = 0
+    for line in text.split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        item = line.lstrip(" ").startswith("- ")
+        while stack and stack[-1][0] >= indent + (2 if item else 0):
+            stack.pop()
+        parent = stack[-1][1] if stack else ()
+        entry = _DEPENDABOT_ENTRY.fullmatch(line.strip())
+        if entry is None:
+            # The only non-mapping lines allowed are `patterns:` members.
+            if not (item and parent[-1:] == ("patterns",)):
+                errors.append("unsupported line: {}".format(line.strip()))
+            continue
+        key, value = entry.group(1), entry.group(2)
+        if parent == ("updates",) and item:
+            updates += 1
+        if parent == ("updates", "groups"):
+            child = parent + ("*",)  # a group's name is the operator's choice
+        elif key in DEPENDABOT_KEYS.get(parent, ()):
+            child = parent + (key,)
+        else:
+            errors.append("unknown key {} under {}".format(key, "/".join(parent) or "the document"))
+            continue
+        if parent == () and key == "version":
+            version = value
+        if value is None:
+            stack.append((indent + (2 if item else 0), child))
+    if version != "2":
+        errors.append("version must be exactly 2")
+    if not updates:
+        errors.append("updates must list at least one ecosystem")
+    return errors
+
+
 CHECKS = {
     "layout": check_layout,
+    "dependabot": check_dependabot,
     "privacy": check_privacy,
     "media": check_media,
     "secrets": check_secrets,

@@ -118,11 +118,16 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
             blockers.append(f"required check {name} was not produced by {REQUIRED_CHECK_APP}")
         elif found[0].get("status") != "completed" or found[0].get("conclusion") != "success":
             blockers.append(f"required check {name} has not succeeded at this head")
-    # Every completed check at the head, required or not, must have ended in a
-    # conclusion meaning "nothing went wrong": every other terminal conclusion,
-    # and any value this code has never seen, fails closed.
+    # Every check at the head, required or not, must have FINISHED and ended in
+    # a conclusion meaning "nothing went wrong". A queued or in-progress run has
+    # no verdict yet, so it cannot be green: AGENTS.md permits the flip only
+    # when every check is green at the exact head, and a run still executing can
+    # still fail. Every other terminal conclusion, and any status or conclusion
+    # value this code has never seen, fails closed the same way.
     for check in checks:
-        if check.get("status") == "completed" and check.get("conclusion") not in ACCEPTABLE_CONCLUSIONS:
+        if check.get("status") != "completed":
+            blockers.append(f"a check at this head has not finished: {check.get('name')} is {check.get('status')}")
+        elif check.get("conclusion") not in ACCEPTABLE_CONCLUSIONS:
             blockers.append(f"a check at this head did not succeed: {check.get('name')} ended {check.get('conclusion')}")
     if not tiers:
         blockers.append("the pull request carries no tier label, so its review depth cannot be judged")

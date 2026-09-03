@@ -63,6 +63,17 @@ class ReadyRuleTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertTrue(any(reason in b for b in decide(**state)[2]), reason)
 
+    def test_a_check_still_running_at_this_head_is_a_blocker(self):
+        # Finding 3: only completed checks were judged, so an otherwise-valid
+        # snapshot carrying a pending CodeQL run was ELIGIBLE. A run with no
+        # verdict yet cannot be green, and it can still fail.
+        for status in ("queued", "in_progress", "waiting", None):
+            with self.subTest(status=status):
+                pending = checks()[:-1] + [{"name": "CodeQL", "status": status, "conclusion": None, "app": {"slug": "github-code-scanning"}}]
+                self.assertIn(f"a check at this head has not finished: CodeQL is {status}", decide(check_runs=pending)[2])
+        # The same input, with that one run completed, has no blocker at all.
+        self.assertEqual(decide(check_runs=checks())[2], [])
+
 
 class WrongPullRequestTests(unittest.TestCase):
     """Finding 1: state, base and tier decide WHICH pull request this is.
