@@ -5,6 +5,11 @@ import unittest
 from .support import load_script
 
 MODULE = load_script("ready_check.py")
+# The evaluator pins the promoter's label set itself rather than importing it
+# from the tool it judges, so changing that tool cannot widen what Ready
+# accepts. Drift is caught HERE instead: the emitter's own constants are read
+# and compared below, so the two cannot disagree without a red test.
+PROMOTER = load_script("promote_releases.py", module_name="ready_check_promoter_labels")
 HEAD = "1" * 40
 # The metadata a real reviewable pull request carries; each hostile case below
 # changes exactly one field of it, so the blocker it proves is unambiguous.
@@ -119,3 +124,61 @@ class WrongPullRequestTests(unittest.TestCase):
         # The lane-to-tier judgment is deliberately NOT made here; the module
         # says so where a reader of its output will see it.
         self.assertIn("coordinator", MODULE.__doc__)
+
+
+class PromoterTupleTests(unittest.TestCase):
+    """AGENTS.md: the receipted promoter "is NOT an agent: its pull requests
+    carry `promoter` in place of the agent pair", and its standing authority
+    names one exact label set. The evaluator demanded the agent pair from every
+    author anyway, so no promotion pull request could be judged Ready; the first
+    repair waived only the umbrella label, which let `promoter` stand beside an
+    acting-model label, a foreign tier, or a partial tuple (PR #303, findings 1).
+    `promoter` is an exact ALTERNATIVE, so the accepted set is compared whole.
+    """
+
+    # `requires-review` is armed at open and removed by the reviewer with either
+    # verdict, so the set a Ready evaluation ever sees is the emitted one minus
+    # it. Derived from the emitter, never retyped.
+    EMITTED = sorted(set(PROMOTER.PR_LABELS + PROMOTER.REVIEW_LABELS) - {MODULE.REVIEW_ATTENTION_LABEL})
+
+    def test_the_evaluator_and_the_promoter_name_the_same_tuple(self):
+        # The evaluator pins its own copy so the tool it judges cannot widen it;
+        # this is the only thing keeping the two honest, so it is a test, not a
+        # comment. Change one tuple without the other and this goes red.
+        self.assertEqual(MODULE.PROMOTER_TUPLE, frozenset(self.EMITTED))
+        self.assertIn(MODULE.PROMOTER_LABEL, MODULE.PROMOTER_TUPLE)
+
+    def test_the_exact_promoter_tuple_is_eligible(self):
+        lanes, tiers, blockers = decide(labels=list(self.EMITTED))
+        self.assertEqual(blockers, [], "the labels the promoter emits must satisfy the rule it must pass")
+        self.assertEqual((lanes, tiers), (["opus5"], ["delivery-lane", "release", "security"]))
+
+    def test_each_listed_hybrid_of_the_promoter_tuple_is_denied(self):
+        # Every shape here was ELIGIBLE with zero blockers under the first
+        # repair; the first is the live metadata PR #303 itself wore.
+        for reason, labels in (
+            ("unexpected opus5", self.EMITTED + ["opus5"]),
+            ("unexpected fable5, unexpected tests", [MODULE.PROMOTER_LABEL, "fable5", "tests"]),
+            ("unexpected docs", [MODULE.PROMOTER_LABEL, "docs"]),
+            ("unexpected agent-authored", self.EMITTED + [MODULE.UMBRELLA_LABEL]),
+            ("missing release", [n for n in self.EMITTED if n != "release"]),
+            ("missing delivery-lane", [n for n in self.EMITTED if n != "delivery-lane"]),
+            ("missing security", [n for n in self.EMITTED if n != MODULE.SECURITY_TIER_LABEL]),
+            ("missing cybersecurity-review-requested", [n for n in self.EMITTED if n != MODULE.SECURITY_REVIEW_LABEL]),
+        ):
+            with self.subTest(reason=reason):
+                blockers = decide(labels=labels)[2]
+                self.assertTrue(any(f"{MODULE.PROMOTER_LABEL} pins an exact label set: " in b and reason in b for b in blockers), (reason, blockers))
+
+    def test_the_promoter_still_waits_for_the_review_it_armed(self):
+        # `requires-review` is reported by its own blocker, so the exact-set
+        # comparison deliberately ignores it rather than reporting it twice.
+        blockers = decide(labels=self.EMITTED + [MODULE.REVIEW_ATTENTION_LABEL])[2]
+        self.assertEqual(blockers, [f"{MODULE.REVIEW_ATTENTION_LABEL} is still armed"])
+
+    def test_an_ordinary_pull_request_still_needs_the_umbrella_label(self):
+        # Drop only `promoter` and the umbrella requirement returns, so the
+        # exception cannot be inherited by anything else wearing these labels.
+        without = [name for name in self.EMITTED if name != MODULE.PROMOTER_LABEL]
+        self.assertEqual(decide(labels=without)[2], [f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label"])
+        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL])[2], [])

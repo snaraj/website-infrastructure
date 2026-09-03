@@ -55,6 +55,12 @@ API_VERSION = "2022-11-28"
 SITES_DIR = Path("kubernetes/websites")
 ISSUE_MARKER = "deploy-assurance["
 ISSUE_LABELS = ["ci", "delivery-lane", "agent-authored", "fable5"]
+# The lane line this tool's issue bodies end with, and the one heading whose
+# appended block survives a body rewrite (see preserved_estimate). Both live
+# here because the composer and the preserver must agree byte for byte: two
+# copies of either is how the estimate went missing in the first place.
+SIGNATURE = "- Fable5"
+ESTIMATE_HEADING = "## Estimate"
 GATE_WORKFLOW = "pull-request.yml"
 PUBLISH_WORKFLOW = "platform-release.yml"
 # A publish run that has not appeared this soon after its gate completed is
@@ -150,6 +156,33 @@ def condition_title(key):
     """One stable title per condition key — the idempotency anchor."""
 
     return "{}{}]".format(ISSUE_MARKER, key)
+
+
+def preserved_estimate(body):
+    """The `## Estimate` block appended to an existing tracking issue, or "".
+
+    This tool regenerates a tracking issue's body from the evidence on every
+    tick — hourly — and until now that rewrite erased everything else the issue
+    had grown. AGENTS.md requires the commission to state an estimate (files,
+    net lines, review rounds), and one of these trackers IS the commission for
+    the promotion pull request that answers it, so the estimate a coordinator
+    added was gone before the next review handoff and the pull request's
+    actuals had nothing to be measured against (PR #303, findings 4 and 3).
+
+    Exactly one appended block survives, and only from this heading to the end:
+    the evidence sentence above it is still rewritten wholesale, so no text a
+    reader could mistake for the watchdog's own finding can be smuggled into
+    its report. The trailing lane signature is dropped because the caller
+    re-adds it, keeping exactly one at the end of the recomposed body.
+    """
+
+    _, marker, tail = body.partition(ESTIMATE_HEADING)
+    if not marker:
+        return ""
+    block = (marker + tail).rstrip()
+    if block.endswith(SIGNATURE):
+        block = block[: -len(SIGNATURE)].rstrip()
+    return "\n\n" + block
 
 
 def iso_age_seconds(stamp):
@@ -468,14 +501,17 @@ def reconcile_issues(github, conditions, apply):
     One issue per condition title: created when the condition appears,
     its BODY updated in place when the evidence changes, duplicates
     (same title, higher numbers) closed toward the lowest survivor, and
-    everything closed with a comment when the condition clears.
+    everything closed with a comment when the condition clears. The rewrite
+    replaces the evidence and carries one appended `## Estimate` block
+    forward, so the recomposed body is still byte-comparable and an unchanged
+    condition stays "still-open" rather than churning every tick.
     """
 
     actions = []
     open_issues = github.open_assurance_issues()
     for title, body in conditions.items():
-        desired = body + "\n\n- Fable5"
         entry = open_issues.get(title)
+        desired = body + preserved_estimate(entry["body"] if entry else "") + "\n\n" + SIGNATURE
         if entry is None:
             actions.append("open: " + title)
             if apply:

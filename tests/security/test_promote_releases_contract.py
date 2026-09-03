@@ -825,8 +825,19 @@ class RewriteTests(unittest.TestCase):
         (self.root / "changelog.d/990-promote-naranjo-online-0-1-99.md").unlink()
         # The committed README row states the capture the inverse must restore.
         date, issues = MODULE.README_ROW_RE.search(self.originals["README.md"].decode()).group(2, 3)
+        issue = int(issues.split("/")[0].lstrip("#"))
+        # The inverse REPLAYS the capture the committed tree records, so the
+        # moment a promotion this tool cut is on main the scratch tree already
+        # carries the fragment that replay would write, and the inverse meets
+        # apply_promotion's immutable-fragment refusal instead of restoring
+        # bytes (PR #303, security finding 1). The pre-promotion tree carried
+        # neither fragment; dropping this one is the same scratch setup as the
+        # line above, not a relaxation — the refusal stays pinned by
+        # test_refused_replayed_fragment_writes_nothing below, and the rewrite
+        # never reads changelog.d/ at all.
+        (self.root / MODULE.fragment_path(issue, {"naranjo-online": original["chartTag"]})).unlink(missing_ok=True)
         MODULE.apply_promotion(
-            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, int(issues.split("/")[0].lstrip("#")), issues, date
+            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, issue, issues, date
         )
         for name in PINNED:
             if name == "docs/assurance/195-chart-acquisition-receipt.md":
@@ -855,6 +866,22 @@ class RewriteTests(unittest.TestCase):
         (self.root / "changelog.d/990-promote-naranjo-online-0-1-99.md").write_text("### Changed\n\n- taken\n")
         with self.assertRaisesRegex(MODULE.Refusal, "fragments are immutable"):
             self.promote()
+        self.assert_tree_untouched()
+
+    def test_refused_replayed_fragment_writes_nothing(self):
+        # The inverse test's one scratch removal is load-bearing exactly when
+        # the path it drops is the one a committed promotion already wrote.
+        # Build that path the way apply_promotion does, seed it — the shape
+        # main takes after the first cut this tool makes — and prove the
+        # refusal fires on it and writes nothing. Without this the removal
+        # would be a no-op on today's tree and prove nothing at all.
+        date, issues = MODULE.README_ROW_RE.search(self.originals["README.md"].decode()).group(2, 3)
+        issue = int(issues.split("/")[0].lstrip("#"))
+        original = self.receipt["records"]["naranjo-online"]
+        replayed = self.root / MODULE.fragment_path(issue, {"naranjo-online": original["chartTag"]})
+        replayed.write_text("### Changed\n\n- committed by that promotion\n", encoding="utf-8")
+        with self.assertRaisesRegex(MODULE.Refusal, "fragments are immutable"):
+            MODULE.apply_promotion(self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, issue, issues, date)
         self.assert_tree_untouched()
 
     def test_refused_unknown_workload_writes_nothing(self):

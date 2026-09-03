@@ -81,7 +81,15 @@ README = Path("README.md")
 FRAGMENTS = Path("changelog.d")
 VERSIONS_ENV = Path("versions.env")
 ANNOTATION = "platform.snaraj.dev/chart-release"
-PR_LABELS = ("release", "delivery-lane", "promoter")
+# `promoter` stands in for the agent pair AGENTS.md withholds from this tool,
+# and `security` is the tier a promotion actually earns: it advances a signed
+# chart digest and the identity pins that gate it, which AGENTS.md's risk table
+# names ("signing, digests, immutable artifacts"). The tier label and the review
+# label below travel together, so arming the cybersecurity lane without the tier
+# left every promotion pull request wearing a metadata contradiction the Ready
+# evaluator refuses (`scripts/ready_check.py`, whose PROMOTER_TUPLE is this
+# tuple plus `cybersecurity-review-requested`).
+PR_LABELS = ("release", "security", "delivery-lane", "promoter")
 REVIEW_LABELS = ("requires-review", "cybersecurity-review-requested")
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"

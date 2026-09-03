@@ -545,6 +545,46 @@ class IssueReconciliationTests(unittest.TestCase):
         self.assertEqual(github.closed, [])
         self.assertTrue(any(action.startswith("update:") for action in actions))
 
+    def test_an_appended_estimate_survives_the_evidence_rewrite(self):
+        """PR #303 finding 3 / owner direction 5530907119: an estimate added to
+        a tracking issue was erased on the next hourly tick, so the commission
+        AGENTS.md requires had no estimate by the time the pull request stated
+        its actuals. The evidence above the heading is still replaced whole."""
+
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        estimate = "## Estimate\n\n13 files, net about +80 lines, two rounds."
+        github = self.RecordingGitHub(
+            {drift: {"numbers": [41], "body": "stale evidence\n\n" + estimate + "\n\n- Fable5"}}
+        )
+        assurance.reconcile_issues(github, {drift: "fresh evidence"}, apply=True)
+        self.assertEqual(
+            github.updated, [(41, "fresh evidence\n\n" + estimate + "\n\n- Fable5")]
+        )
+
+    def test_a_preserved_estimate_leaves_an_unchanged_condition_untouched(self):
+        # The recomposed body must be byte-identical to what is already there,
+        # or every tick would rewrite the issue and the preservation would show
+        # up as hourly churn instead of stability.
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        body = "behind\n\n## Estimate\n\n6 files, net +85, one round.\n\n- Fable5"
+        github = self.RecordingGitHub({drift: {"numbers": [41], "body": body}})
+        actions = assurance.reconcile_issues(github, {drift: "behind"}, apply=True)
+        self.assertEqual(github.updated, [])
+        self.assertTrue(any(action.startswith("still-open:") for action in actions))
+
+    def test_only_the_estimate_block_survives_and_a_new_issue_gains_none(self):
+        # Prose a reader could mistake for the watchdog's own finding must not
+        # be carried forward, and an issue this tool opens starts with none.
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        github = self.RecordingGitHub(
+            {drift: {"numbers": [41], "body": "stale\n\nsmuggled finding\n\n- Fable5"}}
+        )
+        assurance.reconcile_issues(github, {drift: "fresh evidence"}, apply=True)
+        self.assertEqual(github.updated, [(41, "fresh evidence\n\n- Fable5")])
+        fresh = self.RecordingGitHub({})
+        assurance.reconcile_issues(fresh, {drift: "fresh evidence"}, apply=True)
+        self.assertEqual(assurance.preserved_estimate(""), "")
+
     def test_duplicate_trackers_converge_on_the_lowest_number(self):
         drift = assurance.condition_title("site-drift/naranjo-online")
         github = self.RecordingGitHub(
