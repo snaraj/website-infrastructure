@@ -43,6 +43,13 @@ TIER_LABELS = frozenset({
     "release", "fix", "provider-neutrality", "delivery-lane", "features",
     "platform", "extraction",
 })
+# The receipted release promoter "is NOT an agent: its pull requests carry
+# `promoter` in place of the agent pair" (AGENTS.md, Agent labels). Demanding
+# the umbrella label of it would ask an automation to claim an authorship it
+# does not have, and a pull request wearing BOTH asserts two provenances at
+# once — so the promoter label replaces the umbrella requirement rather than
+# waiving it, and the pair together is a contradiction.
+PROMOTER_LABEL = "promoter"
 # The security-surface tier and the label that arms its reviewer travel
 # together; exactly one of them is a metadata contradiction, not a tier.
 SECURITY_TIER_LABEL = "security"
@@ -131,7 +138,10 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
             blockers.append(f"a check at this head did not succeed: {check.get('name')} ended {check.get('conclusion')}")
     if not tiers:
         blockers.append("the pull request carries no tier label, so its review depth cannot be judged")
-    if UMBRELLA_LABEL not in labels:
+    if PROMOTER_LABEL in labels:
+        if UMBRELLA_LABEL in labels:
+            blockers.append(f"conflicting provenance labels: {PROMOTER_LABEL} stands in place of {UMBRELLA_LABEL}, never beside it")
+    elif UMBRELLA_LABEL not in labels:
         blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
     if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
         blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")

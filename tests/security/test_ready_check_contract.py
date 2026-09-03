@@ -5,6 +5,13 @@ import unittest
 from .support import load_script
 
 MODULE = load_script("ready_check.py")
+# The promoter's emitted labels are READ from the tool, never retyped here, so
+# the evaluator and the only automation that has to satisfy it cannot drift
+# apart again: changing one tuple without the other turns these cases red.
+PROMOTER = load_script("promote_releases.py", module_name="ready_check_promoter_labels")
+# `requires-review` is armed at open and removed by the reviewer with either
+# verdict, so the set a Ready evaluation ever sees is the emitted one minus it.
+PROMOTER_LABELS = [name for name in PROMOTER.PR_LABELS + PROMOTER.REVIEW_LABELS if name != "requires-review"]
 HEAD = "1" * 40
 # The metadata a real reviewable pull request carries; each hostile case below
 # changes exactly one field of it, so the blocker it proves is unambiguous.
@@ -119,3 +126,43 @@ class WrongPullRequestTests(unittest.TestCase):
         # The lane-to-tier judgment is deliberately NOT made here; the module
         # says so where a reader of its output will see it.
         self.assertIn("coordinator", MODULE.__doc__)
+
+
+class PromoterTupleTests(unittest.TestCase):
+    """AGENTS.md: the release promoter "is NOT an agent: its pull requests
+    carry `promoter` in place of the agent pair". The evaluator demanded the
+    agent pair from every author anyway, and demanded a `security` tier the
+    promoter never emitted, so no promotion pull request could ever be judged
+    Ready (PR #303, security finding 2). The exception is exactly one label
+    wide, and each case below proves one edge of it.
+    """
+
+    def test_the_exact_promoter_tuple_is_eligible(self):
+        lanes, tiers, blockers = decide(labels=PROMOTER_LABELS)
+        self.assertEqual(blockers, [], "the labels the promoter emits must satisfy the rule it must pass")
+        self.assertEqual((lanes, tiers), (["opus5"], ["delivery-lane", "release", "security"]))
+
+    def test_every_foreign_hybrid_of_that_tuple_is_denied(self):
+        for reason, labels in (
+            # An automation claiming the agent authorship AGENTS.md withholds.
+            ("conflicting provenance labels", PROMOTER_LABELS + ["agent-authored"]),
+            # The pre-repair emitted set: the cybersecurity lane armed with no
+            # security tier beside it — the live blocker on PR #303.
+            ("conflicting tier labels", [n for n in PROMOTER_LABELS if n != "security"]),
+            # The security tier without the lane that reviews it, the same
+            # contradiction read the other way.
+            ("conflicting tier labels", [n for n in PROMOTER_LABELS if n != "cybersecurity-review-requested"]),
+            # Still waiting on the review it armed at open.
+            ("requires-review is still armed", PROMOTER_LABELS + ["requires-review"]),
+            # `promoter` replaces the umbrella label; it replaces nothing else.
+            ("carries no tier label", [MODULE.PROMOTER_LABEL]),
+        ):
+            with self.subTest(reason=reason):
+                self.assertTrue(any(reason in b for b in decide(labels=labels)[2]), reason)
+
+    def test_an_ordinary_pull_request_still_needs_the_umbrella_label(self):
+        # Drop only `promoter` and the umbrella requirement returns, so the
+        # exception cannot be inherited by anything else wearing these labels.
+        without = [name for name in PROMOTER_LABELS if name != MODULE.PROMOTER_LABEL]
+        self.assertEqual(decide(labels=without)[2], [f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label"])
+        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL])[2], [])

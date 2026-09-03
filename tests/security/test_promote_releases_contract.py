@@ -825,8 +825,18 @@ class RewriteTests(unittest.TestCase):
         (self.root / "changelog.d/990-promote-naranjo-online-0-1-99.md").unlink()
         # The committed README row states the capture the inverse must restore.
         date, issues = MODULE.README_ROW_RE.search(self.originals["README.md"].decode()).group(2, 3)
+        issue = int(issues.split("/")[0].lstrip("#"))
+        # The inverse replays THIS head's own promotion, so once that promotion
+        # is committed the scratch tree already carries the fragment it added
+        # and the inverse meets the immutable-fragment refusal instead of
+        # restoring bytes. The pre-promotion tree carried neither fragment;
+        # dropping this one is the same scratch setup as the line above, not a
+        # relaxation — the refusal itself stays pinned by
+        # test_refused_fragment_collision_writes_nothing, and the rewrite never
+        # reads changelog.d/ at all.
+        (self.root / MODULE.fragment_path(issue, {"naranjo-online": original["chartTag"]})).unlink(missing_ok=True)
         MODULE.apply_promotion(
-            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, int(issues.split("/")[0].lstrip("#")), issues, date
+            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, issue, issues, date
         )
         for name in PINNED:
             if name == "docs/assurance/195-chart-acquisition-receipt.md":
