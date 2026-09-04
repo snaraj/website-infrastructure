@@ -60,6 +60,15 @@ CHART_RELEASES = {
         "digest": "sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6",
     },
 }
+# How long a merged selection can wait before source-controller re-reads the
+# object. Pinned as one exact literal, like every other field of this contract:
+# the value is a security-relevant reconciliation property (it bounds how long
+# the cluster may keep serving a superseded signed digest), and the owner's
+# 2026-09-03 release-loop decision (issue #309) set it to one minute for both
+# sites. Shortening a poll of an already signature-verified reference adds no
+# credential, no inbound path and no object — a Flux Receiver would have added
+# all three and is excluded.
+CHART_SOURCE_INTERVAL = "1m0s"
 # Helm charts pushed with `helm push` carry exactly this layer media type.
 # Pinning it means a non-chart layer smuggled into the same artifact is not
 # what source-controller extracts.
@@ -245,7 +254,7 @@ metadata:
   name: {slug}-chart
   namespace: {slug}
 spec:
-  interval: 10m0s
+  interval: {interval}
   layerSelector:
     mediaType: {media_type}
     operation: copy
@@ -262,6 +271,7 @@ spec:
         slug=slug,
         tag=tag,
         digest=digest,
+        interval=CHART_SOURCE_INTERVAL,
         media_type=CHART_LAYER_MEDIA_TYPE,
         url=CHART_REPOSITORIES[slug],
         issuer=CHART_OIDC_ISSUER_PATTERN,

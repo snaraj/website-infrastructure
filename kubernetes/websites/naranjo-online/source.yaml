@@ -35,6 +35,12 @@
 #     invariant 5).
 #   * The layer selector pins the Helm chart media type, so a non-chart layer
 #     smuggled into the artifact is not what gets reconciled.
+#   * spec.interval is the ceiling on how long a merged selection waits before
+#     source-controller re-reads this object. It is a poll of one already
+#     signature-verified OCI reference, so shortening it adds no credential, no
+#     inbound path and no new object — a Flux Receiver would have added all
+#     three (issue #309). One minute keeps the merge-to-live loop bounded by
+#     the release ceremony rather than by a timer.
 #
 # The chart is also the sole workload image-identity carrier; platform
 # HelmRelease values contain no repository, tag, or digest override (ADR 0016).
@@ -46,7 +52,7 @@ metadata:
   name: naranjo-online-chart
   namespace: naranjo-online
 spec:
-  interval: 10m0s
+  interval: 1m0s
   layerSelector:
     mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
     operation: copy

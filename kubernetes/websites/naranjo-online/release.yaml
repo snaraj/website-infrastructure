@@ -9,7 +9,12 @@ metadata:
     platform.snaraj.dev/readiness: active-via-signature-verified-chart
 spec:
   suspend: false
-  interval: 10m0s
+  # One minute is the ceiling on how long a merged chart selection waits for
+  # helm-controller to act on it. Like the OCIRepository beside this file it is
+  # a poll of already-verified state, so the shorter interval buys deploy
+  # latency with no webhook receiver, no inbound path and no new object
+  # (issue #309).
+  interval: 1m0s
   # Helm keeps every release revision as a Secret in this namespace, and
   # helm-controller retains five when this field is unset. `storage.Create`
   # prunes history to maxHistory-1 BEFORE writing the new revision, so any

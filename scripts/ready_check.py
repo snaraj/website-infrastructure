@@ -61,10 +61,17 @@ TIER_LABELS = frozenset({
 # `requires-review` is armed at open and removed by the reviewer with either
 # verdict, so the set a Ready evaluation can ever see excludes it; a pull
 # request still wearing it is blocked by the review-attention rule instead.
+#
+# Since issue #309 the set no longer carries `cybersecurity-review-requested`.
+# A promotion pull request's verdict is earned by re-derivation — the promoter
+# re-runs the acquisition ceremony against the registry and the site's
+# immutable Release, re-renders the whole promotion surface and compares it to
+# the head byte for byte, and the reviewer App posts the result at that exact
+# head. The cybersecurity lane still reviews every change to the promoter's
+# CODE, which is a normal agent pull request and where the risk lives.
 PROMOTER_LABEL = "promoter"
 PROMOTER_TUPLE = frozenset({
     "release", "security", "delivery-lane", "promoter",
-    "cybersecurity-review-requested",
 })
 REVIEW_ATTENTION_LABEL = "requires-review"
 # The security-surface tier and the label that arms its reviewer travel
@@ -166,10 +173,17 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
             detail = [f"unexpected {name}" for name in sorted(carried - PROMOTER_TUPLE)]
             detail += [f"missing {name}" for name in sorted(PROMOTER_TUPLE - carried)]
             blockers.append(f"{PROMOTER_LABEL} pins an exact label set: " + ", ".join(detail))
-    elif UMBRELLA_LABEL not in labels:
-        blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
-    if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
-        blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")
+    else:
+        if UMBRELLA_LABEL not in labels:
+            blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
+        # The pair rule asks an AGENT pull request that claims the security tier
+        # to have armed the lane that reviews it. It does not reach a promotion
+        # pull request, whose exact tuple above already fixes both members and
+        # whose `security` tier is discharged by the promoter's own
+        # re-derivation receipt (issue #309) rather than by that label; applying
+        # both rules would make the exact tuple permanently self-contradictory.
+        if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
+            blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")
     if behind_by is None:
         blockers.append("base freshness is unknown")
     elif behind_by:
