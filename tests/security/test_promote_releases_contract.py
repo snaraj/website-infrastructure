@@ -1008,6 +1008,8 @@ class TickTests(unittest.TestCase):
         self.commits = []
         self.mutations = []
         self.fail_gates = set()
+        # A tracked file a gate rewrites during the cut; see run_command.
+        self.gate_rewrites = ""
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -1035,13 +1037,27 @@ class TickTests(unittest.TestCase):
             self.mutations.append(("gate", tuple(argv)))
             if argv[1] in self.fail_gates:
                 raise MODULE.Refusal(f"`make {argv[1]}` exited 2: FAIL pre-push security gate did not authorize publication.")
+            # Real gates rewrite tracked files — a formatter, a regenerated
+            # badge or ledger. When a test asks for it this one does too, so
+            # the committed index and `apply_promotion`'s returned path list
+            # DISAGREE in count and the accounting oracle can tell which of
+            # the two the body actually states (PR #308 review, finding 1).
+            if self.gate_rewrites:
+                path = self.repo / self.gate_rewrites
+                path.write_text(path.read_text(encoding="utf-8") + "\nrewritten by a gate\n", encoding="utf-8")
+                # Once, before the commit: the publication gate runs after it,
+                # and a second rewrite would leave residue the cut never saw.
+                self.gate_rewrites = ""
             return ""
         if argv[:2] == ["ssh-add", "-L"]:
             return "ssh-ed25519 AAAATESTKEY loaded\nssh-ed25519 AAAAOTHER other\n"
         if argv[:3] == ["gh", "pr", "ready"]:
             raise AssertionError("the promoter must never flip or withdraw Ready")
         if argv[:3] == ["gh", "pr", "create"]:
-            self.mutations.append(("pr-create", tuple(argv)))
+            # The body file is unlinked right after this call, so capture what
+            # gh was actually handed rather than inferring it afterwards.
+            handed = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
+            self.mutations.append(("pr-create", tuple(argv), handed))
             return "https://github.com/snaraj/website-infrastructure/pull/300\n"
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
@@ -1132,7 +1148,40 @@ class TickTests(unittest.TestCase):
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "", "the refused dry run left the clone dirty")
 
+    def test_a_live_tick_traces_every_documented_call_kind_and_ends_in_one_summary(self):
+        # PR #313 round 1, finding 2: the runbook's list of call kinds is bound
+        # to what a real tick EMITS, not to strings the module contains, and
+        # the summary prefix the runbook names is the one the tick writes.
+        captured = []
+        original = MODULE.log
+        MODULE.log = captured.append
+        self.addCleanup(setattr, MODULE, "log", original)
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 0)
+        runbook = (REPO_ROOT / "docs" / "runbooks" / "release-promotion.md").read_text(encoding="utf-8")
+        section = runbook.split("### Reading the log", 1)[1].split("## Disable", 1)[0]
+        listed = re.findall(r"`([a-z]+(?:-[a-z]+)+)`", section.split("- `DONE", 1)[0].split("`<kind>` is one of", 1)[1])
+        self.assertGreaterEqual(len(listed), 12, listed)
+        starts = [line for line in captured if line.startswith("START ")]
+        for kind in listed:
+            self.assertTrue(any(line.startswith(f"START {kind} ") for line in starts), (kind, starts))
+            self.assertTrue(any(line.startswith(f"DONE {kind} ") for line in captured), kind)
+        for line in captured:
+            if line.startswith("DONE "):
+                self.assertRegex(line, r"elapsed=\d+\.\d+s (OK$|FAILED decision=\S+ reason=)")
+        summaries = [line for line in captured if line.startswith("SUMMARY ")]
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertRegex(summaries[0], r"^SUMMARY tick elapsed=\d+\.\d+s dry-run=False ")
+        self.assertIn("cut=", summaries[0])
+
     def test_live_tick_cuts_signs_pushes_opens_and_arms_but_never_flips(self):
+        # One gate rewrites a tracked file the promotion never names, so the
+        # committed index carries MORE paths than `apply_promotion` returned.
+        # That divergence is what gives the accounting oracle below its teeth:
+        # a body counting the tool's own list instead of the index states a
+        # different number and the assertion fails (PR #308 review, finding 1).
+        self.gate_rewrites = "ROADMAP.md"
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
         code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual(code, 0)
@@ -1157,6 +1206,23 @@ class TickTests(unittest.TestCase):
         self.assertNotIn("Co-Authored-By", message)
         pushed_tree = subprocess.run(["git", "ls-tree", "--name-only", branch, "changelog.d/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout
         self.assertIn(f"changelog.d/285-promote-naranjo-online-{self.next.replace('.', '-')}.md", pushed_tree)
+        # AGENTS.md: the commission states an estimate and the PR BODY the
+        # actuals. Measure the pushed head the way the line tells the reviewer
+        # to, and require the body gh was handed to state exactly that (#307).
+        numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{branch}"], cwd=self.origin, capture_output=True, text=True, check=True).stdout.splitlines()
+        rows = [line.split("\t") for line in numstat]
+        self.assertIn("ROADMAP.md", [row[2] for row in rows], "the gate's rewrite is in the commit")
+        reported = [line for line in self.log_lines if line.startswith("rewrote ")][0]
+        self.assertNotEqual(
+            len(rows), int(reported.split()[1]),
+            "the fixture must make the index and the reported path list disagree, or the count below proves nothing",
+        )
+        expected = MODULE.accounting_line(base, len(rows), sum(int(r[0]) for r in rows), sum(int(r[1]) for r in rows))
+        self.assertIn(MODULE.ACCOUNTING_PREFIX, expected)
+        handed = next(m for m in self.mutations if m[0] == "pr-create")[2]
+        self.assertIn(expected, handed, "the body gh received must carry the measured accounting")
+        self.assertIn(expected, message, "the commit message and the body must state the same numbers")
+        self.assertEqual(handed.count(MODULE.ACCOUNTING_PREFIX), 1, "exactly one accounting line per body")
         create = next(m for m in self.mutations if m[0] == "pr-create")[1]
         self.assertIn("--draft", create)
         for label in MODULE.PR_LABELS:
@@ -1410,6 +1476,78 @@ class SiblingLoaderTests(unittest.TestCase):
                     load()
                 self.assertIn("promoter_loader_probe", sys.modules)
                 self.assertIsNone(sys.modules["promoter_loader_probe"])
+
+
+class BodyAccountingTests(unittest.TestCase):
+    """AGENTS.md's accounting contract: the commission states an estimate and
+    the pull-request body the actuals, so the doubling rule has something to
+    compare. The generated promotion body carried none, which made every cut
+    structurally unable to satisfy it (PR #306, security finding). The line is
+    rendered from measured numbers and names the command that reproduces it.
+    """
+
+    BASE = "b424421eb9b539fa559c24d915c36211c369720e"
+
+    def test_the_line_states_the_measured_numbers_and_its_own_command(self):
+        for (files, added, deleted), expected in (
+            ((9, 51, 47), "9 files, +51 / -47, net +4."),
+            ((3, 4, 120), "3 files, +4 / -120, net -116."),
+            ((1, 7, 7), "1 files, +7 / -7, net +0."),
+        ):
+            with self.subTest(files=files):
+                line = MODULE.accounting_line(self.BASE, files, added, deleted)
+                self.assertEqual(
+                    line,
+                    f"Accounting (measured, `git diff --numstat {self.BASE[:7]}..HEAD`): {expected}",
+                )
+
+    def test_the_body_carries_the_line_between_the_evidence_and_the_closes(self):
+        record = self.receipt_record()
+        accounting = MODULE.accounting_line(self.BASE, 9, 51, 47)
+        body = MODULE.pr_body(
+            MODULE.discover_selections(REPO_ROOT),
+            {"naranjo-online": (record, {})},
+            [285],
+            self.BASE,
+            accounting,
+        )
+        self.assertIn(accounting, body)
+        self.assertLess(body.index("Evidence:"), body.index(accounting))
+        self.assertLess(body.index(accounting), body.index("Closes #285"))
+        self.assertTrue(body.rstrip().endswith(MODULE.SIGNATURE))
+
+    def test_a_body_may_state_its_accounting_exactly_once(self):
+        # Two sets of numbers state neither: a reader cannot tell which the
+        # commit records, and one named command reproduces only one of them
+        # (PR #308 review, finding 2). Enforced, not trusted.
+        record = self.receipt_record()
+        one = MODULE.accounting_line(self.BASE, 9, 51, 47)
+        arguments = (MODULE.discover_selections(REPO_ROOT), {"naranjo-online": (record, {})}, [285], self.BASE)
+        self.assertIn(one, MODULE.pr_body(*arguments, one))
+        for doubled in (one + "\n" + one, one + " " + MODULE.accounting_line(self.BASE, 1, 1, 1)):
+            with self.subTest(shape=doubled[:40]):
+                with self.assertRaisesRegex(MODULE.Refusal, "exactly once, not 2 times"):
+                    MODULE.pr_body(*arguments, doubled)
+        with self.assertRaisesRegex(MODULE.Refusal, "exactly once, not 0 times"):
+            MODULE.pr_body(*arguments, "no accounting at all")
+
+    def test_an_unmeasurable_numstat_row_refuses_the_cut(self):
+        # git renders a binary path's counts as `-`; summing that would raise
+        # or silently mis-state, so the cut refuses instead of guessing.
+        for rendered in ("-\t-\tdocs/logo.png", "12\tdocs/only-two-fields.md", "x\t3\tdocs/a.md"):
+            with self.subTest(rendered=rendered):
+                workspace = MODULE.Workspace(REPO_ROOT, run=lambda argv, **kw: "" if argv[1] == "add" else rendered + "\n")
+                with self.assertRaisesRegex(MODULE.Refusal, "not measurable"):
+                    workspace.numstat(self.BASE)
+
+    def test_the_measured_totals_sum_every_row(self):
+        rows = "1\t1\tREADME.md\n4\t0\tchangelog.d/285-x.md\n9\t9\tdocs/receipt.json\n"
+        workspace = MODULE.Workspace(REPO_ROOT, run=lambda argv, **kw: "" if argv[1] == "add" else rows)
+        self.assertEqual(workspace.numstat(self.BASE), (3, 14, 10))
+
+    def receipt_record(self):
+        record = json.loads((REPO_ROOT / MODULE.RECEIPT_JSON).read_text())["records"]["naranjo-online"]
+        return record
 
 
 if __name__ == "__main__":  # pragma: no cover

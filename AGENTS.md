@@ -205,6 +205,17 @@ and dependency-governed Draft capacity is recorded durably in
   a site release permanently, and blocked every subsequent deploy. Record the
   owner or platform (peer) ruling here when it arrives, including whether
   release-retention fields belong to this lane.
+  Issue #309 is a further DECLARED CROSSING on the same terms, on the owner's
+  explicit 2026-09-03 release-loop instruction, which names these two files and
+  the value: `spec.interval` on both site HelmRelease objects moves from
+  `10m0s` to `1m0s`. Reconciliation cadence is not release identity — no
+  digest, signature, chart binding or fail-closed property moves with it — and
+  the shorter bound is a poll of already-verified state, adding no credential,
+  no inbound path and no object. `scripts/validate_release_state.py` now pins
+  the value PER release identity, so the connector release is untouched and a
+  widened site interval is a gate failure. This grants no standing claim on
+  these manifests; record the owner or platform (peer) ruling here when it
+  arrives, including whether reconciliation-cadence fields belong to this lane.
   **Owner ruling 2026-08-28:** the exact version-neutral
   `app.kubernetes.io/managed-by: fluxcd` label on both site HelmRelease
   objects is DELIVERY-owned for issue #240. It supplies the ordinary
@@ -237,6 +248,18 @@ and dependency-governed Draft capacity is recorded durably in
   longer a per-PR declared crossing. It still requires the exact acquisition
   receipt issue #195 pinned; it covers no other field of these manifests and
   no other path under `kubernetes/websites/**`.
+  Issue #309 therefore reaches `spec.interval` on both site `OCIRepository`
+  objects as a DECLARED CROSSING, not under that ruling: on the owner's
+  explicit 2026-09-03 release-loop instruction, which names these two files and
+  the value, it moves from `10m0s` to `1m0s`. Nothing about the identity tuple
+  moves with it — the digest, the cosign `matchOIDCIdentity`, the layer
+  selector and the anonymous-read posture are byte-identical — and the shorter
+  bound is a poll of an already signature-verified reference, so it adds no
+  credential, no inbound path and no object; a Flux `Receiver` would have added
+  all three and is excluded. `scripts/validate_signature_policy.py` states the
+  value as one exact literal, so widening it is a gate failure rather than an
+  edit. This grants no standing claim on any other field; record the owner or
+  platform (peer) ruling here when it arrives.
   History, kept because it is the reasoning the ruling settles: the row above
   assigns `kubernetes/websites/*/release.yaml` to delivery
   through the promotion surface and leaves the remaining
@@ -362,8 +385,10 @@ Delivery-lane requirements, explicit and numbered:
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
    or update restriction before this release policy is Ready.
 
-**Promoter feature freeze.** No new `scripts/promote_releases.py` feature
-lands until one real promotion has run and been reviewed; security fixes do.
+**Promoter feature freeze — DISCHARGED.** The condition was one real promotion
+run and reviewed: PR #287 was cut by hand and merged 2026-09-01, and #303 was
+cut by the tool, reviewed and closed 2026-09-03. Promoter changes are ordinary
+work again, at the security tier every path in that tool earns.
 
 ## Adversarial review protocol
 
