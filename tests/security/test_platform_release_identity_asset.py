@@ -257,32 +257,32 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             sites["naranjo-online"]["chart"],
             {
                 "layer_digest": (
-                    "sha256:419e5b6ae64969ace4e090ca"
-                    "5f9550495e7655dfa7c529d81"
-                    "a15a2d06d3b6e95"
+                    "sha256:d2c043123b121f1d8fa32d15"
+                    "e0c5ac5890f1d7f4214c1ac6a"
+                    "095f4f5b614ae98"
                 ),
                 "manifest_digest": (
-                    "sha256:d19bb1bd7e357d47d6676e9d"
-                    "e2d2817864762ffd539ac55dd"
-                    "d0246dc0ef770b3"
+                    "sha256:115c9d3218393f74ba0a6e49"
+                    "f2587099c456b5ae6e8db154a"
+                    "9548ac117810a91"
                 ),
                 "repository": "ghcr.io/snaraj/charts/naranjo-online",
-                "version": "0.1.71",
+                "version": "0.1.73",
             },
         )
         self.assertEqual(
             sites["naranjo-online"]["workload"],
             {
                 "arm64_digest": (
-                    "sha256:773b2d8c50f6369ed5597ed3"
-                    "bc474fe81885ff55d9380389"
-                    "2ba5b350a04e934e"
+                    "sha256:36d2fc9bc05c804a4db0e4a5"
+                    "1ea01a5a3f25e3c3554233b3"
+                    "47e91fa459232593"
                 ),
                 "image": (
-                    "ghcr.io/snaraj/naranjo-online:v0.1.71@"
-                    "sha256:3e6057bce0a81fdefb50f56"
-                    "3715d50b84d5eb008abae5cd"
-                    "5265c1c64d2b5ba99"
+                    "ghcr.io/snaraj/naranjo-online:v0.1.73@"
+                    "sha256:d5e480fe1e4ccecc155e6b9"
+                    "adf53193541ddd820e935dab"
+                    "f81f1fcf81b9c44fa"
                 ),
             },
         )
@@ -1072,8 +1072,8 @@ class AcquisitionReceiptViewCoherenceTests(unittest.TestCase):
     RECEIPT_DIR = ROOT / "docs" / "assurance"
     LAYER_INSPECTION_HASHES = {
         # naranjo-online Chart.yaml / values.yaml
-        "1e8708c34244925e72da1e0bd97d3ee86ecb495d4279d848d33fa2fad286cd71",
-        "4cf32b9cab3ae7964eb7a80ceda6368f00c8024ae518adb90f9b2be59c1dbff2",
+        "6b8e24aa3590a7b3e372f80bbbefc6e55329c9ae86616b72eeb5e38a30db1903",
+        "5e87bbb471a703de50facb578b768fe083a808203b4b77884810608d7ac7a73e",
         # lidersea-com Chart.yaml / values.yaml
         "5e1727720c3277fbb9d0e9be0b5994c15b1d7b1eba20cb7ae1f4e2c19c49c341",
         "c93a729c03094830ea161404ffefaeab8947f90cd0fe7568ea79506183f713b9",

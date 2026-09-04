@@ -52,8 +52,8 @@ CHART_REPOSITORIES = {
 # and the exact-site keyless signature before changing either value.
 CHART_RELEASES = {
     "naranjo-online": {
-        "tag": "0.1.71",
-        "digest": "sha256:d19bb1bd7e357d47d6676e9de2d2817864762ffd539ac55ddd0246dc0ef770b3",
+        "tag": "0.1.73",
+        "digest": "sha256:115c9d3218393f74ba0a6e49f2587099c456b5ae6e8db154a9548ac117810a91",
     },
     "lidersea-com": {
         "tag": "0.1.41",
