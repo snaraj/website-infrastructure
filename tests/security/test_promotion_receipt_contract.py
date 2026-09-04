@@ -58,8 +58,9 @@ HELPER = "/nonexistent/receipt-token-helper"
 TOKEN = "receipt-token-fixture-value-with-no-credential-shape"
 
 
-def app_comment(head: str, body: str = "") -> dict:
-    """A comment as GitHub lists it, carrying the review App's exact actor."""
+def app_comment(head: str, body: str = "", at: str = "2026-09-04T00:00:00Z") -> dict:
+    """A comment as GitHub lists it, carrying the review App's exact actor
+    and, by default, a validator-shaped APPROVE receipt."""
 
     return {
         "user": {
@@ -68,8 +69,13 @@ def app_comment(head: str, body: str = "") -> dict:
             "type": "Bot",
         },
         "performed_via_github_app": {"id": READY.REVIEWS_APP_ID},
-        "body": body or f"HEAD: {head}\nVERDICT: APPROVE\n\n- Someone (adversarial reviewer)",
+        "body": body or f"HEAD: {head}\nVERDICT: APPROVE\n\nMutation matrix and claim audit: supported.\n\n- Someone (adversarial reviewer)",
+        "created_at": at,
     }
+
+
+def owner_comment(body: str, at: str) -> dict:
+    return {"user": {"login": MODULE.ASSIGNEE, "id": OWNER_ID, "type": "User"}, "body": body, "created_at": at}
 
 
 class ProofFixture:
@@ -106,6 +112,10 @@ class ProofFixture:
         ]
         self.calls = []
         self.label_delete_failures = 0
+        # Hostile forge knobs: move the head the instant a named write lands,
+        # or let a valid receipt arrive between the proof and the post.
+        self.move_head_after = None
+        self.inject_receipt_before_post = False
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -202,10 +212,18 @@ class ProofFixture:
         if argv[:3] == ["gh", "pr", "comment"]:
             body = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
             self.comments.append(app_comment(self.head, body))
+            if self.move_head_after == "post":
+                self.move_head_after, self.head = None, "d" * 40
             self.wire()
             return "https://github.com/snaraj/website-infrastructure/pull/300#issuecomment-1\n"
         if argv[:3] == ["gh", "pr", "ready"]:
+            if "--undo" in argv:
+                self.draft = True
+                self.wire()
+                return ""
             self.draft = False
+            if self.move_head_after == "ready":
+                self.move_head_after, self.head = None, "d" * 40
             self.wire()
             return ""
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
@@ -216,11 +234,20 @@ class ProofFixture:
                     self.label_delete_failures -= 1
                     raise MODULE.Refusal("`gh api` exited 1: HTTP 502")
                 self.review_armed = False
+                if self.move_head_after == "label":
+                    self.move_head_after, self.head = None, "d" * 40
+                self.wire()
+            elif path.endswith("/issues/300/labels") and argv[argv.index("-X") + 1] == "POST":
+                self.review_armed = True
                 self.wire()
             return "[]" if "/labels" in path else "{}"
         if Path(argv[0]).name.startswith("python") or argv[0] == sys.executable:
             # The receipt validator really runs: a composed receipt that the
             # repository's own validator would reject must never be posted.
+            if self.inject_receipt_before_post:
+                self.inject_receipt_before_post = False
+                self.comments.append(app_comment(self.head))
+                self.wire()
             return MODULE.run_command(argv, cwd=cwd, input_text=input_text, env=env)
         return self.fleet.run(argv, cwd=cwd, input_text=input_text, env=env)
 
@@ -614,6 +641,73 @@ class PostingTests(unittest.TestCase):
         self.assertTrue(any("requires-review removed (a receipt already binds this head)" in line
                             for line in self.fixture.log_lines))
 
+    def test_a_head_that_moves_during_the_flip_is_undone(self):
+        # Round 2, finding 1: the forge accepts `gh pr ready` by number, so a
+        # head that moves during the call would leave an unreviewed head
+        # Ready. The flip is re-checked against the head and undone.
+        self.fixture.step()
+        self.fixture.move_head_after = "ready"
+        self.assertEqual(self.fixture.flip(), {"ready-300": "reverted"})
+        self.assertTrue(any("--undo" in call["argv"] for call in self.fixture.readied()), "the flip was undone")
+        self.assertTrue(self.fixture.draft, "the pull request is Draft again")
+        self.assertTrue(any("during the ready write; undoing it" in line for line in self.fixture.log_lines))
+
+    def test_ready_compares_the_base_live_before_the_write(self):
+        # Round 2, finding 2: main moved after the tick's snapshot said 0.
+        self.fixture.step()
+        self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{self.fixture.head}"] = {"behind_by": 2}
+        self.assertEqual(self.fixture.flip(), {"ready-300": "withheld"}, "flip() hands the rule a stale behind_by of 0")
+        self.assertEqual(self.fixture.readied(), [])
+        self.assertTrue(any("2 commit(s) behind" in line for line in self.fixture.log_lines))
+
+    def test_a_comment_newer_than_the_receipt_withholds_ready(self):
+        # Round 2, finding 2: an owner comment the reviewer never saw.
+        self.fixture.step()
+        self.fixture.comments.append(owner_comment("BLOCK", "2026-09-04T00:00:01Z"))
+        self.fixture.wire()
+        self.assertEqual(self.fixture.flip(), {"ready-300": "withheld"})
+        self.assertEqual(self.fixture.readied(), [])
+        self.assertTrue(any("newer than the APPROVE receipt and outstanding" in line for line in self.fixture.log_lines))
+
+    def test_a_head_that_moves_during_label_retirement_is_re_armed(self):
+        # Round 2, finding 3: the receipt names the old head; the label it
+        # retires must not come off the replacement head.
+        self.fixture.move_head_after = "label"
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1)
+        self.assertTrue(self.fixture.review_armed, "the label was put back on the moved head")
+        self.assertTrue(any(call["write"].endswith("/issues/300/labels") and call["argv"][argv_index(call, "-X") + 1] == "POST"
+                            for call in self.fixture.writes()), "the compensation re-added the label")
+        self.assertTrue(any("during the label-retirement write; undoing it" in line for line in self.fixture.log_lines))
+
+    def test_a_head_that_moves_after_the_post_keeps_its_review_attention(self):
+        # Round 2, finding 3, as the reviewer staged it: the receipt posted at
+        # the old head, then the head moved before the retirement. The label
+        # belongs to the replacement head, which no receipt has judged.
+        self.fixture.move_head_after = "post"
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1)
+        self.assertTrue(self.fixture.review_armed, "the replacement head keeps its review attention")
+        self.assertEqual([call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")], [])
+        self.assertTrue(any("kept; the head moved past" in line for line in self.fixture.log_lines))
+
+    def test_a_malformed_app_comment_is_not_a_receipt(self):
+        # Round 2, finding 4: a HEAD-only App comment is text, not a verdict.
+        self.fixture.comments.append(app_comment(self.head, body=f"HEAD: {self.head}\n"))
+        self.fixture.wire()
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1, "the head was judged and received its real receipt")
+        self.assertFalse(self.fixture.review_armed)
+        self.assertFalse(any("already binds this head" in line for line in self.fixture.log_lines))
+
+    def test_a_receipt_arriving_during_the_proof_is_not_posted_twice(self):
+        # Round 2, finding 4: novelty is re-read immediately before the post.
+        self.fixture.inject_receipt_before_post = True
+        self.fixture.step()
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertTrue(any("arrived at" in line and "during the proof; nothing was posted" in line
+                            for line in self.fixture.log_lines))
+
     def test_ready_is_never_flipped_on_a_dry_run(self):
         self.fixture.step()
         self.assertEqual(self.fixture.flip(dry_run=True), {"ready-300": "would-flip"})
@@ -698,6 +792,10 @@ class PostingTests(unittest.TestCase):
             )
         self.assertEqual(self.fixture.posted(), [])
         self.assertFalse((self.fixture.repo / ".git" / "promoter-receipt.md").exists())
+
+def argv_index(call: dict, flag: str) -> int:
+    return list(call["argv"]).index(flag)
+
 
 class CallTracingTests(unittest.TestCase):
     """Owner direction 2026-09-04, after a `cosign verify` held the full

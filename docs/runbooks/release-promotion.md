@@ -242,10 +242,19 @@ head with no REQUEST-CHANGES, `requires-review` is retired, every check at the
 head has finished green, and the label tuple is intact. Two extra conditions
 are the promoter's own: the head must still be the one this tick began with,
 and the approving lanes must include `promoter` — the receipt it earned, not
-a receipt somebody else posted. Only then does it run `gh pr ready`, and the
-`READY` line says `held:` on success or `withheld:` with every blocker. It is
-the one tool-driven flip AGENTS.md permits (owner ruling 2026-09-04, issue
-#309); every other pull request is the coordinator's to flip.
+a receipt somebody else posted. The base is compared live at that moment,
+not from the snapshot the tick began with, and every comment goes to the
+rule, which withholds while any comment by anybody but the review App is
+newer than the receipt — an owner or peer comment the reviewer never saw is
+outstanding until a new head earns a new receipt. Only then does it run
+`gh pr ready`, and the `READY` line says `held:` on success, `withheld:` with
+every blocker, or `reverted:` when the head moved across the write and the
+flip was undone with `gh pr ready --undo`. Every write the tick makes against
+a pull request is bound that way — the head re-read immediately before and
+after it, the residue of a race undone: the flip un-flipped, a retired label
+put back. It is the one tool-driven flip AGENTS.md permits (owner ruling
+2026-09-04, issue #309); every other pull request is the coordinator's to
+flip.
 
 **What is NOT automated.** Merge. The owner alone merges, and auto-merge —
 if the owner arms it on a promotion pull request — is the owner's own

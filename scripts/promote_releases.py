@@ -2029,10 +2029,13 @@ def receipt_actor() -> tuple:
 
 
 def app_receipt_heads(github: GitHub, number: int) -> set:
-    """Every head an App-posted comment on this pull request already binds.
+    """Every head a validator-shaped App receipt on this pull request binds.
 
     Only the App's own comments count, matched on the same four-part actor the
-    Ready evaluator uses; a `HEAD:` line pasted by anybody else is text.
+    Ready evaluator uses, and only in the shape `scripts/validate_review_receipt.py`
+    accepts (2026-09-04 security review round 2, finding 4): a comment that
+    merely carries a `HEAD:` line — anybody's, the App's included — is text,
+    and text is never terminal.
     """
 
     heads = set()
@@ -2046,9 +2049,10 @@ def app_receipt_heads(github: GitHub, number: int) -> set:
         )
         if actor != receipt_actor():
             continue
-        for line in (comment.get("body") or "").replace("\r\n", "\n").splitlines():
-            if line.startswith("HEAD: ") and SHA_RE.fullmatch(line[6:].strip()):
-                heads.add(line[6:].strip())
+        body = (comment.get("body") or "").replace("\r\n", "\n")
+        named = [line[6:].strip() for line in body.splitlines() if line.startswith("HEAD: ")]
+        if len(named) == 1 and SHA_RE.fullmatch(named[0]) and READY.RECEIPTS.denial(body, named[0], "pull-request") is None:
+            heads.add(named[0])
     return heads
 
 
@@ -2447,6 +2451,12 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
         if live is None or live["head"] != head:
             log(f"PR #{number}: the head moved between proof and post; nothing was posted")
             return False
+        # Novelty is re-read here too, not only at the start of the proof: a
+        # receipt that arrived while the proofs ran binds this head already,
+        # and a second one would be a duplicate record of the same verdict.
+        if head in app_receipt_heads(github, number):
+            log(f"PR #{number}: a receipt arrived at {head[:7]} during the proof; nothing was posted")
+            return False
         if dry_run:
             log(f"PR #{number}: WOULD post a validated receipt at {head[:7]} as the review App (dry run)")
             return False
@@ -2510,7 +2520,7 @@ def post_receipts(workspace: Workspace, github: GitHub, registry: Registry, cosi
                     if READY.REVIEW_ATTENTION_LABEL not in pr.get("labels", ()):
                         record[f"receipt-{pr['number']}"] = "bound"
                         continue
-                    retire_review_attention(github, pr["number"], "a receipt already binds this head", dry_run)
+                    retire_review_attention(github, pr["number"], pr["head"], "a receipt already binds this head", dry_run)
                     record[f"receipt-{pr['number']}"] = "label-retired"
                     continue
                 judged = prove_promotion(workspace, github, registry, cosign, pr, receipts=bound)
@@ -2528,26 +2538,68 @@ def post_receipts(workspace: Workspace, github: GitHub, registry: Registry, cosi
                 # the item is no longer waiting on review attention. A
                 # REQUEST-CHANGES still never repairs the pull request in
                 # place — the promoter supersedes and re-cuts it.
-                retire_review_attention(github, pr["number"], f"with the {verdict} receipt", dry_run)
+                retire_review_attention(github, pr["number"], pr["head"], f"with the {verdict} receipt", dry_run)
         except Refusal as error:
             log(f"PR #{pr['number']}: receipt step refused ({error})")
             record[f"receipt-{pr['number']}"] = "refused"
 
 
-def retire_review_attention(github: GitHub, number: int, why: str, dry_run: bool) -> bool:
-    """Remove the review-attention label from one pull request, re-reading
-    its labels first so the write is idempotent. Returns whether a removal
-    happened; a failed removal raises, and the next tick finishes it."""
+def bound_write(github: GitHub, number: int, head: str, kind: str, write, compensate) -> bool:
+    """One write against a pull request, bound to the exact head it was
+    evaluated at (2026-09-04 security review round 2, findings 1 and 3).
 
-    labels = [(label or {}).get("name") for label in (github.api(f"repos/{REPOSITORY}/pulls/{number}").get("labels") or [])]
-    if READY.REVIEW_ATTENTION_LABEL not in labels:
+    GitHub addresses every write by pull request NUMBER, and none can be made
+    conditional on a head. So the window is closed as far as the forge allows
+    and what leaks through it is undone: the head is re-read immediately
+    before the write and immediately after it; a head that moved before the
+    write means no write, and a head that moved during it means ``compensate``
+    undoes it — the flip un-flipped, the label put back — and the write is
+    reported as not done. A receipt comment needs no such binding: it names
+    the head it judged, so at any other head it is inert.
+    """
+
+    before = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    if before is None or before["head"] != head:
+        log(f"PR #{number}: {kind} not written; the head moved past {head[:7]} before the write")
+        return False
+    write()
+    after = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    if after is None or after["head"] != head:
+        log(f"PR #{number}: the head moved past {head[:7]} during the {kind} write; undoing it")
+        compensate()
+        return False
+    return True
+
+
+def retire_review_attention(github: GitHub, number: int, head: str, why: str, dry_run: bool) -> bool:
+    """Remove the review-attention label from one pull request AT ONE HEAD.
+
+    The label is retired because a receipt binds ``head``; a pull request whose
+    head has moved is a different subject, whose review attention that receipt
+    never earned. So the write is bound like every other: skipped when the
+    head moved before it, undone — the label put back — when it moved during
+    it. Returns whether the label is retired at that head; a failed removal
+    raises, and the next tick finishes it.
+    """
+
+    live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    if live is None or live["head"] != head:
+        log(f"PR #{number}: {READY.REVIEW_ATTENTION_LABEL} kept; the head moved past {head[:7]} before the receipt could retire it")
+        return False
+    if READY.REVIEW_ATTENTION_LABEL not in live["labels"]:
         return False
     if dry_run:
         log(f"PR #{number}: WOULD remove {READY.REVIEW_ATTENTION_LABEL} ({why}) (dry run)")
         return False
-    github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/{READY.REVIEW_ATTENTION_LABEL}", "DELETE")
-    log(f"PR #{number}: {READY.REVIEW_ATTENTION_LABEL} removed ({why})")
-    return True
+    labels = f"repos/{REPOSITORY}/issues/{number}/labels"
+    done = bound_write(
+        github, number, head, "label-retirement",
+        write=lambda: github.mutate(f"{labels}/{READY.REVIEW_ATTENTION_LABEL}", "DELETE"),
+        compensate=lambda: github.mutate(labels, "POST", {"labels": [READY.REVIEW_ATTENTION_LABEL]}),
+    )
+    if done:
+        log(f"PR #{number}: {READY.REVIEW_ATTENTION_LABEL} removed ({why})")
+    return done
 
 
 def flip_ready(github: GitHub, run, prs: list, dry_run: bool, outcomes=None) -> None:
@@ -2583,8 +2635,15 @@ def flip_ready(github: GitHub, run, prs: list, dry_run: bool, outcomes=None) -> 
                 if runs.get("total_count") != len(runs.get("check_runs", [])):
                     raise Refusal("the check-run listing is truncated; refusing to judge a partial view")
                 base = pull.get("base") or {}
+                # The base is compared LIVE, here, never from the snapshot the
+                # tick began with (2026-09-04 security review round 2, finding
+                # 2): main can move while the proofs run, and a flip on the
+                # old answer is a flip of a behind branch. Every comment is
+                # handed to the rule as well, which withholds while any
+                # comment by anybody but the App is newer than the receipt.
+                behind_by = github.api(f"repos/{REPOSITORY}/compare/{base.get('ref')}...{head}").get("behind_by")
                 lanes, _tiers, blockers = READY.ready_decision(
-                    head, labels, comments, runs.get("check_runs", []), pr.get("behind_by"),
+                    head, labels, comments, runs.get("check_runs", []), behind_by if isinstance(behind_by, int) else None,
                     pull.get("state"), base.get("ref"), (base.get("repo") or {}).get("default_branch"),
                 )
                 if "promoter" not in lanes:
@@ -2597,8 +2656,18 @@ def flip_ready(github: GitHub, run, prs: list, dry_run: bool, outcomes=None) -> 
                     proof_log("ready", number, head, "held: WOULD flip Ready (dry run)", started)
                     record[f"ready-{number}"] = "would-flip"
                     continue
-                with timed_call("pr-ready", f"pull-request={number} head={head[:7]}", COMMAND_TIMEOUT_SECONDS):
-                    run(["gh", "pr", "ready", str(number), "--repo", REPOSITORY])
+                def flip():
+                    with timed_call("pr-ready", f"pull-request={number} head={head[:7]}", COMMAND_TIMEOUT_SECONDS):
+                        run(["gh", "pr", "ready", str(number), "--repo", REPOSITORY])
+
+                def undo():
+                    with timed_call("pr-ready-undo", f"pull-request={number} head={head[:7]}", COMMAND_TIMEOUT_SECONDS):
+                        run(["gh", "pr", "ready", str(number), "--repo", REPOSITORY, "--undo"])
+
+                if not bound_write(github, number, head, "ready", flip, undo):
+                    proof_log("ready", number, head, "reverted: the head moved across the flip; the pull request is Draft again", started)
+                    record[f"ready-{number}"] = "reverted"
+                    continue
                 # Trust the forge, not the exit status.
                 if github.api(f"repos/{REPOSITORY}/pulls/{number}").get("draft") is not False:
                     raise Refusal("the pull request is still Draft after the flip")

@@ -530,8 +530,9 @@ defensive machinery, and the reviewer names that reset rather than more
 findings. `scripts/ready_check.py` is the Ready rule in code and the only
 place it is expressed outside this file: it proves the pull request is open,
 targets the default branch, is not behind it, carries an App-posted exact-head
-APPROVE with no REQUEST-CHANGES at that head, and has green required checks
-and intact labels. It judges no approving lane against a risk tier — that
+APPROVE with no REQUEST-CHANGES at that head, has green required checks and
+intact labels, and carries no comment newer than that receipt. It judges no
+approving lane against a risk tier — that
 match is the coordinator's. NO TOOL FLIPS READY on any pull request but a
 promotion pull request: the promoter flips ITS OWN promotion pull requests,
 and only after the receipt it earned binds the exact head, `requires-review`

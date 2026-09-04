@@ -31,9 +31,9 @@ def decide(labels=DEFAULT, comments=DEFAULT, check_runs=DEFAULT, behind_by=0, **
     )
 
 
-def comment(head=HEAD, verdict="APPROVE", lane="Opus5", login=MODULE.REVIEWS_APP, uid=MODULE.REVIEWS_APP_USER_ID, kind="Bot", app=MODULE.REVIEWS_APP_ID):
+def comment(head=HEAD, verdict="APPROVE", lane="Opus5", login=MODULE.REVIEWS_APP, uid=MODULE.REVIEWS_APP_USER_ID, kind="Bot", app=MODULE.REVIEWS_APP_ID, at="2026-09-04T00:00:00Z"):
     body = f"HEAD: {head}\nVERDICT: {verdict}\n\nMutation matrix and claim audit: supported.\n\n- {lane} (adversarial reviewer)\n"
-    return {"user": {"login": login, "id": uid, "type": kind}, "performed_via_github_app": {"id": app}, "body": body}
+    return {"user": {"login": login, "id": uid, "type": kind}, "performed_via_github_app": {"id": app}, "body": body, "created_at": at}
 
 
 def checks(conclusion="success", app=MODULE.REQUIRED_CHECK_APP, other="neutral"):
@@ -44,6 +44,19 @@ class ReadyRuleTests(unittest.TestCase):
     def test_one_exact_head_approval_from_the_app_with_green_checks_is_eligible(self):
         self.assertEqual(decide(comments=[comment(lane="Opus 5")]), (["opus5"], ["security"], []))
         self.assertEqual(MODULE.ACCEPTABLE_CONCLUSIONS, frozenset({"success", "neutral", "skipped"}), "the allowlist is the contract; widen it only with a case here")
+
+    def test_a_comment_newer_than_the_receipt_is_outstanding_and_blocks(self):
+        # AGENTS.md: the flip happens only when no owner or peer comment is
+        # outstanding. A comment the reviewer never saw is outstanding.
+        owner = {"user": {"login": "snaraj", "id": 1, "type": "User"}, "body": "BLOCK", "created_at": "2026-09-04T00:00:01Z"}
+        blocker = "a comment by snaraj is newer than the APPROVE receipt and outstanding"
+        self.assertIn(blocker, decide(comments=[comment(), owner])[2])
+        self.assertEqual(decide(comments=[comment(), dict(owner, created_at="2026-09-03T23:59:59Z")])[2], [],
+                         "a comment the reviewer could see is not outstanding")
+        undated = {key: value for key, value in owner.items() if key != "created_at"}
+        self.assertIn(blocker, decide(comments=[comment(), undated])[2], "a comment without a time fails closed")
+        # A newer receipt at the same head clears an older comment.
+        self.assertEqual(decide(comments=[comment(), owner, comment(at="2026-09-04T00:00:02Z")])[2], [])
 
     def test_every_receipt_evasion_leaves_the_head_unapproved(self):
         # Another head or poster, the bot login without the bot's own id or

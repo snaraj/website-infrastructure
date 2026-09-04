@@ -9,7 +9,9 @@ eligible, 3 blocked, 1 refused.
 What it proves is exactly: the pull request is open, targets its repository's
 default branch, is not behind that branch, carries an App-posted exact-head
 APPROVE with no REQUEST-CHANGES at the same head, has every required check
-green, and still carries the metadata AGENTS.md requires. What it does NOT
+green, carries no comment newer than that receipt — an owner or peer comment
+the reviewer never saw is outstanding by definition — and still carries the
+metadata AGENTS.md requires. What it does NOT
 decide is whether the lanes that approved are the right lanes for this change's
 risk tier: AGENTS.md pins no model roster and binds independence to the posting
 actor rather than the signature wording, so this prints the approving lanes and
@@ -112,7 +114,7 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
     request itself; a missing or unreadable one is a blocker rather than an
     omission, because every one of them decides WHICH pull request this is.
     """
-    blockers, verdicts = [], []
+    blockers, verdicts, receipt_times, others = [], [], [], []
     if state != "open":
         blockers.append(f"the pull request is not open (state: {state or 'unreadable'})")
     if not base_ref or not default_branch:
@@ -127,13 +129,30 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
         # Only the review App's own comment is a receipt, and only in the
         # canonical shape: ``Opus 5`` and ``opus-5`` are the one lane opus5.
         if ((c.get("user") or {}).get("login"), (c.get("user") or {}).get("id"), (c.get("user") or {}).get("type"), (c.get("performed_via_github_app") or {}).get("id")) != (REVIEWS_APP, REVIEWS_APP_USER_ID, "Bot", REVIEWS_APP_ID):
+            # Everybody else's comment is a possible outstanding comment; its
+            # time is what decides that below. A missing time fails closed.
+            others.append((c.get("created_at") or "", (c.get("user") or {}).get("login") or "an unknown user"))
             continue
         if RECEIPTS.denial(body, head, "pull-request") is not None:
             continue
         lines = body.replace("\r\n", "\n").splitlines()
         lane = RECEIPTS.SIGNATURE.fullmatch([line for line in lines if line.strip()][-1]).group(1)
-        verdicts.append(([line[9:] for line in lines if line.startswith("VERDICT: ")][0], re.sub(r"[^a-z0-9]", "", lane.lower())))
+        verdict = [line[9:] for line in lines if line.startswith("VERDICT: ")][0]
+        verdicts.append((verdict, re.sub(r"[^a-z0-9]", "", lane.lower())))
+        if verdict == "APPROVE":
+            receipt_times.append(c.get("created_at") or "")
     lanes = sorted({lane for verdict, lane in verdicts if verdict == "APPROVE" and lane})
+    # AGENTS.md permits the flip only when "no owner or peer comment is
+    # outstanding". Mechanically: a comment by anybody but the review App that
+    # is NEWER than the receipt that would approve is one the reviewer never
+    # saw, so it is outstanding until a new head earns a new receipt. GitHub's
+    # timestamps are ISO-8601 in one zone, so string order is time order; a
+    # comment without a time is treated as newer.
+    newest_receipt = max(receipt_times, default="")
+    if newest_receipt:
+        for created, login in others:
+            if not created or created > newest_receipt:
+                blockers.append(f"a comment by {login} is newer than the APPROVE receipt and outstanding")
     tiers = sorted(TIER_LABELS.intersection(labels))
     if any(verdict == "REQUEST-CHANGES" for verdict, _ in verdicts):
         blockers.append("a REQUEST-CHANGES receipt binds this head")
