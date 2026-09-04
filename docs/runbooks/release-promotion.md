@@ -229,9 +229,12 @@ next tick instead of needing an undo that could itself fail. Every write is
 addressed by pull request number, because that is the only way GitHub takes
 one; the head is re-read immediately before each, and what the forge leaves
 after that read is closed by the Ready rule, which reads every receipt at a
-head as a set and withholds on any REQUEST-CHANGES among them. A
-definitive failure of proof 2, 3 or 4 posts `VERDICT: REQUEST-CHANGES` naming
-the proof and the mismatch and does nothing else: a promotion pull request is
+head as a set and withholds on any REQUEST-CHANGES among them. Immediately
+before the post — and again after the token is minted — the whole
+eligibility tuple is re-read: a subject that was closed, readied, disarmed or
+moved meanwhile receives nothing, because a verdict is durable. A
+definitive failure of proof 2, 3, 4 or 5 posts `VERDICT: REQUEST-CHANGES` naming
+the proof and the mismatch, and nothing but that proof; a promotion pull request is
 never repaired in place — the fix lands in the promoter's code and the
 promoter re-cuts. A refusal it cannot attribute to the pull request — the registry,
 the Release, cosign, the network — is neither verdict: it is logged and the

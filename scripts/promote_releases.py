@@ -34,8 +34,9 @@ Design, in the order the ``tick`` runs it:
   comment already binds that head, that every path the head changes is one
   ``apply_promotion`` itself writes, and that re-running the ceremony above
   from ``main`` re-renders that surface byte for byte — then the reviewer App
-  posts the receipt. Nothing is read from the pull request; a proof failure is
-  REQUEST-CHANGES and an unattributable refusal is neither.
+  posts the receipt. The pull request's own text is read only to be audited
+  against those records, never believed; a proof failure is REQUEST-CHANGES
+  and an unattributable refusal is neither.
 
 The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
@@ -2291,26 +2292,52 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
     )
 
 
-def request_changes_receipt(head: str, base: str, proof: str, detail: str) -> str:
-    """The REQUEST-CHANGES receipt: which proof failed, and on what."""
+# What each definitive proof failure says about the head, and what the audit
+# that found it compared. A receipt that named re-derivation for an identity
+# failure would be a false statement in a durable record, so the shape is
+# closed: a proof this table does not know cannot compose a receipt.
+FAILED_PROOFS = {
+    "Confinement": (
+        "changes paths outside the promotion surface the promoter's own `apply_promotion` writes",
+        "the head's changed-path set against `main`, compared with the paths a re-derived cut writes",
+    ),
+    "Re-derivation": (
+        "does not re-derive from `main` at `{base}`, the OCI registry and the site's immutable GitHub Release",
+        "the promotion surface a re-derived cut writes, compared entry by entry with what the head carries",
+    ),
+    "Claim audit": (
+        "states, in its body or its head commit's message, something the re-derived records do not produce",
+        "the body and the commit message re-composed from the re-derived records and the head's own accounting, compared byte for byte",
+    ),
+    "Identity": (
+        "is not a commit the owner's credential signed under the owner's identity",
+        "the head commit's author, committer and SSH signature, checked against the owner's noreply identity and registered signing keys",
+    ),
+}
 
+
+def request_changes_receipt(head: str, base: str, proof: str, detail: str) -> str:
+    """The REQUEST-CHANGES receipt: which proof failed, on what, and what that
+    proof compared — never a sentence about a proof that did not fail."""
+
+    if proof not in FAILED_PROOFS:
+        raise Refusal(f"no receipt shape for a failure of proof {proof!r}")
+    subject, compared = FAILED_PROOFS[proof]
     return "\n".join(
         [
             f"HEAD: {head}",
             "VERDICT: REQUEST-CHANGES",
             "",
             "Proof-based receipt for a promotion pull request, composed and posted from"
-            " the promoter's own tick (issue #309). The promotion surface at this head"
-            f" does not re-derive from `main` at `{base[:7]}`, the OCI registry and the"
-            " site's immutable GitHub Release.",
+            " the promoter's own tick (issue #309). The promotion pull request at this"
+            f" head {subject.format(base=base[:7])}.",
             "",
             f"1. {proof} failed: {detail}",
             "",
-            "Mutation and claim audit: the re-derivation IS both — the only claim a"
-            " promotion pull request makes is the surface it writes, and the difference"
-            " named above is that claim against what the registry and the immutable"
-            " Release actually produce. Every other statement is withheld, because a"
-            " head that does not re-derive has no verified figures to report.",
+            f"Mutation and claim audit: proof {proof} IS the audit — {compared}; the"
+            " difference named above is the mismatch. Every other statement is"
+            " withheld, because a head that fails a proof has no verified figures to"
+            " report.",
             "Scratch: no workspace from this proof remains.",
             "",
             "A promotion pull request is never repaired in place: the fix lands in the"
@@ -2491,8 +2518,29 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
         proof_log("claim-audit", number, head, f"failed: {claim}", audit)
         return "REQUEST-CHANGES", request_changes_receipt(head, base, "Claim audit", claim)
     proof_log("claim-audit", number, head, "held: the body and the commit message re-compose from the re-derived records", audit)
-    log(f"{label}: all four proofs hold at {head[:7]}")
+    log(f"{label}: all five proofs hold at {head[:7]}")
     return "APPROVE", approve_receipt(head, base, surface, statements, captured)
+
+
+def receipt_subject(github: GitHub, number: int, head: str):
+    """The complete receipt-eligibility tuple, re-read LIVE: the pull request
+    is open, still Draft, still carries the review-attention label and still
+    points at ``head``. Returns the reason it is no longer a subject, or
+    ``None`` while it is one (security review of PR #312, round 2, finding 1:
+    a verdict is durable, so it is published only to a subject that is still
+    asking for one)."""
+
+    pull = github.api(f"repos/{REPOSITORY}/pulls/{number}")
+    live = owned_pull_request(pull)
+    if live is None or live["head"] != head:
+        return "the head moved"
+    if pull.get("state") != "open":
+        return f"the pull request is {pull.get('state') or 'unreadable'}"
+    if not live["draft"]:
+        return "the pull request left Draft"
+    if READY.REVIEW_ATTENTION_LABEL not in live["labels"]:
+        return f"{READY.REVIEW_ATTENTION_LABEL} was withdrawn"
+    return None
 
 
 def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number: int, head: str, body: str, dry_run: bool) -> bool:
@@ -2510,12 +2558,13 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
             sys.executable, "-I", "-B", str(workspace.root / RECEIPT_VALIDATOR),
             "--head", head, "--resource-kind", "pull-request", str(path),
         ])
-        # The head is re-read from GitHub as late as possible: a receipt names
-        # one head, so a head that moved between the proof and the post would
-        # bind a verdict to bytes nobody proved.
-        live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
-        if live is None or live["head"] != head:
-            log(f"PR #{number}: the head moved between proof and post; nothing was posted")
+        # The subject is re-read from GitHub as late as possible: a receipt
+        # names one head, so a head that moved between the proof and the post
+        # would bind a verdict to bytes nobody proved, and a subject that was
+        # closed, readied or disarmed meanwhile is no longer asking.
+        gone = receipt_subject(github, number, head)
+        if gone is not None:
+            log(f"PR #{number}: {gone} between proof and post; nothing was posted")
             return False
         if dry_run:
             log(f"PR #{number}: WOULD post a validated receipt at {head[:7]} as the review App (dry run)")
@@ -2537,12 +2586,12 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
         if head in app_receipt_heads(github, number):
             log(f"PR #{number}: a receipt arrived at {head[:7]} during the proof; nothing was posted")
             return False
-        # And the head once more, in the same last interval: token acquisition
-        # is the longest step between the proof and the post (security review
-        # of PR #312, finding 3).
-        live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
-        if live is None or live["head"] != head:
-            log(f"PR #{number}: the head moved during token acquisition; nothing was posted")
+        # And the whole eligibility tuple once more, in the same last interval:
+        # token acquisition is the longest step between the proof and the post
+        # (security review of PR #312, rounds 1 and 2).
+        gone = receipt_subject(github, number, head)
+        if gone is not None:
+            log(f"PR #{number}: {gone} during token acquisition; nothing was posted")
             return False
         environment = dict(os.environ)
         environment.pop("GITHUB_TOKEN", None)
@@ -2816,8 +2865,8 @@ def launchd_plist(repo: str, log_path: str, token_command: str = "") -> str:
         "  <key>EnvironmentVariables</key>\n  <dict>\n"
         "    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>\n"
         # The reviewer App token helper reaches the tick by NAME only, and only
-        # when the installer supplies one: an agent installed without it runs
-        # every proof and posts nothing. The path is the installer's argument,
+        # when the installer supplies one: an agent installed without it reports
+        # the receipt step unconfigured and composes nothing. The path is the installer's argument,
         # exactly like the clone and the log, so none is ever committed.
         + (
             f"    <key>{RECEIPT_TOKEN_COMMAND_ENV}</key><string>{escape(token_command)}</string>\n"

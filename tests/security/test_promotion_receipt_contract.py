@@ -110,6 +110,7 @@ class ProofFixture:
             [{"number": 285, "title": "deploy-assurance[site-drift/naranjo-online]"}]
         ]
         self.comments = []
+        self.state = "open"
         self.draft = True
         self.review_armed = True
         self.checks = [
@@ -122,6 +123,9 @@ class ProofFixture:
         # or let a valid receipt arrive between the proof and the post.
         self.move_head_after = None
         self.inject_receipt_before_post = False
+        # Withdraw the subject while the token is being minted: closed,
+        # readied, or its review attention removed, the head unchanged.
+        self.after_token = None
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -145,7 +149,7 @@ class ProofFixture:
         return done.stdout
 
     # -- the head under proof ---------------------------------------------
-    def cut(self, mutate=None, message=None, sign=True, key=None, email=OWNER_EMAIL) -> str:
+    def cut(self, mutate=None, message=None, sign=True, key=None, email=OWNER_EMAIL, committer_email=None) -> str:
         """Produce a genuine promotion commit on the promoter branch.
 
         ``mutate`` receives the author checkout after ``apply_promotion`` has
@@ -153,7 +157,8 @@ class ProofFixture:
         ``message`` receives the composed commit message and returns the one
         to commit, so a test can make the head claim something false;
         ``sign``, ``key`` and ``email`` let a test commit unsigned, with a key
-        GitHub does not register, or under a foreign identity.
+        GitHub does not register, or under a foreign identity;
+        ``committer_email`` forges the committer half alone.
         """
 
         selections = MODULE.discover_selections(self.author)
@@ -174,9 +179,10 @@ class ProofFixture:
         if message is not None:
             composed = message(composed)
         signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key or self.key}", "-S"] if sign else []
+        committer = {"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": committer_email} if committer_email else None
         self.run(
             ["git", "-c", "user.name=t", "-c", f"user.email={email}", *signing[:4], "commit", "-q", *signing[4:], "-F", "-"],
-            cwd=self.author, input_text=composed,
+            cwd=self.author, input_text=composed, env=committer,
         )
         self.head = self.git("rev-parse", "HEAD", cwd=self.author).strip()
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{self.branch}", cwd=self.author)
@@ -190,7 +196,7 @@ class ProofFixture:
         pull = {
             "number": 300,
             "draft": self.draft,
-            "state": "open",
+            "state": self.state,
             "user": {"login": MODULE.ASSIGNEE},
             "head": {"ref": self.branch, "sha": self.head, "repo": {"full_name": MODULE.REPOSITORY}},
             "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY, "default_branch": "main"}},
@@ -225,6 +231,15 @@ class ProofFixture:
                 self.wire()
             if self.move_head_after == "token":
                 self.move_head_after, self.head = None, "d" * 40
+                self.wire()
+            if self.after_token == "close":
+                self.state = "closed"
+            elif self.after_token == "ready":
+                self.draft = False
+            elif self.after_token == "disarm":
+                self.review_armed = False
+            if self.after_token:
+                self.after_token = None
                 self.wire()
             return TOKEN + "\n"
         if argv[:3] == ["gh", "pr", "comment"]:
@@ -512,6 +527,20 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(verdict, "REQUEST-CHANGES")
         self.assertIn("Identity failed: the head commit's signature does not verify", receipt)
         self.assertTrue(any(line.startswith("PROOF identity ") and "failed:" in line for line in self.fixture.log_lines))
+        # PR #312 round 2, finding 3: the receipt names the proof that failed
+        # and says nothing about proofs that did not.
+        self.assertIn("is not a commit the owner's credential signed under the owner's identity", receipt)
+        self.assertIn("proof Identity IS the audit", receipt)
+        self.assertNotIn("does not re-derive", receipt)
+        self.assertNotIn("promotion surface", receipt)
+
+    def test_a_foreign_committer_alone_is_a_request_changes(self):
+        # PR #312 round 2, finding 2: the committer half of the contract,
+        # exercised on its own — author and signature are the owner's.
+        self.fixture.cut(committer_email="someone@example.invalid")
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Identity failed: the head commit's author or committer is not the owner's noreply identity", receipt)
 
     def test_a_head_signed_by_an_unregistered_key_is_a_request_changes(self):
         other = self.fixture.key.parent / "other-key"
@@ -556,6 +585,8 @@ class MutationTests(unittest.TestCase):
         verdict, receipt = self.fixture.prove()
         self.assertEqual(verdict, "REQUEST-CHANGES")
         self.assertIn("Claim audit failed: the pull request body does not re-compose", receipt)
+        self.assertIn("proof Claim audit IS the audit", receipt)
+        self.assertNotIn("does not re-derive", receipt)
         self.assertTrue(any(line.startswith("PROOF claim-audit ") and "failed:" in line
                             for line in self.fixture.log_lines))
 
@@ -677,6 +708,21 @@ class PostingTests(unittest.TestCase):
         self.assertEqual(self.fixture.posted(), [])
         self.assertTrue(any("the head moved during token acquisition; nothing was posted" in line
                             for line in self.fixture.log_lines))
+
+    def test_a_subject_withdrawn_during_token_acquisition_is_not_posted(self):
+        # PR #312 round 2, finding 1: the last pre-write read covers the whole
+        # eligibility tuple, not the head alone. A verdict is durable; it is
+        # published only to a subject still asking for one.
+        for withdrawal, reason in (("close", "the pull request is closed"), ("ready", "the pull request left Draft"),
+                                   ("disarm", "requires-review was withdrawn")):
+            with self.subTest(withdrawal=withdrawal):
+                fixture = ProofFixture(self)
+                fixture.cut()
+                fixture.after_token = withdrawal
+                fixture.step()
+                self.assertEqual(fixture.posted(), [], withdrawal)
+                self.assertTrue(any(f"{reason} during token acquisition; nothing was posted" in line
+                                    for line in fixture.log_lines), (withdrawal, fixture.log_lines[-6:]))
 
     def test_a_malformed_app_comment_is_not_a_receipt(self):
         # Round 2, finding 4: a HEAD-only App comment is text, not a verdict.
@@ -1009,6 +1055,16 @@ class ContractTextTests(unittest.TestCase):
         source = Path(MODULE.__file__).read_text(encoding="utf-8")
         self.assertNotIn("armed both review lanes", source)
         self.assertIn("and armed {', '.join(REVIEW_LABELS)}", source)
+        # PR #312 round 2, finding 3: every tracked claim matches execution.
+        self.assertNotIn("Nothing is read from the pull request", MODULE.__doc__)
+        self.assertIn("read only to be audited", MODULE.__doc__)
+        self.assertIn("all five proofs hold", source)
+        self.assertNotIn("all four proofs hold", source)
+        self.assertNotIn("runs\n        # every proof", source)
+        index = (REPO_ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("arms both review lanes", index)
+        self.assertIn("arms `requires-review`", index)
+        self.assertIn("five proofs", index)
         self.assertIn("A promotion pull request's receipt is EARNED, not requested", text)
         self.assertIn("the security lane reviews every change to\n  the promoter's CODE", text)
         # The promoter's paragraph and the tool must name the same label set.
@@ -1042,6 +1098,7 @@ class ContractTextTests(unittest.TestCase):
         self.assertIn("reports itself unconfigured and composes nothing; no proof runs", text)
         self.assertNotIn("still runs every proof", text)
         self.assertIn("5. **Identity.**", text)
+        self.assertIn("definitive failure of proof 2, 3, 4 or 5", text)
         self.assertIn("interval: 1m0s", text.replace("`interval: 1m0s`", "interval: 1m0s"))
         self.assertIn("no Flux `Receiver`", text)
         self.assertIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, text)
