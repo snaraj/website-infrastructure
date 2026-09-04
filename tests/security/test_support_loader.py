@@ -11,8 +11,12 @@ battery's subject becomes importable by the next (PR #305 round 4).
 `EntrypointLayoutTests` covers the other half: a battery's `__main__` guard has
 to be the LAST top-level statement, because a guard placed above a class runs
 `unittest.main()` before that class exists and its tests vanish from direct
-execution while discovery still reports them (PR #305 rounds 4 and 5). The gate
-runs discovery, so nothing else in the suite can see that regression.
+execution while discovery still reports them (PR #305 rounds 4 to 6). The gate
+runs discovery, so nothing else in the suite can see that regression. What
+counts as a guard is exactly one `==` between the name `__name__` and the
+string `"__main__"`, in either operand order — no more, because `!=` guards
+import-time-only code rather than an entrypoint, and no less, because the
+reversed order runs `unittest.main()` just the same.
 """
 
 from __future__ import annotations
@@ -82,6 +86,24 @@ class LoadScriptCleanupTests(unittest.TestCase):
 class EntrypointLayoutTests(unittest.TestCase):
     """Every `tests/security/test_*.py` keeps its `__main__` guard last."""
 
+    def test_the_detector_matches_one_equality_in_either_order(self):
+        # The scan is only as good as what it recognises: a spelling it misses
+        # is an early guard it will not report, and one it over-matches fails a
+        # battery for a statement that never runs anything (PR #305 round 6).
+        for source, expected in (
+            ('if __name__ == "__main__":\n    pass', True),
+            ('if "__main__" == __name__:\n    pass', True),
+            ('if __name__ != "__main__":\n    pass', False),
+            ('if __name__ is "__main__":\n    pass', False),
+            ('if __name__ == "__main__" == other:\n    pass', False),
+            ('if __name__ == "__not_main__":\n    pass', False),
+            ('if other == "__main__":\n    pass', False),
+            ('if __name__ == other:\n    pass', False),
+        ):
+            with self.subTest(source=source.splitlines()[0]):
+                node = ast.parse(source).body[0]
+                self.assertEqual(_is_main_guard(node), expected)
+
     def test_every_battery_puts_its_main_guard_last(self):
         modules = sorted(SECURITY_DIR.glob("test_*.py"))
         self.assertGreater(len(modules), 1, "the scan must actually find batteries")
@@ -100,14 +122,26 @@ class EntrypointLayoutTests(unittest.TestCase):
 
 
 def _is_main_guard(node):
-    """``if __name__ == "__main__":`` at module level, however it is spelled."""
+    """True for an `if` whose test is exactly one `==` between the name
+    `__name__` and the string `"__main__"`, in either operand order.
+
+    The operator and both operands are checked, because neither half is
+    optional: reading `__name__` on the left only misses `if "__main__" ==
+    __name__`, which runs the entrypoint just the same and hid tests again;
+    ignoring the operator turns `if __name__ != "__main__"` — a guard around
+    import-time-only code — into a false positive that would fail a battery
+    for a statement that is not an entrypoint at all.
+    """
 
     if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
         return False
-    left, comparators = node.test.left, node.test.comparators
-    names = [n.id for n in (left,) if isinstance(n, ast.Name)]
-    values = [c.value for c in comparators if isinstance(c, ast.Constant)]
-    return "__name__" in names and "__main__" in values
+    test = node.test
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq) or len(test.comparators) != 1:
+        return False
+    operands = (test.left, test.comparators[0])
+    names = {n.id for n in operands if isinstance(n, ast.Name)}
+    values = {c.value for c in operands if isinstance(c, ast.Constant)}
+    return names == {"__name__"} and values == {"__main__"}
 
 
 if __name__ == "__main__":  # pragma: no cover
