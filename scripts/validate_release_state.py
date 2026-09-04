@@ -40,6 +40,11 @@ RELEASE_CONTRACTS = {
         "namespace": "naranjo-online",
         "repository": "ghcr.io/snaraj/naranjo-online",
         "readiness": "active-via-signature-verified-chart",
+        # Reconciliation cadence, pinned per identity rather than shared: the
+        # owner's 2026-09-03 release-loop decision (issue #309) put both SITE
+        # releases on one minute so a merged chart selection reaches the cluster
+        # inside the loop, while the suspended connector below keeps ten.
+        "interval": "1m0s",
         # Site charts arrive as signed OCI artifacts selected by exact digest,
         # so this identity has no in-repository chart path and no Git chart
         # source; ``chart_ref`` is the OCIRepository beside its release.
@@ -57,6 +62,7 @@ RELEASE_CONTRACTS = {
         "namespace": "lidersea-com",
         "repository": "ghcr.io/snaraj/lidersea-com",
         "readiness": "active-via-signature-verified-chart",
+        "interval": "1m0s",
         # Site charts arrive as signed OCI artifacts selected by exact digest,
         # so this identity has no in-repository chart path and no Git chart
         # source; ``chart_ref`` is the OCIRepository beside its release.
@@ -74,6 +80,10 @@ RELEASE_CONTRACTS = {
         "namespace": "cloudflare-public",
         "repository": None,
         "readiness": "suspended-until-tunnel-token-ceremony-and-cloudflare-plan",
+        # The connector release is suspended and carries no published release
+        # identity, so nothing about a site promotion changes how often it is
+        # reconciled; it keeps the ten minutes it has always had.
+        "interval": "10m0s",
         # The connector chart is this repository's own, so it keeps the
         # anonymous Git chart source; it has no published release identity of
         # its own and therefore no OCI chart reference.
@@ -408,7 +418,11 @@ def _helm_release_shape(name: str) -> list[str | re.Pattern[str]]:
             "    platform.snaraj.dev/readiness: {}".format(contract["readiness"]),
             "spec:",
             re.compile(r"  suspend: (?:true|false)\Z"),
-            "  interval: 10m0s",
+            # An exact literal for the same reason ``maxHistory`` below is one:
+            # reconciliation cadence bounds how long the cluster may keep
+            # serving a superseded signed digest, so a lane must not be able to
+            # widen it quietly. It is per identity (see RELEASE_CONTRACTS).
+            "  interval: {}".format(contract["interval"]),
             # Retention is pinned to an exact literal, not a range, because Helm
             # stores every release revision as a Secret in the release namespace
             # and prunes history to maxHistory-1 BEFORE writing the new revision.

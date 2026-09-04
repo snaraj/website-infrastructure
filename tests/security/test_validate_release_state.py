@@ -57,7 +57,10 @@ def website_release_text(
         "    platform.snaraj.dev/readiness: {readiness}\n"
         "spec:\n"
         "  suspend: {suspended}\n"
-        "  interval: 10m0s\n"
+        # Site releases reconcile every minute since issue #309; the connector
+        # fixture below keeps ten, which is what makes the per-identity pin in
+        # RELEASE_CONTRACTS a real distinction rather than a shared constant.
+        "  interval: 1m0s\n"
         "{max_history}"
         "  releaseName: {name}\n"
         "  serviceAccountName: helm-reconciler\n"
