@@ -1,8 +1,8 @@
 # Issue 195 chart acquisition receipt
 
-Captured 2026-09-04 for issues #302, which kept lidersea.com at `0.1.41` and
-advanced naranjo.online to `0.1.74`; it supersedes the issues #285 capture of
-2026-09-01. The canonical, machine-checked record is
+Captured 2026-09-04 for issues #318, which kept lidersea.com at `0.1.41` and
+advanced naranjo.online to `0.1.75`; it supersedes the issues #302 capture of
+2026-09-04. The canonical, machine-checked record is
 `195-chart-acquisition-receipt.json`; this Markdown is its explanatory view
 and must not be used as an independent source of release pins. This receipt
 is public, credential-free evidence for the exact chart artifacts committed
@@ -25,12 +25,12 @@ workload indexes; chart trust remains each chart's exact Cosign signature.
 | workload and canonical chart repository | tag | OCI manifest / config / chart-layer digests | Chart.yaml identity | embedded workload image | Linux ARM64 child |
 | --- | --- | --- | --- | --- | --- |
 | lidersea.com — `ghcr.io/snaraj/charts/lidersea-com` | `0.1.41` | `sha256:a3d242a2689c2c41a8d6960e848ea3b195ae14bc80cbf9461de36f69d4845cb6` / `sha256:ae045bde722060e04ae5f8b6c3fc4135386068026d787692c055852ade98f289` / `sha256:2c2b92acd6488afe16b1deb034e445ce3064256c1971415f8600eb601fdd09cc` | name/version/appVersion `lidersea-com` / `0.1.41` / `0.1.41` | `ghcr.io/snaraj/lidersea-com:v0.1.41@sha256:f661cdf9e33e8b36389b7f2d130a6fff6cbc1bbcb1c460968de416a831fdd86d` | `sha256:39929c6aaf5cc3c4feca57a7eac12858e83cc84505b99fdf0e0b57d6752d88e9` |
-| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.74` | `sha256:94c0f5b81005be514395610993d0574528dcc219db111471061e5bb02d4d1085` / `sha256:ceaff3b44fa0a699880f2c0a2e47918fcb6842f18751f8b525db703f25b50449` / `sha256:40f0c1557a19733a3add83d02ca66c262fa74dbb5e209b54931a466c8ed9032c` | name/version/appVersion `naranjo-online` / `0.1.74` / `0.1.74` | `ghcr.io/snaraj/naranjo-online:v0.1.74@sha256:18edfcd5b776f44d8056ccef817c28f724e47417e5c6525a60b06e02b41b910e` | `sha256:34e83e5c500b3de3a254bc7e1c2c13946ab6f299cabbb4fb7703e2438a513e3c` |
+| naranjo.online — `ghcr.io/snaraj/charts/naranjo-online` | `0.1.75` | `sha256:79d1010c0a3356bcae7f2d4bde25aa4db1ec6117236821000b23d7550bed65fe` / `sha256:7e9bd6d7a609eed4719047cba24d41c15580d4792d5254f611a7514ef8354322` / `sha256:456d30f5f876f46a97697191cfe4a7bfc09e43289008f93feaffdd4956424573` | name/version/appVersion `naranjo-online` / `0.1.75` / `0.1.75` | `ghcr.io/snaraj/naranjo-online:v0.1.75@sha256:ce14479b8084e1f2f83f9add0d70778a7242e59fe86c597ab0f5602b2228e427` | `sha256:602b2668ecaa72a5bb80511fb6de1c8e17fb2d2dea770375870e2b286b13489b` |
 
 Publisher Release bindings:
 
 - lidersea.com: protected-main source `382272756fafe6b7e7f52602fd6263299b5c2589`; immutable Release asset `sha256:34404bf9c348f50c0f4d0ff0a3a6efbe8b41eedf40d9ab58b1b3fa3eb4ff26d9`.
-- naranjo.online: protected-main source `477a2a698584a2cdc3bc4fa206167c318175b566`; immutable Release asset `sha256:168696354d454aa5e70504a6c702046175ff0b5f665cd1b6280018aefce99967`.
+- naranjo.online: protected-main source `b206c07d00e86ad9d6c79416fd92ddf2bd0f7114`; immutable Release asset `sha256:66f0e64421e397ba46c1cc4bd309eaab81c247c0593e1bf6ad5e87fde246a241`.
 
 Each `vX.Y.Z` annotated tag was dereferenced to the commit above, and that
 same commit is what the Release asset's own `source_sha` field reports — two
@@ -52,8 +52,8 @@ Exact-layer inspection hashes provide a reproducible custody check:
 
 - lidersea `Chart.yaml`: `sha256:5e1727720c3277fbb9d0e9be0b5994c15b1d7b1eba20cb7ae1f4e2c19c49c341`
 - lidersea `values.yaml`: `sha256:c93a729c03094830ea161404ffefaeab8947f90cd0fe7568ea79506183f713b9`
-- naranjo `Chart.yaml`: `sha256:ef0fc4353f17d675c7ee8c9c1013c2f01bc13e37de5653d779454cb2b970651e`
-- naranjo `values.yaml`: `sha256:1ae1210c371d0c59994c817de01be2509ceadb7f3e8822460b58536db087c4cf`
+- naranjo `Chart.yaml`: `sha256:3a4ea0b9bb8a55c2648ed9175f33b6fe7092b36185528e1deaddf20e6ef02c71`
+- naranjo `values.yaml`: `sha256:85e8c758853306f7703b5666b998dbab820019361ef718ab339c23d35c6e3e3b`
 
 Future updates repeat this exact sequence: resolve the reviewed tag, verify the
 exact manifest, config, sole layer and signer, inspect chart identity and
