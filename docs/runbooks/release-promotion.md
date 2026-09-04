@@ -213,9 +213,10 @@ audited, never to be believed:
    head, a key the owner never registered, or a foreign identity is
    REQUEST-CHANGES; the capture date is bound to that verified commit.
 
-Only a Draft that carries `requires-review` is judged: a head that is already
-Ready, or that nobody armed, is outside the review-before-Ready sequence and
-is skipped with a logged reason. All five hold and the App posts `VERDICT:
+A receipt attests the head and nothing about the pull request's state:
+whether it is Draft or carries review attention is the Ready rule's business
+at flip time, read live by the coordinator, and a verdict about a head stays
+true wherever the pull request goes. All five hold and the App posts `VERDICT:
 APPROVE` at that head, validated by `scripts/validate_review_receipt.py` first
 and with the live head re-read immediately before posting — a head that moved
 aborts the post, and novelty is re-read once more after the token is minted,
@@ -230,9 +231,11 @@ addressed by pull request number, because that is the only way GitHub takes
 one; the head is re-read immediately before each, and what the forge leaves
 after that read is closed by the Ready rule, which reads every receipt at a
 head as a set and withholds on any REQUEST-CHANGES among them. Immediately
-before the post — and again after the token is minted — the whole
-eligibility tuple is re-read: a subject that was closed, readied, disarmed or
-moved meanwhile receives nothing, because a verdict is durable. A
+before the token is minted, and again after it, the head is re-read: a head
+that moved meanwhile receives nothing and no token is minted on its behalf.
+Without a token helper configured the step composes nothing and runs no
+proof. The interval between the last read and the write belongs to the
+forge; what it can leave is a true record about a head. A
 definitive failure of proof 2, 3, 4 or 5 posts `VERDICT: REQUEST-CHANGES` naming
 the proof and the mismatch, and nothing but that proof; a promotion pull request is
 never repaired in place — the fix lands in the promoter's code and the

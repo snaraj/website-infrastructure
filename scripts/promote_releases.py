@@ -30,13 +30,17 @@ Design, in the order the ``tick`` runs it:
   noreply identity, the publication gate runs on that exact signed commit,
   and the branch is pushed and opened as a labelled DRAFT pull request.
 * **Receipt (issue #309).** On a later tick the promotion pull request earns
-  its exact-head verdict rather than asking for one: the tool proves no App
-  comment already binds that head, that every path the head changes is one
-  ``apply_promotion`` itself writes, and that re-running the ceremony above
-  from ``main`` re-renders that surface byte for byte — then the reviewer App
-  posts the receipt. The pull request's own text is read only to be audited
-  against those records, never believed; a proof failure is REQUEST-CHANGES
-  and an unattributable refusal is neither.
+  its exact-head verdict rather than asking for one: the tool proves five
+  things — no validator-shaped App receipt already binds that head; the head
+  commit is the owner's, signed with the owner's registered key; every path
+  the head changes is one ``apply_promotion`` itself writes; re-running the
+  ceremony above from ``main`` re-renders that surface entry for entry; and
+  the body and commit message re-compose from those records — then the
+  reviewer App posts the receipt. The pull request's own text is read only to
+  be audited against those records, never believed; a proof failure is
+  REQUEST-CHANGES and an unattributable refusal is neither. A receipt attests
+  the head and nothing about the pull request's state: Draft, review
+  attention and freshness are the Ready rule's business at flip time.
 
 The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
@@ -1987,21 +1991,29 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
 # Proof-based receipts for promotion pull requests (issue #309).
 #
 # A promotion pull request's verdict is EARNED by re-derivation, never by
-# reading the pull request. Three proofs, in the order the step runs them:
+# believing the pull request. Five proofs, in the order the step runs them:
 #
-#   0. Novelty. No comment by the reviewer App already binds this head, so a
-#      verdict is posted at most once per head.
-#   1. Confinement. Every path `main...HEAD` changes is a path the promoter's
+#   1. Novelty. No validator-shaped receipt by the reviewer App already binds
+#      this head, so a verdict is posted at most once per head.
+#   2. Identity. The head commit's author and committer are the owner's
+#      noreply identity and its SSH signature verifies against the keys
+#      GitHub registers for the owner.
+#   3. Confinement. Every path `main...HEAD` changes is a path the promoter's
 #      own ``apply_promotion`` writes. The permitted set is not a list kept in
 #      this file — it is the return value of that very function, re-run.
-#   2. Re-derivation. From `main`, the issue-195 acquisition ceremony runs
+#   4. Re-derivation. From `main`, the issue-195 acquisition ceremony runs
 #      again against the registry, the site's immutable GitHub Release and its
 #      protected `main`, the whole promotion surface is re-rendered from the
-#      resulting record, and every blob is compared to the head's by object id.
-#      A single mutated byte anywhere in that surface is a different object id.
+#      resulting record, and every tree entry is compared to the head's by
+#      mode, type and object id. A single mutated byte, or mode, is a
+#      different entry.
+#   5. Claim audit. The pull request body and the head commit's message are
+#      re-composed from those records and the head's own accounting and
+#      compared byte for byte with what GitHub and the head carry.
 #
-# Failing 1 or 2 is a definitive REQUEST-CHANGES: those comparisons are this
-# tool's own arithmetic over bytes it produced. A refusal from the network, the
+# Failing 2, 3, 4 or 5 is a definitive REQUEST-CHANGES naming that proof and
+# only that proof: those comparisons are this tool's own arithmetic over bytes
+# it produced. A refusal from the network, the
 # registry, cosign or the ceremony is NOT: the promoter cannot attribute it to
 # the pull request, so it logs and skips the tick rather than publishing a
 # verdict it cannot stand behind. Nothing here flips Ready or merges.
@@ -2398,17 +2410,12 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
         proof_log("subject", number, head, "skipped: branch is outside the promoter grammar", started)
         return None
     base7, issue, targets = parsed
-    # Fail closed on the subject's state (2026-09-04 security review round 1,
-    # finding 2): a receipt is earned by a Draft that is armed for review,
-    # inside the repository's review-before-Ready sequence. A head that is
-    # already Ready, or that nobody armed, is outside that sequence and is
-    # never judged, whatever else is true of it.
-    if not pr["draft"]:
-        proof_log("subject", number, head, "skipped: not Draft; a receipt is earned before Ready, never after", started)
-        return None
-    if READY.REVIEW_ATTENTION_LABEL not in pr.get("labels", ()):
-        proof_log("subject", number, head, f"skipped: {READY.REVIEW_ATTENTION_LABEL} is not armed", started)
-        return None
+    # A receipt attests the HEAD and nothing about the pull request's state
+    # (security review of PR #312, rounds 1–3, design reset). Whether the pull
+    # request is Draft or carries review attention is the Ready rule's
+    # business at flip time, read live by the coordinator; a verdict about a
+    # head is true wherever the pull request's state goes, and a state read
+    # here would be a race with the write that the forge cannot close.
     if pr.get("behind_by") is None:
         proof_log("subject", number, head, "skipped: base freshness is unknown", started)
         return None
@@ -2522,25 +2529,16 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
     return "APPROVE", approve_receipt(head, base, surface, statements, captured)
 
 
-def receipt_subject(github: GitHub, number: int, head: str):
-    """The complete receipt-eligibility tuple, re-read LIVE: the pull request
-    is open, still Draft, still carries the review-attention label and still
-    points at ``head``. Returns the reason it is no longer a subject, or
-    ``None`` while it is one (security review of PR #312, round 2, finding 1:
-    a verdict is durable, so it is published only to a subject that is still
-    asking for one)."""
+def head_still(github: GitHub, number: int, head: str) -> bool:
+    """Whether the pull request still points at ``head``, read LIVE. The one
+    thing a receipt binds is the head it names, so the one thing the post
+    re-reads is the head: once before the token is minted, so no token is
+    minted for a head that moved, and once after, immediately before the
+    write. The interval after that read belongs to the forge; what it can
+    leave is a true record about a head."""
 
-    pull = github.api(f"repos/{REPOSITORY}/pulls/{number}")
-    live = owned_pull_request(pull)
-    if live is None or live["head"] != head:
-        return "the head moved"
-    if pull.get("state") != "open":
-        return f"the pull request is {pull.get('state') or 'unreadable'}"
-    if not live["draft"]:
-        return "the pull request left Draft"
-    if READY.REVIEW_ATTENTION_LABEL not in live["labels"]:
-        return f"{READY.REVIEW_ATTENTION_LABEL} was withdrawn"
-    return None
+    live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+    return live is not None and live["head"] == head
 
 
 def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number: int, head: str, body: str, dry_run: bool) -> bool:
@@ -2558,13 +2556,12 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
             sys.executable, "-I", "-B", str(workspace.root / RECEIPT_VALIDATOR),
             "--head", head, "--resource-kind", "pull-request", str(path),
         ])
-        # The subject is re-read from GitHub as late as possible: a receipt
+        # The head is re-read from GitHub before a token is minted: a receipt
         # names one head, so a head that moved between the proof and the post
-        # would bind a verdict to bytes nobody proved, and a subject that was
-        # closed, readied or disarmed meanwhile is no longer asking.
-        gone = receipt_subject(github, number, head)
-        if gone is not None:
-            log(f"PR #{number}: {gone} between proof and post; nothing was posted")
+        # would bind a verdict to bytes nobody proved, and no credential is
+        # minted on its behalf.
+        if not head_still(github, number, head):
+            log(f"PR #{number}: the head moved between proof and post; nothing was posted")
             return False
         if dry_run:
             log(f"PR #{number}: WOULD post a validated receipt at {head[:7]} as the review App (dry run)")
@@ -2586,12 +2583,10 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
         if head in app_receipt_heads(github, number):
             log(f"PR #{number}: a receipt arrived at {head[:7]} during the proof; nothing was posted")
             return False
-        # And the whole eligibility tuple once more, in the same last interval:
-        # token acquisition is the longest step between the proof and the post
-        # (security review of PR #312, rounds 1 and 2).
-        gone = receipt_subject(github, number, head)
-        if gone is not None:
-            log(f"PR #{number}: {gone} during token acquisition; nothing was posted")
+        # And the head once more, in the same last interval: token acquisition
+        # is the longest step between the proof and the post.
+        if not head_still(github, number, head):
+            log(f"PR #{number}: the head moved during token acquisition; nothing was posted")
             return False
         environment = dict(os.environ)
         environment.pop("GITHUB_TOKEN", None)

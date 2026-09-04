@@ -149,7 +149,7 @@ class ProofFixture:
         return done.stdout
 
     # -- the head under proof ---------------------------------------------
-    def cut(self, mutate=None, message=None, sign=True, key=None, email=OWNER_EMAIL, committer_email=None) -> str:
+    def cut(self, mutate=None, message=None, sign=True, key=None, email=OWNER_EMAIL, committer_email=None, author_email=None) -> str:
         """Produce a genuine promotion commit on the promoter branch.
 
         ``mutate`` receives the author checkout after ``apply_promotion`` has
@@ -158,7 +158,8 @@ class ProofFixture:
         to commit, so a test can make the head claim something false;
         ``sign``, ``key`` and ``email`` let a test commit unsigned, with a key
         GitHub does not register, or under a foreign identity;
-        ``committer_email`` forges the committer half alone.
+        ``committer_email`` forges the committer half alone, ``author_email``
+        the author half alone.
         """
 
         selections = MODULE.discover_selections(self.author)
@@ -179,10 +180,14 @@ class ProofFixture:
         if message is not None:
             composed = message(composed)
         signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key or self.key}", "-S"] if sign else []
-        committer = {"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": committer_email} if committer_email else None
+        halves = {}
+        if committer_email:
+            halves.update({"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": committer_email})
+        if author_email:
+            halves.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": author_email})
         self.run(
             ["git", "-c", "user.name=t", "-c", f"user.email={email}", *signing[:4], "commit", "-q", *signing[4:], "-F", "-"],
-            cwd=self.author, input_text=composed, env=committer,
+            cwd=self.author, input_text=composed, env=halves or None,
         )
         self.head = self.git("rev-parse", "HEAD", cwd=self.author).strip()
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{self.branch}", cwd=self.author)
@@ -269,6 +274,10 @@ class ProofFixture:
         if Path(argv[0]).name.startswith("python") or argv[0] == sys.executable:
             # The receipt validator really runs: a composed receipt that the
             # repository's own validator would reject must never be posted.
+            if self.move_head_after == "validate":
+                # The head moves before the token is minted.
+                self.move_head_after, self.head = None, "d" * 40
+                self.wire()
             return MODULE.run_command(argv, cwd=cwd, input_text=input_text, env=env)
         return self.fleet.run(argv, cwd=cwd, input_text=input_text, env=env)
 
@@ -400,6 +409,10 @@ class MutationTests(unittest.TestCase):
         self.assertIn("Confinement failed", body)
         self.assertIn("docs/assurance/smuggled-note.md", body)
         self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+        # PR #312 round 3, finding 5: the receipt describes the audit that failed.
+        self.assertIn("changes paths outside the promotion surface", body)
+        self.assertIn("proof Confinement IS the audit", body)
+        self.assertNotIn("does not re-derive", body)
 
     def test_a_changed_digest_line_fails_re_derivation(self):
         def mutate(root):
@@ -413,6 +426,9 @@ class MutationTests(unittest.TestCase):
         self.assertIn("Re-derivation failed", body)
         self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
         self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+        self.assertIn("does not re-derive from `main`", body)
+        self.assertIn("proof Re-derivation IS the audit", body)
+        self.assertNotIn("changes paths outside", body)
 
     def test_a_mutated_committed_receipt_digest_fails_re_derivation(self):
         def mutate(root):
@@ -534,6 +550,14 @@ class MutationTests(unittest.TestCase):
         self.assertNotIn("does not re-derive", receipt)
         self.assertNotIn("promotion surface", receipt)
 
+    def test_a_foreign_author_alone_is_a_request_changes(self):
+        # PR #312 round 3, finding 2: the author half of the contract on its
+        # own — committer and signature are the owner's.
+        self.fixture.cut(author_email="someone@example.invalid")
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Identity failed: the head commit's author or committer is not the owner's noreply identity", receipt)
+
     def test_a_foreign_committer_alone_is_a_request_changes(self):
         # PR #312 round 2, finding 2: the committer half of the contract,
         # exercised on its own — author and signature are the owner's.
@@ -603,25 +627,6 @@ class MutationTests(unittest.TestCase):
         self.assertIn("4. Claim audit.", receipt)
         self.assertTrue(any(line.startswith("PROOF claim-audit ") and "held:" in line
                             for line in self.fixture.log_lines))
-
-    def test_a_subject_that_is_not_draft_is_never_judged(self):
-        # Finding 2 (2026-09-04): a receipt is earned before Ready, never
-        # after; a non-Draft subject is outside the review-before-Ready
-        # sequence whatever else is true of it.
-        self.fixture.cut()
-        self.fixture.draft = False
-        self.fixture.wire()
-        self.assertIsNone(self.fixture.prove())
-        self.assertTrue(any("skipped: not Draft" in line for line in self.fixture.log_lines))
-        self.assertEqual(self.fixture.posted(), [])
-
-    def test_a_subject_nobody_armed_is_never_judged(self):
-        self.fixture.cut()
-        self.fixture.review_armed = False
-        self.fixture.wire()
-        self.assertIsNone(self.fixture.prove())
-        self.assertTrue(any("skipped: requires-review is not armed" in line for line in self.fixture.log_lines))
-        self.assertEqual(self.fixture.posted(), [])
 
     def test_a_head_that_the_branch_does_not_carry_is_never_judged(self):
         head = self.fixture.cut()
@@ -709,20 +714,54 @@ class PostingTests(unittest.TestCase):
         self.assertTrue(any("the head moved during token acquisition; nothing was posted" in line
                             for line in self.fixture.log_lines))
 
-    def test_a_subject_withdrawn_during_token_acquisition_is_not_posted(self):
-        # PR #312 round 2, finding 1: the last pre-write read covers the whole
-        # eligibility tuple, not the head alone. A verdict is durable; it is
-        # published only to a subject still asking for one.
-        for withdrawal, reason in (("close", "the pull request is closed"), ("ready", "the pull request left Draft"),
-                                   ("disarm", "requires-review was withdrawn")):
-            with self.subTest(withdrawal=withdrawal):
+    def test_a_receipt_attests_the_head_whatever_the_state_becomes(self):
+        # Design reset (PR #312 round 3): a receipt binds the head it names
+        # and nothing about the pull request's state, which the Ready rule
+        # reads at flip time. A subject closed, readied or disarmed while the
+        # token is minted still receives its head-bound record.
+        for change in ("close", "ready", "disarm"):
+            with self.subTest(change=change):
                 fixture = ProofFixture(self)
-                fixture.cut()
-                fixture.after_token = withdrawal
+                head = fixture.cut()
+                fixture.after_token = change
                 fixture.step()
-                self.assertEqual(fixture.posted(), [], withdrawal)
-                self.assertTrue(any(f"{reason} during token acquisition; nothing was posted" in line
-                                    for line in fixture.log_lines), (withdrawal, fixture.log_lines[-6:]))
+                self.assertEqual(len(fixture.posted()), 1, change)
+                self.assertIn(f"HEAD: {head}", fixture.comments[-1]["body"])
+
+    def test_a_head_is_judged_whatever_state_the_pull_request_is_in(self):
+        # Design reset (PR #312 round 3): no state gate in the receipt path.
+        # A head that is already out of Draft, or whose review attention was
+        # removed by hand, is still judged (the label is re-armed first) and
+        # still receives its head-bound record.
+        for change in ("ready", "disarm"):
+            with self.subTest(change=change):
+                fixture = ProofFixture(self)
+                head = fixture.cut()
+                if change == "ready":
+                    fixture.draft = False
+                else:
+                    fixture.review_armed = False
+                fixture.wire()
+                fixture.step()
+                self.assertEqual(len(fixture.posted()), 1, change)
+                self.assertIn(f"HEAD: {head}", fixture.comments[-1]["body"])
+                self.assertFalse(fixture.review_armed, "either verdict retires the label")
+
+    def test_a_head_that_moves_before_the_token_mints_no_token(self):
+        # PR #312 round 3, finding 3: the pre-token read is bound on its own —
+        # a head that moved before the mint gets no credential minted for it.
+        self.fixture.move_head_after = "validate"
+        self.fixture.step()
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertEqual([call for call in self.fixture.calls if call["argv"][0] == HELPER], [], "no token was minted")
+        self.assertTrue(any("the head moved between proof and post; nothing was posted" in line for line in self.fixture.log_lines))
+
+    def test_an_unconfigured_helper_runs_no_proof(self):
+        # PR #312 round 3, finding 4: without a way to post, nothing is proved.
+        self.fixture.step(helper="")
+        self.assertEqual([call for call in self.fixture.calls if call["argv"][0] == "cosign"], [], "no cosign call")
+        self.assertEqual([call for call in self.fixture.calls if call["argv"][:2] == ("git", "fetch") and any("refs/heads/" in a for a in call["argv"])], [], "the branch was never fetched")
+        self.assertEqual([line for line in self.fixture.log_lines if line.startswith("PROOF ")], [], "no proof ran")
 
     def test_a_malformed_app_comment_is_not_a_receipt(self):
         # Round 2, finding 4: a HEAD-only App comment is text, not a verdict.
@@ -1057,7 +1096,8 @@ class ContractTextTests(unittest.TestCase):
         self.assertIn("and armed {', '.join(REVIEW_LABELS)}", source)
         # PR #312 round 2, finding 3: every tracked claim matches execution.
         self.assertNotIn("Nothing is read from the pull request", MODULE.__doc__)
-        self.assertIn("read only to be audited", MODULE.__doc__)
+        self.assertIn("be audited against those records, never believed", MODULE.__doc__)
+        self.assertIn("A receipt attests\n  the head and nothing about the pull request's state", MODULE.__doc__)
         self.assertIn("all five proofs hold", source)
         self.assertNotIn("all four proofs hold", source)
         self.assertNotIn("runs\n        # every proof", source)
