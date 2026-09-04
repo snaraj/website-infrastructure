@@ -44,6 +44,8 @@ from types import ModuleType
 # tests/security/support.py -> tests/security -> tests -> repository root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
+# "no entry at all", distinguishable from a stored ``None``.
+_ABSENT = object()
 
 
 def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
@@ -80,12 +82,15 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     # fails at class-creation time with a bare ``AttributeError`` on ``None``.
     # It is removed again immediately, so the "copies stay visibly independent"
     # property above is unchanged: nothing observes the name after this returns.
-    previous = sys.modules.get(spec.name)
+    # Absence is tracked with a private sentinel, never with ``None``: a present
+    # ``None`` entry is Python's import-blocking marker, a distinct state that
+    # must be RESTORED rather than dropped as if the key had never been there.
+    previous = sys.modules.get(spec.name, _ABSENT)
     sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
     finally:
-        if previous is None:
+        if previous is _ABSENT:
             sys.modules.pop(spec.name, None)
         else:
             sys.modules[spec.name] = previous

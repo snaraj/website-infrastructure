@@ -160,6 +160,10 @@ class Refusal(Exception):
     """A fail-closed judgment. The message names the exact check that failed."""
 
 
+# "no entry at all", distinguishable from a stored ``None``.
+_ABSENT = object()
+
+
 def _load_sibling(name, module_name):
     spec = importlib.util.spec_from_file_location(
         module_name, Path(__file__).resolve().parent / name
@@ -172,13 +176,16 @@ def _load_sibling(name, module_name):
     # defining module up there, so a sibling with `from __future__ import
     # annotations` and a dataclass would otherwise abort the whole tick with a
     # bare AttributeError on None. Removed again immediately, so the sibling
-    # stays a private copy rather than an importable name.
-    previous = sys.modules.get(module_name)
+    # stays a private copy rather than an importable name. Absence is tracked
+    # with a private sentinel, never with ``None``: a present ``None`` entry is
+    # Python's import-blocking marker, a distinct state that must be RESTORED
+    # rather than dropped as if the key had never been there.
+    previous = sys.modules.get(module_name, _ABSENT)
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
     finally:
-        if previous is None:
+        if previous is _ABSENT:
             sys.modules.pop(module_name, None)
         else:
             sys.modules[module_name] = previous

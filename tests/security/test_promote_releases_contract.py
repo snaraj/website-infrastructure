@@ -1392,6 +1392,25 @@ class SiblingLoaderTests(unittest.TestCase):
             MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_sentinel")
         self.assertIs(sys.modules["promoter_loader_sentinel"], sentinel)
 
+    def test_a_pre_existing_none_entry_is_restored_not_dropped(self):
+        # A stored `None` is Python's import-blocking marker, not absence: it
+        # is a state some other importer deliberately put there, and dropping
+        # it silently unblocks that import. Tracking absence by `.get()` and
+        # `is None` cannot tell the two apart, so both exits are pinned.
+        for label, load in (
+            ("success", lambda: MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_probe")),
+            ("failure", lambda: MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_probe")),
+        ):
+            with self.subTest(path=label):
+                sys.modules["promoter_loader_probe"] = None
+                if label == "failure":
+                    with self.assertRaises(FileNotFoundError):
+                        load()
+                else:
+                    load()
+                self.assertIn("promoter_loader_probe", sys.modules)
+                self.assertIsNone(sys.modules["promoter_loader_probe"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -371,10 +371,6 @@ class ReleaseTransitionTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CloudflareWebsiteTunnelInventoryTests(unittest.TestCase):
     """Prove the exactly-two-public-Tunnels invariant is not decorative."""
 
@@ -426,3 +422,7 @@ class CloudflareWebsiteTunnelInventoryTests(unittest.TestCase):
                 contract,
                 TRANSITION.CLOUDFLARE_SITE_PHASES["site-naranjo-online"],
             )
+
+
+if __name__ == "__main__":
+    unittest.main()
