@@ -1962,19 +1962,20 @@ def release_lock(fd) -> None:
 def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run=run_command) -> int:
     github = github or GitHub(run=run)
     registry = registry or Registry()
+    started, outcomes = time.monotonic(), {}
     lock = acquire_lock(repo / ".git" / "promoter.lock")
     if lock is None:
         # Even this exit ends in the summary line the runbook promises on
-        # every exit path: an expected overlap must stay distinguishable from
-        # a tick that died (security review of PR #313, finding 1).
+        # every exit path, with the elapsed time it actually measured: an
+        # expected overlap must stay distinguishable from a tick that died
+        # (security review of PR #313, findings 1 and 2 of round 2).
         log("another tick holds the lock; skipping")
-        log(f"SUMMARY tick elapsed=0.0s dry-run={dry_run} lock=held-by-another-tick")
+        log(f"SUMMARY tick elapsed={time.monotonic() - started:.1f}s dry-run={dry_run} lock=held-by-another-tick")
         return 0
     # One line at the end says what this tick did to every workload and every
     # pull request it touched, and what the whole thing cost. It is emitted on
     # EVERY exit path: a tick that ends in a refusal is exactly the tick whose
     # summary a reader needs.
-    started, outcomes = time.monotonic(), {}
     try:
         workspace = Workspace(repo, run)
         base = workspace.refresh()
@@ -2014,8 +2015,9 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
 
 
 def launchd_plist(repo: str, log_path: str) -> str:
-    """The user agent that runs ``tick`` every 15 minutes. Paths are the
-    installer's arguments, never committed values."""
+    """The user agent that runs ``tick`` every ``LAUNCHD_INTERVAL_SECONDS``
+    seconds — five minutes since issue #309. Paths are the installer's
+    arguments, never committed values."""
 
     def escape(value: str) -> str:
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

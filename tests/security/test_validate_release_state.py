@@ -603,6 +603,36 @@ class StrictReleaseStateTests(unittest.TestCase):
                     write_lf(release, website_release_text(name))
                 self.assertTrue(MODULE.load_helm_release(name, root).suspended)
 
+    def test_reconciliation_interval_must_be_the_exact_per_identity_literal(self):
+        """Every interval but the reviewed per-identity literal must fail closed.
+
+        Reconciliation cadence bounds how long the cluster may keep serving a
+        superseded signed digest, so no lane may widen it quietly (issue #309;
+        PR #313 review, finding 1); and the pin is per identity, so the
+        connector's ten minutes must not leak into a site nor a site's minute
+        into the connector. Each identity is asserted separately, with the
+        unmodified fixture as the vacuity control.
+        """
+
+        cases = {
+            "naranjo-online": ("1m0s", ("10m0s", "30s", "2m0s", "1m")),
+            "lidersea-com": ("1m0s", ("10m0s", "30s", "2m0s", "1m")),
+            "cloudflare-public": ("10m0s", ("1m0s", "5m0s", "10m", "15m0s")),
+        }
+        for name, (reviewed, mutations) in cases.items():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                release = release_path(root, name)
+                text = cloudflare_release_text() if name == "cloudflare-public" else website_release_text(name)
+                self.assertIn(f"  interval: {reviewed}\n", text)
+                for mutation in mutations:
+                    with self.subTest(name=name, interval=mutation):
+                        write_lf(release, text.replace(f"  interval: {reviewed}\n", f"  interval: {mutation}\n"))
+                        with self.assertRaises(MODULE.CanonicalYamlError):
+                            MODULE.load_helm_release(name, root)
+                write_lf(release, text)
+                self.assertTrue(MODULE.load_helm_release(name, root).suspended)
+
     def test_reader_rejects_non_regular_and_oversized_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

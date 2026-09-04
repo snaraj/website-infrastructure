@@ -78,6 +78,20 @@ class ChartSourceContractTests(unittest.TestCase):
                 ).read_text(encoding="utf-8")
                 self.assertEqual(MODULE.chart_source_errors(text, slug), [])
 
+    def test_chart_source_interval_is_bound_by_the_closed_comparison(self):
+        # Issue #309; PR #313 review, finding 1: the poll interval is part of
+        # the closed contract, so a widened or narrowed interval is a denied
+        # body, and the comparison must not stop reading that line.
+        for slug in MODULE.CHART_REPOSITORIES:
+            text = self.canonical(slug)
+            self.assertIn("  interval: 1m0s\n", text)
+            self.assertEqual(MODULE.chart_source_errors(text, slug), [])
+            for interval in ("10m0s", "30s", "2m0s", "1m"):
+                with self.subTest(slug=slug, interval=interval):
+                    mutated = text.replace("  interval: 1m0s\n", f"  interval: {interval}\n")
+                    errors = MODULE.chart_source_errors(mutated, slug)
+                    self.assertTrue(any("does not match the pinned" in error for error in errors), (interval, errors))
+
     def test_every_site_tuple_binds_only_its_own_publisher(self):
         subjects = {
             slug: MODULE.chart_source_certificate_subject(slug)

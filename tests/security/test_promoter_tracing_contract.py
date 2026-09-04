@@ -3,8 +3,10 @@ call announces itself with its budget and reports what it cost, cosign is
 bounded short with one retry, the tick interval and the runbook agree, and a
 credential-bearing command never has its output recorded."""
 
+import re
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -129,17 +131,23 @@ class CallTracingTests(unittest.TestCase):
         # distinguishable from a dead tick, so this exit reports too.
         held = MODULE.acquire_lock(self.fixture.repo / ".git" / "promoter.lock")
         self.assertIsNotNone(held)
+        before = time.monotonic()
         try:
             code = MODULE.tick(self.fixture.repo, True, registry=self.fixture.fleet.registry(),
                                github=MODULE.GitHub(run=self.fixture.run, fetch=self.fixture.fleet.fetch),
                                cosign=self.fixture.fleet.cosign(), run=self.fixture.run)
         finally:
+            wall = time.monotonic() - before
             MODULE.release_lock(held)
         self.assertEqual(code, 0)
         self.assertTrue(any("another tick holds the lock" in line for line in self.fixture.log_lines))
         summaries = [line for line in self.fixture.log_lines if line.startswith("SUMMARY tick elapsed=")]
         self.assertEqual(len(summaries), 1, self.fixture.log_lines)
         self.assertIn("dry-run=True lock=held-by-another-tick", summaries[0])
+        # The elapsed field is measured, not a sentinel: it cannot exceed the
+        # wall time this test observed around the call (round 2, finding 2).
+        elapsed = float(re.search(r"elapsed=([0-9.]+)s", summaries[0]).group(1))
+        self.assertLessEqual(elapsed, wall + 0.05, summaries[0])
 
     def test_the_initial_fetch_is_traced_and_a_refusal_leaves_start_and_done(self):
         MODULE.Workspace(self.fixture.repo, self.fixture.run).refresh()
