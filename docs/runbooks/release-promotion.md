@@ -118,7 +118,8 @@ Every line carries the UTC timestamp first. After it, four shapes:
 - `SUMMARY tick elapsed=<n>s dry-run=<bool> <key>=<value> …` — the last line
   of every tick, on every exit path, with one key per workload
   (`current`/`behind`/`ahead`) and one per pull request it touched
-  (`cut=`, `pull-request-N=superseded`).
+  (`cut=`, `pull-request-N=superseded`), or `lock=held-by-another-tick` when
+  another tick owned the lock and this one did nothing.
 
 A tick that ends without a `SUMMARY` line died in a way the tool did not
 survive; that is the one shape worth escalating on sight.

@@ -3,7 +3,6 @@ call announces itself with its budget and reports what it cost, cosign is
 bounded short with one retry, the tick interval and the runbook agree, and a
 credential-bearing command never has its output recorded."""
 
-import re
 import subprocess
 import tempfile
 import unittest
@@ -125,6 +124,23 @@ class CallTracingTests(unittest.TestCase):
         self.assertTrue(any("decision=refuse" in line for line in self.fixture.log_lines),
                         "outside any declared block the default decision is the strict one")
 
+    def test_a_tick_that_finds_the_lock_held_still_ends_in_one_summary(self):
+        # PR #313 round 1, finding 1: an expected overlap must stay
+        # distinguishable from a dead tick, so this exit reports too.
+        held = MODULE.acquire_lock(self.fixture.repo / ".git" / "promoter.lock")
+        self.assertIsNotNone(held)
+        try:
+            code = MODULE.tick(self.fixture.repo, True, registry=self.fixture.fleet.registry(),
+                               github=MODULE.GitHub(run=self.fixture.run, fetch=self.fixture.fleet.fetch),
+                               cosign=self.fixture.fleet.cosign(), run=self.fixture.run)
+        finally:
+            MODULE.release_lock(held)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("another tick holds the lock" in line for line in self.fixture.log_lines))
+        summaries = [line for line in self.fixture.log_lines if line.startswith("SUMMARY tick elapsed=")]
+        self.assertEqual(len(summaries), 1, self.fixture.log_lines)
+        self.assertIn("dry-run=True lock=held-by-another-tick", summaries[0])
+
     def test_the_initial_fetch_is_traced_and_a_refusal_leaves_start_and_done(self):
         MODULE.Workspace(self.fixture.repo, self.fixture.run).refresh()
         self.assertTrue(any(line.startswith("START git-fetch origin main budget=600s") for line in self.fixture.log_lines))
@@ -155,11 +171,3 @@ class CadenceTests(unittest.TestCase):
                       MODULE.launchd_plist("/x/repo", "/x/log"))
         self.assertIn("### Reading the log", text)
         self.assertNotIn("PROOF", text)
-
-    def test_the_log_shapes_the_runbook_lists_are_the_ones_the_tool_emits(self):
-        text = (REPO_ROOT / "docs" / "runbooks" / "release-promotion.md").read_text(encoding="utf-8")
-        source = Path(MODULE.__file__).read_text(encoding="utf-8")
-        for kind in re.findall(r"`([a-z-]+)`", text.split("### Reading the log", 1)[1].split("## Disable", 1)[0]):
-            if kind in ("retry", "refuse", "skip-this-tick", "attempt", "current", "behind", "ahead", "cut"):
-                continue
-            self.assertIn(f'"{kind}"', source, f"the runbook lists a call kind the tool never emits: {kind}")

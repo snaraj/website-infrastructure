@@ -1964,7 +1964,11 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
     registry = registry or Registry()
     lock = acquire_lock(repo / ".git" / "promoter.lock")
     if lock is None:
+        # Even this exit ends in the summary line the runbook promises on
+        # every exit path: an expected overlap must stay distinguishable from
+        # a tick that died (security review of PR #313, finding 1).
         log("another tick holds the lock; skipping")
+        log(f"SUMMARY tick elapsed=0.0s dry-run={dry_run} lock=held-by-another-tick")
         return 0
     # One line at the end says what this tick did to every workload and every
     # pull request it touched, and what the whole thing cost. It is emitted on

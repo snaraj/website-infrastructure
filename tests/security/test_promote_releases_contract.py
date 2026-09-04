@@ -1148,6 +1148,33 @@ class TickTests(unittest.TestCase):
         status = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(status, "", "the refused dry run left the clone dirty")
 
+    def test_a_live_tick_traces_every_documented_call_kind_and_ends_in_one_summary(self):
+        # PR #313 round 1, finding 2: the runbook's list of call kinds is bound
+        # to what a real tick EMITS, not to strings the module contains, and
+        # the summary prefix the runbook names is the one the tick writes.
+        captured = []
+        original = MODULE.log
+        MODULE.log = captured.append
+        self.addCleanup(setattr, MODULE, "log", original)
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 0)
+        runbook = (REPO_ROOT / "docs" / "runbooks" / "release-promotion.md").read_text(encoding="utf-8")
+        section = runbook.split("### Reading the log", 1)[1].split("## Disable", 1)[0]
+        listed = re.findall(r"`([a-z]+(?:-[a-z]+)+)`", section.split("- `DONE", 1)[0].split("`<kind>` is one of", 1)[1])
+        self.assertGreaterEqual(len(listed), 12, listed)
+        starts = [line for line in captured if line.startswith("START ")]
+        for kind in listed:
+            self.assertTrue(any(line.startswith(f"START {kind} ") for line in starts), (kind, starts))
+            self.assertTrue(any(line.startswith(f"DONE {kind} ") for line in captured), kind)
+        for line in captured:
+            if line.startswith("DONE "):
+                self.assertRegex(line, r"elapsed=\d+\.\d+s (OK$|FAILED decision=\S+ reason=)")
+        summaries = [line for line in captured if line.startswith("SUMMARY ")]
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertRegex(summaries[0], r"^SUMMARY tick elapsed=\d+\.\d+s dry-run=False ")
+        self.assertIn("cut=", summaries[0])
+
     def test_live_tick_cuts_signs_pushes_opens_and_arms_but_never_flips(self):
         # One gate rewrites a tracked file the promotion never names, so the
         # committed index carries MORE paths than `apply_promotion` returned.
