@@ -164,7 +164,10 @@ class PromoterTupleTests(unittest.TestCase):
             ("missing release", [n for n in self.EMITTED if n != "release"]),
             ("missing delivery-lane", [n for n in self.EMITTED if n != "delivery-lane"]),
             ("missing security", [n for n in self.EMITTED if n != MODULE.SECURITY_TIER_LABEL]),
-            ("missing cybersecurity-review-requested", [n for n in self.EMITTED if n != MODULE.SECURITY_REVIEW_LABEL]),
+            # Issue #309 dropped this label from the promoter's set: a promotion
+            # earns its receipt by re-derivation instead. Adding it back is now a
+            # hybrid like any other, and the exact-set comparison says so.
+            ("unexpected cybersecurity-review-requested", self.EMITTED + [MODULE.SECURITY_REVIEW_LABEL]),
         ):
             with self.subTest(reason=reason):
                 blockers = decide(labels=labels)[2]
@@ -177,8 +180,12 @@ class PromoterTupleTests(unittest.TestCase):
         self.assertEqual(blockers, [f"{MODULE.REVIEW_ATTENTION_LABEL} is still armed"])
 
     def test_an_ordinary_pull_request_still_needs_the_umbrella_label(self):
-        # Drop only `promoter` and the umbrella requirement returns, so the
-        # exception cannot be inherited by anything else wearing these labels.
+        # Drop only `promoter` and BOTH ordinary-author rules return — the
+        # umbrella label and the security tier/review pair — so neither
+        # exception can be inherited by anything else wearing these labels.
         without = [name for name in self.EMITTED if name != MODULE.PROMOTER_LABEL]
-        self.assertEqual(decide(labels=without)[2], [f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label"])
-        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL])[2], [])
+        self.assertEqual(decide(labels=without)[2], [
+            f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label",
+            f"conflicting tier labels: exactly one of {MODULE.SECURITY_TIER_LABEL} and {MODULE.SECURITY_REVIEW_LABEL} is present",
+        ])
+        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL, MODULE.SECURITY_REVIEW_LABEL])[2], [])

@@ -29,6 +29,13 @@ Design, in the order the ``tick`` runs it:
 * **Publication.** The gates run, the commit is signed under the owner's
   noreply identity, the publication gate runs on that exact signed commit,
   and the branch is pushed and opened as a labelled DRAFT pull request.
+* **Receipt (issue #309).** On a later tick the promotion pull request earns
+  its exact-head verdict rather than asking for one: the tool proves no App
+  comment already binds that head, that every path the head changes is one
+  ``apply_promotion`` itself writes, and that re-running the ceremony above
+  from ``main`` re-renders that surface byte for byte — then the reviewer App
+  posts the receipt. Nothing is read from the pull request; a proof failure is
+  REQUEST-CHANGES and an unattributable refusal is neither.
 
 The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
@@ -42,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import fcntl
 import gzip
@@ -52,11 +60,13 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -84,13 +94,19 @@ ANNOTATION = "platform.snaraj.dev/chart-release"
 # `promoter` stands in for the agent pair AGENTS.md withholds from this tool,
 # and `security` is the tier a promotion actually earns: it advances a signed
 # chart digest and the identity pins that gate it, which AGENTS.md's risk table
-# names ("signing, digests, immutable artifacts"). The tier label and the review
-# label below travel together, so arming the cybersecurity lane without the tier
-# left every promotion pull request wearing a metadata contradiction the Ready
-# evaluator refuses (`scripts/ready_check.py`, whose PROMOTER_TUPLE is this
-# tuple plus `cybersecurity-review-requested`).
+# names ("signing, digests, immutable artifacts"). `scripts/ready_check.py`'s
+# PROMOTER_TUPLE is exactly this tuple, and its battery reads both and proves
+# they agree, so widening one alone is a red test rather than a permission.
 PR_LABELS = ("release", "security", "delivery-lane", "promoter")
-REVIEW_LABELS = ("requires-review", "cybersecurity-review-requested")
+# Since issue #309 a promotion pull request arms review ATTENTION only. Its
+# receipt is EARNED, not requested: the receipt step below re-derives the whole
+# promotion surface from the registry and the site's immutable Release, and the
+# reviewer App posts the verdict at the exact head. The cybersecurity lane
+# keeps reviewing every change to this tool's CODE — normal agent pull
+# requests, where the risk actually lives — so arming that lane on the tool's
+# own mechanical output spent a scarce reviewer re-reading a value a machine
+# had already re-derived byte for byte.
+REVIEW_LABELS = ("requires-review",)
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
@@ -104,6 +120,15 @@ PUBLICATION_GATE = ("make", "pre-push-security")
 # forever; the gates get the long bound.
 COMMAND_TIMEOUT_SECONDS = 600
 GATE_TIMEOUT_SECONDS = 3600
+# Cosign is the one call that reaches a public transparency log and a registry
+# in the same breath, and it is where a stall actually happened: on 2026-09-04
+# one `cosign verify` held COMMAND_TIMEOUT_SECONDS in full and cost a tick
+# fifteen minutes. Its own budget is therefore short and it gets exactly one
+# in-tick retry, so a Sigstore or registry stall costs a couple of minutes and
+# a logged retry rather than a silent ten. Two attempts, not more: a second
+# stall is a condition to report, not to keep paying for.
+COSIGN_TIMEOUT_SECONDS = 120
+COSIGN_ATTEMPTS = 2
 MAX_JSON_BYTES = 1024 * 1024
 MAX_BLOB_BYTES = 64 * 1024 * 1024
 # The chart layer is read as a bounded stream: an entry-count ceiling, a
@@ -135,7 +160,15 @@ README_ROW_RE = re.compile(
     r"(#\d+(?:/#\d+)*) in `docs/assurance/195-chart-acquisition-receipt\.json`"
 )
 LAUNCHD_LABEL = "dev.snaraj.release-promoter"
-LAUNCHD_INTERVAL_SECONDS = 900
+# The tick is a READ-ONLY poll until it has something to do: a status read per
+# selection and one pull-request listing. Five minutes is the interval the
+# owner's 2026-09-03 release-loop commission (issue #309) fixed, cutting the
+# worst-case wait between a published release and its promotion pull request
+# from fifteen minutes to five without touching a control: the lock, the
+# per-command bounds and every ceremony judgment are unchanged. The runbook
+# states the same number and `test_promotion_receipt_contract.py` pins the two
+# together, so the prose and the plist cannot drift apart.
+LAUNCHD_INTERVAL_SECONDS = 300
 
 # The runbook's fenced command blocks, pinned byte for byte by the battery so
 # a neutralized or smuggled invocation is a red test, never prose drift.
@@ -144,8 +177,10 @@ RUNBOOK_BLOCKS = (
     'mkdir -p "$(dirname "$repo")"\n'
     'git clone --quiet https://github.com/snaraj/website-infrastructure.git "$repo"\n',
     'python3 -I -B "$repo/scripts/promote_releases.py" tick --repo "$repo" --dry-run\n',
+    'receipt_helper="$HOME/path/to/agent-reviews-token"\n'
     'python3 -I -B "$repo/scripts/promote_releases.py" launchd-plist --repo "$repo"'
     ' --log "$HOME/Library/Logs/release-promoter.log"'
+    ' --token-command "$receipt_helper"'
     ' > "$HOME/Library/LaunchAgents/dev.snaraj.release-promoter.plist"\n'
     'launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.snaraj.release-promoter.plist"\n',
     'launchctl kickstart -k "gui/$(id -u)/dev.snaraj.release-promoter"\n'
@@ -153,6 +188,8 @@ RUNBOOK_BLOCKS = (
     'launchctl bootout "gui/$(id -u)/dev.snaraj.release-promoter"\n',
     'python3 -I -B scripts/promote_releases.py status\n',
     'python3 -I -B scripts/promote_releases.py verify\n',
+    'PROMOTER_RECEIPT_TOKEN_COMMAND="$receipt_helper"'
+    ' python3 -I -B "$repo/scripts/promote_releases.py" receipt --repo "$repo" --dry-run\n',
 )
 
 
@@ -195,6 +232,15 @@ def _load_sibling(name, module_name):
 # The watchdog owns the annotation/subject grammar and the drift verdict; the
 # promoter reuses them so the two can never classify one manifest differently.
 ASSURANCE = _load_sibling("ci/deploy_assurance.py", "promoter_deploy_assurance")
+# The Ready rule owns the reviewer App's immutable identity (login, user id,
+# App id) and loads the receipt-shape validator. The promoter READS both from
+# there rather than restating them: an actor tuple copied into a second file is
+# a tuple that can drift, and the whole value of an App-posted receipt is that
+# the actor is exactly the one the Ready evaluator will later look for. Nothing
+# here can widen that rule — this module never writes to it and holds no Ready
+# authority.
+READY = _load_sibling("ready_check.py", "promoter_ready_check")
+RECEIPTS = READY.RECEIPTS
 
 
 def sha256_hex(data: bytes) -> str:
@@ -208,6 +254,58 @@ def utc_today() -> str:
 def log(message: str) -> None:
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"{stamp} {message}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Call tracing (owner direction, 2026-09-04). A tick spends nearly all of its
+# wall clock inside a handful of external calls, and until this existed a
+# stalled one was INVISIBLE: on 2026-09-04 a `cosign verify` held the full
+# 600-second command bound and the only trace was a single refusal line ten
+# minutes later, after which the next tick silently retried. Every long call
+# now announces itself before it starts, with its budget, and reports its
+# elapsed time and — when it fails — the decision the tick took, on one line.
+# ---------------------------------------------------------------------------
+
+# What a failed call means depends on WHO is making it, not on the call: the
+# same registry read refuses a cut and merely skips a receipt. The caller
+# declares that once with ``failure_decision`` and every call underneath it
+# reports the truth instead of a guess. A single-threaded tick, one stack.
+_FAILURE_DECISION = ["refuse"]
+
+
+@contextlib.contextmanager
+def failure_decision(decision: str):
+    """Declare what a failed call under this block costs the tick."""
+
+    _FAILURE_DECISION.append(decision)
+    try:
+        yield
+    finally:
+        _FAILURE_DECISION.pop()
+
+
+@contextlib.contextmanager
+def timed_call(kind: str, target: str, budget: int, decision: str = ""):
+    """One START line, one DONE line with elapsed seconds and the outcome.
+
+    The failure line carries the decision AND the reason together, so reading
+    the log never means correlating two lines to learn what a stall cost. The
+    reason is redacted at the source: it can quote a registry or Release the
+    promoter does not control.
+    """
+
+    log(f"START {kind} {target} budget={budget}s")
+    started = time.monotonic()
+    try:
+        yield
+    except BaseException as error:
+        taken = decision or _FAILURE_DECISION[-1]
+        log(
+            f"DONE {kind} {target} elapsed={time.monotonic() - started:.1f}s FAILED"
+            f" decision={taken} reason={redact(str(error))[:200]}"
+        )
+        raise
+    log(f"DONE {kind} {target} elapsed={time.monotonic() - started:.1f}s OK")
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +451,11 @@ class Registry:
     def _token(self, name: str) -> str:
         if name not in self._tokens:
             url = f"https://{self.host}/token?scope=repository:{name}:pull"
-            body, _ = self._fetch(url, {}, MAX_JSON_BYTES)
+            # The traced target names the repository and the scope, never the
+            # answer: the pull token itself is a credential and stays out of
+            # every log line the same way the reviewer App's token does.
+            with timed_call("registry-token", f"{name} scope=pull", TIMEOUT):
+                body, _ = self._fetch(url, {}, MAX_JSON_BYTES)
             token = json.loads(body).get("token")
             if not isinstance(token, str) or not token:
                 raise Refusal(f"{name}: registry issued no pull token")
@@ -366,7 +468,8 @@ class Registry:
         name = self._name(repository)
         headers = {"Authorization": "Bearer " + self._token(name), "Accept": accept}
         url = f"https://{self.host}/v2/{name}/manifests/{reference}"
-        body, response_headers = self._fetch(url, headers, MAX_JSON_BYTES)
+        with timed_call("registry-manifest", f"{repository}:{reference}", TIMEOUT):
+            body, response_headers = self._fetch(url, headers, MAX_JSON_BYTES)
         header = response_headers.get("docker-content-digest")
         if not isinstance(header, str) or DIGEST_RE.fullmatch(header) is None:
             raise Refusal(f"{repository}:{reference}: registry answered without a content digest")
@@ -376,7 +479,8 @@ class Registry:
         name = self._name(repository)
         headers = {"Authorization": "Bearer " + self._token(name)}
         url = f"https://{self.host}/v2/{name}/blobs/{digest}"
-        body, _ = self._fetch(url, headers, MAX_BLOB_BYTES)
+        with timed_call("registry-blob", f"{repository}@{digest}", TIMEOUT):
+            body, _ = self._fetch(url, headers, MAX_BLOB_BYTES)
         if sha256_hex(body) != digest:
             raise Refusal(f"{repository}@{digest}: blob bytes do not hash to their digest")
         return body
@@ -403,7 +507,7 @@ def pinned_environment(env=None) -> dict:
     return merged
 
 
-def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEOUT_SECONDS) -> str:
+def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEOUT_SECONDS, quiet_output=False) -> str:
     """Run one command as the leader of its own session and return its
     stdout; a non-zero exit, or a hang past ``timeout`` seconds, is a
     Refusal. On completion and on timeout the whole process group is killed
@@ -451,6 +555,12 @@ def run_command(argv, cwd=None, input_text=None, env=None, timeout=COMMAND_TIMEO
     if timed_out:
         raise Refusal(f"`{label}` exceeded {timeout}s and its process group was killed") from None
     if process.returncode != 0:
+        if quiet_output:
+            # A command whose OUTPUT is a credential: its exit status is
+            # reportable, its bytes are not. Nothing from either stream reaches
+            # the local log or the refusal, because a failing helper that
+            # printed a token first would otherwise put it there.
+            raise Refusal(f"`{label}` exited {process.returncode}; its output is deliberately not recorded")
         detail = (stderr or stdout).strip().splitlines()
         tail = " | ".join(detail[-3:]) if detail else "no output"
         # The raw tail stays in the local log; the refusal, which can travel
@@ -498,7 +608,8 @@ class GitHub:
         if body is not None:
             argv += ["--input", "-"]
             input_text = json.dumps(body)
-        output = self._run(argv, input_text=input_text)
+        with timed_call("github-api", f"{method} {path}", COMMAND_TIMEOUT_SECONDS):
+            output = self._run(argv, input_text=input_text)
         decoded = json.loads(output) if output.strip() else {}
         if not isinstance(decoded, dict):
             raise Refusal(f"{path}: expected one object, got {type(decoded).__name__}")
@@ -514,13 +625,16 @@ class GitHub:
         if body is not None:
             argv += ["--input", "-"]
             input_text = json.dumps(body)
-        self._run(argv, input_text=input_text)
+        with timed_call("github-write", f"{method} {path}", COMMAND_TIMEOUT_SECONDS):
+            self._run(argv, input_text=input_text)
 
     def api_pages(self, path: str) -> list:
         """A list-shaped call, paginated to exhaustion."""
 
         argv = ["gh", "api", "--paginate", "--slurp", "-H", "Accept: application/vnd.github+json", path]
-        decoded = json.loads(self._run(argv))
+        with timed_call("github-list", path, COMMAND_TIMEOUT_SECONDS):
+            output = self._run(argv)
+        decoded = json.loads(output)
         merged = []
         for page in decoded:
             if not isinstance(page, list):
@@ -532,11 +646,15 @@ class GitHub:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "https" or parsed.netloc != "github.com":
             raise Refusal(f"refusing to download a Release asset from {parsed.netloc}")
-        body, _ = self._fetch(url, {}, MAX_JSON_BYTES)
+        with timed_call("release-asset", parsed.path, TIMEOUT):
+            body, _ = self._fetch(url, {}, MAX_JSON_BYTES)
         return body
 
     def command(self, argv, cwd=None) -> str:
-        return self._run(["gh", *argv], cwd=cwd)
+        # The traced target is the subcommand only: a full argv can carry a
+        # workstation path (run_command's own refusals redact for this reason).
+        with timed_call("github-command", " ".join(argv[:2]), COMMAND_TIMEOUT_SECONDS):
+            return self._run(["gh", *argv], cwd=cwd)
 
 
 class Cosign:
@@ -561,9 +679,29 @@ class Cosign:
             self._verified_version = version
         return self._verified_version
 
+    def _bounded(self, argv, kind: str, target: str) -> str:
+        """One cosign call under a SHORT budget, with exactly one retry.
+
+        Cosign reaches Sigstore and the registry in the same call, so a stall
+        there is the one failure mode that used to cost a whole tick silently.
+        Each attempt is traced and bounded; the first failure logs
+        ``decision=retry`` and the second the caller's real decision, so the
+        log says what a stall cost without anyone correlating lines.
+        """
+
+        failure = None
+        for attempt in range(1, COSIGN_ATTEMPTS + 1):
+            decision = "retry" if attempt < COSIGN_ATTEMPTS else ""
+            try:
+                with timed_call(kind, f"{target} attempt={attempt}/{COSIGN_ATTEMPTS}", COSIGN_TIMEOUT_SECONDS, decision):
+                    return self._run(argv, timeout=COSIGN_TIMEOUT_SECONDS)
+            except Refusal as error:
+                failure = error
+        raise failure
+
     def verify_chart(self, repository: str, digest: str, subject: str) -> None:
         self.require_pinned_version()
-        output = self._run(
+        output = self._bounded(
             [
                 "cosign",
                 "verify",
@@ -572,7 +710,9 @@ class Cosign:
                 "--certificate-oidc-issuer",
                 ACTIONS_ISSUER,
                 f"{repository}@{digest}",
-            ]
+            ],
+            "cosign-verify-chart",
+            f"{repository}@{digest}",
         )
         entries = json.loads(output)
         if not isinstance(entries, list) or not entries:
@@ -584,7 +724,7 @@ class Cosign:
 
     def verify_provenance(self, repository: str, digest: str, subject: str) -> None:
         self.require_pinned_version()
-        output = self._run(
+        output = self._bounded(
             [
                 "cosign",
                 "verify-attestation",
@@ -596,7 +736,9 @@ class Cosign:
                 "--certificate-oidc-issuer",
                 ACTIONS_ISSUER,
                 f"{repository}@{digest}",
-            ]
+            ],
+            "cosign-verify-provenance",
+            f"{repository}@{digest}",
         )
         statements = 0
         for line in output.splitlines():
@@ -1546,6 +1688,34 @@ class Workspace:
             raise Refusal(f"expected exactly one registered signing key in the agent, found {len(matched)}")
         return matched[0]
 
+    def numstat(self, base: str) -> tuple:
+        """``(files, added, deleted)`` for the rewritten tree against ``base``.
+
+        All three come from the SAME numstat rows, deliberately: the file
+        count is ``len(rows)``, never the length of ``apply_promotion``'s
+        returned path list. Those two can differ — a gate that rewrites a
+        tracked file (a formatter, a regenerated badge) changes what the
+        commit records without changing what the rewrite reported — and the
+        body must state what the commit records, because that is what the
+        command it names reproduces. Measured from the index after ``add -A``,
+        which carries exactly what the commit then records, so a reviewer
+        reproduces these numbers with ``git diff --numstat <base>..HEAD`` on
+        the published head. A row that is not two integers and a path — a
+        binary one, which git renders ``-`` — refuses: an accounting it cannot
+        measure the tool must not state.
+        """
+
+        self.git("add", "-A")
+        files = added = deleted = 0
+        for line in self.git("diff", "--numstat", "--cached", base).splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+                raise Refusal("a numstat row is not measurable; refusing to state an accounting this cut cannot prove")
+            files += 1
+            added += int(fields[0])
+            deleted += int(fields[1])
+        return files, added, deleted
+
     def commit_signed(self, message: str, identity: dict, key: str) -> str:
         env = dict(os.environ)
         env.update(identity)
@@ -1564,8 +1734,24 @@ def pr_title(selections: dict, targets: dict) -> str:
     return f"Promote {moved} to the published release by receipted ceremony"
 
 
-def pr_body(selections: dict, acquired: dict, issues: list, head_base: str) -> str:
-    """One line per moved workload; the regenerated receipt is the evidence."""
+ACCOUNTING_PREFIX = "Accounting (measured, "
+
+
+def accounting_line(base: str, files: int, added: int, deleted: int) -> str:
+    """The actuals AGENTS.md requires of a pull-request body, in the shape the
+    agent lanes already write by hand, naming the command that reproduces it so
+    a reviewer re-measures rather than trusting the number."""
+
+    return (
+        f"{ACCOUNTING_PREFIX}`git diff --numstat {base[:7]}..HEAD`): "
+        f"{files} files, +{added} / -{deleted}, net {added - deleted:+d}."
+    )
+
+
+def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, accounting: str) -> str:
+    """One line per moved workload; the regenerated receipt is the evidence.
+    ``accounting`` is measured by the workspace and passed in, so one string
+    reaches the commit message and the body and the two cannot disagree."""
 
     lines = [
         "## Promotion",
@@ -1576,9 +1762,17 @@ def pr_body(selections: dict, acquired: dict, issues: list, head_base: str) -> s
     for slug, (record, _) in sorted(acquired.items()):
         lines.append(f"- {selections[slug].domain}: `{selections[slug].version}` to `{record['chartTag']}`, workload index `{record['workloadImage'].split('@', 1)[1]}`")
     lines += ["", "Evidence: the regenerated `docs/assurance/195-chart-acquisition-receipt.*` files in this pull request.", ""]
+    lines += [accounting, ""]
     lines += [f"Closes #{number}" for number in issues]
     lines += ["", SIGNATURE, ""]
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    # EXACTLY one accounting line. A body stating two sets of numbers states
+    # neither: a reader cannot tell which the commit records, and the whole
+    # point of the line is that one command reproduces it. Enforced here
+    # rather than trusted, because the string is composed by the caller.
+    if body.count(ACCOUNTING_PREFIX) != 1:
+        raise Refusal(f"a promotion body states its accounting exactly once, not {body.count(ACCOUNTING_PREFIX)} times")
+    return body
 
 
 def owned_pull_request(pr: dict) -> dict | None:
@@ -1661,7 +1855,8 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
     log(f"rewrote {len(changed)} paths for {branch}: " + ", ".join(changed))
     for gate in GATES:
         try:
-            workspace._run(list(gate), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
+            with timed_call("gate", " ".join(gate), GATE_TIMEOUT_SECONDS):
+                workspace._run(list(gate), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
         except Refusal as error:
             # The output stays in the local log: a gate's findings (gitleaks
             # above all) are never forwarded into a public issue comment.
@@ -1669,18 +1864,22 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
             raise Refusal(f"gate `{' '.join(gate)}` failed; the promoter log carries its output") from None
         log(f"gate `{' '.join(gate)}` OK")
     title = pr_title(selections, targets)
-    body = pr_body(selections, acquired, issues, base)
+    # Measured after the rewrite and before the commit, so one accounting
+    # string reaches the commit message and the pull-request body alike.
+    body = pr_body(selections, acquired, issues, base, accounting_line(base, *workspace.numstat(base)))
     if dry_run:
         log(f"WOULD commit, push and open Draft PR `{title}` from {branch} (dry run)")
         return 0
     head = workspace.commit_signed(f"{title}\n\n{body}", workspace.identity(github), workspace.signing_key(github))
     try:
-        workspace._run(list(PUBLICATION_GATE), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
+        with timed_call("gate", " ".join(PUBLICATION_GATE), GATE_TIMEOUT_SECONDS):
+            workspace._run(list(PUBLICATION_GATE), cwd=workspace.root, timeout=GATE_TIMEOUT_SECONDS)
     except Refusal as error:
         log(f"gate `{' '.join(PUBLICATION_GATE)}` FAILED on the signed commit {head}: {error}")
         raise Refusal(f"gate `{' '.join(PUBLICATION_GATE)}` refused the outgoing commit; nothing was pushed") from None
     log(f"gate `{' '.join(PUBLICATION_GATE)}` OK on the outgoing commit {head}")
-    workspace.git("push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
+    with timed_call("git-push", f"origin {branch}", COMMAND_TIMEOUT_SECONDS):
+        workspace.git("push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
     body_path = workspace.root / ".git" / "promoter-pr-body.md"
     body_path.write_text(body, encoding="utf-8")
     argv = ["pr", "create", "--repo", REPOSITORY, "--draft", "--base", "main", "--head", branch, "--title", title, "--body-file", str(body_path), "--milestone", MILESTONE, "--assignee", ASSIGNEE]
@@ -1751,6 +1950,492 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
     )
 
 
+# ---------------------------------------------------------------------------
+# Proof-based receipts for promotion pull requests (issue #309).
+#
+# A promotion pull request's verdict is EARNED by re-derivation, never by
+# reading the pull request. Three proofs, in the order the step runs them:
+#
+#   0. Novelty. No comment by the reviewer App already binds this head, so a
+#      verdict is posted at most once per head.
+#   1. Confinement. Every path `main...HEAD` changes is a path the promoter's
+#      own ``apply_promotion`` writes. The permitted set is not a list kept in
+#      this file — it is the return value of that very function, re-run.
+#   2. Re-derivation. From `main`, the issue-195 acquisition ceremony runs
+#      again against the registry, the site's immutable GitHub Release and its
+#      protected `main`, the whole promotion surface is re-rendered from the
+#      resulting record, and every blob is compared to the head's by object id.
+#      A single mutated byte anywhere in that surface is a different object id.
+#
+# Failing 1 or 2 is a definitive REQUEST-CHANGES: those comparisons are this
+# tool's own arithmetic over bytes it produced. A refusal from the network, the
+# registry, cosign or the ceremony is NOT: the promoter cannot attribute it to
+# the pull request, so it logs and skips the tick rather than publishing a
+# verdict it cannot stand behind. Nothing here flips Ready or merges.
+# ---------------------------------------------------------------------------
+
+# The machine-local helper that mints the reviewer App's repository-scoped
+# token is named by ENVIRONMENT, never by a committed path: the tool must carry
+# no workstation path (safety invariant 12), and an unset variable means the
+# receipt step reports itself unconfigured and does nothing at all.
+RECEIPT_TOKEN_COMMAND_ENV = "PROMOTER_RECEIPT_TOKEN_COMMAND"
+RECEIPT_SIGNATURE = "- Promoter (adversarial reviewer)"
+RECEIPT_VALIDATOR = Path("scripts/validate_review_receipt.py")
+# A promotion surface is a handful of paths; a diff claiming hundreds is a
+# report to bound rather than to render in full.
+RECEIPT_PATH_CEILING = 20
+CAPTURE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def receipt_actor() -> tuple:
+    """The reviewer App's immutable identity, read from the Ready rule."""
+
+    return (READY.REVIEWS_APP, READY.REVIEWS_APP_USER_ID, "Bot", READY.REVIEWS_APP_ID)
+
+
+def app_receipt_heads(github: GitHub, number: int) -> set:
+    """Every head an App-posted comment on this pull request already binds.
+
+    Only the App's own comments count, matched on the same four-part actor the
+    Ready evaluator uses; a `HEAD:` line pasted by anybody else is text.
+    """
+
+    heads = set()
+    for comment in github.api_pages(f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100"):
+        user = comment.get("user") or {}
+        actor = (
+            user.get("login"),
+            user.get("id"),
+            user.get("type"),
+            (comment.get("performed_via_github_app") or {}).get("id"),
+        )
+        if actor != receipt_actor():
+            continue
+        for line in (comment.get("body") or "").replace("\r\n", "\n").splitlines():
+            if line.startswith("HEAD: ") and SHA_RE.fullmatch(line[6:].strip()):
+                heads.add(line[6:].strip())
+    return heads
+
+
+@contextlib.contextmanager
+def scratch_worktree(workspace: Workspace, commit: str):
+    """A disposable detached worktree of the promoter's OWN clone at ``commit``.
+
+    It lives outside the repository so no scratch path can ever be staged, and
+    it is removed on every exit path — the receipt states that removal, so the
+    statement has to be true.
+    """
+
+    holder = Path(tempfile.mkdtemp(prefix="promoter-proof-"))
+    tree = holder / "tree"
+    workspace.git("worktree", "add", "--quiet", "--detach", str(tree), commit)
+    try:
+        yield tree
+    finally:
+        try:
+            workspace.git("worktree", "remove", "--force", str(tree))
+        except Refusal:
+            log("scratch worktree could not be removed by git; pruning")
+        shutil.rmtree(holder, ignore_errors=True)
+        workspace.git("worktree", "prune")
+
+
+def head_blob(workspace: Workspace, commit: str, name: str):
+    """The object id of ``name`` at ``commit``, or ``None`` when it is absent."""
+
+    try:
+        return workspace.git("rev-parse", f"{commit}:{name}").strip()
+    except Refusal:
+        return None
+
+
+def rendered_blob(workspace: Workspace, path: Path) -> str:
+    """The object id of a re-rendered file's exact bytes.
+
+    ``--no-filters`` is what makes this a BYTE comparison: it hashes the file
+    as it sits, with no attribute-driven line-ending or clean filter in the
+    way, so equal ids mean equal bytes and nothing weaker.
+    """
+
+    return workspace.git("hash-object", "--no-filters", "--", str(path)).strip()
+
+
+def safe_path(name: str) -> str:
+    """One repository path, safe to render inside a public comment.
+
+    Path names on a head are attacker-chooseable text. Everything outside the
+    ordinary path alphabet becomes ``?`` and the result is bounded, so a
+    crafted name cannot smuggle Markdown, a mention or a line break into a
+    receipt.
+    """
+
+    cleaned = re.sub(r"[^A-Za-z0-9._/+-]", "?", name)
+    return cleaned[:120] + ("…" if len(cleaned) > 120 else "")
+
+
+def path_list(names) -> str:
+    """A bounded, rendered list of repository paths."""
+
+    shown = [f"`{safe_path(name)}`" for name in sorted(names)[:RECEIPT_PATH_CEILING]]
+    if len(names) > RECEIPT_PATH_CEILING:
+        shown.append(f"and {len(names) - RECEIPT_PATH_CEILING} more")
+    return ", ".join(shown) if shown else "none"
+
+
+def captured_date(workspace: Workspace, head: str) -> str:
+    """The capture date the head's receipt states, bound to its own commit.
+
+    This is the ONE value the proof takes from the head, because
+    ``apply_promotion`` stamps the day the cut ran and cannot recover it from
+    the registry. It is bound anyway: it must be a plain ISO date within a day
+    of the head commit's own author timestamp — and that commit is signed — so
+    the only thing it can be is the date the promoter actually cut, give or
+    take a midnight boundary. Anything else is a mutation.
+    """
+
+    try:
+        document = json.loads(workspace.git("show", f"{head}:{RECEIPT_JSON.as_posix()}"))
+        stamp = int(workspace.git("show", "-s", "--format=%at", head).strip())
+    except (ValueError, TypeError) as error:
+        # The head's receipt file is untrusted bytes: a malformed one is a
+        # named refusal, never a traceback that escapes every handler above.
+        raise Refusal(f"the receipt at {head[:7]} is unreadable ({type(error).__name__})") from None
+    stated = document.get("capturedDate") if isinstance(document, dict) else None
+    if not isinstance(stated, str) or CAPTURE_DATE_RE.fullmatch(stated) is None:
+        raise Refusal(f"the receipt at {head[:7]} states no plain ISO capture date")
+    day = dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date()
+    allowed = {(day + dt.timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)}
+    if stated not in allowed:
+        raise Refusal(
+            f"capture date {stated} is not the head commit's own date {day.isoformat()}"
+        )
+    return stated
+
+
+def workload_statement(selection: Selection, record: dict) -> str:
+    """One workload's re-derived figures, exactly as the ceremony proved them."""
+
+    image, index = record["workloadImage"].split("@", 1)
+    tag = f"v{record['chartTag']}"
+    return (
+        f"   - {selection.domain} `{record['chartTag']}`: chart"
+        f" `{record['chartRepository']}` manifest `{record['manifestDigest']}`"
+        f" (config `{record['chartConfigDigest']}`, sole Helm layer"
+        f" `{record['chartLayerDigest']}`), workload `{image}` index `{index}`"
+        f" with one linux/arm64 child `{record['arm64Digest']}`, both"
+        f" cosign-verified AT THOSE DIGESTS against"
+        f" `{record['signer']['subject']}`; the immutable Release"
+        f" https://github.com/{selection.source_repository}/releases/tag/{tag}"
+        f" states the same pair, its `release-manifest.json` bytes hash to"
+        f" `{record['release']['assetDigest']}`, and its annotated tag"
+        f" dereferences to `{record['release']['sourceSha']}`, reachable from"
+        f" that site's protected `main`."
+    )
+
+
+def approve_receipt(head: str, base: str, surface: list, statements: list, captured: str) -> str:
+    """The APPROVE receipt, in the contract's shape (AGENTS.md, Verdict format)."""
+
+    return "\n".join(
+        [
+            f"HEAD: {head}",
+            "VERDICT: APPROVE",
+            "",
+            "Proof-based receipt for a promotion pull request, composed and posted from"
+            " the promoter's own tick (issue #309). No figure below was read from this"
+            f" pull request: each was re-derived from `main` at `{base[:7]}`, the OCI"
+            " registry and the site's immutable GitHub Release.",
+            "",
+            f"1. Confinement. This head changes {len(surface)} path(s), every one of them"
+            " written by the promoter's own `apply_promotion` when the cut was"
+            f" re-derived: {path_list(surface)}. Nothing else is touched.",
+            "2. Re-derivation. The issue-195 acquisition ceremony ran again:",
+        ]
+        + statements
+        + [
+            "   Re-rendering every promotion surface from those records reproduces this"
+            " head byte for byte — each blob compared by object id. The capture date"
+            f" {captured} is the one value taken from the head and is bound to the head"
+            " commit's own signed timestamp.",
+            f"3. Novelty. No `{READY.REVIEWS_APP}` comment on this pull request bound"
+            " this head before this one.",
+            "",
+            "Mutation and claim audit: the re-derivation IS both. Every claim the body"
+            " and commit make about a version, digest or source is a value recomputed"
+            " above rather than read from the diff, so an overstated claim is a byte"
+            " mismatch; and one mutated byte anywhere in the surface — a digest, a"
+            " receipt field, the changelog fragment, the README sentence — changes an"
+            " object id and turns this verdict into REQUEST-CHANGES. Findings: none.",
+            "No finding — checked the changed-path set, every re-rendered byte, the"
+            " keyless signer identity, the immutable Release binding, the"
+            " manifest-digest agreement and the tag-to-protected-main ancestry.",
+            "",
+            "Gates and flakes: this head's tree is byte-identical to one the promoter's"
+            " own cut produces, and that cut runs `make check-fast`, `make"
+            " check-gitleaks` and `make check-kubernetes` before committing and `make"
+            " pre-push-security` on the exact signed commit before pushing; GitHub's"
+            " required checks at this head are the authority for the rest and are not"
+            " restated here. The re-derivation is deterministic: the same bytes, or a"
+            " refusal.",
+            "Scratch: the detached read-only worktree this proof used was removed.",
+            "",
+            "Review evidence only. NO TOOL FLIPS READY, promoter included: the"
+            " coordinator flips and the owner alone merges.",
+            "",
+            RECEIPT_SIGNATURE,
+            "",
+        ]
+    )
+
+
+def request_changes_receipt(head: str, base: str, proof: str, detail: str) -> str:
+    """The REQUEST-CHANGES receipt: which proof failed, and on what."""
+
+    return "\n".join(
+        [
+            f"HEAD: {head}",
+            "VERDICT: REQUEST-CHANGES",
+            "",
+            "Proof-based receipt for a promotion pull request, composed and posted from"
+            " the promoter's own tick (issue #309). The promotion surface at this head"
+            f" does not re-derive from `main` at `{base[:7]}`, the OCI registry and the"
+            " site's immutable GitHub Release.",
+            "",
+            f"1. {proof} failed: {detail}",
+            "",
+            "Mutation and claim audit: the re-derivation IS both — the only claim a"
+            " promotion pull request makes is the surface it writes, and the difference"
+            " named above is that claim against what the registry and the immutable"
+            " Release actually produce. Every other statement is withheld, because a"
+            " head that does not re-derive has no verified figures to report.",
+            "Scratch: no workspace from this proof remains.",
+            "",
+            "A promotion pull request is never repaired in place: the fix lands in the"
+            " promoter's own code through a normal pull request, and this one is"
+            " superseded and re-cut. Review evidence only — the owner alone merges.",
+            "",
+            RECEIPT_SIGNATURE,
+            "",
+        ]
+    )
+
+
+def proof_log(name: str, number: int, head: str, outcome: str, started: float) -> None:
+    """One line per proof: which, on what, how it ended, and what it cost."""
+
+    log(f"PROOF {name} pull-request={number} head={head[:7]} {outcome} elapsed={time.monotonic() - started:.1f}s")
+
+
+def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosign: Cosign, pr: dict):
+    """Judge one open promoter pull request. Returns ``(verdict, body)`` or
+    ``None`` when this tick has nothing to say about it."""
+
+    number, head, branch = pr["number"], pr["head"], pr["branch"]
+    label = f"PR #{number}"
+    started = time.monotonic()
+    parsed = parse_branch(branch)
+    if parsed is None:
+        proof_log("subject", number, head, "skipped: branch is outside the promoter grammar", started)
+        return None
+    base7, issue, targets = parsed
+    if pr.get("behind_by") is None:
+        proof_log("subject", number, head, "skipped: base freshness is unknown", started)
+        return None
+    if pr["behind_by"]:
+        proof_log("subject", number, head, f"skipped: {pr['behind_by']} commit(s) behind main", started)
+        return None
+
+    # Every read from here to the verdict is one the tick can afford to lose:
+    # a failure means this head is judged again in five minutes, and the log
+    # says so on the failing line itself.
+    with failure_decision("skip-this-tick"):
+        novelty = time.monotonic()
+        if head in app_receipt_heads(github, number):
+            proof_log("novelty", number, head, "skipped: a receipt already binds this head", novelty)
+            return None
+        proof_log("novelty", number, head, "held: no App receipt binds this head", novelty)
+
+        base = workspace.git("rev-parse", "origin/main").strip()
+        if not base.startswith(base7):
+            proof_log("subject", number, head, f"skipped: cut from {base7}, main is now {base[:7]}", started)
+            return None
+        # Bind the head through the BRANCH REF rather than by fetching a bare
+        # object: the ref is what the owner's credential pushed, and a head
+        # GitHub reports that the ref does not carry is a moving target.
+        with timed_call("git-fetch", f"origin {branch}", COMMAND_TIMEOUT_SECONDS):
+            workspace.git("fetch", "--quiet", "origin", f"refs/heads/{branch}")
+        if workspace.git("rev-parse", "FETCH_HEAD").strip() != head:
+            proof_log("subject", number, head, "skipped: the branch does not point at the head GitHub reports", started)
+            return None
+
+        changed = [name for name in workspace.git("diff", "--name-only", "-z", base, head).split("\0") if name]
+        derivation = time.monotonic()
+        try:
+            captured = captured_date(workspace, head)
+        except Refusal as error:
+            proof_log("re-derivation", number, head, f"failed: {error}", derivation)
+            return "REQUEST-CHANGES", request_changes_receipt(head, base, "Re-derivation", str(error))
+
+        try:
+            cosign.require_pinned_version()
+            with scratch_worktree(workspace, base) as tree:
+                selections = discover_selections(tree)
+                unknown = sorted(set(targets) - set(selections))
+                if unknown:
+                    proof_log("subject", number, head, f"skipped: main has no selection for {', '.join(unknown)}", started)
+                    return None
+                acquired = {
+                    slug: acquire(selections[slug], version, registry, github, cosign)
+                    for slug, version in sorted(targets.items())
+                }
+                issues = drift_issues(github, targets)
+                if not issues or issues[0] != issue:
+                    proof_log("subject", number, head, "skipped: the drift issues these targets name have moved", started)
+                    return None
+                surface = apply_promotion(
+                    tree,
+                    selections,
+                    acquired,
+                    issue,
+                    "/".join(f"#{n}" for n in issues),
+                    captured,
+                    workspace._run,
+                )
+                surface = sorted(set(surface))
+                confinement = time.monotonic()
+                outside = sorted(set(changed) - set(surface))
+                if outside:
+                    proof_log("confinement", number, head, f"failed: {len(outside)} path(s) outside the promotion surface", confinement)
+                    return "REQUEST-CHANGES", request_changes_receipt(
+                        head, base, "Confinement",
+                        f"{len(outside)} changed path(s) are outside the promotion surface"
+                        f" this cut writes: {path_list(outside)}",
+                    )
+                proof_log("confinement", number, head, f"held: {len(changed)} changed path(s), all in the surface", confinement)
+                differing = [
+                    name for name in surface
+                    if head_blob(workspace, head, name) != rendered_blob(workspace, tree / name)
+                ]
+                statements = [workload_statement(selections[slug], record) for slug, (record, _) in sorted(acquired.items())]
+        except Refusal as error:
+            # A registry, Release, cosign or ceremony refusal is not this pull
+            # request's fault as far as this tool can prove, so it never becomes
+            # a verdict: the tick logs it and tries again on the next tick.
+            proof_log("re-derivation", number, head, f"skipped: could not complete ({error})", derivation)
+            return None
+
+    if differing:
+        proof_log("re-derivation", number, head, f"failed: {len(differing)} path(s) do not reproduce", derivation)
+        return "REQUEST-CHANGES", request_changes_receipt(
+            head, base, "Re-derivation",
+            f"{len(differing)} promotion-surface path(s) do not reproduce from the"
+            f" registry and the immutable Release: {path_list(differing)}",
+        )
+    proof_log("re-derivation", number, head, f"held: {len(surface)} path(s) reproduce byte for byte", derivation)
+    log(f"{label}: all three proofs hold at {head[:7]}")
+    return "APPROVE", approve_receipt(head, base, surface, statements, captured)
+
+
+def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number: int, head: str, body: str, dry_run: bool) -> bool:
+    """Validate one composed receipt and post it AS THE REVIEWER APP.
+
+    The token never enters an argument list, a log line or a file: it is minted
+    by the machine-local helper, held in one local name, and handed to exactly
+    one ``gh`` subprocess through its environment.
+    """
+
+    path = workspace.root / ".git" / "promoter-receipt.md"
+    path.write_text(body, encoding="utf-8")
+    try:
+        run([
+            sys.executable, "-I", "-B", str(workspace.root / RECEIPT_VALIDATOR),
+            "--head", head, "--resource-kind", "pull-request", str(path),
+        ])
+        # The head is re-read from GitHub as late as possible: a receipt names
+        # one head, so a head that moved between the proof and the post would
+        # bind a verdict to bytes nobody proved.
+        live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+        if live is None or live["head"] != head:
+            log(f"PR #{number}: the head moved between proof and post; nothing was posted")
+            return False
+        if dry_run:
+            log(f"PR #{number}: WOULD post a validated receipt at {head[:7]} as the review App (dry run)")
+            return False
+        with timed_call("receipt-token", f"repository={REPOSITORY}", COMMAND_TIMEOUT_SECONDS):
+            # ``quiet_output`` is load-bearing, not tidiness: this command's
+            # STDOUT IS THE CREDENTIAL, and the ordinary failure path quotes a
+            # failed command's output into the local log.
+            token = run([helper, REPOSITORY], quiet_output=True).strip()
+        if not token or "\n" in token:
+            raise Refusal("the receipt token helper produced no single-line token")
+        environment = dict(os.environ)
+        environment.pop("GITHUB_TOKEN", None)
+        environment["GH_TOKEN"] = token
+        with timed_call("receipt-post", f"pull-request={number} head={head[:7]}", COMMAND_TIMEOUT_SECONDS):
+            run(
+                ["gh", "pr", "comment", str(number), "--repo", REPOSITORY, "--body-file", str(path)],
+                cwd=workspace.root,
+                env=environment,
+            )
+    finally:
+        path.unlink(missing_ok=True)
+    # Trust the forge, not the exit status: the comment counts only if the
+    # App's own identity is what carries it at this exact head.
+    if head not in app_receipt_heads(github, number):
+        raise Refusal(f"PR #{number}: no App-posted comment binds {head[:7]} after posting")
+    log(f"PR #{number}: the review App posted a receipt at {head[:7]}")
+    return True
+
+
+def post_receipts(workspace: Workspace, github: GitHub, registry: Registry, cosign: Cosign, prs: list, dry_run: bool, run=run_command, outcomes=None) -> None:
+    """The tick's receipt step over the promotion pull requests it keeps.
+
+    ``outcomes`` collects one word per pull request for the tick's summary
+    line, so a reader learns from one line whether a receipt was posted,
+    withheld, or never attempted.
+    """
+
+    record = {} if outcomes is None else outcomes
+    helper = (os.environ.get(RECEIPT_TOKEN_COMMAND_ENV) or "").strip()
+    if not helper:
+        if prs:
+            log(f"receipt posting not configured ({RECEIPT_TOKEN_COMMAND_ENV} is unset); no receipt was composed")
+            record["receipt"] = "unconfigured"
+        return
+    for pr in prs:
+        # Nothing in this loop is worth stopping a tick for: a failed proof, a
+        # failed validation and a failed post all mean the same thing — this
+        # head is judged again on the next tick — and every call underneath
+        # says so on its own failing line.
+        try:
+            with failure_decision("skip-this-tick"):
+                judged = prove_promotion(workspace, github, registry, cosign, pr)
+                if judged is None:
+                    record[f"receipt-{pr['number']}"] = "skipped"
+                    continue
+                verdict, body = judged
+                log(f"PR #{pr['number']}: proof verdict {verdict} at {pr['head'][:7]}")
+                if not post_receipt(workspace, github, run, helper, pr["number"], pr["head"], body, dry_run):
+                    record[f"receipt-{pr['number']}"] = "not-posted"
+                    continue
+                record[f"receipt-{pr['number']}"] = f"posted:{verdict}"
+                if verdict == "APPROVE":
+                    # Only an APPROVE retires the review-attention label. A
+                    # REQUEST-CHANGES leaves it armed on purpose: the pull
+                    # request still needs a human to look, and the promoter
+                    # will supersede and re-cut it rather than repair it.
+                    labels = [(label or {}).get("name") for label in (github.api(f"repos/{REPOSITORY}/pulls/{pr['number']}").get("labels") or [])]
+                    if READY.REVIEW_ATTENTION_LABEL in labels:
+                        github.mutate(
+                            f"repos/{REPOSITORY}/issues/{pr['number']}/labels/{READY.REVIEW_ATTENTION_LABEL}",
+                            "DELETE",
+                        )
+                        log(f"PR #{pr['number']}: {READY.REVIEW_ATTENTION_LABEL} removed with the verdict")
+        except Refusal as error:
+            log(f"PR #{pr['number']}: receipt step refused ({error})")
+            record[f"receipt-{pr['number']}"] = "refused"
+
+
 def acquire_lock(path: Path):
     """Hold an OS-level exclusive lock on ``path`` for the tick's lifetime,
     or return ``None`` while another live process holds it. The kernel
@@ -1781,6 +2466,11 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
     if lock is None:
         log("another tick holds the lock; skipping")
         return 0
+    # One line at the end says what this tick did to every workload and every
+    # pull request it touched, and what the whole thing cost. It is emitted on
+    # EVERY exit path: a tick that ends in a refusal is exactly the tick whose
+    # summary a reader needs.
+    started, outcomes = time.monotonic(), {}
     try:
         workspace = Workspace(repo, run)
         base = workspace.refresh()
@@ -1789,16 +2479,30 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
         report = status(repo, github)
         for slug, entry in report.items():
             log(f"{slug}: committed {entry['committed']} vs latest {entry['latest']} -> {entry['verdict']}")
+            outcomes[slug] = entry["verdict"]
         open_prs = open_promoter_prs(github)
         decision = plan(report, open_prs)
+        # The receipt step runs on the pull requests the planner KEEPS — never
+        # on one it is about to supersede — and never stops the tick: a promotion
+        # that is due must still be cut when a receipt cannot be earned.
+        try:
+            keep = set(decision["keep"])
+            post_receipts(workspace, github, registry, cosign, [pr for pr in open_prs if pr["number"] in keep], dry_run, run, outcomes)
+        except Refusal as error:
+            log(f"receipt step refused: {error}")
+            outcomes["receipt"] = "refused"
         for number in decision["supersede"]:
             supersede(github, number, "base moved or the target release changed; a fresh cut follows", dry_run)
+            outcomes[f"pull-request-{number}"] = "superseded"
         if decision["targets"] and not decision["keep"]:
             try:
-                cut_promotion(workspace, github, registry, cosign, selections, decision["targets"], dry_run)
+                with failure_decision("refuse"):
+                    number = cut_promotion(workspace, github, registry, cosign, selections, decision["targets"], dry_run)
+                outcomes["cut"] = str(number) if number else "dry-run"
             except Refusal as error:
                 log(f"promotion refused: {error}")
                 report_failure(github, decision["targets"], "cut", str(error), dry_run)
+                outcomes["cut"] = "refused"
                 return 1
             finally:
                 workspace.restore(base)
@@ -1806,6 +2510,42 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
             log("every selection is current; nothing to promote")
         return 0
     finally:
+        log(
+            f"SUMMARY tick elapsed={time.monotonic() - started:.1f}s dry-run={dry_run} "
+            + (" ".join(f"{key}={value}" for key, value in sorted(outcomes.items())) or "nothing-to-report")
+        )
+        release_lock(lock)
+
+
+def receipt_pass(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run=run_command) -> int:
+    """The receipt step on its own, for a manual run.
+
+    It reads exactly what the tick reads and judges exactly the pull requests
+    the tick would judge, under the same lock — so a manual run can never race
+    a scheduled one, and can never post a receipt the tick would not.
+    """
+
+    github = github or GitHub(run=run)
+    registry = registry or Registry()
+    lock = acquire_lock(repo / ".git" / "promoter.lock")
+    if lock is None:
+        log("another tick holds the lock; skipping")
+        return 0
+    started, outcomes = time.monotonic(), {}
+    try:
+        workspace = Workspace(repo, run)
+        workspace.refresh()
+        cosign = cosign or Cosign(run=run, pinned_version="v" + tool_pins(repo)["cosign"])
+        open_prs = open_promoter_prs(github)
+        decision = plan(status(repo, github), open_prs)
+        keep = set(decision["keep"])
+        post_receipts(workspace, github, registry, cosign, [pr for pr in open_prs if pr["number"] in keep], dry_run, run, outcomes)
+        return 0
+    finally:
+        log(
+            f"SUMMARY receipt elapsed={time.monotonic() - started:.1f}s dry-run={dry_run} "
+            + (" ".join(f"{key}={value}" for key, value in sorted(outcomes.items())) or "nothing-to-report")
+        )
         release_lock(lock)
 
 
@@ -1814,9 +2554,11 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
 # ---------------------------------------------------------------------------
 
 
-def launchd_plist(repo: str, log_path: str) -> str:
-    """The user agent that runs ``tick`` every 15 minutes. Paths are the
-    installer's arguments, never committed values."""
+def launchd_plist(repo: str, log_path: str, token_command: str = "") -> str:
+    """The user agent that runs ``tick`` on ``LAUNCHD_INTERVAL_SECONDS``.
+    Paths are the installer's arguments, never committed values; the reviewer
+    App token helper is named the same way and reaches the tick as one
+    environment variable, so no machine path is ever committed."""
 
     def escape(value: str) -> str:
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1835,7 +2577,16 @@ def launchd_plist(repo: str, log_path: str) -> str:
         "  <key>RunAtLoad</key><true/>\n"
         "  <key>EnvironmentVariables</key>\n  <dict>\n"
         "    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>\n"
-        "  </dict>\n"
+        # The reviewer App token helper reaches the tick by NAME only, and only
+        # when the installer supplies one: an agent installed without it runs
+        # every proof and posts nothing. The path is the installer's argument,
+        # exactly like the clone and the log, so none is ever committed.
+        + (
+            f"    <key>{RECEIPT_TOKEN_COMMAND_ENV}</key><string>{escape(token_command)}</string>\n"
+            if token_command
+            else ""
+        )
+        + "  </dict>\n"
         f"  <key>StandardOutPath</key><string>{escape(log_path)}</string>\n"
         f"  <key>StandardErrorPath</key><string>{escape(log_path)}</string>\n"
         "</dict>\n</plist>\n"
@@ -1853,12 +2604,14 @@ def main(argv=None) -> int:
     for name in ("status", "verify"):
         p = sub.add_parser(name)
         p.add_argument("--repo", type=Path, default=Path.cwd())
-    p = sub.add_parser("tick")
-    p.add_argument("--repo", type=Path, required=True)
-    p.add_argument("--dry-run", action="store_true")
+    for name in ("tick", "receipt"):
+        p = sub.add_parser(name)
+        p.add_argument("--repo", type=Path, required=True)
+        p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("launchd-plist")
     p.add_argument("--repo", required=True)
     p.add_argument("--log", required=True)
+    p.add_argument("--token-command", default="")
     args = parser.parse_args(argv)
     try:
         if args.mode == "status":
@@ -1877,8 +2630,10 @@ def main(argv=None) -> int:
             return 1 if problems else 0
         if args.mode == "tick":
             return tick(args.repo.resolve(), args.dry_run)
+        if args.mode == "receipt":
+            return receipt_pass(args.repo.resolve(), args.dry_run)
         if args.mode == "launchd-plist":
-            sys.stdout.write(launchd_plist(args.repo, args.log))
+            sys.stdout.write(launchd_plist(args.repo, args.log, args.token_command))
             return 0
     except Refusal as error:
         print(f"DENY: {error}", file=sys.stderr)

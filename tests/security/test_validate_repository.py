@@ -131,7 +131,8 @@ def write_site_release(
         "    platform.snaraj.dev/readiness: {readiness}\n"
         "spec:\n"
         "  suspend: {suspended}\n"
-        "  interval: 10m0s\n"
+        # Site releases reconcile every minute since issue #309.
+        "  interval: 1m0s\n"
         "  maxHistory: 2\n"
         "  releaseName: {slug}\n"
         "  serviceAccountName: helm-reconciler\n"

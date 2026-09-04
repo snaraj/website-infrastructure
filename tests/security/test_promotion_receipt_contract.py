@@ -1,0 +1,792 @@
+"""Pin the promoter's proof-based receipt for promotion pull requests (#309).
+
+The fixture is a real one: a bare ``origin`` holding a copy of the tracked
+tree, a promoter clone of it, and a genuine promotion cut with the tool's own
+``apply_promotion`` and pushed to a promoter branch — so the head under proof
+was produced by exactly the code the proof re-runs. Each mutation test changes
+ONE thing on that branch and asserts the verdict flips for that reason and no
+other, which is what keeps the three proofs from being decorative.
+
+The registry, Release and cosign answers come from
+``test_promote_releases_contract``'s byte-honest ``FakeFleet``: every digest is
+computed from the bytes it names, so a mutated digest cannot pass by accident.
+
+Also here, because they are the same commission: the tick constant and the
+runbook cadence pinned together, and both sites' Flux intervals pinned against
+the validators that assert them.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+import unittest.mock
+from pathlib import Path
+
+from .support import REPO_ROOT, load_script
+from .test_promote_releases_contract import (
+    FakeFleet,
+    OWNER_EMAIL,
+    OWNER_ID,
+    quiet_git_environment,
+    tracked_copy,
+)
+# The SAME module object the fake fleet was built against, deliberately: a
+# second `load_script` copy would define a second `Refusal` class, and the
+# receipt step's whole distinction between "this pull request is wrong" and
+# "the world is unreachable" is which exception it catches.
+from .test_promote_releases_contract import MODULE
+READY = load_script("ready_check.py", module_name="receipt_contract_ready_check")
+SIGNATURE_POLICY = load_script(
+    "validate_signature_policy.py", module_name="receipt_contract_signature_policy"
+)
+RELEASE_STATE = load_script(
+    "validate_release_state.py", module_name="receipt_contract_release_state"
+)
+RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "release-promotion.md"
+AGENTS = REPO_ROOT / "AGENTS.md"
+SITES = ("naranjo-online", "lidersea-com")
+# The helper is never run: the scripted runner answers for it. Its NAME is what
+# the contract cares about, and it carries no workstation path.
+HELPER = "/nonexistent/receipt-token-helper"
+TOKEN = "receipt-token-fixture-value-with-no-credential-shape"
+
+
+def app_comment(head: str, body: str = "") -> dict:
+    """A comment as GitHub lists it, carrying the review App's exact actor."""
+
+    return {
+        "user": {
+            "login": READY.REVIEWS_APP,
+            "id": READY.REVIEWS_APP_USER_ID,
+            "type": "Bot",
+        },
+        "performed_via_github_app": {"id": READY.REVIEWS_APP_ID},
+        "body": body or f"HEAD: {head}\nVERDICT: APPROVE\n\n- Someone (adversarial reviewer)",
+    }
+
+
+class ProofFixture:
+    """A real promoter clone, a real cut, and a scripted world around it."""
+
+    def __init__(self, case: unittest.TestCase):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.env = quiet_git_environment()
+        source = tracked_copy(base / "source")
+        self.origin = base / "origin.git"
+        self.git("clone", "-q", "--bare", str(source), str(self.origin), cwd=base)
+        self.repo = base / "repo"
+        self.git("clone", "-q", str(self.origin), str(self.repo), cwd=base)
+        self.author = base / "author"
+        self.git("clone", "-q", str(self.origin), str(self.author), cwd=base)
+
+        committed = MODULE.load_receipt(REPO_ROOT)["records"]["naranjo-online"]["chartTag"]
+        major, minor, patch = committed.split(".")
+        self.version = f"{major}.{minor}.{int(patch) + 1}"
+        self.fleet = FakeFleet(version=self.version)
+        self.fleet.gh[f"repos/{self.fleet.site}/releases/latest"] = {"tag_name": f"v{self.version}"}
+        self.fleet.gh["repos/snaraj/lidersea.com/releases/latest"] = {"tag_name": "v0.1.41"}
+        self.fleet.gh["user"] = {"login": MODULE.ASSIGNEE, "id": OWNER_ID, "name": "t"}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues?state=open&labels=delivery-lane&per_page=100"] = [
+            [{"number": 285, "title": "deploy-assurance[site-drift/naranjo-online]"}]
+        ]
+        self.comments = []
+        self.calls = []
+        self.log_lines = []
+        self._log = MODULE.log
+        MODULE.log = self.log_lines.append
+        case.addCleanup(self.close)
+
+        self.base = self.git("rev-parse", "main", cwd=self.author).strip()
+        self.branch = MODULE.branch_name(self.base, 285, {"naranjo-online": self.version})
+        self.captured = MODULE.utc_today()
+        self.head = ""
+
+    # -- lifecycle ---------------------------------------------------------
+    def close(self):
+        MODULE.log = self._log
+        self.tmp.cleanup()
+
+    def git(self, *argv, cwd=None) -> str:
+        done = subprocess.run(
+            ["git", *argv], cwd=str(cwd or self.repo), capture_output=True, text=True, check=True, env=self.env
+        )
+        return done.stdout
+
+    # -- the head under proof ---------------------------------------------
+    def cut(self, mutate=None) -> str:
+        """Produce a genuine promotion commit on the promoter branch.
+
+        ``mutate`` receives the author checkout after ``apply_promotion`` has
+        written the surface, so a test can change exactly one thing.
+        """
+
+        selections = MODULE.discover_selections(self.author)
+        acquired = {
+            "naranjo-online": MODULE.acquire(
+                selections["naranjo-online"], self.version, self.fleet.registry(), self.fleet.github(), self.fleet.cosign()
+            )
+        }
+        MODULE.apply_promotion(self.author, selections, acquired, 285, "#285", self.captured)
+        if mutate is not None:
+            mutate(self.author)
+        self.git("add", "-A", cwd=self.author)
+        self.git(
+            "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}",
+            "commit", "-q", "-m", "Promote by receipted ceremony\n\n- Promoter",
+            cwd=self.author,
+        )
+        self.head = self.git("rev-parse", "HEAD", cwd=self.author).strip()
+        self.git("push", "-q", "origin", f"HEAD:refs/heads/{self.branch}", cwd=self.author)
+        self.wire()
+        return self.head
+
+    def wire(self):
+        """Point the scripted GitHub at the branch this fixture pushed."""
+
+        pull = {
+            "number": 300,
+            "draft": True,
+            "user": {"login": MODULE.ASSIGNEE},
+            "head": {"ref": self.branch, "sha": self.head, "repo": {"full_name": MODULE.REPOSITORY}},
+            "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY}},
+            "labels": [{"name": name} for name in MODULE.PR_LABELS + MODULE.REVIEW_LABELS],
+        }
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[pull]]
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pull
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{self.head}"] = {"behind_by": 0}
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/300/comments?per_page=100"] = [self.comments]
+
+    # -- the scripted world ------------------------------------------------
+    def run(self, argv, cwd=None, input_text=None, env=None, timeout=None, quiet_output=False):
+        argv = list(argv)
+        self.calls.append({
+            "argv": tuple(argv), "env": dict(env) if env else None,
+            "timeout": timeout, "quiet": quiet_output,
+        })
+        if argv[0] == "git":
+            merged = dict(self.env)
+            merged.update(env or {})
+            return MODULE.run_command(argv, cwd=cwd, input_text=input_text, env=merged)
+        if argv[0] == HELPER:
+            return TOKEN + "\n"
+        if argv[:3] == ["gh", "pr", "comment"]:
+            body = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
+            self.comments.append(app_comment(self.head, body))
+            self.wire()
+            return "https://github.com/snaraj/website-infrastructure/pull/300#issuecomment-1\n"
+        if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
+            path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
+            self.calls[-1]["write"] = path
+            return "[]" if "/labels" in path else "{}"
+        if Path(argv[0]).name.startswith("python") or argv[0] == sys.executable:
+            # The receipt validator really runs: a composed receipt that the
+            # repository's own validator would reject must never be posted.
+            return MODULE.run_command(argv, cwd=cwd, input_text=input_text, env=env)
+        return self.fleet.run(argv, cwd=cwd, input_text=input_text, env=env)
+
+    def workspace(self):
+        space = MODULE.Workspace(self.repo, self.run)
+        space.refresh()
+        return space
+
+    def github(self):
+        return MODULE.GitHub(run=self.run, fetch=self.fleet.fetch)
+
+    def prove(self):
+        pr = MODULE.owned_pull_request(self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+        pr["behind_by"] = self.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{self.head}"].get("behind_by")
+        return MODULE.prove_promotion(self.workspace(), self.github(), self.fleet.registry(), self.fleet.cosign(), pr)
+
+    def step(self, dry_run=False, helper=HELPER):
+        pr = MODULE.owned_pull_request(self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+        pr["behind_by"] = 0
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(MODULE.RECEIPT_TOKEN_COMMAND_ENV, None)
+            if helper:
+                os.environ[MODULE.RECEIPT_TOKEN_COMMAND_ENV] = helper
+            MODULE.post_receipts(
+                self.workspace(), self.github(), self.fleet.registry(), self.fleet.cosign(), [pr], dry_run, self.run
+            )
+
+    def receipt_pass(self, dry_run=False, helper=HELPER):
+        """The whole standalone step: lock, reads, plan, proofs, summary."""
+
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(MODULE.RECEIPT_TOKEN_COMMAND_ENV, None)
+            if helper:
+                os.environ[MODULE.RECEIPT_TOKEN_COMMAND_ENV] = helper
+            return MODULE.receipt_pass(
+                self.repo, dry_run, registry=self.fleet.registry(), github=self.github(),
+                cosign=self.fleet.cosign(), run=self.run,
+            )
+
+    def posted(self):
+        return [call for call in self.calls if call["argv"][:3] == ("gh", "pr", "comment")]
+
+    def writes(self):
+        return [call for call in self.calls if "write" in call]
+
+    def worktrees(self):
+        listing = self.git("worktree", "list", "--porcelain")
+        return [line for line in listing.splitlines() if line.startswith("worktree ")]
+
+
+class HonestHeadTests(unittest.TestCase):
+    """An untouched promoter cut earns an APPROVE, and the receipt is real."""
+
+    def setUp(self):
+        self.fixture = ProofFixture(self)
+        self.head = self.fixture.cut()
+
+    def test_an_untouched_cut_is_approved_and_the_receipt_validates(self):
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "APPROVE")
+        self.assertIsNone(
+            MODULE.RECEIPTS.denial(body, self.head, "pull-request"),
+            "the composed receipt must satisfy the repository's own validator",
+        )
+        self.assertLessEqual(len(body.encode("utf-8")), MODULE.RECEIPTS.RECEIPT_BYTE_CEILING)
+        self.assertTrue(body.startswith(f"HEAD: {self.head}\nVERDICT: APPROVE\n"))
+        self.assertEqual(body.strip().splitlines()[-1], MODULE.RECEIPT_SIGNATURE)
+        # The figures are the re-derived ones, not values read from the head.
+        record = self.fixture.fleet.expected_record()
+        for figure in (
+            record["manifestDigest"], record["chartConfigDigest"], record["chartLayerDigest"],
+            record["arm64Digest"], record["release"]["assetDigest"], record["release"]["sourceSha"],
+        ):
+            self.assertIn(figure, body)
+        self.assertIn(f"releases/tag/v{self.fixture.version}", body)
+        self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
+        for required in ("Confinement", "Re-derivation", "Novelty", "NO TOOL FLIPS READY"):
+            self.assertIn(required, body)
+
+    def test_a_two_workload_receipt_still_fits_the_contract_ceiling(self):
+        # A promotion can move both sites at once; the ceiling is enforced by
+        # the validator, so a receipt that outgrows it would be refused rather
+        # than posted. Compose the widest realistic shape and prove it fits.
+        verdict, _ = self.fixture.prove()
+        self.assertEqual(verdict, "APPROVE")
+        selection = MODULE.discover_selections(REPO_ROOT)["naranjo-online"]
+        statement = MODULE.workload_statement(selection, self.fixture.fleet.expected_record())
+        surface = [f"some/directory/with/a/long/name/file-{n}.py" for n in range(13)]
+        widest = MODULE.approve_receipt(self.head, self.head, surface, [statement, statement], "2026-09-04")
+        self.assertIsNone(MODULE.RECEIPTS.denial(widest, self.head, "pull-request"))
+        self.assertLess(len(widest.encode("utf-8")), MODULE.RECEIPTS.RECEIPT_BYTE_CEILING)
+
+    def test_the_cli_exposes_the_receipt_step_and_the_step_runs_under_the_lock(self):
+        output = subprocess.run(
+            [sys.executable, "-B", str(REPO_ROOT / "scripts" / "promote_releases.py"), "--help"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("receipt", output)
+        held = MODULE.acquire_lock(self.fixture.repo / ".git" / "promoter.lock")
+        self.assertIsNotNone(held)
+        self.assertEqual(MODULE.receipt_pass(self.fixture.repo, True, run=self.fixture.run), 0)
+        self.assertTrue(any("another tick holds the lock" in line for line in self.fixture.log_lines))
+        MODULE.release_lock(held)
+
+    def test_the_scratch_worktree_is_removed_on_every_exit(self):
+        before = self.fixture.worktrees()
+        self.fixture.prove()
+        self.assertEqual(self.fixture.worktrees(), before, "a proof must leave no worktree behind")
+        workspace = self.fixture.workspace()
+        with self.assertRaises(ZeroDivisionError):
+            with MODULE.scratch_worktree(workspace, self.fixture.base):
+                raise ZeroDivisionError("the body failed")
+        self.assertEqual(self.fixture.worktrees(), before, "a failed proof must leave no worktree behind")
+
+
+class MutationTests(unittest.TestCase):
+    """Each proof fails on exactly its own mutation."""
+
+    def setUp(self):
+        self.fixture = ProofFixture(self)
+
+    def test_an_extra_file_in_the_diff_fails_confinement_only(self):
+        def mutate(root):
+            (root / "docs" / "assurance" / "smuggled-note.md").write_text("extra\n", encoding="utf-8")
+
+        head = self.fixture.cut(mutate)
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Confinement failed", body)
+        self.assertIn("docs/assurance/smuggled-note.md", body)
+        self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+
+    def test_a_changed_digest_line_fails_re_derivation(self):
+        def mutate(root):
+            path = root / "kubernetes" / "websites" / "naranjo-online" / "source.yaml"
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("sha256:", "sha256:" + "0", 1), encoding="utf-8")
+
+        head = self.fixture.cut(mutate)
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Re-derivation failed", body)
+        self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
+        self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+
+    def test_a_mutated_committed_receipt_digest_fails_re_derivation(self):
+        def mutate(root):
+            path = root / MODULE.RECEIPT_JSON
+            document = json.loads(path.read_text(encoding="utf-8"))
+            record = document["records"]["naranjo-online"]
+            record["release"]["assetDigest"] = "sha256:" + "b" * 64
+            path.write_text(MODULE.render_receipt_json(document), encoding="utf-8")
+
+        head = self.fixture.cut(mutate)
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Re-derivation failed", body)
+        self.assertIn(MODULE.RECEIPT_JSON.as_posix(), body)
+        self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+
+    def test_a_forged_capture_date_fails_re_derivation(self):
+        def mutate(root):
+            path = root / MODULE.RECEIPT_JSON
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["capturedDate"] = "2019-01-01"
+            path.write_text(MODULE.render_receipt_json(document), encoding="utf-8")
+
+        head = self.fixture.cut(mutate)
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Re-derivation failed", body)
+        self.assertIn("2019-01-01", body)
+        self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+
+    def test_an_unreadable_committed_receipt_is_a_named_refusal_not_a_traceback(self):
+        # The head's receipt file is untrusted bytes; malformed JSON must reach
+        # the verdict as a refusal with a name, never as an exception that
+        # escapes the tick's handlers.
+        def mutate(root):
+            (root / MODULE.RECEIPT_JSON).write_text("{ not json", encoding="utf-8")
+
+        head = self.fixture.cut(mutate)
+        verdict, body = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("is unreadable", body)
+        self.assertIsNone(MODULE.RECEIPTS.denial(body, head, "pull-request"))
+
+    def test_an_existing_app_receipt_at_this_head_yields_nothing(self):
+        head = self.fixture.cut()
+        self.fixture.comments.append(app_comment(head))
+        self.fixture.wire()
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("a receipt already binds" in line for line in self.fixture.log_lines))
+        # A receipt at ANOTHER head, and a lookalike from a non-App actor, are
+        # both invisible: novelty binds the exact head AND the App's actor.
+        self.fixture.comments[:] = [app_comment("f" * 40)]
+        outsider = app_comment(head)
+        outsider["user"] = {"login": "mallory", "id": 4242, "type": "User"}
+        self.fixture.comments.append(outsider)
+        self.fixture.wire()
+        self.assertEqual(self.fixture.prove()[0], "APPROVE")
+
+    def test_a_stale_base_yields_nothing(self):
+        head = self.fixture.cut()
+        self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {"behind_by": 4}
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("behind main" in line for line in self.fixture.log_lines))
+        self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{head}"] = {}
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("base freshness is unknown" in line for line in self.fixture.log_lines))
+
+    def test_a_registry_error_is_a_skip_not_a_verdict(self):
+        self.fixture.cut()
+        del self.fixture.fleet.manifest_answers[
+            (self.fixture.fleet.chart_repo, self.fixture.version, MODULE.OCI_MANIFEST)
+        ]
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(
+            any(line.startswith("PROOF re-derivation ") and "skipped: could not complete" in line
+                for line in self.fixture.log_lines),
+            self.fixture.log_lines,
+        )
+
+    def test_a_ceremony_refusal_is_a_skip_not_a_verdict(self):
+        self.fixture.cut()
+        self.fixture.fleet.gh[f"repos/{self.fixture.fleet.site}/releases/tags/v{self.fixture.version}"]["immutable"] = False
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("not an immutable final release" in line for line in self.fixture.log_lines))
+
+    def test_a_request_changes_posts_and_leaves_review_attention_armed(self):
+        def mutate(root):
+            (root / "README.md").write_text(
+                (root / "README.md").read_text(encoding="utf-8") + "\nsmuggled\n", encoding="utf-8"
+            )
+
+        self.fixture.cut(mutate)
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1)
+        self.assertIn("VERDICT: REQUEST-CHANGES", self.fixture.comments[-1]["body"])
+        self.assertEqual(
+            [call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")],
+            [],
+            "a REQUEST-CHANGES leaves the review-attention label armed",
+        )
+
+    def test_a_head_that_the_branch_does_not_carry_is_never_judged(self):
+        head = self.fixture.cut()
+        pull = self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"]
+        pull["head"] = dict(pull["head"], sha="c" * 40)
+        self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/compare/main...{'c' * 40}"] = {"behind_by": 0}
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("does not point at the head" in line for line in self.fixture.log_lines))
+        self.assertNotEqual(head, "c" * 40)
+
+
+class PostingTests(unittest.TestCase):
+    """The posting path: the App, the token, and the label."""
+
+    def setUp(self):
+        self.fixture = ProofFixture(self)
+        self.head = self.fixture.cut()
+
+    def test_an_approve_posts_as_the_app_and_retires_review_attention(self):
+        self.fixture.step()
+        posts = self.fixture.posted()
+        self.assertEqual(len(posts), 1)
+        argv = posts[0]["argv"]
+        self.assertEqual(argv[:5], ("gh", "pr", "comment", "300", "--repo"))
+        self.assertIn("--body-file", argv)
+        body = self.fixture.comments[-1]["body"]
+        self.assertIn(f"HEAD: {self.head}", body)
+        self.assertIn("VERDICT: APPROVE", body)
+        deletes = [call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")]
+        self.assertEqual(len(deletes), 1)
+        self.assertIn("DELETE", deletes[0]["argv"])
+
+    def test_the_token_reaches_exactly_one_subprocess_and_only_through_its_environment(self):
+        self.fixture.step()
+        carrying = [call for call in self.fixture.calls if (call["env"] or {}).get("GH_TOKEN") == TOKEN]
+        self.assertEqual(len(carrying), 1, "exactly one command may hold the token")
+        self.assertEqual(carrying[0]["argv"][:3], ("gh", "pr", "comment"))
+        for call in self.fixture.calls:
+            self.assertNotIn(TOKEN, " ".join(call["argv"]), "the token is never an argument")
+            if call["argv"][:3] != ("gh", "pr", "comment"):
+                self.assertNotEqual((call["env"] or {}).get("GH_TOKEN"), TOKEN)
+        for line in self.fixture.log_lines:
+            self.assertNotIn(TOKEN, line, "the token is never logged")
+        self.assertFalse(
+            (self.fixture.repo / ".git" / "promoter-receipt.md").exists(),
+            "the composed receipt file is removed after posting",
+        )
+
+    def test_an_unconfigured_helper_composes_and_posts_nothing(self):
+        self.fixture.step(helper="")
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertEqual(self.fixture.writes(), [])
+        self.assertTrue(any("receipt posting not configured" in line for line in self.fixture.log_lines))
+
+    def test_a_dry_run_proves_and_validates_but_posts_nothing(self):
+        self.fixture.step(dry_run=True)
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertEqual(self.fixture.writes(), [])
+        self.assertTrue(any("WOULD post a validated receipt" in line for line in self.fixture.log_lines))
+
+    def test_a_head_that_moves_between_proof_and_post_aborts(self):
+        original = self.fixture.wire
+
+        def move_head_on_live_read():
+            original()
+            pull = dict(self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+            pull["head"] = dict(pull["head"], sha="d" * 40)
+            self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pull
+
+        pr = MODULE.owned_pull_request(self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+        pr["behind_by"] = 0
+        workspace = self.fixture.workspace()
+        judged = MODULE.prove_promotion(workspace, self.fixture.github(), self.fixture.fleet.registry(), self.fixture.fleet.cosign(), pr)
+        move_head_on_live_read()
+        posted = MODULE.post_receipt(
+            workspace, self.fixture.github(), self.fixture.run, HELPER, 300, self.head, judged[1], False
+        )
+        self.assertFalse(posted)
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertTrue(any("head moved between proof and post" in line for line in self.fixture.log_lines))
+
+    def test_a_receipt_the_validator_rejects_is_never_posted(self):
+        workspace = self.fixture.workspace()
+        with self.assertRaises(MODULE.Refusal):
+            MODULE.post_receipt(
+                workspace, self.fixture.github(), self.fixture.run, HELPER, 300, self.head,
+                "HEAD: " + self.head + "\nVERDICT: MAYBE\n\n- Promoter (adversarial reviewer)\n", False,
+            )
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertFalse((self.fixture.repo / ".git" / "promoter-receipt.md").exists())
+
+class CallTracingTests(unittest.TestCase):
+    """Owner direction 2026-09-04, after a `cosign verify` held the full
+    600-second command bound and left one line ten minutes later: every long
+    call announces itself with its budget and reports what it cost, cosign is
+    bounded short with one retry, and each tick ends in one summary line."""
+
+    def setUp(self):
+        self.fixture = ProofFixture(self)
+
+    def test_cosign_is_bounded_short_and_retried_exactly_once(self):
+        self.assertEqual((MODULE.COSIGN_TIMEOUT_SECONDS, MODULE.COSIGN_ATTEMPTS), (120, 2))
+        self.assertLess(MODULE.COSIGN_TIMEOUT_SECONDS, MODULE.COMMAND_TIMEOUT_SECONDS)
+        stalls = []
+
+        def stalling(argv, cwd=None, input_text=None, env=None, timeout=None, quiet_output=False):
+            if argv[:2] == ["cosign", "verify"]:
+                stalls.append(timeout)
+                raise MODULE.Refusal(f"`cosign verify` exceeded {timeout}s and its process group was killed")
+            return self.fixture.fleet.run(argv, cwd=cwd, input_text=input_text, env=env, timeout=timeout)
+
+        cosign = MODULE.Cosign(run=stalling, pinned_version="v3.1.3")
+        with self.assertRaisesRegex(MODULE.Refusal, "exceeded 120s"):
+            cosign.verify_chart("ghcr.io/snaraj/charts/naranjo-online", "sha256:" + "a" * 64, "subject")
+        self.assertEqual(stalls, [MODULE.COSIGN_TIMEOUT_SECONDS] * MODULE.COSIGN_ATTEMPTS,
+                         "each attempt carries the short budget, and there are exactly two")
+        lines = self.fixture.log_lines
+        self.assertTrue(any("START cosign-verify-chart" in line and "attempt=1/2" in line and "budget=120s" in line for line in lines), lines)
+        self.assertTrue(any("FAILED decision=retry" in line and "attempt=1/2" in line for line in lines), lines)
+        self.assertTrue(any("FAILED decision=refuse" in line and "attempt=2/2" in line for line in lines), lines)
+        # A recovering second attempt is a logged retry, not a refusal.
+        self.fixture.log_lines.clear()
+        attempts = []
+
+        def flaky(argv, cwd=None, input_text=None, env=None, timeout=None, quiet_output=False):
+            if argv[:2] == ["cosign", "verify"]:
+                attempts.append(argv)
+                if len(attempts) == 1:
+                    raise MODULE.Refusal("`cosign verify` exceeded 120s and its process group was killed")
+            return self.fixture.fleet.run(argv, cwd=cwd, input_text=input_text, env=env, timeout=timeout)
+
+        MODULE.Cosign(run=flaky, pinned_version="v3.1.3").verify_chart(
+            self.fixture.fleet.chart_repo, self.fixture.fleet.manifest_digest, "subject"
+        )
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(any("FAILED decision=retry" in line for line in self.fixture.log_lines))
+        self.assertTrue(any("DONE cosign-verify-chart" in line and line.endswith("OK") for line in self.fixture.log_lines))
+
+    def test_run_command_really_enforces_the_budget_it_is_given(self):
+        # The budget is only a claim until a subprocess is actually killed by
+        # it; this is the one test that proves the number reaches the kernel.
+        with self.assertRaisesRegex(MODULE.Refusal, r"exceeded 1s and its process group was killed"):
+            MODULE.run_command(["sh", "-c", "sleep 30"], timeout=1)
+
+    def test_a_credential_bearing_command_never_has_its_output_recorded(self):
+        # `quiet_output` exists for one call whose STDOUT IS THE CREDENTIAL.
+        with self.assertRaisesRegex(MODULE.Refusal, "deliberately not recorded"):
+            MODULE.run_command(["sh", "-c", "echo super-secret-token-value; exit 3"], quiet_output=True)
+        for line in self.fixture.log_lines:
+            self.assertNotIn("super-secret-token-value", line)
+        # Without it the ordinary path DOES quote the failed command's output,
+        # which is exactly why the flag is load-bearing rather than cosmetic.
+        with self.assertRaises(MODULE.Refusal):
+            MODULE.run_command(["sh", "-c", "echo ordinary-diagnostic; exit 3"])
+        self.assertTrue(any("ordinary-diagnostic" in line for line in self.fixture.log_lines))
+
+    def test_one_pass_traces_every_long_call_and_ends_in_one_summary(self):
+        self.fixture.cut()
+        self.assertEqual(self.fixture.receipt_pass(), 0)
+        # `MODULE.log` is captured before it stamps, so these are the messages
+        # themselves; the runbook's line shapes are these plus the timestamp.
+        lines = self.fixture.log_lines
+        starts = [line for line in lines if line.startswith("START ")]
+        dones = [line for line in lines if line.startswith("DONE ")]
+        self.assertEqual(len(starts), len(dones), "every START is answered by exactly one DONE")
+        for kind in ("registry-token", "registry-manifest", "registry-blob",
+                     "cosign-verify-chart", "cosign-verify-provenance", "github-api",
+                     "github-list", "release-asset", "git-fetch", "receipt-token",
+                     "receipt-post"):
+            named = [line for line in starts if line.startswith(f"START {kind} ")]
+            self.assertTrue(named, (kind, starts))
+            for line in named:
+                self.assertRegex(line, r" budget=\d+s$")
+        for line in dones:
+            self.assertRegex(line, r"elapsed=\d+\.\d+s (OK$|FAILED decision=\S+ reason=)")
+        for proof, outcome in (("novelty", "held"), ("confinement", "held"), ("re-derivation", "held")):
+            self.assertTrue(
+                any(line.startswith(f"PROOF {proof} ") and f" {outcome}" in line and "elapsed=" in line for line in lines),
+                (proof, lines),
+            )
+        # The summary is one line, and it names this pull request's outcome.
+        summaries = [line for line in lines if line.startswith("SUMMARY ")]
+        self.assertEqual(len(summaries), 1, summaries)
+        self.assertIn("receipt-300=posted:APPROVE", summaries[0])
+        self.assertRegex(summaries[0], r"^SUMMARY receipt elapsed=\d+\.\d+s dry-run=False ")
+
+    def test_no_secret_reaches_any_logged_line(self):
+        self.fixture.cut()
+        self.fixture.receipt_pass()
+        for line in self.fixture.log_lines:
+            self.assertNotIn(TOKEN, line)
+            self.assertNotIn("GH_TOKEN", line)
+            self.assertNotIn("Authorization", line)
+            self.assertNotIn("Bearer ", line)
+            self.assertNotIn("anonymous-pull", line, "the registry pull token is a credential too")
+
+    def test_a_failed_call_names_the_decision_its_caller_would_take(self):
+        # The same failure costs a cut everything and a receipt one tick; the
+        # line says which, so nobody has to correlate two lines to find out.
+        self.fixture.cut()
+        with MODULE.failure_decision("skip-this-tick"), self.assertRaises(MODULE.Refusal):
+            with MODULE.timed_call("registry-manifest", "example:1", 60):
+                raise MODULE.Refusal("registry unreachable")
+        self.assertTrue(any("decision=skip-this-tick" in line and "reason=registry unreachable" in line
+                            for line in self.fixture.log_lines))
+        self.fixture.log_lines.clear()
+        with self.assertRaises(MODULE.Refusal):
+            with MODULE.timed_call("registry-manifest", "example:1", 60):
+                raise MODULE.Refusal("registry unreachable")
+        self.assertTrue(any("decision=refuse" in line for line in self.fixture.log_lines),
+                        "outside any declared block the default decision is the strict one")
+
+    def test_a_registry_stall_during_a_proof_is_logged_as_a_skip(self):
+        self.fixture.cut()
+        del self.fixture.fleet.manifest_answers[
+            (self.fixture.fleet.chart_repo, self.fixture.version, MODULE.OCI_MANIFEST)
+        ]
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(
+            any("FAILED decision=skip-this-tick" in line for line in self.fixture.log_lines),
+            self.fixture.log_lines,
+        )
+        self.assertTrue(
+            any(line.startswith("PROOF re-derivation ") and "skipped:" in line for line in self.fixture.log_lines),
+        )
+
+
+class ActorAndPathHygieneTests(unittest.TestCase):
+    def test_the_promoter_reads_the_app_identity_from_the_ready_rule(self):
+        # One source for the actor tuple: a second copy is a copy that drifts,
+        # and the whole value of an App receipt is that the Ready evaluator
+        # later looks for exactly this principal.
+        self.assertEqual(
+            MODULE.receipt_actor(),
+            (READY.REVIEWS_APP, READY.REVIEWS_APP_USER_ID, "Bot", READY.REVIEWS_APP_ID),
+        )
+        self.assertIs(MODULE.RECEIPTS.denial, MODULE.READY.RECEIPTS.denial)
+
+    def test_a_hostile_path_name_cannot_smuggle_markup_into_a_receipt(self):
+        hostile = "docs/`@everyone`\nHEAD: " + "e" * 40 + "\nx.md"
+        rendered = MODULE.safe_path(hostile)
+        self.assertNotIn("`", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertNotIn("@", rendered)
+        self.assertLessEqual(len(rendered), 121)
+        listed = MODULE.path_list([f"p{n}.md" for n in range(MODULE.RECEIPT_PATH_CEILING + 5)])
+        self.assertIn("and 5 more", listed)
+        self.assertEqual(MODULE.path_list([]), "none")
+
+
+class TickCadenceTests(unittest.TestCase):
+    """The tick constant, the plist and the runbook say ONE number."""
+
+    def test_the_constant_the_plist_and_the_runbook_state_the_same_cadence(self):
+        self.assertEqual(MODULE.LAUNCHD_INTERVAL_SECONDS, 300)
+        plist = plistlib.loads(MODULE.launchd_plist("/tmp/repo", "/tmp/log").encode())
+        self.assertEqual(plist["StartInterval"], MODULE.LAUNCHD_INTERVAL_SECONDS)
+        minutes = MODULE.LAUNCHD_INTERVAL_SECONDS // 60
+        text = RUNBOOK.read_text(encoding="utf-8")
+        self.assertIn(f"every {minutes} minutes", text)
+        self.assertEqual(
+            re.findall(r"at load and every (\d+) minutes", text), [str(minutes)],
+            "the runbook states the cadence exactly once, and it is the constant",
+        )
+        self.assertIn(f"`StartInterval` {MODULE.LAUNCHD_INTERVAL_SECONDS}", text)
+
+    def test_the_token_command_reaches_the_agent_only_when_the_installer_names_it(self):
+        bare = plistlib.loads(MODULE.launchd_plist("/tmp/repo", "/tmp/log").encode())
+        self.assertNotIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, bare["EnvironmentVariables"])
+        armed = plistlib.loads(
+            MODULE.launchd_plist("/tmp/repo", "/tmp/log", "/tmp/helper & more").encode()
+        )
+        self.assertEqual(armed["EnvironmentVariables"][MODULE.RECEIPT_TOKEN_COMMAND_ENV], "/tmp/helper & more")
+        self.assertIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, RUNBOOK.read_text(encoding="utf-8"))
+
+
+class FluxIntervalTests(unittest.TestCase):
+    """Both sites reconcile at one minute, and every pin says so."""
+
+    def test_both_sites_pin_one_minute_on_both_objects(self):
+        for slug in SITES:
+            for name in ("source.yaml", "release.yaml"):
+                path = REPO_ROOT / "kubernetes" / "websites" / slug / name
+                body = [
+                    line for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("  interval:")
+                ]
+                self.assertEqual(body, ["  interval: 1m0s"], f"{slug}/{name}")
+
+    def test_the_validators_pin_the_same_bound(self):
+        self.assertEqual(SIGNATURE_POLICY.CHART_SOURCE_INTERVAL, "1m0s")
+        for slug in SITES:
+            self.assertIn(
+                "  interval: 1m0s\n", SIGNATURE_POLICY.expected_chart_source_body(slug)
+            )
+            self.assertEqual(RELEASE_STATE.RELEASE_CONTRACTS[slug]["interval"], "1m0s")
+        # The suspended connector is untouched: the shorter bound is the SITES'.
+        self.assertEqual(RELEASE_STATE.RELEASE_CONTRACTS["cloudflare-public"]["interval"], "10m0s")
+
+    def test_a_widened_interval_is_denied_by_the_signature_validator(self):
+        path = REPO_ROOT / "kubernetes" / "websites" / "naranjo-online" / "source.yaml"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(SIGNATURE_POLICY.chart_source_errors(text, "naranjo-online"), [])
+        widened = text.replace("  interval: 1m0s\n", "  interval: 10m0s\n", 1)
+        self.assertNotEqual(widened, text)
+        self.assertTrue(SIGNATURE_POLICY.chart_source_errors(widened, "naranjo-online"))
+
+    def test_no_flux_receiver_or_webhook_is_introduced(self):
+        # The loop was shortened by polling, deliberately: a Receiver would add
+        # an inbound path, a shared secret and a new object (issue #309).
+        for path in sorted((REPO_ROOT / "kubernetes").rglob("*.yaml")):
+            self.assertNotIn(
+                "kind: Receiver", path.read_text(encoding="utf-8"), f"{path} introduces a Flux Receiver"
+            )
+
+
+class ContractTextTests(unittest.TestCase):
+    def test_agents_states_the_earned_receipt_and_keeps_the_ready_rule_verbatim(self):
+        text = AGENTS.read_text(encoding="utf-8")
+        self.assertIn("NO TOOL FLIPS READY, promoter included", text)
+        self.assertIn("A promotion pull request's receipt is EARNED, not requested", text)
+        self.assertIn("the security lane reviews every change to\n  the promoter's CODE", text)
+        # The promoter's paragraph and the tool must name the same label set.
+        for label in MODULE.PR_LABELS:
+            self.assertIn(f"`{label}`", text)
+        self.assertNotIn("and arm `requires-review` and\n  `cybersecurity-review-requested`", text)
+
+    def test_the_runbook_lists_every_traced_call_shape(self):
+        text = RUNBOOK.read_text(encoding="utf-8")
+        self.assertIn("### Reading the log", text)
+        # Every kind the tool can emit is documented, and the documented budget
+        # is the constant: a new traced call with no runbook line is a red test.
+        for kind in ("registry-token", "registry-manifest", "registry-blob",
+                     "release-asset", "cosign-verify-chart", "cosign-verify-provenance",
+                     "github-api", "github-list", "github-write", "github-command",
+                     "git-fetch", "git-push", "gate", "receipt-token", "receipt-post"):
+            self.assertIn(f"`{kind}`", text, kind)
+        flowed = " ".join(text.split())
+        self.assertIn(
+            f"bounded at {MODULE.COSIGN_TIMEOUT_SECONDS} seconds per attempt with exactly one retry",
+            flowed,
+            "the runbook states cosign's budget, and it is the constant",
+        )
+        for decision in ("retry", "refuse", "skip-this-tick"):
+            self.assertIn(decision, text)
+
+    def test_the_runbook_documents_what_is_proven_and_what_is_not_automated(self):
+        text = RUNBOOK.read_text(encoding="utf-8")
+        self.assertIn("## Receipts by proof", text)
+        self.assertIn("**What is NOT automated.** Ready and merge.", text)
+        self.assertIn("interval: 1m0s", text.replace("`interval: 1m0s`", "interval: 1m0s"))
+        self.assertIn("no Flux `Receiver`", text)
+        self.assertIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, text)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()
