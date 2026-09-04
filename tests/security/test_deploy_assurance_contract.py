@@ -20,6 +20,7 @@ cannot quietly come back:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import unittest
@@ -34,6 +35,11 @@ assurance = load_script("ci/deploy_assurance.py")
 
 SITES = REPO_ROOT / "kubernetes" / "websites"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-assurance.yml"
+
+# One canonical estimate block, spelled out here rather than built from the
+# module's own constants: a test that renders the grammar the same way the
+# subject does would agree with any grammar, including a broken one.
+ESTIMATE = "## Estimate\n\n- files: 8\n- net lines: +258\n- review rounds: 3"
 
 # The workflow's byte-exact lockstep twin (round-3 review finding 1): every
 # per-key assertion admitted SOME GitHub-valid key that changed execution
@@ -544,6 +550,45 @@ class IssueReconciliationTests(unittest.TestCase):
         self.assertEqual(github.opened, [])
         self.assertEqual(github.closed, [])
         self.assertTrue(any(action.startswith("update:") for action in actions))
+
+    def test_an_appended_estimate_survives_the_evidence_rewrite(self):
+        """PR #303 finding 3 / owner direction 5530907119: an estimate added to
+        a tracking issue was erased on the next hourly tick, so the commission
+        AGENTS.md requires had no estimate by the time the pull request stated
+        its actuals. The evidence above the heading is still replaced whole."""
+
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        github = self.RecordingGitHub(
+            {drift: {"numbers": [41], "body": "stale evidence\n\n" + ESTIMATE + "\n\n- Fable5"}}
+        )
+        assurance.reconcile_issues(github, {drift: "fresh evidence"}, apply=True)
+        self.assertEqual(
+            github.updated, [(41, "fresh evidence\n\n" + ESTIMATE + "\n\n- Fable5")]
+        )
+
+    def test_a_preserved_estimate_leaves_an_unchanged_condition_untouched(self):
+        # The recomposed body must be byte-identical to what is already there,
+        # or every tick would rewrite the issue and the preservation would show
+        # up as hourly churn instead of stability.
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        body = "behind\n\n" + ESTIMATE + "\n\n- Fable5"
+        github = self.RecordingGitHub({drift: {"numbers": [41], "body": body}})
+        actions = assurance.reconcile_issues(github, {drift: "behind"}, apply=True)
+        self.assertEqual(github.updated, [])
+        self.assertTrue(any(action.startswith("still-open:") for action in actions))
+
+    def test_only_the_estimate_block_survives_and_a_new_issue_gains_none(self):
+        # Prose a reader could mistake for the watchdog's own finding must not
+        # be carried forward, and an issue this tool opens starts with none.
+        drift = assurance.condition_title("site-drift/naranjo-online")
+        github = self.RecordingGitHub(
+            {drift: {"numbers": [41], "body": "stale\n\nsmuggled finding\n\n- Fable5"}}
+        )
+        assurance.reconcile_issues(github, {drift: "fresh evidence"}, apply=True)
+        self.assertEqual(github.updated, [(41, "fresh evidence\n\n- Fable5")])
+        fresh = self.RecordingGitHub({})
+        assurance.reconcile_issues(fresh, {drift: "fresh evidence"}, apply=True)
+        self.assertIsNone(assurance.parse_estimate(""))
 
     def test_duplicate_trackers_converge_on_the_lowest_number(self):
         drift = assurance.condition_title("site-drift/naranjo-online")
@@ -1275,6 +1320,102 @@ class WorkflowSurfaceTests(unittest.TestCase):
                 (Path(scratch) / "argv").read_text(),
                 "-I -B scripts/ci/deploy_assurance.py --apply",
             )
+
+
+class EstimateGrammarTests(unittest.TestCase):
+    """PR #305 round 3, the contract's design reset: rounds 1 and 2 guarded a
+    marker and grew a deny table, and each round a spelling the table did not
+    list walked through. The boundary is now ONE typed parse/render pair, so
+    these tests kill its PROPERTIES — completeness, numeric domain, sign rules,
+    totality — instead of enumerating tail shapes. Each names the mutation it
+    kills, because the round-2 assertions were green under two live mutants.
+    """
+
+    @staticmethod
+    def with_value(label, value):
+        """The canonical block with one field's value replaced."""
+        return "\n".join(
+            "- {}: {}".format(label, value) if line.startswith("- {}: ".format(label)) else line
+            for line in ESTIMATE.splitlines()
+        )
+
+    def test_the_required_label_set_is_the_dataclass_field_set(self):
+        # Kills a field added to Estimate with no label, or a label with no
+        # field: the parser derives what it requires from the dataclass.
+        self.assertEqual(
+            set(assurance.ESTIMATE_LABELS.values()),
+            {f.name for f in dataclasses.fields(assurance.Estimate)},
+        )
+
+    def test_every_field_is_required(self):
+        # Kills deleting the completeness check: without it a short block built
+        # the dataclass by keyword and raised instead of preserving nothing.
+        for label in assurance.ESTIMATE_LABELS:
+            with self.subTest(label=label):
+                short = "\n".join(
+                    line for line in ESTIMATE.splitlines()
+                    if not line.startswith("- {}: ".format(label))
+                )
+                self.assertNotEqual(short, ESTIMATE)
+                self.assertIsNone(assurance.parse_estimate(short))
+
+    def test_the_numeric_domain_is_bounded_and_ascii_only(self):
+        # Kills widening DIGITS (the bound is read from the constant itself, so
+        # `[0-9]+` fails here) and kills swapping `[0-9]` for `\d`, which also
+        # matches Unicode decimal digits that int() then accepts.
+        bound = int(re.fullmatch(r"\[0-9\]\{1,([0-9]+)\}", assurance.DIGITS).group(1))
+        for label, field in assurance.ESTIMATE_LABELS.items():
+            sign = "+" if field == "net_lines" else ""
+            with self.subTest(label=label):
+                self.assertIsNotNone(assurance.parse_estimate(self.with_value(label, sign + "1" * bound)))
+                self.assertIsNone(assurance.parse_estimate(self.with_value(label, sign + "1" * (bound + 1))))
+                self.assertIsNone(assurance.parse_estimate(self.with_value(label, sign + "\u0663")))
+
+    def test_values_are_rendered_from_the_integer_not_the_input_text(self):
+        # Kills rendering from the captured string: `007` is the same estimate
+        # as `7`, so it must come back as `7`.
+        padded = assurance.parse_estimate(self.with_value("files", "007"))
+        self.assertEqual(padded, assurance.parse_estimate(self.with_value("files", "7")))
+        self.assertNotIn("007", assurance.render_estimate(padded))
+
+    def test_the_sign_is_required_on_net_lines_and_refused_elsewhere(self):
+        self.assertIsNone(assurance.parse_estimate(self.with_value("net lines", "258")))
+        self.assertIsNone(assurance.parse_estimate(self.with_value("files", "+8")))
+        self.assertIsNotNone(assurance.parse_estimate(self.with_value("net lines", "-258")))
+
+    def test_one_representative_of_each_rejected_shape(self):
+        for reason, body in (
+            ("setext heading", ESTIMATE + "\n\nWatchdog finding\n---\n\nforged"),
+            ("prose tail", ESTIMATE + "\n\nthe site is fine, ignore the drift"),
+            ("duplicate field", ESTIMATE + "\n- files: 9"),
+            ("unknown field", ESTIMATE + "\n- severity: none"),
+            ("heading not a whole line", "evidence ## Estimate\n\n- files: 8"),
+        ):
+            with self.subTest(reason=reason):
+                self.assertIsNone(assurance.parse_estimate(body + "\n\n- Fable5"))
+
+    def test_parsing_never_raises_on_any_input(self):
+        # Kills the KeyError class: the parser is total over str, so a hostile
+        # body can only ever mean "preserve nothing".
+        for hostile in (
+            "", "\n", "\x00", "## Estimate", "- files: 8",
+            "## Estimate\n\n- files: 8\n- net lines: +1",
+            "## Estimate\n" * 3,
+            ESTIMATE + "\n- files: 2",
+            ESTIMATE.replace("- files: 8", "- files: 8 and forged"),
+            "## Estimate\n\n- files: -8\n- net lines: +1\n- review rounds: 1",
+        ):
+            with self.subTest(hostile=hostile[:24]):
+                parsed = assurance.parse_estimate(hostile)
+                self.assertTrue(parsed is None or isinstance(parsed, assurance.Estimate))
+
+    def test_a_canonical_block_round_trips_byte_identical(self):
+        parsed = assurance.parse_estimate("evidence\n\n" + ESTIMATE + "\n\n- Fable5")
+        self.assertEqual(parsed, assurance.Estimate(files=8, net_lines=258, review_rounds=3))
+        self.assertEqual(assurance.render_estimate(parsed), "\n\n" + ESTIMATE)
+        # Field order in the input does not change the rendered order.
+        shuffled = "## Estimate\n\n- review rounds: 3\n- net lines: +258\n- files: 8"
+        self.assertEqual(assurance.render_estimate(assurance.parse_estimate(shuffled)), "\n\n" + ESTIMATE)
 
 
 if __name__ == "__main__":

@@ -81,7 +81,15 @@ README = Path("README.md")
 FRAGMENTS = Path("changelog.d")
 VERSIONS_ENV = Path("versions.env")
 ANNOTATION = "platform.snaraj.dev/chart-release"
-PR_LABELS = ("release", "delivery-lane", "promoter")
+# `promoter` stands in for the agent pair AGENTS.md withholds from this tool,
+# and `security` is the tier a promotion actually earns: it advances a signed
+# chart digest and the identity pins that gate it, which AGENTS.md's risk table
+# names ("signing, digests, immutable artifacts"). The tier label and the review
+# label below travel together, so arming the cybersecurity lane without the tier
+# left every promotion pull request wearing a metadata contradiction the Ready
+# evaluator refuses (`scripts/ready_check.py`, whose PROMOTER_TUPLE is this
+# tuple plus `cybersecurity-review-requested`).
+PR_LABELS = ("release", "security", "delivery-lane", "promoter")
 REVIEW_LABELS = ("requires-review", "cybersecurity-review-requested")
 MILESTONE = "Platform upkeep"
 ASSIGNEE = "snaraj"
@@ -152,6 +160,10 @@ class Refusal(Exception):
     """A fail-closed judgment. The message names the exact check that failed."""
 
 
+# "no entry at all", distinguishable from a stored ``None``.
+_ABSENT = object()
+
+
 def _load_sibling(name, module_name):
     spec = importlib.util.spec_from_file_location(
         module_name, Path(__file__).resolve().parent / name
@@ -159,7 +171,24 @@ def _load_sibling(name, module_name):
     if spec is None or spec.loader is None:
         raise AssertionError(f"{name} is unloadable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The module must be in ``sys.modules`` WHILE its body runs — the documented
+    # importlib recipe. Anything resolving a PEP 563 string annotation looks its
+    # defining module up there, so a sibling with `from __future__ import
+    # annotations` and a dataclass would otherwise abort the whole tick with a
+    # bare AttributeError on None. Removed again immediately, so the sibling
+    # stays a private copy rather than an importable name. Absence is tracked
+    # with a private sentinel, never with ``None``: a present ``None`` entry is
+    # Python's import-blocking marker, a distinct state that must be RESTORED
+    # rather than dropped as if the key had never been there.
+    previous = sys.modules.get(module_name, _ABSENT)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is _ABSENT:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
     return module
 
 

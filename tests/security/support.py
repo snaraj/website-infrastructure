@@ -44,6 +44,8 @@ from types import ModuleType
 # tests/security/support.py -> tests/security -> tests -> repository root.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
+# "no entry at all", distinguishable from a stored ``None``.
+_ABSENT = object()
 
 
 def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
@@ -73,7 +75,25 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
             "usable spec/loader for {}".format(path)
         )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The module must be visible in ``sys.modules`` WHILE its body runs, which
+    # is the documented importlib recipe and not optional: anything resolving a
+    # PEP 563 string annotation looks its defining module up there, so a script
+    # with `from __future__ import annotations` and a ``@dataclasses.dataclass``
+    # fails at class-creation time with a bare ``AttributeError`` on ``None``.
+    # It is removed again immediately, so the "copies stay visibly independent"
+    # property above is unchanged: nothing observes the name after this returns.
+    # Absence is tracked with a private sentinel, never with ``None``: a present
+    # ``None`` entry is Python's import-blocking marker, a distinct state that
+    # must be RESTORED rather than dropped as if the key had never been there.
+    previous = sys.modules.get(spec.name, _ABSENT)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is _ABSENT:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
     return module
 
 

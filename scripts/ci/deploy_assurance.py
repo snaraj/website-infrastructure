@@ -41,6 +41,7 @@ registry, or external service is contacted.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -55,6 +56,15 @@ API_VERSION = "2022-11-28"
 SITES_DIR = Path("kubernetes/websites")
 ISSUE_MARKER = "deploy-assurance["
 ISSUE_LABELS = ["ci", "delivery-lane", "agent-authored", "fable5"]
+SIGNATURE = "- Fable5"
+ESTIMATE_HEADING = "## Estimate"
+# ASCII only and bounded. `\d` also matches Unicode decimal digits — Arabic-Indic
+# ٣ among them — which `int` then accepts, so a label could round-trip through a
+# spelling no reader typed.
+DIGITS = "[0-9]{1,6}"
+# The one place a label is tied to a field. The set the parser requires is
+# DERIVED from the dataclass below, so a field cannot be half-added.
+ESTIMATE_LABELS = {"files": "files", "net lines": "net_lines", "review rounds": "review_rounds"}
 GATE_WORKFLOW = "pull-request.yml"
 PUBLISH_WORKFLOW = "platform-release.yml"
 # A publish run that has not appeared this soon after its gate completed is
@@ -150,6 +160,73 @@ def condition_title(key):
     """One stable title per condition key — the idempotency anchor."""
 
     return "{}{}]".format(ISSUE_MARKER, key)
+
+
+@dataclasses.dataclass(frozen=True)
+class Estimate:
+    """The estimate AGENTS.md requires of a commission, as integers.
+
+    A tracking issue this tool opens IS the commission for the pull request
+    answering it, and the hourly rewrite erased the estimate a coordinator added.
+    Preserving it as TEXT failed twice, so it is parsed into this type and
+    rendered back from it: nothing from the issue is on the output path, which
+    closes "another spelling rides along" by construction rather than by
+    enumerating spellings (PR #303; PR #305 rounds 1-3, design reset).
+    """
+
+    files: int
+    net_lines: int
+    review_rounds: int
+
+
+# The sign is required on net lines and refused elsewhere; `fullmatch` below
+# means a field carrying trailing text is not a field.
+ESTIMATE_PATTERNS = {
+    label: re.compile("- " + re.escape(label) + ": ("
+                      + ("[+-]" if field == "net_lines" else "") + DIGITS + ")")
+    for label, field in ESTIMATE_LABELS.items()
+}
+
+
+def parse_estimate(body):
+    """One ``Estimate``, or ``None`` for every other body. Never raises.
+
+    Exactly one whole-line heading, then one line per field — blank lines
+    ignored, the trailing lane signature dropped, labels unique, the label set
+    equal to the dataclass's own. Any deviation preserves nothing and the
+    regenerated evidence wins: the fail-closed direction.
+    """
+
+    lines = body.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1] == SIGNATURE:
+        lines.pop()
+    if [line for line in lines if line == ESTIMATE_HEADING] != [ESTIMATE_HEADING]:
+        return None
+    values = {}
+    for line in lines[lines.index(ESTIMATE_HEADING) + 1:]:
+        if not line.strip():
+            continue
+        hits = [(f, m) for label, f in ESTIMATE_LABELS.items()
+                for m in [ESTIMATE_PATTERNS[label].fullmatch(line)] if m]
+        if len(hits) != 1 or hits[0][0] in values:
+            return None
+        values[hits[0][0]] = int(hits[0][1].group(1))
+    if values.keys() != {f.name for f in dataclasses.fields(Estimate)}:
+        return None
+    return Estimate(**values)
+
+
+def render_estimate(estimate):
+    """The canonical block, built from the integers — so leading zeros and any
+    other spelling the writer used normalise away instead of being copied."""
+
+    fields = "\n".join(
+        "- {}: {}".format(label, format(getattr(estimate, field), "+d" if field == "net_lines" else "d"))
+        for label, field in ESTIMATE_LABELS.items()
+    )
+    return "\n\n" + ESTIMATE_HEADING + "\n\n" + fields
 
 
 def iso_age_seconds(stamp):
@@ -468,14 +545,18 @@ def reconcile_issues(github, conditions, apply):
     One issue per condition title: created when the condition appears,
     its BODY updated in place when the evidence changes, duplicates
     (same title, higher numbers) closed toward the lowest survivor, and
-    everything closed with a comment when the condition clears.
+    everything closed with a comment when the condition clears. The rewrite
+    replaces the evidence and carries one appended `## Estimate` block
+    forward, so the recomposed body is still byte-comparable and an unchanged
+    condition stays "still-open" rather than churning every tick.
     """
 
     actions = []
     open_issues = github.open_assurance_issues()
     for title, body in conditions.items():
-        desired = body + "\n\n- Fable5"
         entry = open_issues.get(title)
+        estimate = parse_estimate(entry["body"] if entry else "")
+        desired = body + (render_estimate(estimate) if estimate else "") + "\n\n" + SIGNATURE
         if entry is None:
             actions.append("open: " + title)
             if apply:

@@ -227,8 +227,18 @@ and dependency-governed Draft capacity is recorded durably in
   authorization. A material trust-boundary expansion, including another
   independent tenant or untrusted/third-party workload, triggers a new
   threat model and ADR; it is not standing install authority.
-- `kubernetes/websites/*/source.yaml` — NOT transferred, ruling PENDING.
-  The row above assigns `kubernetes/websites/*/release.yaml` to delivery
+- `kubernetes/websites/*/source.yaml` — DELIVERY for selection digest moves
+  (owner ruling 2026-09-03, source
+  [PR #303 comment 5530765637](https://github.com/snaraj/website-infrastructure/pull/303#issuecomment-5530765637)).
+  The owner's words there, exactly: "Digest now moves under
+  kubernetes/websites/*/source.yaml. Do not blcok on this anymore." The ruling
+  is that narrow, and nothing here reads it wider: moving a selection's
+  tag/digest pair forward or back in these files is delivery work and is no
+  longer a per-PR declared crossing. It still requires the exact acquisition
+  receipt issue #195 pinned; it covers no other field of these manifests and
+  no other path under `kubernetes/websites/**`.
+  History, kept because it is the reasoning the ruling settles: the row above
+  assigns `kubernetes/websites/*/release.yaml` to delivery
   through the promotion surface and leaves the remaining
   `kubernetes/websites/**` files unruled; these per-site chart
   `OCIRepository` objects are among them. Each one carries a cosign
@@ -248,14 +258,14 @@ and dependency-governed Draft capacity is recorded durably in
   forward selection and is DECLARED as a crossing on exactly those terms: it
   recaptured the receipt and moved both sites to their published releases
   without touching a fail-closed property, a signature contract, or
-  `release.yaml`. It is a worked precedent for the shape, not a ruling — the
-  row above stays PENDING, and the next selection declares its crossing too.
+  `release.yaml`. It is a worked precedent for the shape, not a ruling; the
+  linked comment at the head of this row is the ruling that answered it.
   The owner's 2026-09-01 decoupling ruling (issue #275) rebinds only the
   CONSUMPTION side: the `flux-system` GitRepository follows protected `main`
   rather than a selector-advanced platform tag, so a merged forward
   selection deploys with no platform release involved. The selection
-  grammar above — receipted audit-tag and exact manifest-digest pairs,
-  each change a declared crossing — is unchanged by that ruling.
+  grammar above — receipted audit-tag and exact manifest-digest pairs — is
+  unchanged by that ruling.
 - `docs/adr/0016-tag-driven-flux-release-sync.md` — NOT transferred,
   ruling PENDING. The lane split above assigns "the remaining ADRs" to
   the platform lane, and "Lane discipline in docs" says the delivery lane
@@ -562,9 +572,20 @@ authority: the owner alone merges.
   its pull requests carry `promoter` in place of the agent pair, its commit
   and pull-request bodies end with `- Promoter`, and it runs under the
   owner's own keyring credential and signing key. Its standing authority is
-  exactly: open Draft promotion pull requests from a receipted acquisition
-  and arm `requires-review` and `cybersecurity-review-requested`. It never
-  flips Ready and never merges.
+  exactly: open Draft promotion pull requests from a receipted acquisition,
+  labelled `release`, `security`, `delivery-lane` and `promoter` — the
+  `security` tier because a promotion advances a signed chart digest and the
+  identity pins that gate it — and arm `requires-review` and
+  `cybersecurity-review-requested`. That set is exact: the Ready evaluator
+  accepts it whole and denies `promoter` beside an acting-model label,
+  `agent-authored`, another tier, or a missing member. It never flips Ready
+  and never merges. A promotion pull request is never repaired in place by an
+  agent (owner direction 2026-09-03, source
+  [PR #303 comment 5530907119](https://github.com/snaraj/website-infrastructure/pull/303#issuecomment-5530907119)):
+  a defect in one is fixed in the promoter's own code through a normal agent
+  pull request, after which the promotion pull request is superseded and the
+  promoter re-cuts it — otherwise the repair produces a hybrid carrying two
+  lanes' labels, commits and signatures that this contract does not define.
   Adversarial-review verdicts carry the same identity as
   `- <Agent> (adversarial reviewer)`. These repositories are worked by
   several frontier models in parallel lanes; labels plus signatures keep

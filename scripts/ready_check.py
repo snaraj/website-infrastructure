@@ -43,6 +43,30 @@ TIER_LABELS = frozenset({
     "release", "fix", "provider-neutrality", "delivery-lane", "features",
     "platform", "extraction",
 })
+# The receipted release promoter "is NOT an agent: its pull requests carry
+# `promoter` in place of the agent pair" (AGENTS.md, Agent labels), and that
+# same paragraph fixes its standing authority to ONE label set. `promoter` is
+# therefore an exact ALTERNATIVE to the agent pair, never a waiver of the rest:
+# a promotion pull request wearing an acting-model label, `agent-authored`,
+# another tier, or only part of the set is a hybrid the contract does not
+# define, and this rule cannot judge what the contract does not describe.
+# Enforcing the exact set also needs no model roster, which AGENTS.md
+# deliberately declines to pin — a label added for a future model is denied
+# beside `promoter` without ever being named here.
+#
+# The set is pinned HERE rather than read from `promote_releases.py`,
+# deliberately: an evaluator that asked the tool it evaluates what to accept
+# could be widened by changing that tool. `test_ready_check_contract.py` reads
+# both and proves they agree, so drift is a red test, not a silent permission.
+# `requires-review` is armed at open and removed by the reviewer with either
+# verdict, so the set a Ready evaluation can ever see excludes it; a pull
+# request still wearing it is blocked by the review-attention rule instead.
+PROMOTER_LABEL = "promoter"
+PROMOTER_TUPLE = frozenset({
+    "release", "security", "delivery-lane", "promoter",
+    "cybersecurity-review-requested",
+})
+REVIEW_ATTENTION_LABEL = "requires-review"
 # The security-surface tier and the label that arms its reviewer travel
 # together; exactly one of them is a metadata contradiction, not a tier.
 SECURITY_TIER_LABEL = "security"
@@ -108,8 +132,8 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
         blockers.append("a REQUEST-CHANGES receipt binds this head")
     if not lanes:
         blockers.append("no adversarial APPROVE receipt binds this head")
-    if "requires-review" in labels:
-        blockers.append("requires-review is still armed")
+    if REVIEW_ATTENTION_LABEL in labels:
+        blockers.append(f"{REVIEW_ATTENTION_LABEL} is still armed")
     for name in REQUIRED_CHECKS:
         found = [check for check in checks if check.get("name") == name]
         if len(found) != 1:
@@ -131,7 +155,18 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
             blockers.append(f"a check at this head did not succeed: {check.get('name')} ended {check.get('conclusion')}")
     if not tiers:
         blockers.append("the pull request carries no tier label, so its review depth cannot be judged")
-    if UMBRELLA_LABEL not in labels:
+    if PROMOTER_LABEL in labels:
+        # One exact set, so every hybrid is denied by the same comparison: an
+        # acting-model label beside `promoter`, `agent-authored` claiming an
+        # authorship the contract withholds, a foreign tier, or a member of the
+        # tuple missing. `requires-review` is excluded because its own blocker
+        # above already reports it, and reporting it twice would say nothing new.
+        carried = set(labels) - {REVIEW_ATTENTION_LABEL}
+        if carried != PROMOTER_TUPLE:
+            detail = [f"unexpected {name}" for name in sorted(carried - PROMOTER_TUPLE)]
+            detail += [f"missing {name}" for name in sorted(PROMOTER_TUPLE - carried)]
+            blockers.append(f"{PROMOTER_LABEL} pins an exact label set: " + ", ".join(detail))
+    elif UMBRELLA_LABEL not in labels:
         blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
     if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
         blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")

@@ -825,8 +825,25 @@ class RewriteTests(unittest.TestCase):
         (self.root / "changelog.d/990-promote-naranjo-online-0-1-99.md").unlink()
         # The committed README row states the capture the inverse must restore.
         date, issues = MODULE.README_ROW_RE.search(self.originals["README.md"].decode()).group(2, 3)
+        issue = int(issues.split("/")[0].lstrip("#"))
+        # FIXTURE — the shape `main` takes from the first canonical promotion
+        # this tool cuts onward: the fragment that capture committed is already
+        # in the tree. Today's `main` predates that only because the #285
+        # fragment was hand-named, so testing against today's tree alone would
+        # measure a coincidence (PR #305 finding 1).
+        replayed = self.root / MODULE.fragment_path(issue, {"naranjo-online": original["chartTag"]})
+        replayed.write_text("### Changed\n\n- committed by that promotion\n", encoding="utf-8")
+        # REPAIR under test — the inverse REPLAYS exactly that capture, so on
+        # the fixture above it meets apply_promotion's immutable-fragment
+        # refusal instead of restoring bytes. The pre-promotion tree carried
+        # neither fragment, so dropping this one is the same scratch setup as
+        # the 990 line above, not a relaxation: the refusal itself stays pinned
+        # by test_refused_fragment_collision_writes_nothing below, and the
+        # rewrite never reads changelog.d/ at all. Delete this line and the
+        # restoration below never runs.
+        replayed.unlink()
         MODULE.apply_promotion(
-            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, int(issues.split("/")[0].lstrip("#")), issues, date
+            self.root, self.selections, {"naranjo-online": (original, self.inspection["naranjo"])}, issue, issues, date
         )
         for name in PINNED:
             if name == "docs/assurance/195-chart-acquisition-receipt.md":
@@ -1333,6 +1350,66 @@ class RunbookAndLaunchdTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(MODULE.Refusal, re.escape(text)):
                     MODULE.latest_release(MODULE.GitHub(run=down, fetch=fleet.fetch), "snaraj/publishes-nothing")
+
+
+class SiblingLoaderTests(unittest.TestCase):
+    """`_load_sibling` publishes the module under its own name so a PEP 563
+    annotation can resolve while the body runs (without it the promoter aborts
+    at import and every tick fails). Publishing is only half the contract: the
+    name must be gone again afterwards, or the promoter would leave an
+    importable alias for a private copy — and on the second call would find the
+    FIRST copy's leftovers instead of a clean slate. These pin the cleanup on
+    both exits (PR #305 round 4, finding 1)."""
+
+    def tearDown(self):
+        for name in ("promoter_loader_probe", "promoter_loader_sentinel"):
+            sys.modules.pop(name, None)
+
+    def test_an_absent_name_is_absent_again_after_a_successful_load(self):
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+        module = MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_probe")
+        self.assertTrue(hasattr(module, "drift_verdict"), "the sibling really did execute")
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+
+    def test_a_pre_existing_name_is_restored_after_a_successful_load(self):
+        sentinel = object()
+        sys.modules["promoter_loader_sentinel"] = sentinel
+        MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_sentinel")
+        self.assertIs(sys.modules["promoter_loader_sentinel"], sentinel)
+
+    def test_a_sibling_whose_body_fails_leaks_no_name(self):
+        # The exception path is the one a `finally` exists for: a sibling that
+        # raises must not leave its half-executed module published.
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+        with self.assertRaises(FileNotFoundError):
+            MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_probe")
+        self.assertNotIn("promoter_loader_probe", sys.modules)
+
+    def test_a_sibling_whose_body_fails_restores_a_pre_existing_name(self):
+        sentinel = object()
+        sys.modules["promoter_loader_sentinel"] = sentinel
+        with self.assertRaises(FileNotFoundError):
+            MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_sentinel")
+        self.assertIs(sys.modules["promoter_loader_sentinel"], sentinel)
+
+    def test_a_pre_existing_none_entry_is_restored_not_dropped(self):
+        # A stored `None` is Python's import-blocking marker, not absence: it
+        # is a state some other importer deliberately put there, and dropping
+        # it silently unblocks that import. Tracking absence by `.get()` and
+        # `is None` cannot tell the two apart, so both exits are pinned.
+        for label, load in (
+            ("success", lambda: MODULE._load_sibling("ci/deploy_assurance.py", "promoter_loader_probe")),
+            ("failure", lambda: MODULE._load_sibling("no_such_sibling_for_this_test.py", "promoter_loader_probe")),
+        ):
+            with self.subTest(path=label):
+                sys.modules["promoter_loader_probe"] = None
+                if label == "failure":
+                    with self.assertRaises(FileNotFoundError):
+                        load()
+                else:
+                    load()
+                self.assertIn("promoter_loader_probe", sys.modules)
+                self.assertIsNone(sys.modules["promoter_loader_probe"])
 
 
 if __name__ == "__main__":  # pragma: no cover
