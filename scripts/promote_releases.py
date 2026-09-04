@@ -41,7 +41,8 @@ The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
 principal, no credential in CI, and the identity, signature and
 account-protection contracts are untouched. Standard library only. It holds
-no readiness authority: under AGENTS.md the coordinator flips Ready
+readiness authority of its own beyond the Ready rule: it flips Ready ONLY on
+its own promotion pull requests and only when that rule reports ELIGIBLE
 (``scripts/ready_check.py`` is that rule in code) and the owner alone merges.
 """
 
@@ -670,7 +671,8 @@ class Cosign:
         cosign that is not the ``versions.env`` pin verifies nothing."""
 
         if self._verified_version is None:
-            output = self._run(["cosign", "version", "--json"])
+            with timed_call("cosign-version", "cosign version --json", COSIGN_TIMEOUT_SECONDS):
+                output = self._run(["cosign", "version", "--json"], timeout=COSIGN_TIMEOUT_SECONDS)
             version = json.loads(output).get("gitVersion")
             if version != self.pinned_version:
                 raise Refusal(
@@ -1641,7 +1643,11 @@ class Workspace:
         return self._run(["git", *argv], cwd=self.root, env=env)
 
     def refresh(self) -> str:
-        self.git("fetch", "--quiet", "origin", "main")
+        # The tick's first network call, traced like every other one: an
+        # untraced stall here was the last silent way a tick could lose its
+        # whole budget (2026-09-04 security review round 1, finding 4).
+        with timed_call("git-fetch", "origin main", COMMAND_TIMEOUT_SECONDS):
+            self.git("fetch", "--quiet", "origin", "main")
         status_lines = self.git("status", "--porcelain").strip()
         if status_lines:
             raise Refusal("promoter clone is dirty; refusing to reset another writer's work")
@@ -1706,15 +1712,14 @@ class Workspace:
         """
 
         self.git("add", "-A")
-        files = added = deleted = 0
-        for line in self.git("diff", "--numstat", "--cached", base).splitlines():
-            fields = line.split("\t")
-            if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
-                raise Refusal("a numstat row is not measurable; refusing to state an accounting this cut cannot prove")
-            files += 1
-            added += int(fields[0])
-            deleted += int(fields[1])
-        return files, added, deleted
+        return parse_numstat(self.git("diff", "--numstat", "--cached", base))
+
+    def recorded_numstat(self, base: str, head: str) -> tuple:
+        """The accounting a pushed head RECORDS, measured by the command its
+        body names — what a reviewer reproduces, and what the receipt's claim
+        audit re-composes the body from."""
+
+        return parse_numstat(self.git("diff", "--numstat", base, head))
 
     def commit_signed(self, message: str, identity: dict, key: str) -> str:
         env = dict(os.environ)
@@ -1727,6 +1732,22 @@ class Workspace:
             env=env,
         )
         return self.git("rev-parse", "HEAD").strip()
+
+
+def parse_numstat(output: str) -> tuple:
+    """``(files, added, deleted)`` from ``git diff --numstat`` output. A row
+    that is not two integers and a path — a binary one, which git renders
+    ``-`` — refuses: an accounting it cannot measure the tool must not state."""
+
+    files = added = deleted = 0
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+            raise Refusal("a numstat row is not measurable; refusing to state an accounting this cut cannot prove")
+        files += 1
+        added += int(fields[0])
+        deleted += int(fields[1])
+    return files, added, deleted
 
 
 def pr_title(selections: dict, targets: dict) -> str:
@@ -1796,7 +1817,18 @@ def owned_pull_request(pr: dict) -> dict | None:
         or not isinstance(pr.get("number"), int)
     ):
         return None
-    return {"number": pr["number"], "branch": branch, "head": head["sha"], "draft": pr["draft"]}
+    # Labels and body ride along for the receipt step: the labels decide
+    # whether a head may be judged at all, and the body is AUDITED there —
+    # re-composed from re-derived records and compared — never believed.
+    labels = sorted((label or {}).get("name") or "" for label in (pr.get("labels") or []))
+    return {
+        "number": pr["number"],
+        "branch": branch,
+        "head": head["sha"],
+        "draft": pr["draft"],
+        "labels": [name for name in labels if name],
+        "body": pr.get("body") or "",
+    }
 
 
 def open_promoter_prs(github: GitHub) -> list:
@@ -1971,7 +2003,10 @@ def report_failure(github: GitHub, targets: dict, step: str, error: str, dry_run
 # tool's own arithmetic over bytes it produced. A refusal from the network, the
 # registry, cosign or the ceremony is NOT: the promoter cannot attribute it to
 # the pull request, so it logs and skips the tick rather than publishing a
-# verdict it cannot stand behind. Nothing here flips Ready or merges.
+# verdict it cannot stand behind. Nothing here merges; Ready is flipped only
+# by flip_ready below, only on a promotion pull request, and only when the
+# Ready rule's own evaluator reports ELIGIBLE at the exact head (owner ruling
+# 2026-09-04, issue #309).
 # ---------------------------------------------------------------------------
 
 # The machine-local helper that mints the reviewer App's repository-scoped
@@ -2159,13 +2194,17 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " commit's own signed timestamp.",
             f"3. Novelty. No `{READY.REVIEWS_APP}` comment on this pull request bound"
             " this head before this one.",
+            "4. Claim audit. The pull request body and the head commit's message"
+            " re-compose, byte for byte, from the records above and the accounting"
+            " this head records by `git diff --numstat`; neither was parsed or"
+            " believed.",
             "",
-            "Mutation and claim audit: the re-derivation IS both. Every claim the body"
-            " and commit make about a version, digest or source is a value recomputed"
-            " above rather than read from the diff, so an overstated claim is a byte"
-            " mismatch; and one mutated byte anywhere in the surface — a digest, a"
-            " receipt field, the changelog fragment, the README sentence — changes an"
-            " object id and turns this verdict into REQUEST-CHANGES. Findings: none.",
+            "Mutation and claim audit: the re-derivation and the re-composition ARE"
+            " both. A body or message stating any other version, digest, source or"
+            " accounting is a byte mismatch in proof 4; and one mutated byte anywhere"
+            " in the surface — a digest, a receipt field, the changelog fragment, the"
+            " README sentence — changes an object id and turns this verdict into"
+            " REQUEST-CHANGES. Findings: none.",
             "No finding — checked the changed-path set, every re-rendered byte, the"
             " keyless signer identity, the immutable Release binding, the"
             " manifest-digest agreement and the tag-to-protected-main ancestry.",
@@ -2179,8 +2218,10 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " refusal.",
             "Scratch: the detached read-only worktree this proof used was removed.",
             "",
-            "Review evidence only. NO TOOL FLIPS READY, promoter included: the"
-            " coordinator flips and the owner alone merges.",
+            "Review evidence only: this receipt grants neither Ready nor merge. The"
+            " promoter's own Ready step acts only once this receipt binds the head,"
+            f" `{READY.REVIEW_ATTENTION_LABEL}` is retired and every check is green"
+            " (owner ruling 2026-09-04, issue #309); the owner alone merges.",
             "",
             RECEIPT_SIGNATURE,
             "",
@@ -2226,9 +2267,39 @@ def proof_log(name: str, number: int, head: str, outcome: str, started: float) -
     log(f"PROOF {name} pull-request={number} head={head[:7]} {outcome} elapsed={time.monotonic() - started:.1f}s")
 
 
-def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosign: Cosign, pr: dict):
+def claim_audit(workspace: Workspace, pr: dict, base: str, selections: dict, acquired: dict, targets: dict, issues: list) -> str | None:
+    """The claim audit the receipt reports, done rather than asserted
+    (2026-09-04 security review round 1, finding 1).
+
+    A promotion pull request's body and its head commit's message are pure
+    functions of the re-derived records and the accounting the head records,
+    so the audit RE-COMPOSES both from those inputs and compares each, byte
+    for byte after newline normalisation, with what GitHub and the head
+    carry. Nothing in the body is parsed or believed: a body or message that
+    says anything else — a different version, digest, source, accounting or
+    one extra sentence — is the first disagreement returned, and ``None``
+    means both re-compose.
+    """
+
+    accounting = accounting_line(base, *workspace.recorded_numstat(base, pr["head"]))
+    expected_body = pr_body(selections, acquired, issues, base, accounting)
+    expected_message = f"{pr_title(selections, targets)}\n\n{expected_body}"
+
+    def canon(text: str) -> str:
+        return text.replace("\r\n", "\n").strip("\n")
+
+    if canon(pr.get("body") or "") != canon(expected_body):
+        return "the pull request body does not re-compose from the re-derived records and the accounting this head records"
+    if canon(workspace.git("log", "-1", "--format=%B", pr["head"])) != canon(expected_message):
+        return "the head commit's message does not re-compose from the re-derived records and the accounting this head records"
+    return None
+
+
+def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosign: Cosign, pr: dict, receipts: set | None = None):
     """Judge one open promoter pull request. Returns ``(verdict, body)`` or
-    ``None`` when this tick has nothing to say about it."""
+    ``None`` when this tick has nothing to say about it. ``receipts`` is the
+    set of heads App comments already bind when the caller has read it; the
+    proof reads it itself otherwise."""
 
     number, head, branch = pr["number"], pr["head"], pr["branch"]
     label = f"PR #{number}"
@@ -2238,6 +2309,17 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
         proof_log("subject", number, head, "skipped: branch is outside the promoter grammar", started)
         return None
     base7, issue, targets = parsed
+    # Fail closed on the subject's state (2026-09-04 security review round 1,
+    # finding 2): a receipt is earned by a Draft that is armed for review,
+    # inside the repository's review-before-Ready sequence. A head that is
+    # already Ready, or that nobody armed, is outside that sequence and is
+    # never judged, whatever else is true of it.
+    if not pr["draft"]:
+        proof_log("subject", number, head, "skipped: not Draft; a receipt is earned before Ready, never after", started)
+        return None
+    if READY.REVIEW_ATTENTION_LABEL not in pr.get("labels", ()):
+        proof_log("subject", number, head, f"skipped: {READY.REVIEW_ATTENTION_LABEL} is not armed", started)
+        return None
     if pr.get("behind_by") is None:
         proof_log("subject", number, head, "skipped: base freshness is unknown", started)
         return None
@@ -2250,7 +2332,8 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
     # says so on the failing line itself.
     with failure_decision("skip-this-tick"):
         novelty = time.monotonic()
-        if head in app_receipt_heads(github, number):
+        bound = app_receipt_heads(github, number) if receipts is None else receipts
+        if head in bound:
             proof_log("novelty", number, head, "skipped: a receipt already binds this head", novelty)
             return None
         proof_log("novelty", number, head, "held: no App receipt binds this head", novelty)
@@ -2317,6 +2400,8 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
                     if head_blob(workspace, head, name) != rendered_blob(workspace, tree / name)
                 ]
                 statements = [workload_statement(selections[slug], record) for slug, (record, _) in sorted(acquired.items())]
+                audit = time.monotonic()
+                claim = claim_audit(workspace, pr, base, selections, acquired, targets, issues)
         except Refusal as error:
             # A registry, Release, cosign or ceremony refusal is not this pull
             # request's fault as far as this tool can prove, so it never becomes
@@ -2332,7 +2417,11 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
             f" registry and the immutable Release: {path_list(differing)}",
         )
     proof_log("re-derivation", number, head, f"held: {len(surface)} path(s) reproduce byte for byte", derivation)
-    log(f"{label}: all three proofs hold at {head[:7]}")
+    if claim is not None:
+        proof_log("claim-audit", number, head, f"failed: {claim}", audit)
+        return "REQUEST-CHANGES", request_changes_receipt(head, base, "Claim audit", claim)
+    proof_log("claim-audit", number, head, "held: the body and the commit message re-compose from the re-derived records", audit)
+    log(f"{label}: all four proofs hold at {head[:7]}")
     return "APPROVE", approve_receipt(head, base, surface, statements, captured)
 
 
@@ -2409,7 +2498,22 @@ def post_receipts(workspace: Workspace, github: GitHub, registry: Registry, cosi
         # says so on its own failing line.
         try:
             with failure_decision("skip-this-tick"):
-                judged = prove_promotion(workspace, github, registry, cosign, pr)
+                bound = app_receipt_heads(github, pr["number"])
+                if pr["head"] in bound:
+                    # A receipt already binds this head, so the head is
+                    # terminal. The one thing a tick may still owe it is the
+                    # label retirement that belongs to that receipt: posting
+                    # and retiring are ONE operation, and a removal that
+                    # failed after the post is finished here rather than
+                    # stranding a judged head in the review queue
+                    # (2026-09-04 security review round 1, finding 3).
+                    if READY.REVIEW_ATTENTION_LABEL not in pr.get("labels", ()):
+                        record[f"receipt-{pr['number']}"] = "bound"
+                        continue
+                    retire_review_attention(github, pr["number"], "a receipt already binds this head", dry_run)
+                    record[f"receipt-{pr['number']}"] = "label-retired"
+                    continue
+                judged = prove_promotion(workspace, github, registry, cosign, pr, receipts=bound)
                 if judged is None:
                     record[f"receipt-{pr['number']}"] = "skipped"
                     continue
@@ -2419,21 +2523,90 @@ def post_receipts(workspace: Workspace, github: GitHub, registry: Registry, cosi
                     record[f"receipt-{pr['number']}"] = "not-posted"
                     continue
                 record[f"receipt-{pr['number']}"] = f"posted:{verdict}"
-                if verdict == "APPROVE":
-                    # Only an APPROVE retires the review-attention label. A
-                    # REQUEST-CHANGES leaves it armed on purpose: the pull
-                    # request still needs a human to look, and the promoter
-                    # will supersede and re-cut it rather than repair it.
-                    labels = [(label or {}).get("name") for label in (github.api(f"repos/{REPOSITORY}/pulls/{pr['number']}").get("labels") or [])]
-                    if READY.REVIEW_ATTENTION_LABEL in labels:
-                        github.mutate(
-                            f"repos/{REPOSITORY}/issues/{pr['number']}/labels/{READY.REVIEW_ATTENTION_LABEL}",
-                            "DELETE",
-                        )
-                        log(f"PR #{pr['number']}: {READY.REVIEW_ATTENTION_LABEL} removed with the verdict")
+                # Posting the verdict also removes the review-attention label,
+                # whichever way the verdict went (AGENTS.md, Verdict format):
+                # the item is no longer waiting on review attention. A
+                # REQUEST-CHANGES still never repairs the pull request in
+                # place — the promoter supersedes and re-cuts it.
+                retire_review_attention(github, pr["number"], f"with the {verdict} receipt", dry_run)
         except Refusal as error:
             log(f"PR #{pr['number']}: receipt step refused ({error})")
             record[f"receipt-{pr['number']}"] = "refused"
+
+
+def retire_review_attention(github: GitHub, number: int, why: str, dry_run: bool) -> bool:
+    """Remove the review-attention label from one pull request, re-reading
+    its labels first so the write is idempotent. Returns whether a removal
+    happened; a failed removal raises, and the next tick finishes it."""
+
+    labels = [(label or {}).get("name") for label in (github.api(f"repos/{REPOSITORY}/pulls/{number}").get("labels") or [])]
+    if READY.REVIEW_ATTENTION_LABEL not in labels:
+        return False
+    if dry_run:
+        log(f"PR #{number}: WOULD remove {READY.REVIEW_ATTENTION_LABEL} ({why}) (dry run)")
+        return False
+    github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels/{READY.REVIEW_ATTENTION_LABEL}", "DELETE")
+    log(f"PR #{number}: {READY.REVIEW_ATTENTION_LABEL} removed ({why})")
+    return True
+
+
+def flip_ready(github: GitHub, run, prs: list, dry_run: bool, outcomes=None) -> None:
+    """The tick's Ready step (owner ruling 2026-09-04, issue #309).
+
+    ONLY a promotion pull request, ONLY under the Ready rule: the same
+    ``ready_decision`` the coordinator runs, fed the same inputs, must report
+    no blocker AND count the promoter's own earned receipt among the approving
+    lanes. Then, and only then, the pull request leaves Draft. Nothing here
+    merges; the owner alone does. Every other pull request in this repository
+    is still flipped by the coordinator and by nobody else.
+    """
+
+    record = {} if outcomes is None else outcomes
+    for pr in prs:
+        number, head = pr["number"], pr["head"]
+        try:
+            with failure_decision("skip-this-tick"):
+                started = time.monotonic()
+                pull = github.api(f"repos/{REPOSITORY}/pulls/{number}")
+                live = owned_pull_request(pull)
+                if live is None or live["head"] != head:
+                    proof_log("ready", number, head, "skipped: the head moved since this tick began", started)
+                    record[f"ready-{number}"] = "skipped"
+                    continue
+                if pull.get("draft") is not True:
+                    proof_log("ready", number, head, "skipped: already out of Draft", started)
+                    record[f"ready-{number}"] = "already"
+                    continue
+                labels = [(label or {}).get("name") for label in (pull.get("labels") or [])]
+                comments = github.api_pages(f"repos/{REPOSITORY}/issues/{number}/comments?per_page=100")
+                runs = github.api(f"repos/{REPOSITORY}/commits/{head}/check-runs?per_page=100")
+                if runs.get("total_count") != len(runs.get("check_runs", [])):
+                    raise Refusal("the check-run listing is truncated; refusing to judge a partial view")
+                base = pull.get("base") or {}
+                lanes, _tiers, blockers = READY.ready_decision(
+                    head, labels, comments, runs.get("check_runs", []), pr.get("behind_by"),
+                    pull.get("state"), base.get("ref"), (base.get("repo") or {}).get("default_branch"),
+                )
+                if "promoter" not in lanes:
+                    blockers = ["no promoter receipt binds this head"] + blockers
+                if blockers:
+                    proof_log("ready", number, head, "withheld: " + "; ".join(blockers), started)
+                    record[f"ready-{number}"] = "withheld"
+                    continue
+                if dry_run:
+                    proof_log("ready", number, head, "held: WOULD flip Ready (dry run)", started)
+                    record[f"ready-{number}"] = "would-flip"
+                    continue
+                with timed_call("pr-ready", f"pull-request={number} head={head[:7]}", COMMAND_TIMEOUT_SECONDS):
+                    run(["gh", "pr", "ready", str(number), "--repo", REPOSITORY])
+                # Trust the forge, not the exit status.
+                if github.api(f"repos/{REPOSITORY}/pulls/{number}").get("draft") is not False:
+                    raise Refusal("the pull request is still Draft after the flip")
+                proof_log("ready", number, head, "held: Ready under the Ready rule; the owner alone merges", started)
+                record[f"ready-{number}"] = "flipped"
+        except Refusal as error:
+            log(f"PR #{number}: Ready step refused ({error})")
+            record[f"ready-{number}"] = "refused"
 
 
 def acquire_lock(path: Path):
@@ -2488,6 +2661,7 @@ def tick(repo: Path, dry_run: bool, registry=None, github=None, cosign=None, run
         try:
             keep = set(decision["keep"])
             post_receipts(workspace, github, registry, cosign, [pr for pr in open_prs if pr["number"] in keep], dry_run, run, outcomes)
+            flip_ready(github, run, [pr for pr in open_prs if pr["number"] in keep], dry_run, outcomes)
         except Refusal as error:
             log(f"receipt step refused: {error}")
             outcomes["receipt"] = "refused"
@@ -2540,6 +2714,7 @@ def receipt_pass(repo: Path, dry_run: bool, registry=None, github=None, cosign=N
         decision = plan(status(repo, github), open_prs)
         keep = set(decision["keep"])
         post_receipts(workspace, github, registry, cosign, [pr for pr in open_prs if pr["number"] in keep], dry_run, run, outcomes)
+        flip_ready(github, run, [pr for pr in open_prs if pr["number"] in keep], dry_run, outcomes)
         return 0
     finally:
         log(

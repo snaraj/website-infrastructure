@@ -98,7 +98,14 @@ class ProofFixture:
             [{"number": 285, "title": "deploy-assurance[site-drift/naranjo-online]"}]
         ]
         self.comments = []
+        self.draft = True
+        self.review_armed = True
+        self.checks = [
+            {"name": name, "app": {"slug": READY.REQUIRED_CHECK_APP}, "status": "completed", "conclusion": "success"}
+            for name in READY.REQUIRED_CHECKS
+        ]
         self.calls = []
+        self.label_delete_failures = 0
         self.log_lines = []
         self._log = MODULE.log
         MODULE.log = self.log_lines.append
@@ -108,6 +115,7 @@ class ProofFixture:
         self.branch = MODULE.branch_name(self.base, 285, {"naranjo-online": self.version})
         self.captured = MODULE.utc_today()
         self.head = ""
+        self.body = ""
 
     # -- lifecycle ---------------------------------------------------------
     def close(self):
@@ -121,11 +129,13 @@ class ProofFixture:
         return done.stdout
 
     # -- the head under proof ---------------------------------------------
-    def cut(self, mutate=None) -> str:
+    def cut(self, mutate=None, message=None) -> str:
         """Produce a genuine promotion commit on the promoter branch.
 
         ``mutate`` receives the author checkout after ``apply_promotion`` has
-        written the surface, so a test can change exactly one thing.
+        written the surface, so a test can change exactly one thing;
+        ``message`` receives the composed commit message and returns the one
+        to commit, so a test can make the head claim something false.
         """
 
         selections = MODULE.discover_selections(self.author)
@@ -138,10 +148,16 @@ class ProofFixture:
         if mutate is not None:
             mutate(self.author)
         self.git("add", "-A", cwd=self.author)
-        self.git(
-            "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}",
-            "commit", "-q", "-m", "Promote by receipted ceremony\n\n- Promoter",
-            cwd=self.author,
+        # The real title, body and message, composed the way the tick composes
+        # them: the receipt's claim audit re-composes exactly these.
+        accounting = MODULE.accounting_line(self.base, *MODULE.Workspace(self.author, self.run).numstat(self.base))
+        self.body = MODULE.pr_body(selections, acquired, [285], self.base, accounting)
+        composed = f"{MODULE.pr_title(selections, {'naranjo-online': self.version})}\n\n{self.body}"
+        if message is not None:
+            composed = message(composed)
+        self.run(
+            ["git", "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}", "commit", "-q", "-F", "-"],
+            cwd=self.author, input_text=composed,
         )
         self.head = self.git("rev-parse", "HEAD", cwd=self.author).strip()
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{self.branch}", cwd=self.author)
@@ -151,13 +167,19 @@ class ProofFixture:
     def wire(self):
         """Point the scripted GitHub at the branch this fixture pushed."""
 
+        labels = MODULE.PR_LABELS + (MODULE.REVIEW_LABELS if self.review_armed else ())
         pull = {
             "number": 300,
-            "draft": True,
+            "draft": self.draft,
+            "state": "open",
             "user": {"login": MODULE.ASSIGNEE},
             "head": {"ref": self.branch, "sha": self.head, "repo": {"full_name": MODULE.REPOSITORY}},
-            "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY}},
-            "labels": [{"name": name} for name in MODULE.PR_LABELS + MODULE.REVIEW_LABELS],
+            "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY, "default_branch": "main"}},
+            "labels": [{"name": name} for name in labels],
+            "body": self.body,
+        }
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/commits/{self.head}/check-runs?per_page=100"] = {
+            "total_count": len(self.checks), "check_runs": list(self.checks),
         }
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls?state=open&per_page=100"] = [[pull]]
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"] = pull
@@ -182,9 +204,19 @@ class ProofFixture:
             self.comments.append(app_comment(self.head, body))
             self.wire()
             return "https://github.com/snaraj/website-infrastructure/pull/300#issuecomment-1\n"
+        if argv[:3] == ["gh", "pr", "ready"]:
+            self.draft = False
+            self.wire()
+            return ""
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
             self.calls[-1]["write"] = path
+            if path.endswith(f"/labels/{READY.REVIEW_ATTENTION_LABEL}") and argv[argv.index("-X") + 1] == "DELETE":
+                if self.label_delete_failures:
+                    self.label_delete_failures -= 1
+                    raise MODULE.Refusal("`gh api` exited 1: HTTP 502")
+                self.review_armed = False
+                self.wire()
             return "[]" if "/labels" in path else "{}"
         if Path(argv[0]).name.startswith("python") or argv[0] == sys.executable:
             # The receipt validator really runs: a composed receipt that the
@@ -231,6 +263,18 @@ class ProofFixture:
     def posted(self):
         return [call for call in self.calls if call["argv"][:3] == ("gh", "pr", "comment")]
 
+    def flip(self, dry_run=False):
+        """The tick's Ready step over the one fixture pull request."""
+
+        pr = MODULE.owned_pull_request(self.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+        pr["behind_by"] = 0
+        outcomes = {}
+        MODULE.flip_ready(self.github(), self.run, [pr], dry_run, outcomes)
+        return outcomes
+
+    def readied(self):
+        return [call for call in self.calls if call["argv"][:3] == ("gh", "pr", "ready")]
+
     def writes(self):
         return [call for call in self.calls if "write" in call]
 
@@ -265,7 +309,7 @@ class HonestHeadTests(unittest.TestCase):
             self.assertIn(figure, body)
         self.assertIn(f"releases/tag/v{self.fixture.version}", body)
         self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
-        for required in ("Confinement", "Re-derivation", "Novelty", "NO TOOL FLIPS READY"):
+        for required in ("Confinement", "Re-derivation", "Novelty", "Claim audit", "grants neither Ready nor merge"):
             self.assertIn(required, body)
 
     def test_a_two_workload_receipt_still_fits_the_contract_ceiling(self):
@@ -418,7 +462,9 @@ class MutationTests(unittest.TestCase):
         self.assertIsNone(self.fixture.prove())
         self.assertTrue(any("not an immutable final release" in line for line in self.fixture.log_lines))
 
-    def test_a_request_changes_posts_and_leaves_review_attention_armed(self):
+    def test_a_request_changes_posts_and_retires_review_attention_too(self):
+        # AGENTS.md, Verdict format: posting the verdict also removes
+        # `requires-review`, whichever way the verdict went.
         def mutate(root):
             (root / "README.md").write_text(
                 (root / "README.md").read_text(encoding="utf-8") + "\nsmuggled\n", encoding="utf-8"
@@ -429,10 +475,69 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.posted()), 1)
         self.assertIn("VERDICT: REQUEST-CHANGES", self.fixture.comments[-1]["body"])
         self.assertEqual(
-            [call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")],
-            [],
-            "a REQUEST-CHANGES leaves the review-attention label armed",
+            len([call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")]),
+            1,
+            "a REQUEST-CHANGES retires the review-attention label like an APPROVE does",
         )
+        self.assertFalse(self.fixture.review_armed)
+        self.assertTrue(any("requires-review removed (with the REQUEST-CHANGES receipt)" in line
+                            for line in self.fixture.log_lines))
+
+    def test_a_false_body_claim_is_a_request_changes(self):
+        # Finding 1 (2026-09-04): the receipt used to CLAIM a body audit it
+        # never did. The body is a pure function of the re-derived records
+        # and the recorded accounting; one changed byte fails proof 4.
+        self.fixture.cut()
+        pull = self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"]
+        self.assertIn("Accounting (measured", pull["body"])
+        pull["body"] = pull["body"].replace("Accounting (measured", "Accounting (estimated")
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Claim audit failed: the pull request body does not re-compose", receipt)
+        self.assertTrue(any(line.startswith("PROOF claim-audit ") and "failed:" in line
+                            for line in self.fixture.log_lines))
+
+    def test_a_false_commit_message_claim_is_a_request_changes(self):
+        self.fixture.cut(message=lambda composed: composed + "\nAlso promotes lidersea.com 9.9.9.\n")
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Claim audit failed: the head commit's message does not re-compose", receipt)
+
+    def test_an_honest_head_passes_the_claim_audit_it_reports(self):
+        self.fixture.cut()
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "APPROVE")
+        self.assertIn("4. Claim audit.", receipt)
+        self.assertTrue(any(line.startswith("PROOF claim-audit ") and "held:" in line
+                            for line in self.fixture.log_lines))
+
+    def test_a_subject_that_is_not_draft_is_never_judged(self):
+        # Finding 2 (2026-09-04): a receipt is earned before Ready, never
+        # after; a non-Draft subject is outside the review-before-Ready
+        # sequence whatever else is true of it.
+        self.fixture.cut()
+        self.fixture.draft = False
+        self.fixture.wire()
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("skipped: not Draft" in line for line in self.fixture.log_lines))
+        self.assertEqual(self.fixture.posted(), [])
+
+    def test_a_subject_nobody_armed_is_never_judged(self):
+        self.fixture.cut()
+        self.fixture.review_armed = False
+        self.fixture.wire()
+        self.assertIsNone(self.fixture.prove())
+        self.assertTrue(any("skipped: requires-review is not armed" in line for line in self.fixture.log_lines))
+        self.assertEqual(self.fixture.posted(), [])
+
+    def test_ready_is_withheld_after_a_request_changes(self):
+        self.fixture.cut(mutate=lambda tree: (tree / "README.md").write_text("x\n", encoding="utf-8"))
+        self.fixture.step()
+        self.assertIn("VERDICT: REQUEST-CHANGES", self.fixture.comments[-1]["body"])
+        self.assertFalse(self.fixture.review_armed, "the label came off with the verdict")
+        self.assertEqual(self.fixture.flip(), {"ready-300": "withheld"})
+        self.assertEqual(self.fixture.readied(), [])
+        self.assertTrue(any("a REQUEST-CHANGES receipt binds this head" in line for line in self.fixture.log_lines))
 
     def test_a_head_that_the_branch_does_not_carry_is_never_judged(self):
         head = self.fixture.cut()
@@ -464,6 +569,76 @@ class PostingTests(unittest.TestCase):
         deletes = [call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")]
         self.assertEqual(len(deletes), 1)
         self.assertIn("DELETE", deletes[0]["argv"])
+
+    def test_ready_follows_the_earned_receipt_and_green_checks(self):
+        self.fixture.step()
+        outcomes = self.fixture.flip()
+        self.assertEqual(outcomes, {"ready-300": "flipped"})
+        self.assertEqual(len(self.fixture.readied()), 1)
+        self.assertEqual(self.fixture.readied()[0]["argv"][:6], ("gh", "pr", "ready", "300", "--repo", MODULE.REPOSITORY))
+        self.assertFalse(self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"]["draft"])
+        self.assertTrue(any("PROOF ready" in line and "held:" in line for line in self.fixture.log_lines))
+        # A second pass finds nothing to do and touches nothing.
+        self.assertEqual(self.fixture.flip(), {"ready-300": "already"})
+        self.assertEqual(len(self.fixture.readied()), 1)
+
+    def test_ready_is_withheld_without_the_promoter_receipt(self):
+        outcomes = self.fixture.flip()
+        self.assertEqual(outcomes, {"ready-300": "withheld"})
+        self.assertEqual(self.fixture.readied(), [])
+        withheld = [line for line in self.fixture.log_lines if "withheld:" in line]
+        self.assertEqual(len(withheld), 1)
+        self.assertIn("no promoter receipt binds this head", withheld[0])
+        self.assertIn("requires-review is still armed", withheld[0])
+
+    def test_ready_is_withheld_while_a_check_is_still_running(self):
+        self.fixture.step()
+        self.fixture.checks[-1] = dict(self.fixture.checks[-1], status="in_progress", conclusion=None)
+        self.fixture.wire()
+        self.assertEqual(self.fixture.flip(), {"ready-300": "withheld"})
+        self.assertEqual(self.fixture.readied(), [])
+        self.assertTrue(any("has not finished" in line for line in self.fixture.log_lines))
+
+    def test_a_failed_label_retirement_is_finished_on_the_next_tick(self):
+        # Finding 3 (2026-09-04): the post succeeded, the label DELETE did
+        # not. The head is terminal from the moment the receipt binds it, so
+        # the next tick owes it exactly the retirement and nothing else.
+        self.fixture.label_delete_failures = 1
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1)
+        self.assertTrue(self.fixture.review_armed, "the failed DELETE left the label armed")
+        self.assertTrue(any("FAILED decision=skip-this-tick" in line for line in self.fixture.log_lines))
+        self.fixture.step()
+        self.assertEqual(len(self.fixture.posted()), 1, "the bound head was not judged or posted again")
+        self.assertFalse(self.fixture.review_armed, "the second tick finished the retirement")
+        self.assertTrue(any("requires-review removed (a receipt already binds this head)" in line
+                            for line in self.fixture.log_lines))
+
+    def test_ready_is_never_flipped_on_a_dry_run(self):
+        self.fixture.step()
+        self.assertEqual(self.fixture.flip(dry_run=True), {"ready-300": "would-flip"})
+        self.assertEqual(self.fixture.readied(), [])
+        self.assertTrue(self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"]["draft"])
+
+    def test_ready_is_skipped_when_the_head_moves_under_the_tick(self):
+        self.fixture.step()
+        pr = MODULE.owned_pull_request(self.fixture.fleet.gh[f"repos/{MODULE.REPOSITORY}/pulls/300"])
+        pr["behind_by"] = 0
+        pr["head"] = "0" * 40
+        outcomes = {}
+        MODULE.flip_ready(self.fixture.github(), self.fixture.run, [pr], False, outcomes)
+        self.assertEqual(outcomes, {"ready-300": "skipped"})
+        self.assertEqual(self.fixture.readied(), [])
+
+    def test_a_foreign_approve_alone_does_not_let_the_promoter_flip(self):
+        # An APPROVE from any lane but the promoter's own is review evidence
+        # for the coordinator, never a trigger for the tool.
+        self.fixture.comments.append(app_comment(self.head))
+        self.fixture.review_armed = False
+        self.fixture.wire()
+        self.assertEqual(self.fixture.flip(), {"ready-300": "withheld"})
+        self.assertTrue(any("no promoter receipt binds this head" in line for line in self.fixture.log_lines))
+        self.assertEqual(self.fixture.readied(), [])
 
     def test_the_token_reaches_exactly_one_subprocess_and_only_through_its_environment(self):
         self.fixture.step()
@@ -599,16 +774,20 @@ class CallTracingTests(unittest.TestCase):
         dones = [line for line in lines if line.startswith("DONE ")]
         self.assertEqual(len(starts), len(dones), "every START is answered by exactly one DONE")
         for kind in ("registry-token", "registry-manifest", "registry-blob",
-                     "cosign-verify-chart", "cosign-verify-provenance", "github-api",
-                     "github-list", "release-asset", "git-fetch", "receipt-token",
-                     "receipt-post"):
+                     "cosign-version", "cosign-verify-chart", "cosign-verify-provenance",
+                     "github-api", "github-list", "release-asset", "git-fetch",
+                     "receipt-token", "receipt-post"):
             named = [line for line in starts if line.startswith(f"START {kind} ")]
             self.assertTrue(named, (kind, starts))
             for line in named:
                 self.assertRegex(line, r" budget=\d+s$")
+        self.assertTrue(any(line.startswith("START git-fetch origin main budget=") for line in starts),
+                        "the tick's first fetch is traced like every other call")
+        self.assertTrue(any(line.startswith("START cosign-version ") and line.endswith("budget=120s") for line in starts),
+                        "the cosign version check carries cosign's short budget")
         for line in dones:
             self.assertRegex(line, r"elapsed=\d+\.\d+s (OK$|FAILED decision=\S+ reason=)")
-        for proof, outcome in (("novelty", "held"), ("confinement", "held"), ("re-derivation", "held")):
+        for proof, outcome in (("novelty", "held"), ("confinement", "held"), ("re-derivation", "held"), ("claim-audit", "held")):
             self.assertTrue(
                 any(line.startswith(f"PROOF {proof} ") and f" {outcome}" in line and "elapsed=" in line for line in lines),
                 (proof, lines),
@@ -644,6 +823,21 @@ class CallTracingTests(unittest.TestCase):
                 raise MODULE.Refusal("registry unreachable")
         self.assertTrue(any("decision=refuse" in line for line in self.fixture.log_lines),
                         "outside any declared block the default decision is the strict one")
+
+    def test_a_refused_initial_fetch_leaves_a_start_and_a_done_line(self):
+        # Finding 4 (2026-09-04): a forced initial-fetch failure used to
+        # produce no START or DONE record at all.
+        def refusing(argv, cwd=None, input_text=None, env=None, timeout=None, quiet_output=False):
+            if argv[:2] == ["git", "fetch"]:
+                raise MODULE.Refusal("`git fetch` exceeded 600s and its process group was killed")
+            return self.fixture.run(argv, cwd=cwd, input_text=input_text, env=env, timeout=timeout, quiet_output=quiet_output)
+
+        with self.assertRaisesRegex(MODULE.Refusal, "exceeded 600s"):
+            MODULE.Workspace(self.fixture.repo, refusing).refresh()
+        lines = self.fixture.log_lines
+        self.assertTrue(any(line.startswith("START git-fetch origin main budget=600s") for line in lines), lines)
+        self.assertTrue(any(line.startswith("DONE git-fetch origin main ") and "FAILED decision=refuse" in line
+                            for line in lines), lines)
 
     def test_a_registry_stall_during_a_proof_is_logged_as_a_skip(self):
         self.fixture.cut()
@@ -752,7 +946,9 @@ class FluxIntervalTests(unittest.TestCase):
 class ContractTextTests(unittest.TestCase):
     def test_agents_states_the_earned_receipt_and_keeps_the_ready_rule_verbatim(self):
         text = AGENTS.read_text(encoding="utf-8")
-        self.assertIn("NO TOOL FLIPS READY, promoter included", text)
+        self.assertIn("NO TOOL FLIPS READY on any pull request but a\npromotion pull request", text)
+        self.assertNotIn("NO TOOL FLIPS READY, promoter included", text)
+        self.assertIn("the one tool-driven flip this contract permits", text)
         self.assertIn("A promotion pull request's receipt is EARNED, not requested", text)
         self.assertIn("the security lane reviews every change to\n  the promoter's CODE", text)
         # The promoter's paragraph and the tool must name the same label set.
@@ -782,7 +978,8 @@ class ContractTextTests(unittest.TestCase):
     def test_the_runbook_documents_what_is_proven_and_what_is_not_automated(self):
         text = RUNBOOK.read_text(encoding="utf-8")
         self.assertIn("## Receipts by proof", text)
-        self.assertIn("**What is NOT automated.** Ready and merge.", text)
+        self.assertIn("**What is NOT automated.** Merge.", text)
+        self.assertIn("### Ready by rule", text)
         self.assertIn("interval: 1m0s", text.replace("`interval: 1m0s`", "interval: 1m0s"))
         self.assertIn("no Flux `Receiver`", text)
         self.assertIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, text)

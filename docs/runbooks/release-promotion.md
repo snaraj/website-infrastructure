@@ -9,9 +9,10 @@ every judgment in code, rewrites every pinned copy of the selection by
 counted substitution, opens the Draft promotion pull request with review
 attention armed, and — on a later tick — earns that pull request its
 exact-head verdict by re-deriving the whole promotion surface from the
-registry and the site's immutable Release ("Receipts by proof" below). It
-never flips Ready and never merges: the coordinator
-flips under AGENTS.md's one rule and the owner merges. `scripts/ready_check.py`
+registry and the site's immutable Release ("Receipts by proof" below), then
+flips that pull request out of Draft once AGENTS.md's one Ready rule reports
+ELIGIBLE with the promoter's own receipt among the approving lanes ("Ready by
+rule" below). It never merges: the owner merges. `scripts/ready_check.py`
 evaluates that rule read-only, proving exactly that the pull request is open,
 targets the default branch, is not behind it, carries an App-posted exact-head
 APPROVE with no REQUEST-CHANGES at that head, and has green required checks and
@@ -178,7 +179,8 @@ PROMOTER_RECEIPT_TOKEN_COMMAND="$receipt_helper" python3 -I -B "$repo/scripts/pr
 A promotion pull request's verdict is EARNED, not requested. On every tick,
 for each open promoter pull request the planner keeps — owner-authored, a
 promoter branch of this repository against `main`, current with `main` — the
-tool proves three things and reads nothing from the pull request itself:
+tool proves four things; the pull request's own text is read only to be
+audited, never to be believed:
 
 1. **Novelty.** No `snaraj-agent-reviews[bot]` comment already binds this
    exact head, matched on the App's four-part actor identity, so a head is
@@ -197,16 +199,26 @@ tool proves three things and reads nothing from the pull request itself:
    the site's protected `main`. The whole promotion surface is then re-rendered
    from that record and every blob compared to the head's by Git object id.
    One mutated byte anywhere is a different id.
+4. **Claim audit.** The pull request body and the head commit's message are
+   re-composed from the records proof 3 recomputed and the accounting the
+   head records (`git diff --numstat`), and compared byte for byte with what
+   GitHub and the head carry. A body or message that says anything else —
+   another version, digest, source, accounting, or one extra sentence — is
+   REQUEST-CHANGES.
 
-All three hold and the App posts `VERDICT: APPROVE` at that head, validated by
-`scripts/validate_review_receipt.py` first and with the live head re-read
-immediately before posting — a head that moved aborts the post. The
-`requires-review` label comes off with an APPROVE. A definitive failure of
-proof 2 or 3 posts `VERDICT: REQUEST-CHANGES` naming the proof and the
-mismatch and does nothing else: the label stays armed, because the pull
-request still needs a human to look, and a promotion pull request is never
-repaired in place — the fix lands in the promoter's code and the promoter
-re-cuts. A refusal it cannot attribute to the pull request — the registry,
+Only a Draft that carries `requires-review` is judged: a head that is already
+Ready, or that nobody armed, is outside the review-before-Ready sequence and
+is skipped with a logged reason. All four hold and the App posts `VERDICT:
+APPROVE` at that head, validated by `scripts/validate_review_receipt.py` first
+and with the live head re-read immediately before posting — a head that moved
+aborts the post. Posting either verdict also removes `requires-review`, as
+the Verdict format in `AGENTS.md` requires: posting and retiring are one
+operation, and a removal that failed after the post is finished on a later
+tick, because the head is terminal from the moment a receipt binds it. A
+definitive failure of proof 2, 3 or 4 posts `VERDICT: REQUEST-CHANGES` naming
+the proof and the mismatch and does nothing else: a promotion pull request is
+never repaired in place — the fix lands in the promoter's code and the
+promoter re-cuts. A refusal it cannot attribute to the pull request — the registry,
 the Release, cosign, the network — is neither verdict: it is logged and the
 head is judged again on the next tick.
 
@@ -220,9 +232,24 @@ named by `PROMOTER_RECEIPT_TOKEN_COMMAND` mints it, and it is handed to
 exactly one `gh pr comment` subprocess through its environment. With the
 variable unset the step reports itself unconfigured and composes nothing.
 
-**What is NOT automated.** Ready and merge. `scripts/ready_check.py` remains
-the only expression of the Ready rule, the coordinator alone flips, and the
-owner alone merges. A receipt is review evidence and nothing more.
+### Ready by rule
+
+After the receipt step, the tick judges every promotion pull request it keeps
+with `scripts/ready_check.py`'s own `ready_decision`, fed the same inputs the
+coordinator's read-only run reads: the pull request is open against the
+default branch and not behind it, an App-posted exact-head APPROVE binds the
+head with no REQUEST-CHANGES, `requires-review` is retired, every check at the
+head has finished green, and the label tuple is intact. Two extra conditions
+are the promoter's own: the head must still be the one this tick began with,
+and the approving lanes must include `promoter` — the receipt it earned, not
+a receipt somebody else posted. Only then does it run `gh pr ready`, and the
+`READY` line says `held:` on success or `withheld:` with every blocker. It is
+the one tool-driven flip AGENTS.md permits (owner ruling 2026-09-04, issue
+#309); every other pull request is the coordinator's to flip.
+
+**What is NOT automated.** Merge. The owner alone merges, and auto-merge —
+if the owner arms it on a promotion pull request — is the owner's own
+standing instruction to GitHub, never something this tool sets.
 
 ## Loop timing
 

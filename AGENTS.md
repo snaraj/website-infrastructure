@@ -532,7 +532,12 @@ place it is expressed outside this file: it proves the pull request is open,
 targets the default branch, is not behind it, carries an App-posted exact-head
 APPROVE with no REQUEST-CHANGES at that head, and has green required checks
 and intact labels. It judges no approving lane against a risk tier — that
-match is the coordinator's. NO TOOL FLIPS READY, promoter included. The commission states an estimate (files, net lines, review rounds)
+match is the coordinator's. NO TOOL FLIPS READY on any pull request but a
+promotion pull request: the promoter flips ITS OWN promotion pull requests,
+and only after the receipt it earned binds the exact head, `requires-review`
+is retired, every check is green and this rule's evaluator reports ELIGIBLE
+(owner ruling 2026-09-04, issue #309); the coordinator flips everything else.
+The commission states an estimate (files, net lines, review rounds)
 and the PR body the actuals; a material overrun — a doubling — takes a design
 reset before Ready, and green gates alone never make a PR Ready.
 
@@ -615,8 +620,12 @@ authority: the owner alone merges.
   `cybersecurity-review-requested`: the security lane reviews every change to
   the promoter's CODE — a normal agent pull request, where the risk lives —
   rather than re-reading a value a machine has already re-derived. The receipt
-  is review evidence and nothing else: NO TOOL FLIPS READY, promoter included,
-  the coordinator flips, and the owner alone merges.
+  is what the Ready rule reads: on a later tick the promoter runs that rule's
+  own evaluator against its promotion pull request and, when it reports
+  ELIGIBLE with the promoter's receipt among the approving lanes, flips it out
+  of Draft — the one tool-driven flip this contract permits (owner ruling
+  2026-09-04, issue #309). Every other pull request is flipped by the
+  coordinator, and the owner alone merges.
   A promotion pull request is never repaired in place by an
   agent (owner direction 2026-09-03, source
   [PR #303 comment 5530907119](https://github.com/snaraj/website-infrastructure/pull/303#issuecomment-5530907119)):
@@ -665,7 +674,8 @@ authority: the owner alone merges.
   APPROVE receipt, all exact-head
   checks succeed, protected base is current, all discussions/findings are
   resolved, metadata/scope/order remain exact, and the platform patch-release
-  consequence is proven. Only the coordinator flips Ready and re-verifies;
+  consequence is proven. The coordinator flips Ready and re-verifies — or,
+  for a promotion pull request only, the promoter does under the Ready rule;
   author and reviewer never do. Nobody but the repository owner merges.
 
 ## Parallel agents in one checkout
@@ -764,8 +774,9 @@ The complete delivery loop, each step gated by the sections around it:
 7. **Adversarial review** per the protocol above, at the depth its risk
    tier earns; findings are fixed on the same branch by the same writer
    and delta re-reviewed. After an APPROVE at the exact final head with
-   every required check green, the coordinator flips Ready — there is no
-   second receipt between them.
+   every required check green, the coordinator flips Ready (the promoter, for
+   its own promotion pull request, under the same rule) — there is no second
+   receipt between them.
 8. **Owner comments** are handled per the owner review protocol below.
 9. **The owner merges.** Nothing you can do — approval, green checks,
    ready state — substitutes for that.
