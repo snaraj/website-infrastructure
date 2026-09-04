@@ -6,8 +6,11 @@ minutes. The step that advances the committed exact-digest selection is
 it discovers every promotable workload from the annotated `OCIRepository`
 manifests under `kubernetes/`, runs the issue-195 acquisition ceremony with
 every judgment in code, rewrites every pinned copy of the selection by
-counted substitution, and opens the Draft promotion pull request with both
-review lanes armed. It never flips Ready and never merges: the coordinator
+counted substitution, opens the Draft promotion pull request with review
+attention armed, and — on a later tick — earns that pull request its
+exact-head verdict by re-deriving the whole promotion surface from the
+registry and the site's immutable Release ("Receipts by proof" below). It
+never flips Ready and never merges: the coordinator
 flips under AGENTS.md's one rule and the owner merges. `scripts/ready_check.py`
 evaluates that rule read-only, proving exactly that the pull request is open,
 targets the default branch, is not behind it, carries an App-posted exact-head
@@ -60,10 +63,18 @@ python3 -I -B "$repo/scripts/promote_releases.py" tick --repo "$repo" --dry-run
 ```
 
 Then install the user agent. The plist is emitted by the tool with the
-paths as arguments — no machine path is ever committed:
+paths as arguments — no machine path is ever committed. `--token-command`
+names the machine-local helper that mints the reviewer App's
+repository-scoped token; it reaches the tick as the environment variable
+`PROMOTER_RECEIPT_TOKEN_COMMAND`, takes `owner/repository` as its only
+argument, and prints one token on stdout (diagnostics on stderr, which is the
+only stream a failure is ever quoted from). Omit the flag and the receipt step
+reports itself unconfigured and composes nothing; no proof runs without a way
+to post its verdict:
 
 ```sh
-python3 -I -B "$repo/scripts/promote_releases.py" launchd-plist --repo "$repo" --log "$HOME/Library/Logs/release-promoter.log" > "$HOME/Library/LaunchAgents/dev.snaraj.release-promoter.plist"
+receipt_helper="$HOME/path/to/agent-reviews-token"
+python3 -I -B "$repo/scripts/promote_releases.py" launchd-plist --repo "$repo" --log "$HOME/Library/Logs/release-promoter.log" --token-command "$receipt_helper" > "$HOME/Library/LaunchAgents/dev.snaraj.release-promoter.plist"
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.snaraj.release-promoter.plist"
 ```
 
@@ -99,7 +110,7 @@ next tick; nothing is ever amended, rebased or force-pushed.
 
 ### Reading the log
 
-Every line carries the UTC timestamp first. After it, four shapes:
+Every line carries the UTC timestamp first. After it, five shapes:
 
 - `<slug>: committed X vs latest Y -> verdict` — one per workload, per tick.
 - `START <kind> <target> budget=<n>s` — a long external call is beginning.
@@ -115,11 +126,17 @@ Every line carries the UTC timestamp first. After it, four shapes:
   correlating two lines to learn what a stall cost. Cosign is bounded at 120
   seconds per attempt with exactly one retry, so its first failure reads
   `attempt=1/2 ... decision=retry`.
+- `PROOF <novelty|identity|confinement|re-derivation|claim-audit|subject> pull-request=<n>
+  head=<sha7> <held|failed: what|skipped: why> elapsed=<n>s` — one per proof.
+  The receipt step's own two call kinds, `receipt-token` and `receipt-post`,
+  appear as `START`/`DONE` pairs only on a tick that posts.
 - `SUMMARY tick elapsed=<n>s dry-run=<bool> <key>=<value> …` — the last line
   of every tick, on every exit path, with one key per workload
   (`current`/`behind`/`ahead`) and one per pull request it touched
-  (`cut=`, `pull-request-N=superseded`), or `lock=held-by-another-tick` when
-  another tick owned the lock and this one did nothing.
+  (`cut=`, `pull-request-N=superseded`, `receipt-N=posted:APPROVE`,
+  `receipt-N=skipped`, `receipt=unconfigured`), or `lock=held-by-another-tick`
+  when another tick owned the lock and this one did nothing. `SUMMARY receipt …`
+  is the same line from a standalone `receipt` run.
 
 A tick that ends without a `SUMMARY` line died in a way the tool did not
 survive; that is the one shape worth escalating on sight.
@@ -150,6 +167,98 @@ standing custody check that the registry still serves what is committed:
 ```sh
 python3 -I -B scripts/promote_releases.py verify
 ```
+
+`receipt` runs the tick's receipt step alone, under the same lock and over
+the same pull requests, so a manual run can never race the scheduled one or
+post a verdict the tick would not. A dry run performs every proof, validates
+the composed receipt and stops before posting:
+
+```sh
+PROMOTER_RECEIPT_TOKEN_COMMAND="$receipt_helper" python3 -I -B "$repo/scripts/promote_releases.py" receipt --repo "$repo" --dry-run
+```
+
+## Receipts by proof
+
+A promotion pull request's verdict is EARNED, not requested. On every tick,
+for each open promoter pull request the planner keeps — owner-authored, a
+promoter branch of this repository against `main`, current with `main` — the
+tool proves five things; the pull request's own text is read only to be
+audited, never to be believed:
+
+1. **Novelty.** No `snaraj-agent-reviews[bot]` comment already binds this
+   exact head, matched on the App's four-part actor identity, so a head is
+   judged at most once.
+2. **Confinement.** Every path the head changes against `main` is a path the
+   promoter's own `apply_promotion` writes. The permitted set is that
+   function's return value from the re-derivation below, never a list kept in
+   the tool, so it cannot go stale as the promotion surface grows.
+3. **Re-derivation.** In a detached read-only worktree at `main`, the
+   issue-195 acquisition ceremony runs again — double tag resolution, the
+   Helm config and sole chart layer at their own digests, the embedded
+   workload pin bound to the exact index, one `linux/arm64` child, cosign on
+   the chart AT ITS DIGEST and on the SLSA v1 provenance at the index digest,
+   the immutable Release and its `release-manifest.json` bound by GitHub's own
+   asset digest, and the annotated tag dereferenced to a commit reachable from
+   the site's protected `main`. The whole promotion surface is then re-rendered
+   from that record and every tree entry compared to the head's by mode,
+   type and Git object id. One mutated byte anywhere is a different id, and
+   a mode or type the promoter never writes is a different entry.
+4. **Claim audit.** The pull request body and the head commit's message are
+   re-composed from the records proof 3 recomputed and the accounting the
+   head records (`git diff --numstat`), and compared byte for byte with what
+   GitHub and the head carry. A body or message that says anything else —
+   another version, digest, source, accounting, or one extra sentence — is
+   REQUEST-CHANGES.
+5. **Identity.** The head commit's author and committer are the owner's
+   noreply identity, read the way the cut reads it, and its SSH signature
+   verifies against every key GitHub registers for the owner, through a
+   scratch allowed-signers file inside the promoter's own clone. An unsigned
+   head, a key the owner never registered, or a foreign identity is
+   REQUEST-CHANGES; the capture date is bound to that verified commit.
+
+A head is judged only while its pull request is the subject the contract lets
+a reviewer judge: open, Draft, and wearing `requires-review`. The promoter
+armed that label when it opened the pull request and never re-arms it: its
+presence is the author-complete signal `AGENTS.md` defines, its absence means
+nobody asked, and a person who removes it withdraws the request until a person
+arms it again. All five hold and the App posts `VERDICT: APPROVE` at that
+head, validated by `scripts/validate_review_receipt.py` first. The receipt
+binds two things: the head, on its `HEAD:` line, and the body it audited, on
+its `BODY-SHA256:` line — the digest of the body after the newline
+normalisation the claim audit applies. `scripts/ready_check.py` recomputes
+that digest from the live body at flip time and withholds Ready when it
+differs, so a body edited after the receipt, at the same head, is a different
+subject. The whole tuple — head, open, Draft, label — is re-read immediately
+before the token is minted and again after it, immediately before the one
+command that posts; whichever part changed, nothing is posted, and no token
+is minted for a subject withdrawn before the mint. Posting either verdict
+also removes `requires-review`, as the Verdict format in `AGENTS.md`
+requires; a removal a failed write left undone is finished on the next tick,
+at that head only. What the forge can leave after the last read is a true
+record about a head and a body, and every state the Ready rule cares about —
+open, Draft, labels, checks, base — it reads live at flip time. Without a
+token helper configured the step reports itself unconfigured and composes
+nothing; no proof runs. A definitive failure of proof 2, 3, 4 or 5 posts
+`VERDICT: REQUEST-CHANGES` naming the proof and the mismatch, and nothing but
+that proof; a promotion pull request is never repaired in place — the fix
+lands in the promoter's code and the promoter re-cuts. A refusal it cannot
+attribute to the pull request — the registry, the Release, cosign, the
+network — is neither verdict: it is logged and the
+head is judged again on the next tick.
+
+The capture date is the one value taken from the head, because the cut stamps
+the day it ran and no registry can return it; it must be a plain ISO date
+within a day of the head commit's own signed author timestamp, and anything
+else is a mutation that fails proof 3.
+
+The token never enters an argument list, a log line or a file: the helper
+named by `PROMOTER_RECEIPT_TOKEN_COMMAND` mints it, and it is handed to
+exactly one `gh pr comment` subprocess through its environment. With the
+variable unset the step reports itself unconfigured and composes nothing.
+
+**What is NOT automated.** Ready and merge. `scripts/ready_check.py` remains
+the only expression of the Ready rule, the coordinator alone flips, and the
+owner alone merges. A receipt is review evidence and nothing more.
 
 ## Loop timing
 

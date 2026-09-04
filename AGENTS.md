@@ -600,11 +600,30 @@ authority: the owner alone merges.
   exactly: open Draft promotion pull requests from a receipted acquisition,
   labelled `release`, `security`, `delivery-lane` and `promoter` — the
   `security` tier because a promotion advances a signed chart digest and the
-  identity pins that gate it — and arm `requires-review` and
-  `cybersecurity-review-requested`. That set is exact: the Ready evaluator
-  accepts it whole and denies `promoter` beside an acting-model label,
-  `agent-authored`, another tier, or a missing member. It never flips Ready
-  and never merges. A promotion pull request is never repaired in place by an
+  identity pins that gate it — and arm `requires-review`. That set is exact:
+  the Ready evaluator accepts it whole and denies `promoter` beside an
+  acting-model label, `agent-authored`, another tier, or a missing member.
+  **A promotion pull request's receipt is EARNED, not requested** (owner
+  release-loop commission 2026-09-03, issue #309). On a later tick, for a
+  promotion pull request that is open, Draft and still wears the
+  `requires-review` the promoter armed at the cut — it never re-arms that
+  label; a person who removes it withdraws the request — the promoter proves
+  five things: no App comment already binds that head; the head commit is
+  signed by the owner's registered key under the owner's identity; every path
+  the head changes is one its own `apply_promotion` writes; re-running the
+  issue-195 acquisition ceremony against the registry, the site's immutable
+  Release and its protected `main` re-renders that surface byte for byte; and
+  the pull request body and commit message re-compose from those records.
+  Only then does the `snaraj-agent-reviews[bot]` App post the exact-head
+  verdict, which a proof failure makes REQUEST-CHANGES. The receipt also binds
+  the digest of the body it audited, and the Ready rule withholds on a body
+  edited afterwards at the same head. So a promotion pull request no longer
+  carries `cybersecurity-review-requested`: the security lane reviews every change to
+  the promoter's CODE — a normal agent pull request, where the risk lives —
+  rather than re-reading a value a machine has already re-derived. The receipt
+  is review evidence and nothing else: NO TOOL FLIPS READY, promoter included,
+  the coordinator flips, and the owner alone merges.
+  A promotion pull request is never repaired in place by an
   agent (owner direction 2026-09-03, source
   [PR #303 comment 5530907119](https://github.com/snaraj/website-infrastructure/pull/303#issuecomment-5530907119)):
   a defect in one is fixed in the promoter's own code through a normal agent

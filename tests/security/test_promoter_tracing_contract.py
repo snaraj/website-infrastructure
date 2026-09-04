@@ -178,4 +178,5 @@ class CadenceTests(unittest.TestCase):
         self.assertIn(f"<key>StartInterval</key><integer>{MODULE.LAUNCHD_INTERVAL_SECONDS}</integer>",
                       MODULE.launchd_plist("/x/repo", "/x/log"))
         self.assertIn("### Reading the log", text)
-        self.assertNotIn("PROOF", text)
+        # The receipt engine documents its PROOF line beside the four tick shapes.
+        self.assertIn("- `PROOF <novelty|identity|confinement|re-derivation|claim-audit|subject>", text)
