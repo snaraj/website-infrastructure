@@ -100,6 +100,12 @@ class ProofFixture:
         self.fleet.gh[f"repos/{self.fleet.site}/releases/latest"] = {"tag_name": f"v{self.version}"}
         self.fleet.gh["repos/snaraj/lidersea.com/releases/latest"] = {"tag_name": "v0.1.41"}
         self.fleet.gh["user"] = {"login": MODULE.ASSIGNEE, "id": OWNER_ID, "name": "t"}
+        # A real, throwaway SSH signing key: the cut is signed with it and
+        # GitHub is scripted to register its public half for the owner, so the
+        # identity proof verifies a genuine signature rather than a stub.
+        self.key = base / "signing-key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", str(self.key)], check=True, capture_output=True)
+        self.fleet.gh[f"users/{MODULE.ASSIGNEE}/ssh_signing_keys"] = [[{"key": self.key.with_suffix(".pub").read_text(encoding="utf-8").strip()}]]
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues?state=open&labels=delivery-lane&per_page=100"] = [
             [{"number": 285, "title": "deploy-assurance[site-drift/naranjo-online]"}]
         ]
@@ -139,13 +145,15 @@ class ProofFixture:
         return done.stdout
 
     # -- the head under proof ---------------------------------------------
-    def cut(self, mutate=None, message=None) -> str:
+    def cut(self, mutate=None, message=None, sign=True, key=None, email=OWNER_EMAIL) -> str:
         """Produce a genuine promotion commit on the promoter branch.
 
         ``mutate`` receives the author checkout after ``apply_promotion`` has
         written the surface, so a test can change exactly one thing;
         ``message`` receives the composed commit message and returns the one
-        to commit, so a test can make the head claim something false.
+        to commit, so a test can make the head claim something false;
+        ``sign``, ``key`` and ``email`` let a test commit unsigned, with a key
+        GitHub does not register, or under a foreign identity.
         """
 
         selections = MODULE.discover_selections(self.author)
@@ -165,8 +173,9 @@ class ProofFixture:
         composed = f"{MODULE.pr_title(selections, {'naranjo-online': self.version})}\n\n{self.body}"
         if message is not None:
             composed = message(composed)
+        signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key or self.key}", "-S"] if sign else []
         self.run(
-            ["git", "-c", "user.name=t", "-c", f"user.email={OWNER_EMAIL}", "commit", "-q", "-F", "-"],
+            ["git", "-c", "user.name=t", "-c", f"user.email={email}", *signing[:4], "commit", "-q", *signing[4:], "-F", "-"],
             cwd=self.author, input_text=composed,
         )
         self.head = self.git("rev-parse", "HEAD", cwd=self.author).strip()
@@ -213,6 +222,9 @@ class ProofFixture:
                 # last interval before the post.
                 self.inject_receipt_before_post = False
                 self.comments.append(app_comment(self.head))
+                self.wire()
+            if self.move_head_after == "token":
+                self.move_head_after, self.head = None, "d" * 40
                 self.wire()
             return TOKEN + "\n"
         if argv[:3] == ["gh", "pr", "comment"]:
@@ -318,7 +330,7 @@ class HonestHeadTests(unittest.TestCase):
             self.assertIn(figure, body)
         self.assertIn(f"releases/tag/v{self.fixture.version}", body)
         self.assertIn("kubernetes/websites/naranjo-online/source.yaml", body)
-        for required in ("Confinement", "Re-derivation", "Novelty", "Claim audit", "NO TOOL FLIPS READY"):
+        for required in ("Confinement", "Re-derivation", "Novelty", "Claim audit", "Identity", "NO TOOL FLIPS READY"):
             self.assertIn(required, body)
 
     def test_a_two_workload_receipt_still_fits_the_contract_ceiling(self):
@@ -492,6 +504,47 @@ class MutationTests(unittest.TestCase):
         self.assertTrue(any("requires-review removed (with the REQUEST-CHANGES receipt)" in line
                             for line in self.fixture.log_lines))
 
+    def test_an_unsigned_head_is_a_request_changes(self):
+        # PR #312 round 1, finding 1: the receipt attests a signed head, so
+        # the proof verifies the signature instead of assuming it.
+        self.fixture.cut(sign=False)
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Identity failed: the head commit's signature does not verify", receipt)
+        self.assertTrue(any(line.startswith("PROOF identity ") and "failed:" in line for line in self.fixture.log_lines))
+
+    def test_a_head_signed_by_an_unregistered_key_is_a_request_changes(self):
+        other = self.fixture.key.parent / "other-key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "other", "-f", str(other)], check=True, capture_output=True)
+        self.fixture.cut(key=other)
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("does not verify against the owner's registered signing keys", receipt)
+
+    def test_a_foreign_identity_is_a_request_changes(self):
+        self.fixture.cut(email="someone@example.invalid")
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Identity failed: the head commit's author or committer is not the owner's noreply identity", receipt)
+
+    def test_an_honest_head_carries_the_identity_proof(self):
+        self.fixture.cut()
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "APPROVE")
+        self.assertIn("5. Identity.", receipt)
+        self.assertTrue(any(line.startswith("PROOF identity ") and "held:" in line for line in self.fixture.log_lines))
+
+    def test_a_mode_only_mutation_is_a_request_changes(self):
+        # PR #312 round 1, finding 2: same bytes, different tree entry.
+        def mutate(root):
+            (root / "README.md").chmod(0o755)
+
+        self.fixture.cut(mutate)
+        verdict, receipt = self.fixture.prove()
+        self.assertEqual(verdict, "REQUEST-CHANGES")
+        self.assertIn("Re-derivation failed", receipt)
+        self.assertIn("README.md", receipt)
+
     def test_a_false_body_claim_is_a_request_changes(self):
         # Finding 1 (2026-09-04): the receipt used to CLAIM a body audit it
         # never did. The body is a pure function of the re-derived records
@@ -615,6 +668,15 @@ class PostingTests(unittest.TestCase):
         self.assertTrue(self.fixture.review_armed, "the replacement head keeps its review attention")
         self.assertEqual([call for call in self.fixture.writes() if call["write"].endswith("/labels/requires-review")], [])
         self.assertTrue(any("kept; the head moved past" in line for line in self.fixture.log_lines))
+
+    def test_a_head_that_moves_during_token_acquisition_is_not_posted(self):
+        # PR #312 round 1, finding 3: the last pre-post read covers the head
+        # as well as the receipt set.
+        self.fixture.move_head_after = "token"
+        self.fixture.step()
+        self.assertEqual(self.fixture.posted(), [])
+        self.assertTrue(any("the head moved during token acquisition; nothing was posted" in line
+                            for line in self.fixture.log_lines))
 
     def test_a_malformed_app_comment_is_not_a_receipt(self):
         # Round 2, finding 4: a HEAD-only App comment is text, not a verdict.
@@ -941,6 +1003,12 @@ class ContractTextTests(unittest.TestCase):
         text = AGENTS.read_text(encoding="utf-8")
         self.assertIn("NO TOOL FLIPS READY, promoter included", text)
         self.assertIn("is review evidence and nothing else: NO TOOL FLIPS READY, promoter included", text)
+        # PR #312 round 1, finding 4: the tool's own claims say the same.
+        self.assertIn("It holds\nno readiness authority: under AGENTS.md the coordinator flips Ready", MODULE.__doc__)
+        self.assertNotIn("flips Ready ONLY", MODULE.__doc__)
+        source = Path(MODULE.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("armed both review lanes", source)
+        self.assertIn("and armed {', '.join(REVIEW_LABELS)}", source)
         self.assertIn("A promotion pull request's receipt is EARNED, not requested", text)
         self.assertIn("the security lane reviews every change to\n  the promoter's CODE", text)
         # The promoter's paragraph and the tool must name the same label set.
@@ -971,6 +1039,9 @@ class ContractTextTests(unittest.TestCase):
         text = RUNBOOK.read_text(encoding="utf-8")
         self.assertIn("## Receipts by proof", text)
         self.assertIn("**What is NOT automated.** Ready and merge.", text)
+        self.assertIn("reports itself unconfigured and composes nothing; no proof runs", text)
+        self.assertNotIn("still runs every proof", text)
+        self.assertIn("5. **Identity.**", text)
         self.assertIn("interval: 1m0s", text.replace("`interval: 1m0s`", "interval: 1m0s"))
         self.assertIn("no Flux `Receiver`", text)
         self.assertIn(MODULE.RECEIPT_TOKEN_COMMAND_ENV, text)

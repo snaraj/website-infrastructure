@@ -41,8 +41,7 @@ The tool runs on the owner's workstation under the owner's own keyring
 credential and SSH signing key, exactly like every promotion so far: no new
 principal, no credential in CI, and the identity, signature and
 account-protection contracts are untouched. Standard library only. It holds
-readiness authority of its own beyond the Ready rule: it flips Ready ONLY on
-its own promotion pull requests and only when that rule reports ELIGIBLE
+no readiness authority: under AGENTS.md the coordinator flips Ready
 (``scripts/ready_check.py`` is that rule in code) and the owner alone merges.
 """
 
@@ -59,6 +58,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import posixpath
 import re
 import shutil
@@ -1921,7 +1921,7 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
     body_path.unlink()
     number = int(url.rstrip("/").rsplit("/", 1)[1])
     github.mutate(f"repos/{REPOSITORY}/issues/{number}/labels", "POST", body={"labels": list(REVIEW_LABELS)})
-    log(f"opened Draft PR #{number} at {head} and armed both review lanes")
+    log(f"opened Draft PR #{number} at {head} and armed {', '.join(REVIEW_LABELS)}")
     return number
 
 
@@ -2076,13 +2076,31 @@ def scratch_worktree(workspace: Workspace, commit: str):
         workspace.git("worktree", "prune")
 
 
-def head_blob(workspace: Workspace, commit: str, name: str):
-    """The object id of ``name`` at ``commit``, or ``None`` when it is absent."""
+def head_entry(workspace: Workspace, commit: str, name: str):
+    """The tree entry of ``name`` at ``commit`` — ``(mode, type, object id)``
+    — or ``None`` when it is absent. The MODE is part of the comparison
+    (security review of PR #312, finding 2): a file whose bytes reproduce but
+    which the head made executable, or a symlink, is not the surface the
+    promoter writes, and an object id alone cannot see that."""
 
-    try:
-        return workspace.git("rev-parse", f"{commit}:{name}").strip()
-    except Refusal:
+    line = workspace.git("ls-tree", commit, "--", name).strip()
+    if not line:
         return None
+    meta, _path = line.split("\t", 1)
+    mode, kind, oid = meta.split()
+    return mode, kind, oid
+
+
+def rendered_entry(workspace: Workspace, path: Path):
+    """The tree entry a re-rendered file would commit as: the mode git records
+    from the filesystem, a blob, and the object id of its exact bytes."""
+
+    status = os.lstat(path)
+    if stat.S_ISLNK(status.st_mode):
+        mode = "120000"
+    else:
+        mode = "100755" if status.st_mode & 0o111 else "100644"
+    return mode, "blob", rendered_blob(workspace, path)
 
 
 def rendered_blob(workspace: Workspace, path: Path) -> str:
@@ -2118,15 +2136,56 @@ def path_list(names) -> str:
     return ", ".join(shown) if shown else "none"
 
 
+class IdentityMismatch(Refusal):
+    """The head itself fails identity or signature verification: a definitive
+    verdict about the head, unlike an environment refusal, which is a skip."""
+
+
+def verify_head_identity(workspace: Workspace, github: GitHub, head: str) -> None:
+    """Proof 5, Identity: the head commit is what the owner's credential signs.
+
+    A promotion pull request is opened by the owner's own credential and its
+    commit is SSH-signed with the owner's registered signing key under the
+    owner's noreply identity (AGENTS.md, Commit identity mechanics). The
+    receipt attests exactly that, so it is verified rather than assumed
+    (security review of PR #312, finding 1): author and committer must both be
+    the owner's noreply identity read the way the cut reads it, and the
+    signature must verify against the keys GitHub registers for the owner —
+    every registered key as a principal for that one email, in a scratch
+    allowed-signers file inside the promoter's own clone, removed afterwards.
+    """
+
+    identity = workspace.identity(github)
+    fields = workspace.git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", head).rstrip("\n").split("\x00")
+    expected = [identity["GIT_AUTHOR_NAME"], identity["GIT_AUTHOR_EMAIL"], identity["GIT_COMMITTER_NAME"], identity["GIT_COMMITTER_EMAIL"]]
+    if fields != expected:
+        raise IdentityMismatch("the head commit's author or committer is not the owner's noreply identity")
+    login = github.api("user").get("login")
+    registered = [" ".join(key["key"].split()[:2]) for key in github.api_pages(f"users/{login}/ssh_signing_keys")]
+    if not registered:
+        raise Refusal("the owner has no registered SSH signing key to verify against")
+    signers = workspace.root / ".git" / "promoter-allowed-signers"
+    signers.write_text("".join(f"{identity['GIT_AUTHOR_EMAIL']} {key}\n" for key in registered), encoding="utf-8")
+    try:
+        status = workspace.git("-c", f"gpg.ssh.allowedSignersFile={signers}", "show", "-s", "--format=%G?", head).strip()
+    finally:
+        signers.unlink(missing_ok=True)
+    if status != "G":
+        raise IdentityMismatch(
+            f"the head commit's signature does not verify against the owner's registered signing keys (git reports {status or 'none'})"
+        )
+
+
 def captured_date(workspace: Workspace, head: str) -> str:
     """The capture date the head's receipt states, bound to its own commit.
 
     This is the ONE value the proof takes from the head, because
     ``apply_promotion`` stamps the day the cut ran and cannot recover it from
     the registry. It is bound anyway: it must be a plain ISO date within a day
-    of the head commit's own author timestamp — and that commit is signed — so
-    the only thing it can be is the date the promoter actually cut, give or
-    take a midnight boundary. Anything else is a mutation.
+    of the head commit's own author timestamp — and ``verify_head_identity``
+    has already proved that commit signed by the owner's key — so the only
+    thing it can be is the date the promoter actually cut, give or take a
+    midnight boundary. Anything else is a mutation.
     """
 
     try:
@@ -2190,7 +2249,7 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
         + statements
         + [
             "   Re-rendering every promotion surface from those records reproduces this"
-            " head byte for byte — each blob compared by object id. The capture date"
+            " head byte for byte — each tree entry compared by mode and object id. The capture date"
             f" {captured} is the one value taken from the head and is bound to the head"
             " commit's own signed timestamp.",
             f"3. Novelty. No `{READY.REVIEWS_APP}` comment on this pull request bound"
@@ -2199,6 +2258,10 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " re-compose, byte for byte, from the records above and the accounting"
             " this head records by `git diff --numstat`; neither was parsed or"
             " believed.",
+            "5. Identity. The head commit's author and committer are the owner's"
+            " noreply identity and its SSH signature verifies against the keys"
+            " GitHub registers for the owner; the capture date above is bound to"
+            " that verified commit's timestamp.",
             "",
             "Mutation and claim audit: the re-derivation and the re-composition ARE"
             " both. A body or message stating any other version, digest, source or"
@@ -2206,8 +2269,8 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " in the surface — a digest, a receipt field, the changelog fragment, the"
             " README sentence — changes an object id and turns this verdict into"
             " REQUEST-CHANGES. Findings: none.",
-            "No finding — checked the changed-path set, every re-rendered byte, the"
-            " keyless signer identity, the immutable Release binding, the"
+            "No finding — checked the changed-path set, every re-rendered entry, the"
+            " head commit's signature and identity, the keyless signer identity, the immutable Release binding, the"
             " manifest-digest agreement and the tag-to-protected-main ancestry.",
             "",
             "Gates and flakes: this head's tree is byte-identical to one the promoter's"
@@ -2350,6 +2413,14 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
             proof_log("subject", number, head, "skipped: the branch does not point at the head GitHub reports", started)
             return None
 
+        identity_started = time.monotonic()
+        try:
+            verify_head_identity(workspace, github, head)
+        except IdentityMismatch as error:
+            proof_log("identity", number, head, f"failed: {error}", identity_started)
+            return "REQUEST-CHANGES", request_changes_receipt(head, base, "Identity", str(error))
+        proof_log("identity", number, head, "held: signed by the owner's registered key under the owner's identity", identity_started)
+
         changed = [name for name in workspace.git("diff", "--name-only", "-z", base, head).split("\0") if name]
         derivation = time.monotonic()
         try:
@@ -2396,7 +2467,7 @@ def prove_promotion(workspace: Workspace, github: GitHub, registry: Registry, co
                 proof_log("confinement", number, head, f"held: {len(changed)} changed path(s), all in the surface", confinement)
                 differing = [
                     name for name in surface
-                    if head_blob(workspace, head, name) != rendered_blob(workspace, tree / name)
+                    if head_entry(workspace, head, name) != rendered_entry(workspace, tree / name)
                 ]
                 statements = [workload_statement(selections[slug], record) for slug, (record, _) in sorted(acquired.items())]
                 audit = time.monotonic()
@@ -2456,8 +2527,8 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
             token = run([helper, REPOSITORY], quiet_output=True).strip()
         if not token or "\n" in token:
             raise Refusal("the receipt token helper produced no single-line token")
-        # Novelty is re-read HERE, after the token is minted and immediately
-        # before the one command that posts: the last read the forge allows
+        # Novelty and the head are re-read HERE, after the token is minted and
+        # immediately before the one command that posts: the last read the forge allows
         # before the write. A receipt that arrived during the proof binds this
         # head already. The window the forge leaves after this read is closed
         # by the rule, not by this tool: two receipts at one head are read as
@@ -2465,6 +2536,13 @@ def post_receipt(workspace: Workspace, github: GitHub, run, helper: str, number:
         # withholds Ready, so a duplicate can only ever be conservative.
         if head in app_receipt_heads(github, number):
             log(f"PR #{number}: a receipt arrived at {head[:7]} during the proof; nothing was posted")
+            return False
+        # And the head once more, in the same last interval: token acquisition
+        # is the longest step between the proof and the post (security review
+        # of PR #312, finding 3).
+        live = owned_pull_request(github.api(f"repos/{REPOSITORY}/pulls/{number}"))
+        if live is None or live["head"] != head:
+            log(f"PR #{number}: the head moved during token acquisition; nothing was posted")
             return False
         environment = dict(os.environ)
         environment.pop("GITHUB_TOKEN", None)

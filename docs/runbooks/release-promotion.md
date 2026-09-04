@@ -68,8 +68,9 @@ names the machine-local helper that mints the reviewer App's
 repository-scoped token; it reaches the tick as the environment variable
 `PROMOTER_RECEIPT_TOKEN_COMMAND`, takes `owner/repository` as its only
 argument, and prints one token on stdout (diagnostics on stderr, which is the
-only stream a failure is ever quoted from). Omit the flag and the promoter
-still runs every proof and posts nothing:
+only stream a failure is ever quoted from). Omit the flag and the receipt step
+reports itself unconfigured and composes nothing; no proof runs without a way
+to post its verdict:
 
 ```sh
 receipt_helper="$HOME/path/to/agent-reviews-token"
@@ -125,7 +126,7 @@ Every line carries the UTC timestamp first. After it, five shapes:
   correlating two lines to learn what a stall cost. Cosign is bounded at 120
   seconds per attempt with exactly one retry, so its first failure reads
   `attempt=1/2 ... decision=retry`.
-- `PROOF <novelty|confinement|re-derivation|subject> pull-request=<n>
+- `PROOF <novelty|identity|confinement|re-derivation|claim-audit|subject> pull-request=<n>
   head=<sha7> <held|failed: what|skipped: why> elapsed=<n>s` — one per proof.
 - `SUMMARY tick elapsed=<n>s dry-run=<bool> <key>=<value> …` — the last line
   of every tick, on every exit path, with one key per workload
@@ -178,7 +179,7 @@ PROMOTER_RECEIPT_TOKEN_COMMAND="$receipt_helper" python3 -I -B "$repo/scripts/pr
 A promotion pull request's verdict is EARNED, not requested. On every tick,
 for each open promoter pull request the planner keeps — owner-authored, a
 promoter branch of this repository against `main`, current with `main` — the
-tool proves four things; the pull request's own text is read only to be
+tool proves five things; the pull request's own text is read only to be
 audited, never to be believed:
 
 1. **Novelty.** No `snaraj-agent-reviews[bot]` comment already binds this
@@ -196,18 +197,25 @@ audited, never to be believed:
    the immutable Release and its `release-manifest.json` bound by GitHub's own
    asset digest, and the annotated tag dereferenced to a commit reachable from
    the site's protected `main`. The whole promotion surface is then re-rendered
-   from that record and every blob compared to the head's by Git object id.
-   One mutated byte anywhere is a different id.
+   from that record and every tree entry compared to the head's by mode and
+   Git object id. One mutated byte anywhere is a different id, and a mode
+   the promoter never writes is a different entry.
 4. **Claim audit.** The pull request body and the head commit's message are
    re-composed from the records proof 3 recomputed and the accounting the
    head records (`git diff --numstat`), and compared byte for byte with what
    GitHub and the head carry. A body or message that says anything else —
    another version, digest, source, accounting, or one extra sentence — is
    REQUEST-CHANGES.
+5. **Identity.** The head commit's author and committer are the owner's
+   noreply identity, read the way the cut reads it, and its SSH signature
+   verifies against every key GitHub registers for the owner, through a
+   scratch allowed-signers file inside the promoter's own clone. An unsigned
+   head, a key the owner never registered, or a foreign identity is
+   REQUEST-CHANGES; the capture date is bound to that verified commit.
 
 Only a Draft that carries `requires-review` is judged: a head that is already
 Ready, or that nobody armed, is outside the review-before-Ready sequence and
-is skipped with a logged reason. All four hold and the App posts `VERDICT:
+is skipped with a logged reason. All five hold and the App posts `VERDICT:
 APPROVE` at that head, validated by `scripts/validate_review_receipt.py` first
 and with the live head re-read immediately before posting — a head that moved
 aborts the post, and novelty is re-read once more after the token is minted,
