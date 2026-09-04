@@ -17,6 +17,7 @@ the tier labels side by side and leaves that judgment to the coordinator.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -61,12 +62,25 @@ TIER_LABELS = frozenset({
 # `requires-review` is armed at open and removed by the reviewer with either
 # verdict, so the set a Ready evaluation can ever see excludes it; a pull
 # request still wearing it is blocked by the review-attention rule instead.
+#
+# Since issue #309 the set no longer carries `cybersecurity-review-requested`.
+# A promotion pull request's verdict is earned by re-derivation — the promoter
+# re-runs the acquisition ceremony against the registry and the site's
+# immutable Release, re-renders the whole promotion surface and compares it to
+# the head byte for byte, and the reviewer App posts the result at that exact
+# head. The cybersecurity lane still reviews every change to the promoter's
+# CODE, which is a normal agent pull request and where the risk lives.
 PROMOTER_LABEL = "promoter"
 PROMOTER_TUPLE = frozenset({
     "release", "security", "delivery-lane", "promoter",
-    "cybersecurity-review-requested",
 })
 REVIEW_ATTENTION_LABEL = "requires-review"
+# A receipt may bind the pull request BODY it audited as well as the head: the
+# promoter's APPROVE states the SHA-256 of the body its claim audit compared
+# (issue #309). The body is same-head-mutable metadata, so this rule recomputes
+# the digest from the live body and withholds Ready when it differs — a body
+# edited after the receipt is a different subject, whatever the head says.
+BODY_BINDING = "BODY-SHA256: "
 # The security-surface tier and the label that arms its reviewer travel
 # together; exactly one of them is a metadata contradiction, not a tier.
 SECURITY_TIER_LABEL = "security"
@@ -98,7 +112,15 @@ def gh(path, listing=False):
     return [item for page in decoded for item in page] if listing else decoded
 
 
-def ready_decision(head, labels, comments, checks, behind_by, state=None, base_ref=None, default_branch=None):
+def body_digest(text):
+    """SHA-256 of a pull request body after the newline normalisation the
+    promoter's claim audit applies, so the receipt and this rule hash the same
+    bytes: CRLF becomes LF and surrounding newlines are dropped."""
+
+    return hashlib.sha256((text or "").replace("\r\n", "\n").strip("\n").encode("utf-8")).hexdigest()
+
+
+def ready_decision(head, labels, comments, checks, behind_by, state=None, base_ref=None, default_branch=None, body=None):
     """Return ``(approving lanes, blockers)`` for one exact head.
 
     ``state``, ``base_ref`` and ``default_branch`` are read from the pull
@@ -106,6 +128,7 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
     omission, because every one of them decides WHICH pull request this is.
     """
     blockers, verdicts = [], []
+    pull_body = body
     if state != "open":
         blockers.append(f"the pull request is not open (state: {state or 'unreadable'})")
     if not base_ref or not default_branch:
@@ -116,7 +139,7 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
         blockers.append("the pull request's labels are missing or unreadable")
         labels = []
     for c in comments:
-        body = c.get("body", "")
+        body = c.get("body", "")  # the COMMENT body; the pull request's is ``pull_body``
         # Only the review App's own comment is a receipt, and only in the
         # canonical shape: ``Opus 5`` and ``opus-5`` are the one lane opus5.
         if ((c.get("user") or {}).get("login"), (c.get("user") or {}).get("id"), (c.get("user") or {}).get("type"), (c.get("performed_via_github_app") or {}).get("id")) != (REVIEWS_APP, REVIEWS_APP_USER_ID, "Bot", REVIEWS_APP_ID):
@@ -124,6 +147,13 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
         if RECEIPTS.denial(body, head, "pull-request") is not None:
             continue
         lines = body.replace("\r\n", "\n").splitlines()
+        bound = [line[len(BODY_BINDING):] for line in lines if line.startswith(BODY_BINDING)]
+        if bound and bound != [body_digest(pull_body)]:
+            # A receipt that binds a body this pull request no longer carries is
+            # neither an APPROVE nor a REQUEST-CHANGES here: it is a blocker,
+            # because the reviewed subject was edited under it.
+            blockers.append("a receipt at this head binds a different pull request body; the body was edited after the receipt")
+            continue
         lane = RECEIPTS.SIGNATURE.fullmatch([line for line in lines if line.strip()][-1]).group(1)
         verdicts.append(([line[9:] for line in lines if line.startswith("VERDICT: ")][0], re.sub(r"[^a-z0-9]", "", lane.lower())))
     lanes = sorted({lane for verdict, lane in verdicts if verdict == "APPROVE" and lane})
@@ -166,10 +196,17 @@ def ready_decision(head, labels, comments, checks, behind_by, state=None, base_r
             detail = [f"unexpected {name}" for name in sorted(carried - PROMOTER_TUPLE)]
             detail += [f"missing {name}" for name in sorted(PROMOTER_TUPLE - carried)]
             blockers.append(f"{PROMOTER_LABEL} pins an exact label set: " + ", ".join(detail))
-    elif UMBRELLA_LABEL not in labels:
-        blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
-    if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
-        blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")
+    else:
+        if UMBRELLA_LABEL not in labels:
+            blockers.append(f"the pull request is missing the {UMBRELLA_LABEL} umbrella label")
+        # The pair rule asks an AGENT pull request that claims the security tier
+        # to have armed the lane that reviews it. It does not reach a promotion
+        # pull request, whose exact tuple above already fixes both members and
+        # whose `security` tier is discharged by the promoter's own
+        # re-derivation receipt (issue #309) rather than by that label; applying
+        # both rules would make the exact tuple permanently self-contradictory.
+        if (SECURITY_TIER_LABEL in labels) != (SECURITY_REVIEW_LABEL in labels):
+            blockers.append(f"conflicting tier labels: exactly one of {SECURITY_TIER_LABEL} and {SECURITY_REVIEW_LABEL} is present")
     if behind_by is None:
         blockers.append("base freshness is unknown")
     elif behind_by:
@@ -196,7 +233,7 @@ def snapshot(repository, number):
         raise Refusal(f"PR #{number}: the check-run listing is truncated; refusing to judge a partial view")
     raw_labels = pull.get("labels")
     return {"head": head, "draft": pull.get("draft"), "behind_by": behind_by if isinstance(behind_by, int) else None,
-            "state": pull.get("state"), "baseRef": base_ref, "defaultBranch": default_branch,
+            "state": pull.get("state"), "baseRef": base_ref, "defaultBranch": default_branch, "body": pull.get("body") or "",
             "labels": None if raw_labels is None else [label.get("name") for label in raw_labels],
             "checks": runs["check_runs"],
             "comments": gh(f"repos/{repository}/issues/{number}/comments?per_page=100", listing=True)}
@@ -211,7 +248,8 @@ def main(argv=None):
     try:
         pull = snapshot(args.repo, args.pull_request)
         lanes, tiers, blockers = ready_decision(pull["head"], pull["labels"], pull["comments"], pull["checks"],
-                                                pull["behind_by"], pull["state"], pull["baseRef"], pull["defaultBranch"])
+                                                pull["behind_by"], pull["state"], pull["baseRef"], pull["defaultBranch"],
+                                                body=pull["body"])
     except Refusal as error:
         print(f"DENY: {error}", file=sys.stderr)
         return 1

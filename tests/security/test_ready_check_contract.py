@@ -126,6 +126,55 @@ class WrongPullRequestTests(unittest.TestCase):
         self.assertIn("coordinator", MODULE.__doc__)
 
 
+class BodyBindingTests(unittest.TestCase):
+    """A receipt may bind the pull request body it audited (issue #309): the
+    body is same-head-mutable, so the rule recomputes the digest live."""
+
+    BODY = "Promote naranjo.online 0.1.99\n\nAccounting: 9 files, +1 / -1\n"
+
+    @staticmethod
+    def bound(body_text, verdict="APPROVE", lane="Promoter"):
+        receipt = comment(verdict=verdict, lane=lane)
+        receipt["body"] = receipt["body"].replace(
+            f"VERDICT: {verdict}\n", f"VERDICT: {verdict}\n{MODULE.BODY_BINDING}{MODULE.body_digest(body_text)}\n", 1
+        )
+        return receipt
+
+    def test_the_digest_is_stable_across_newline_normalisation(self):
+        self.assertEqual(MODULE.body_digest(self.BODY), MODULE.body_digest(self.BODY.replace("\n", "\r\n")))
+        self.assertEqual(MODULE.body_digest(self.BODY), MODULE.body_digest("\n\n" + self.BODY + "\n"))
+        self.assertNotEqual(MODULE.body_digest(self.BODY), MODULE.body_digest(self.BODY + "one more sentence"))
+        self.assertEqual(MODULE.body_digest(None), MODULE.body_digest(""))
+
+    def test_a_receipt_bound_to_the_live_body_is_eligible(self):
+        lanes, _, blockers = decide(comments=[self.bound(self.BODY)], body=self.BODY)
+        self.assertEqual(blockers, [])
+        self.assertEqual(lanes, ["promoter"])
+
+    def test_a_body_edited_after_the_receipt_withholds_ready(self):
+        for edited in (self.BODY + "One more sentence.\n", self.BODY.replace("0.1.99", "0.1.98"), "", None):
+            with self.subTest(edited=edited):
+                lanes, _, blockers = decide(comments=[self.bound(self.BODY)], body=edited)
+                self.assertEqual(lanes, [], "a receipt bound to another body approves nothing")
+                self.assertIn("a receipt at this head binds a different pull request body; the body was edited after the receipt", blockers)
+                self.assertIn("no adversarial APPROVE receipt binds this head", blockers)
+
+    def test_an_unbound_receipt_is_read_as_before(self):
+        # A human reviewer's receipt states no body digest, and the rule does
+        # not invent one: the head is what it binds, exactly as before.
+        lanes, _, blockers = decide(body=self.BODY + "edited later")
+        self.assertEqual(blockers, [])
+        self.assertEqual(lanes, ["opus5"])
+
+    def test_a_mismatched_binding_is_never_counted_as_any_verdict(self):
+        # A REQUEST-CHANGES bound to a stale body is a blocker on its own
+        # terms, not silently a second REQUEST-CHANGES.
+        lanes, _, blockers = decide(comments=[self.bound("stale", verdict="REQUEST-CHANGES")], body=self.BODY)
+        self.assertEqual(lanes, [])
+        self.assertIn("a receipt at this head binds a different pull request body; the body was edited after the receipt", blockers)
+        self.assertNotIn("a REQUEST-CHANGES receipt binds this head", blockers)
+
+
 class PromoterTupleTests(unittest.TestCase):
     """AGENTS.md: the receipted promoter "is NOT an agent: its pull requests
     carry `promoter` in place of the agent pair", and its standing authority
@@ -164,7 +213,10 @@ class PromoterTupleTests(unittest.TestCase):
             ("missing release", [n for n in self.EMITTED if n != "release"]),
             ("missing delivery-lane", [n for n in self.EMITTED if n != "delivery-lane"]),
             ("missing security", [n for n in self.EMITTED if n != MODULE.SECURITY_TIER_LABEL]),
-            ("missing cybersecurity-review-requested", [n for n in self.EMITTED if n != MODULE.SECURITY_REVIEW_LABEL]),
+            # Issue #309 dropped this label from the promoter's set: a promotion
+            # earns its receipt by re-derivation instead. Adding it back is now a
+            # hybrid like any other, and the exact-set comparison says so.
+            ("unexpected cybersecurity-review-requested", self.EMITTED + [MODULE.SECURITY_REVIEW_LABEL]),
         ):
             with self.subTest(reason=reason):
                 blockers = decide(labels=labels)[2]
@@ -177,8 +229,12 @@ class PromoterTupleTests(unittest.TestCase):
         self.assertEqual(blockers, [f"{MODULE.REVIEW_ATTENTION_LABEL} is still armed"])
 
     def test_an_ordinary_pull_request_still_needs_the_umbrella_label(self):
-        # Drop only `promoter` and the umbrella requirement returns, so the
-        # exception cannot be inherited by anything else wearing these labels.
+        # Drop only `promoter` and BOTH ordinary-author rules return — the
+        # umbrella label and the security tier/review pair — so neither
+        # exception can be inherited by anything else wearing these labels.
         without = [name for name in self.EMITTED if name != MODULE.PROMOTER_LABEL]
-        self.assertEqual(decide(labels=without)[2], [f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label"])
-        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL])[2], [])
+        self.assertEqual(decide(labels=without)[2], [
+            f"the pull request is missing the {MODULE.UMBRELLA_LABEL} umbrella label",
+            f"conflicting tier labels: exactly one of {MODULE.SECURITY_TIER_LABEL} and {MODULE.SECURITY_REVIEW_LABEL} is present",
+        ])
+        self.assertEqual(decide(labels=without + [MODULE.UMBRELLA_LABEL, MODULE.SECURITY_REVIEW_LABEL])[2], [])
