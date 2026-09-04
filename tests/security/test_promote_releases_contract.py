@@ -1041,7 +1041,10 @@ class TickTests(unittest.TestCase):
         if argv[:3] == ["gh", "pr", "ready"]:
             raise AssertionError("the promoter must never flip or withdraw Ready")
         if argv[:3] == ["gh", "pr", "create"]:
-            self.mutations.append(("pr-create", tuple(argv)))
+            # The body file is unlinked right after this call, so capture what
+            # gh was actually handed rather than inferring it afterwards.
+            handed = Path(argv[argv.index("--body-file") + 1]).read_text(encoding="utf-8")
+            self.mutations.append(("pr-create", tuple(argv), handed))
             return "https://github.com/snaraj/website-infrastructure/pull/300\n"
         if argv[:2] == ["gh", "api"] and "-X" in argv and argv[argv.index("-X") + 1] != "GET":
             path = argv[argv.index("--input") - 1] if "--input" in argv else argv[-1]
@@ -1157,6 +1160,16 @@ class TickTests(unittest.TestCase):
         self.assertNotIn("Co-Authored-By", message)
         pushed_tree = subprocess.run(["git", "ls-tree", "--name-only", branch, "changelog.d/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout
         self.assertIn(f"changelog.d/285-promote-naranjo-online-{self.next.replace('.', '-')}.md", pushed_tree)
+        # AGENTS.md: the commission states an estimate and the PR BODY the
+        # actuals. Measure the pushed head the way the line tells the reviewer
+        # to, and require the body gh was handed to state exactly that (#307).
+        numstat = subprocess.run(["git", "diff", "--numstat", f"{base}..{branch}"], cwd=self.origin, capture_output=True, text=True, check=True).stdout.splitlines()
+        rows = [line.split("\t") for line in numstat]
+        expected = MODULE.accounting_line(base, len(rows), sum(int(r[0]) for r in rows), sum(int(r[1]) for r in rows))
+        self.assertIn("Accounting (measured,", expected)
+        handed = next(m for m in self.mutations if m[0] == "pr-create")[2]
+        self.assertIn(expected, handed, "the body gh received must carry the measured accounting")
+        self.assertIn(expected, message, "the commit message and the body must state the same numbers")
         create = next(m for m in self.mutations if m[0] == "pr-create")[1]
         self.assertIn("--draft", create)
         for label in MODULE.PR_LABELS:
@@ -1410,6 +1423,63 @@ class SiblingLoaderTests(unittest.TestCase):
                     load()
                 self.assertIn("promoter_loader_probe", sys.modules)
                 self.assertIsNone(sys.modules["promoter_loader_probe"])
+
+
+class BodyAccountingTests(unittest.TestCase):
+    """AGENTS.md's accounting contract: the commission states an estimate and
+    the pull-request body the actuals, so the doubling rule has something to
+    compare. The generated promotion body carried none, which made every cut
+    structurally unable to satisfy it (PR #306, security finding). The line is
+    rendered from measured numbers and names the command that reproduces it.
+    """
+
+    BASE = "b424421eb9b539fa559c24d915c36211c369720e"
+
+    def test_the_line_states_the_measured_numbers_and_its_own_command(self):
+        for (files, added, deleted), expected in (
+            ((9, 51, 47), "9 files, +51 / -47, net +4."),
+            ((3, 4, 120), "3 files, +4 / -120, net -116."),
+            ((1, 7, 7), "1 files, +7 / -7, net +0."),
+        ):
+            with self.subTest(files=files):
+                line = MODULE.accounting_line(self.BASE, files, added, deleted)
+                self.assertEqual(
+                    line,
+                    f"Accounting (measured, `git diff --numstat {self.BASE[:7]}..HEAD`): {expected}",
+                )
+
+    def test_the_body_carries_the_line_between_the_evidence_and_the_closes(self):
+        record = self.receipt_record()
+        accounting = MODULE.accounting_line(self.BASE, 9, 51, 47)
+        body = MODULE.pr_body(
+            MODULE.discover_selections(REPO_ROOT),
+            {"naranjo-online": (record, {})},
+            [285],
+            self.BASE,
+            accounting,
+        )
+        self.assertIn(accounting, body)
+        self.assertLess(body.index("Evidence:"), body.index(accounting))
+        self.assertLess(body.index(accounting), body.index("Closes #285"))
+        self.assertTrue(body.rstrip().endswith(MODULE.SIGNATURE))
+
+    def test_an_unmeasurable_numstat_row_refuses_the_cut(self):
+        # git renders a binary path's counts as `-`; summing that would raise
+        # or silently mis-state, so the cut refuses instead of guessing.
+        for rendered in ("-\t-\tdocs/logo.png", "12\tdocs/only-two-fields.md", "x\t3\tdocs/a.md"):
+            with self.subTest(rendered=rendered):
+                workspace = MODULE.Workspace(REPO_ROOT, run=lambda argv, **kw: "" if argv[1] == "add" else rendered + "\n")
+                with self.assertRaisesRegex(MODULE.Refusal, "not measurable"):
+                    workspace.numstat(self.BASE)
+
+    def test_the_measured_totals_sum_every_row(self):
+        rows = "1\t1\tREADME.md\n4\t0\tchangelog.d/285-x.md\n9\t9\tdocs/receipt.json\n"
+        workspace = MODULE.Workspace(REPO_ROOT, run=lambda argv, **kw: "" if argv[1] == "add" else rows)
+        self.assertEqual(workspace.numstat(self.BASE), (3, 14, 10))
+
+    def receipt_record(self):
+        record = json.loads((REPO_ROOT / MODULE.RECEIPT_JSON).read_text())["records"]["naranjo-online"]
+        return record
 
 
 if __name__ == "__main__":  # pragma: no cover

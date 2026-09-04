@@ -1546,6 +1546,27 @@ class Workspace:
             raise Refusal(f"expected exactly one registered signing key in the agent, found {len(matched)}")
         return matched[0]
 
+    def numstat(self, base: str) -> tuple:
+        """``(files, added, deleted)`` for the rewritten tree against ``base``.
+
+        Measured from the index after ``add -A``, which carries exactly what
+        the commit then records, so a reviewer reproduces these numbers with
+        ``git diff --numstat <base>..HEAD`` on the published head. A row that
+        is not two integers and a path — a binary one, which git renders ``-``
+        — refuses: an accounting it cannot measure the tool must not state.
+        """
+
+        self.git("add", "-A")
+        files = added = deleted = 0
+        for line in self.git("diff", "--numstat", "--cached", base).splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+                raise Refusal("a numstat row is not measurable; refusing to state an accounting this cut cannot prove")
+            files += 1
+            added += int(fields[0])
+            deleted += int(fields[1])
+        return files, added, deleted
+
     def commit_signed(self, message: str, identity: dict, key: str) -> str:
         env = dict(os.environ)
         env.update(identity)
@@ -1564,8 +1585,21 @@ def pr_title(selections: dict, targets: dict) -> str:
     return f"Promote {moved} to the published release by receipted ceremony"
 
 
-def pr_body(selections: dict, acquired: dict, issues: list, head_base: str) -> str:
-    """One line per moved workload; the regenerated receipt is the evidence."""
+def accounting_line(base: str, files: int, added: int, deleted: int) -> str:
+    """The actuals AGENTS.md requires of a pull-request body, in the shape the
+    agent lanes already write by hand, naming the command that reproduces it so
+    a reviewer re-measures rather than trusting the number."""
+
+    return (
+        f"Accounting (measured, `git diff --numstat {base[:7]}..HEAD`): "
+        f"{files} files, +{added} / -{deleted}, net {added - deleted:+d}."
+    )
+
+
+def pr_body(selections: dict, acquired: dict, issues: list, head_base: str, accounting: str) -> str:
+    """One line per moved workload; the regenerated receipt is the evidence.
+    ``accounting`` is measured by the workspace and passed in, so one string
+    reaches the commit message and the body and the two cannot disagree."""
 
     lines = [
         "## Promotion",
@@ -1576,6 +1610,7 @@ def pr_body(selections: dict, acquired: dict, issues: list, head_base: str) -> s
     for slug, (record, _) in sorted(acquired.items()):
         lines.append(f"- {selections[slug].domain}: `{selections[slug].version}` to `{record['chartTag']}`, workload index `{record['workloadImage'].split('@', 1)[1]}`")
     lines += ["", "Evidence: the regenerated `docs/assurance/195-chart-acquisition-receipt.*` files in this pull request.", ""]
+    lines += [accounting, ""]
     lines += [f"Closes #{number}" for number in issues]
     lines += ["", SIGNATURE, ""]
     return "\n".join(lines)
@@ -1669,7 +1704,9 @@ def cut_promotion(workspace: Workspace, github: GitHub, registry: Registry, cosi
             raise Refusal(f"gate `{' '.join(gate)}` failed; the promoter log carries its output") from None
         log(f"gate `{' '.join(gate)}` OK")
     title = pr_title(selections, targets)
-    body = pr_body(selections, acquired, issues, base)
+    # Measured after the rewrite and before the commit, so one accounting
+    # string reaches the commit message and the pull-request body alike.
+    body = pr_body(selections, acquired, issues, base, accounting_line(base, *workspace.numstat(base)))
     if dry_run:
         log(f"WOULD commit, push and open Draft PR `{title}` from {branch} (dry run)")
         return 0
