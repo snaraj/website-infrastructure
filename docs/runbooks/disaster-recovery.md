@@ -10,7 +10,6 @@ aspirational until a timed restore drill succeeds.
 - encrypted etcd snapshot copied off-device at least daily;
 - Kubernetes PKI and API-encryption configuration/key material stored encrypted
   and separately from the snapshot;
-- two tested age identity backups;
 - Git desired state and immutable image evidence;
 - encrypted, checksum-verified off-device media originals and publication
   metadata, stored independently from the Pi data filesystem;
@@ -45,7 +44,9 @@ method, copy verification, and time without exposing snapshot content or keys.
    pinned etcd tool. Restore the reviewed CNI/kube-proxy dataplane, then prove
    Secret encryption, member/API/node/CoreDNS health, PSA, audit, and policy
    enforcement.
-3. Restore the age identity out of band, controllers, and anonymous Flux sync.
+3. Restore controllers and anonymous Flux sync. Restore or recreate the exact
+   runtime Secrets through the owner custody procedure before reconciling their
+   consumers; no Git decryption identity is required.
 4. Reconcile prerequisites with releases suspended. Verify RBAC, default deny,
    quotas, signatures, and digests. Before any media binding, verify the
    preserved/restored data filesystem identity and checksums, recreate the exact

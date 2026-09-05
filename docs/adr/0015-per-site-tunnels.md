@@ -115,10 +115,9 @@ only its own runtime token Secret by name (`naranjo-online-tunnel-token`,
 egress is double-pinned so a site's own connector is the only one that can open
 its origin leg.
 
-Two things this amendment does not claim. The HelmRelease remains suspended,
-and the per-site encrypted token Secrets still await the user-run SOPS
-encryption ceremony before they enter the release Kustomization — the chart
-README's suspension checklist is unchanged and remains the authority on what
-must be true first. Separately, the authenticated Cloudflare apply ceremony
-still speaks this ADR's superseded vocabulary; issue #82 tracks that work and
-is deliberately out of scope here.
+Runtime token Secrets are created on the cluster by an owner ceremony; they do
+not enter Git or the release Kustomization as ciphertext. Release readiness is
+established from reviewed desired state and current convergence evidence, not
+this amendment's historical suspension status. The authenticated Cloudflare
+apply ceremony's separate vocabulary reconciliation remains tracked in issue
+#82.

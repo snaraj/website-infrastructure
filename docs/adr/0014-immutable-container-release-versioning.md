@@ -76,9 +76,9 @@ before and after signature/provenance checks, requires both platform configs to
 bind that version and one full Git revision, then edits only the selected
 Flux HelmRelease's digest and readiness override in an ignored candidate. The
 transaction directory is mode-restricted on POSIX; on Git Bash/NTFS it inherits
-the operator's ACL. It contains no plaintext credentials, but a configured
-tunnel Secret is presence-bound as repository-tracked SOPS ciphertext, so the
-directory still requires the same access protection as the checkout.
+the operator's ACL. It contains no credentials. Runtime tunnel Secrets are
+created on the cluster by an owner ceremony and are not part of the transaction
+or repository. The candidate still requires the checkout's access protection.
 It emits a bounded patch plus a hash-bound evidence record, proves that patch
 applies cleanly, and leaves the worktree unchanged. The operator reviews and
 applies that patch explicitly; the verifier never races an editor by replacing

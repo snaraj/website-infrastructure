@@ -1,18 +1,18 @@
-# ADR 0009: Defer Vault and preserve a migration seam
+# ADR 0009: Keep runtime secret custody explicit
 
 - Status: Accepted
 - Date: 2026-08-08
 
 ## Decision
 
-Do not deploy Vault for one operator, one static site, and two tunnel tokens.
-Applications consume ordinary Kubernetes Secrets with stable names and keys and
-do not know whether SOPS or a future operator produced them.
+Runtime secrets are created on the cluster by an owner ceremony. The repository
+carries neither plaintext secrets nor encrypted secret documents. Applications
+consume ordinary Kubernetes Secrets with stable names and keys; delivery does
+not require a cluster decryption identity or an external secret service.
 
-## Revisit trigger and migration
+## Revisit trigger
 
-Revisit at the first database or second Kubernetes environment, or when dynamic
-credentials, PKI, multi-operator policy, or central audit becomes necessary.
-Deploy hardened multi-node Vault, configure auth/policies, have an operator
-produce the same Secret interface, migrate and rotate one workload at a time,
-and remove SOPS values only after validation. Retain minimal bootstrap secrets.
+Revisit when a deployed workload needs dynamic credentials, additional operator
+policy, or centralized secret auditing. Any replacement needs its own threat
+model, custody and recovery evidence; it is not a prerequisite for the current
+release path. Kubernetes API encryption and protected backups remain required.

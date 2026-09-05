@@ -3,8 +3,8 @@
 ## Assets and assumptions
 
 Protected assets include GitHub/Cloudflare control planes, the Pi and SSD,
-irreplaceable media originals and publication metadata, desired state, age
-identity, tunnel tokens, Kubernetes PKI/API-encryption keys, user traffic, and
+irreplaceable media originals and publication metadata, desired state, protected
+backup keys, tunnel tokens, Kubernetes PKI/API-encryption keys, user traffic, and
 domain renewal continuity. The Internet, public repository
 readers, pull requests, container images, the home network, and compromised
 workloads are untrusted. The operator
@@ -17,8 +17,7 @@ controlled.
 | --- | --- | --- | --- |
 | GitHub takeover or malicious merge | Passkey/MFA, protected main, least privilege, signed review path | audit log, CI, Flux revision | revoke sessions, revert commit, rotate affected values |
 | Compromised Action/PR | full-SHA pins, read-only PR token, no infra secrets, GitHub runners | dependency review, action policy, CodeQL/scans | pin/revert, invalidate artifacts |
-| Flux privilege escalation | explicit SAs, no cross-namespace refs/remote bases, no Git credential | RBAC/policy tests, audit metadata | suspend/revert, rotate age identity if exposed |
-| Stolen cluster age identity | two operator-wrapped restore-tested backups, private key only in `flux-system`, never CI/chat | unexpected decrypt access is hard to prove; monitor workstation/cluster access | new identity, re-encrypt, rotate every credential exposed through repository history |
+| Flux privilege escalation | explicit SAs, no cross-namespace refs/remote bases, no Git credential or decryption identity | RBAC/policy tests, audit metadata | suspend/revert, rotate any exposed runtime credentials |
 | Stolen operator-wrapping identity or OpenTofu state | separate identity on BitLocker/ACL workspace, opaque age archives, phase-separated state, never Pi/Git/CI | workspace access evidence, lineage/serial/hash receipts, exact-index/history gates | replace wrapping identity, re-encrypt archives, rotate retained bearer credentials; treat topology/state disclosure as permanent |
 | Tunnel token leak or wrong-Tunnel substitution | tunnel-specific token created on the cluster, never in Git, no API token, separate tunnels, independent account/Tunnel-ID digests | protected MAC/plaintext-identity proof, active systemd credential equality/redaction, connector inventory | revoke/rotate one tunnel, force-disconnect on compromise, verify the other unchanged |
 | Stolen Pi/SSD | disk/physical controls, Kubernetes API encryption at rest | inventory/availability alert | revoke tokens/keys, rebuild, restore tested backup |
