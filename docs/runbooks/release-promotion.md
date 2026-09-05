@@ -97,9 +97,13 @@ tail -n 40 "$HOME/Library/Logs/release-promoter.log"
 ```
 
 Each tick logs one line per workload (`committed X vs latest Y -> verdict`),
-every gate it ran, and the Draft pull request it opened. After the signed commit the tick runs
+every gate it ran, and the Draft pull request it opened. Generated candidates
+run `make check-gitleaks` and `make check-kubernetes` before signing. Required
+CI runs the complete unittest and coverage battery; the promoter does not
+repeat it locally. After the signed commit the tick runs
 `make pre-push-security` on the exact outgoing commit and pushes only when
-it passes; a refusal pushes nothing. Only pull requests that satisfy the
+it passes; this includes isolated repository validation, publication-history
+validation and the range secret scan. A refusal pushes nothing. Only pull requests that satisfy the
 owned-promoter identity tuple (owner-authored, promoter branch of this
 repository against `main`; labels are authorization inputs, not identity,
 so a stripped label never removes the pull request from the tool's view) are

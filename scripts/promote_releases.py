@@ -121,7 +121,11 @@ ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
 SIGNATURE = "- Promoter"
 BRANCH_PREFIX = "promoter/"
-GATES = (("make", "check-fast"), ("make", "check-gitleaks"), ("make", "check-kubernetes"))
+# A generated promotion validates its candidate, not the implementation of
+# every policy tool again. The exact signed-commit publication gate below
+# runs the isolated repository validators, history checks and range scan;
+# hosted CI runs the complete unittest/coverage battery before merge.
+GATES = (("make", "check-gitleaks"), ("make", "check-kubernetes"))
 # The repository's outgoing-range gate: it runs on the exact signed commit,
 # after the commit and before the push, and a refusal pushes nothing.
 PUBLICATION_GATE = ("make", "pre-push-security")
@@ -2321,11 +2325,12 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " manifest-digest agreement and the tag-to-protected-main ancestry.",
             "",
             "Gates and flakes: this head's tree is byte-identical to one the promoter's"
-            " own cut produces, and that cut runs `make check-fast`, `make"
-            " check-gitleaks` and `make check-kubernetes` before committing and `make"
+            " own cut produces, and that cut runs `make check-gitleaks` and"
+            " `make check-kubernetes` before committing and `make"
             " pre-push-security` on the exact signed commit before pushing; GitHub's"
-            " required checks at this head are the authority for the rest and are not"
-            " restated here. The re-derivation is deterministic: the same bytes, or a"
+            " required checks at this head remain the authority for the complete"
+            " unittest and coverage battery and are not restated here. The"
+            " re-derivation is deterministic: the same bytes, or a"
             " refusal.",
             "Scratch: the detached read-only worktree this proof used was removed.",
             "",

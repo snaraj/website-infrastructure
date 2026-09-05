@@ -390,6 +390,17 @@ run and reviewed: PR #287 was cut by hand and merged 2026-09-01, and #303 was
 cut by the tool, reviewed and closed 2026-09-03. Promoter changes are ordinary
 work again, at the security tier every path in that tool earns.
 
+**Generated promotion validation.** A deterministic promotion validates the
+candidate through `make check-gitleaks` and `make check-kubernetes` before
+signing, then the unchanged `make pre-push-security` gate on the exact signed
+outgoing commit before publication. That publication gate includes the isolated
+repository validators, full outgoing-history validation and range secret scan.
+The complete unittest and coverage battery runs in required hosted CI before
+merge; it is not repeated locally by the promoter. This exception applies only
+to generated promotions, whose exact surface and receipt are independently
+re-derived. Changes to the promoter, validators, workflows or this contract
+retain the full author gate and independent security review.
+
 ## Adversarial review protocol
 
 Every substantive PR receives an independent adversarial review BEFORE it
