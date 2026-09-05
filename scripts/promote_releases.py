@@ -56,6 +56,7 @@ no readiness authority: under AGENTS.md the coordinator flips Ready
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import contextlib
 import datetime as dt
@@ -121,7 +122,11 @@ ASSIGNEE = "snaraj"
 NOREPLY_DOMAIN = "users.noreply.github.com"
 SIGNATURE = "- Promoter"
 BRANCH_PREFIX = "promoter/"
-GATES = (("make", "check-fast"), ("make", "check-gitleaks"), ("make", "check-kubernetes"))
+# A generated promotion validates its candidate, not the implementation of
+# every policy tool again. The exact signed-commit publication gate below
+# runs the isolated repository validators, history checks and range scan;
+# hosted CI runs the complete unittest/coverage battery before merge.
+GATES = (("make", "check-gitleaks"), ("make", "check-kubernetes"))
 # The repository's outgoing-range gate: it runs on the exact signed commit,
 # after the commit and before the push, and a refusal pushes nothing.
 PUBLICATION_GATE = ("make", "pre-push-security")
@@ -499,6 +504,23 @@ class Registry:
 GIT_MAINTENANCE_PINS = (("gc.auto", "0"), ("gc.autoDetach", "false"), ("maintenance.auto", "false"))
 
 
+_anonymous_registry_directory = None
+
+
+def anonymous_registry_config() -> str:
+    """One private, credential-free Docker config for this process lifetime."""
+    global _anonymous_registry_directory
+    if _anonymous_registry_directory is None:
+        directory = tempfile.TemporaryDirectory(prefix="release-promoter-registry-")
+        atexit.register(directory.cleanup)
+        config = Path(directory.name) / "config.json"
+        descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write("{}\n")
+        _anonymous_registry_directory = directory
+    return _anonymous_registry_directory.name
+
+
 def pinned_environment(env=None) -> dict:
     """The environment every command runs in: the caller's (or the
     process's) plus git's post-command auto maintenance pinned OFF through
@@ -509,6 +531,10 @@ def pinned_environment(env=None) -> dict:
     tick supervises."""
 
     merged = dict(os.environ if env is None else env)
+    # Public artifact verification never needs registry credentials. Override
+    # even an explicit caller setting so cosign/oras cannot consult an ambient
+    # credential store or launch its interactive helper.
+    merged["DOCKER_CONFIG"] = anonymous_registry_config()
     start = int(merged.get("GIT_CONFIG_COUNT", "0") or 0)
     for offset, (key, value) in enumerate(GIT_MAINTENANCE_PINS):
         merged[f"GIT_CONFIG_KEY_{start + offset}"] = key
@@ -2321,11 +2347,12 @@ def approve_receipt(head: str, base: str, surface: list, statements: list, captu
             " manifest-digest agreement and the tag-to-protected-main ancestry.",
             "",
             "Gates and flakes: this head's tree is byte-identical to one the promoter's"
-            " own cut produces, and that cut runs `make check-fast`, `make"
-            " check-gitleaks` and `make check-kubernetes` before committing and `make"
+            " own cut produces, and that cut runs `make check-gitleaks` and"
+            " `make check-kubernetes` before committing and `make"
             " pre-push-security` on the exact signed commit before pushing; GitHub's"
-            " required checks at this head are the authority for the rest and are not"
-            " restated here. The re-derivation is deterministic: the same bytes, or a"
+            " required checks at this head remain the authority for the complete"
+            " unittest and coverage battery and are not restated here. The"
+            " re-derivation is deterministic: the same bytes, or a"
             " refusal.",
             "Scratch: the detached read-only worktree this proof used was removed.",
             "",

@@ -144,6 +144,11 @@ in an untracked JSON receipt with this closed shape:
   "allow_force_pushes": false,
   "allow_deletions": false,
   "restrict_updates": false,
+  "active_main_branch_ruleset_count": 2,
+  "owner_update_ruleset": "Owner-PR-Updates",
+  "owner_update_ref": "~DEFAULT_BRANCH",
+  "owner_update_fetch_and_merge": false,
+  "owner_update_bypass": "owner-user-pull-request",
   "bypass_actors": [],
   "active_release_tag_ruleset_count": 1,
   "release_tag_ruleset": "immutable-platform-release-tags",
@@ -191,7 +196,7 @@ The preflight uses `gh api --method GET` only with REST API version
 `2026-03-10`; it exhaustively reads the ruleset inventory plus the repository,
 `/immutable-releases`, `/private-vulnerability-reporting`, Actions policy,
 workflow-token policy, security-analysis, and exact active repository-owned
-`only-me-merge` records. The same exhaustive inventory includes all active tag
+`only-me-merge` and `Owner-PR-Updates` records. The same exhaustive inventory includes all active tag
 rulesets, including inherited rules, before reading the exact release-tag rule.
 GitHub's [2026-03-10 repository-ruleset REST schema](https://docs.github.com/en/rest/repos/rules?apiVersion=2026-03-10)
 describes `update_allows_fetch_and_merge` as branch behavior. For a tag-targeted
@@ -357,3 +362,70 @@ Make each exact GHCR package public independently after verifying its source
 linkage, digest, attestations, and repository ownership. Package publication is
 not deployment promotion; CI never writes either chart digest or pushes to
 `main`.
+
+## Owner-account merge restriction
+
+The current threat model is public source for a privately operated, single-owner
+homelab. Review this boundary before granting another collaborator, administrator,
+automation principal, or tenant access. An agent holding the owner's credentials
+has the owner's GitHub identity; these rules cannot distinguish that agent from
+an interactive owner. Agents still have no delegated merge authority.
+
+Two active repository-owned branch rulesets compose the protection:
+
+- `only-me-merge` keeps every security check and signature requirement, with
+  an empty bypass list.
+- `Owner-PR-Updates` targets only `~DEFAULT_BRANCH`, has no exclusions, and
+  contains only `update` with `update_allows_fetch_and_merge: false`. Its sole
+  bypass is the repository owner's numeric `User` ID in `pull_request` mode.
+
+GitHub omits the false update parameters from its GET response. The validator
+accepts either that exact no-exception rule or the explicit false form; null,
+empty parameters, foreign fields and a true fetch/merge exception are refused.
+
+The owner exception belongs only to the second ruleset. Adding it to the core
+ruleset would bypass security checks. Immutable tag protection and its empty
+bypass list remain separate. The receipt's existing `restrict_updates: false`
+describes the core ruleset; the combined policy does restrict updates.
+
+The release settings receipt requires these additional observable facts:
+
+```json
+{
+  "active_main_branch_ruleset_count": 2,
+  "owner_update_ruleset": "Owner-PR-Updates",
+  "owner_update_ref": "~DEFAULT_BRANCH",
+  "owner_update_fetch_and_merge": false
+}
+```
+
+Administration-read callers cannot observe bypass actors. Their structural
+receipt must not claim owner-only authority. With the existing authorized
+ruleset-write credential, run this GET-only check alongside the existing
+core/tag zero-bypass checks; missing actor evidence fails, rather than becoming
+an empty list:
+
+```bash
+set -euo pipefail
+repository=snaraj/website-infrastructure
+owner_id="$(gh api "users/${repository%%/*}" --jq '.id')"
+ruleset_id="$(gh api "repos/${repository}/rulesets" --paginate --slurp | jq -er '
+  add | map(select(.name == "Owner-PR-Updates" and .target == "branch"
+    and .enforcement == "active"))
+  | if length == 1 then .[0].id else error("ambiguous owner restriction") end')"
+gh api "repos/${repository}/rulesets/${ruleset_id}" | jq -e --argjson owner "$owner_id" '
+  .bypass_actors == [{actor_id:$owner, actor_type:"User", bypass_mode:"pull_request"}]
+  and .conditions == {ref_name:{include:["~DEFAULT_BRANCH"], exclude:[]}}
+  and (.rules == [{type:"update"}]
+    or .rules == [{type:"update", parameters:{update_allows_fetch_and_merge:false}}])
+' >/dev/null
+printf 'OWNER_PR_UPDATES=PASS\n'
+```
+
+Prepare and validate the release-validator compatibility change before adding
+the restriction. Read back both rulesets after applying it; preserve the
+existing zero-bypass security rules. No step in this procedure merges a PR.
+
+The platform preflight uses owner-visible evidence and additionally requires
+`owner_update_bypass: owner-user-pull-request` after validating the exact actor
+array. This field must never be inferred by an Administration-read caller.

@@ -1087,6 +1087,28 @@ class TickTests(unittest.TestCase):
         self.assertNotIn("promoter/", self.local_heads())
         self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True, check=True).stdout, "")
 
+    def assert_precommit_refusal(self, gate):
+        """A failed candidate check cannot reach signing or publication."""
+        self.fail_gates = {gate}
+        github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
+        self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[]]
+        code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github,
+                           cosign=self.fleet.cosign(), run=self.run_command)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.commits, [], "candidate validation precedes signing")
+        self.assertFalse(any(m[0] == "pr-create" for m in self.mutations))
+        heads = subprocess.run(["git", "for-each-ref", "refs/heads/"], cwd=self.origin,
+                               capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("promoter/", heads, "a failed candidate is never pushed")
+        self.assertFalse(any(m[0] == "gate" and m[1][1] == "pre-push-security"
+                             for m in self.mutations))
+
+    def test_tree_secret_scan_refusal_prevents_signing_and_publication(self):
+        self.assert_precommit_refusal("check-gitleaks")
+
+    def test_kubernetes_policy_refusal_prevents_signing_and_publication(self):
+        self.assert_precommit_refusal("check-kubernetes")
+
     def test_public_failure_text_carries_no_private_host_detail(self):
         github = MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch)
         self.fleet.gh[f"repos/{MODULE.REPOSITORY}/issues/285/comments?per_page=100"] = [[]]
@@ -1127,7 +1149,7 @@ class TickTests(unittest.TestCase):
         code = MODULE.tick(self.repo, True, registry=self.fleet.registry(), github=MODULE.GitHub(run=self.run_command, fetch=self.fleet.fetch), cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual(code, 0)
         self.assertEqual([m for m in self.mutations if m[0] != "gate"], [])
-        self.assertEqual([m[1][1] for m in self.mutations if m[0] == "gate"], ["check-fast", "check-gitleaks", "check-kubernetes"])
+        self.assertEqual([m[1][1] for m in self.mutations if m[0] == "gate"], ["check-gitleaks", "check-kubernetes"])
         self.assertEqual(self.commits, [])
         heads = subprocess.run(["git", "for-each-ref", "refs/heads/"], cwd=self.origin, capture_output=True, text=True, check=True).stdout
         self.assertNotIn("promoter/", heads)
@@ -1186,10 +1208,10 @@ class TickTests(unittest.TestCase):
         code = MODULE.tick(self.repo, False, registry=self.fleet.registry(), github=github, cosign=self.fleet.cosign(), run=self.run_command)
         self.assertEqual(code, 0)
         self.assertEqual(len(self.commits), 1)
-        # Three gates before the commit, the publication gate on the signed
+        # Two gates before the commit, the publication gate on the signed
         # commit before the push, then the pull request.
         sequence = [m[1][1] if m[0] == "gate" else m[0] for m in self.mutations]
-        self.assertEqual(sequence[:6], ["check-fast", "check-gitleaks", "check-kubernetes", "commit", "pre-push-security", "pr-create"])
+        self.assertEqual(sequence[:5], ["check-gitleaks", "check-kubernetes", "commit", "pre-push-security", "pr-create"])
         commit = self.commits[0]
         self.assertIn("-S", commit)
         self.assertIn("gpg.format=ssh", commit)
@@ -1329,6 +1351,28 @@ class TickTests(unittest.TestCase):
 
 
 class HermeticGitTests(unittest.TestCase):
+    def test_every_child_uses_an_empty_private_registry_configuration(self):
+        with tempfile.TemporaryDirectory() as caller:
+            config = Path(caller) / "config.json"
+            config.write_text(json.dumps({"credsStore": "synthetic-helper"}))
+            original = config.read_bytes()
+            environment = {**os.environ, "DOCKER_CONFIG": caller}
+            pinned = MODULE.pinned_environment(environment)
+            directory = Path(pinned["DOCKER_CONFIG"])
+            self.assertNotEqual(directory, Path(caller))
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((directory / "config.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads((directory / "config.json").read_text()), {})
+            probe = (
+                "import json, os; from pathlib import Path; "
+                "print(json.dumps(json.loads((Path(os.environ['DOCKER_CONFIG']) "
+                "/ 'config.json').read_text())))"
+            )
+            self.assertEqual(MODULE.run_command([sys.executable, "-I", "-B", "-c", probe], env=environment).strip(), "{}")
+            self.assertEqual(MODULE.run_command([sys.executable, "-I", "-B", "-c", probe]).strip(), "{}")
+            self.assertEqual(environment["DOCKER_CONFIG"], caller)
+            self.assertEqual(config.read_bytes(), original)
+
     def test_auto_maintenance_is_pinned_off_in_every_hermetic_repository(self):
         environment = quiet_git_environment()
         pins = {environment[f"GIT_CONFIG_KEY_{i}"]: environment[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(environment["GIT_CONFIG_COUNT"]))}

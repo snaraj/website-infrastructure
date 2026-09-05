@@ -22,7 +22,7 @@ platform-release run had died on a transient token-mint 422 with no retry):
    successfully (a no-artifact merge still concludes success: it logs its
    verdict and publishes nothing, so this check needs no classification
    knowledge). A first-attempt conclusion of exactly ``failure`` is
-   retried exactly once via ``rerun-failed-jobs`` — under ``--apply``
+   retried exactly once via ``rerun`` — under ``--apply``
    only, and a failed dispatch still records the condition; every other
    completed conclusion is a fail-closed ``abnormal`` condition that never
    reruns; a run not completed past the two-hour runtime allowance is
@@ -76,7 +76,7 @@ PENDING_GRACE_SECONDS = 20 * 60
 # and "pending forever" is exactly how a wedged run stays silent (round-2
 # review finding: a seven-day-old in_progress run classified as pending).
 STUCK_RUN_SECONDS = 2 * 60 * 60
-# The one conclusion that authorizes the bounded rerun-failed-jobs dispatch.
+# The one conclusion that authorizes the bounded rerun dispatch.
 # Every other completed conclusion (cancelled, skipped, neutral,
 # action_required, timed_out, stale, startup_failure, anything future) is a
 # fail-closed condition WITHOUT a rerun: the write authority reaches exactly
@@ -307,9 +307,12 @@ class GitHub:
                 return run
         return None
 
-    def rerun_failed_jobs(self, run_id):
+    def rerun_workflow(self, run_id):
+        # A full rerun recreates the immutable-settings attestation for the
+        # new run_attempt. Retrying failed jobs alone keeps its stale attempt
+        # and the publisher correctly refuses that attestation.
         self.request(
-            "POST", "/repos/{}/actions/runs/{}/rerun-failed-jobs".format(
+            "POST", "/repos/{}/actions/runs/{}/rerun".format(
                 self.repository, run_id
             ),
         )
@@ -389,7 +392,7 @@ def gather_conditions(github, root, apply=False):
     """Evaluate both checks; return ``{condition_title: body}`` plus log lines.
 
     ``apply`` gates the ONE mutation this function can reach — the bounded
-    ``rerun-failed-jobs`` dispatch. Without it every decision still prints
+    ``rerun`` dispatch. Without it every decision still prints
     and exits red, but nothing on GitHub moves.
     """
 
@@ -482,10 +485,10 @@ def gather_conditions(github, root, apply=False):
         rerun_note = ""
         if apply:
             try:
-                github.rerun_failed_jobs(publish_run["id"])
+                github.rerun_workflow(publish_run["id"])
                 log.append(
                     "platform-release run {} failed on attempt 1; "
-                    "rerun-failed-jobs dispatched (the one bounded retry)".format(
+                    "rerun dispatched (the one bounded retry)".format(
                         publish_run["id"]
                     )
                 )
@@ -494,7 +497,7 @@ def gather_conditions(github, root, apply=False):
                 # transport failure here must still leave the tracker
                 # recording the failed publish (round-2 review finding).
                 log.append(
-                    "rerun-failed-jobs dispatch FAILED: {}".format(error)
+                    "rerun dispatch FAILED: {}".format(error)
                 )
                 rerun_note = (
                     " The bounded rerun dispatch itself failed ({}); no "

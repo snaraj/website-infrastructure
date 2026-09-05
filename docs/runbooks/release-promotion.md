@@ -29,6 +29,17 @@ battery is `tests/security/test_promote_releases_contract.py`; the command
 blocks below are pinned byte for byte against `RUNBOOK_BLOCKS` there, so a
 neutralized or smuggled invocation is a red test, never prose drift.
 
+Registry reads use a process-owned empty Docker configuration. The promoter
+overrides any inherited `DOCKER_CONFIG` for its children, so public cosign/ORAS
+verification never invokes a workstation credential helper. The private
+temporary directory is cleaned up on normal process exit; no plist override or
+registry login is required.
+
+The deploy-assurance watchdog retries a failed first publisher attempt by
+rerunning the complete workflow once. That rebuilds the immutable-settings
+attestation for the new run attempt; a partial failed-job rerun cannot satisfy
+the publisher's existing run-attempt binding. A subsequent failure is reported.
+
 ## Extending to a new workload
 
 Commit the workload's `OCIRepository` with the
@@ -97,9 +108,13 @@ tail -n 40 "$HOME/Library/Logs/release-promoter.log"
 ```
 
 Each tick logs one line per workload (`committed X vs latest Y -> verdict`),
-every gate it ran, and the Draft pull request it opened. After the signed commit the tick runs
+every gate it ran, and the Draft pull request it opened. Generated candidates
+run `make check-gitleaks` and `make check-kubernetes` before signing. Required
+CI runs the complete unittest and coverage battery; the promoter does not
+repeat it locally. After the signed commit the tick runs
 `make pre-push-security` on the exact outgoing commit and pushes only when
-it passes; a refusal pushes nothing. Only pull requests that satisfy the
+it passes; this includes isolated repository validation, publication-history
+validation and the range secret scan. A refusal pushes nothing. Only pull requests that satisfy the
 owned-promoter identity tuple (owner-authored, promoter branch of this
 repository against `main`; labels are authorization inputs, not identity,
 so a stripped label never removes the pull request from the tool's view) are

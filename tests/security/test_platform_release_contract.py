@@ -344,6 +344,11 @@ def event(sha: str) -> dict[str, object]:
 
 def settings_receipt() -> dict[str, object]:
     return {
+        "active_main_branch_ruleset_count": 2,
+        "owner_update_ruleset": "Owner-PR-Updates",
+        "owner_update_ref": "~DEFAULT_BRANCH",
+        "owner_update_fetch_and_merge": False,
+        "owner_update_bypass": "owner-user-pull-request",
         "repository": "owner/platform",
         "branch": "main",
         "actions_enabled": True,
@@ -500,7 +505,7 @@ def settings_api() -> dict[str, object]:
         {"context": context, "integration_id": 15368}
         for context in MODULE.REQUIRED_CHECKS
     ]
-    return {
+    records = {
         "repos/owner/platform": {
             "full_name": "owner/platform",
             "default_branch": "main",
@@ -601,6 +606,21 @@ def settings_api() -> dict[str, object]:
             ],
         },
     }
+
+    owner = {
+        "id": 44, "name": "Owner-PR-Updates", "target": "branch",
+        "source_type": "Repository", "source": "owner/platform", "enforcement": "active",
+    }
+    records["repos/owner/platform/rulesets?includes_parents=true&per_page=100"].append(owner)
+    records["repos/owner/platform/rulesets/44"] = {
+        **owner,
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        "rules": [{"type": "update", "parameters": {"update_allows_fetch_and_merge": False}}],
+    }
+    records["repos/owner/platform/rulesets/44"]["bypass_actors"] = [{
+        "actor_id": 39077795, "actor_type": "User", "bypass_mode": "pull_request",
+    }]
+    return records
 
 
 def exact_tag_records(
@@ -706,6 +726,86 @@ class VersionAndEventTests(unittest.TestCase):
                 0,
             )
         self.assertEqual(json.loads(output.getvalue())["tag"], MODULE.RECOVERY_TAG)
+
+
+
+class OwnerMergeRestrictionTests(unittest.TestCase):
+    def test_github_readback_omits_only_the_false_update_parameters(self):
+        exact = settings_api()
+        rule = exact["repos/owner/platform/rulesets/44"]["rules"][0]
+        del rule["parameters"]
+        self.assertEqual(SettingsReceiptTests.observe(exact), settings_receipt())
+        for invalid in (None, {}, {"unknown": False},
+                        {"update_allows_fetch_and_merge": True},
+                        {"update_allows_fetch_and_merge": 0}):
+            changed = copy.deepcopy(exact)
+            changed["repos/owner/platform/rulesets/44"]["rules"][0]["parameters"] = invalid
+            with self.subTest(parameters=invalid), self.assertRaises(MODULE.ContractError):
+                SettingsReceiptTests.observe(changed)
+
+    def test_owner_restriction_requires_exact_structure_and_scalar_types(self):
+        exact = settings_api()
+        self.assertEqual(SettingsReceiptTests.observe(exact), settings_receipt())
+        for path, value in (
+            (("id",), True), (("id",), 45), (("name",), "foreign"),
+            (("target",), "tag"), (("source_type",), "Organization"),
+            (("source",), "foreign/repository"), (("enforcement",), "disabled"),
+            (("conditions", "ref_name", "include"), ["~ALL"]),
+            (("conditions", "ref_name", "exclude"), ["refs/heads/main"]),
+            (("rules",), []),
+            (("rules", 0, "type"), "deletion"),
+            (("rules", 0, "parameters", "update_allows_fetch_and_merge"), True),
+            (("rules", 0, "parameters", "update_allows_fetch_and_merge"), 0),
+        ):
+            with self.subTest(path=path, value=value):
+                changed = copy.deepcopy(exact)
+                target = changed["repos/owner/platform/rulesets/44"]
+                for key in path[:-1]: target = target[key]
+                target[path[-1]] = value
+                with self.assertRaises(MODULE.ContractError):
+                    SettingsReceiptTests.observe(changed)
+        for field in ("id", "conditions", "rules"):
+            changed = copy.deepcopy(exact)
+            del changed["repos/owner/platform/rulesets/44"][field]
+            with self.subTest(missing=field), self.assertRaises(MODULE.ContractError):
+                SettingsReceiptTests.observe(changed)
+
+    def test_both_rulesets_are_required_without_ambiguous_or_foreign_inventory(self):
+        exact = settings_api()
+        summaries = exact["repos/owner/platform/rulesets?includes_parents=true&per_page=100"]
+        for changed_summaries in (
+            [r for r in summaries if r["name"] != "Owner-PR-Updates"],
+            [r for r in summaries if r["name"] == "Owner-PR-Updates"],
+            [*summaries, summaries[-1]],
+            [*summaries, {**summaries[-1], "id": 45, "name": "foreign"}],
+            [*summaries[:-1], {**summaries[-1], "id": 42}],
+        ):
+            changed = copy.deepcopy(exact)
+            changed["repos/owner/platform/rulesets?includes_parents=true&per_page=100"] = changed_summaries
+            with self.subTest(inventory=changed_summaries), self.assertRaises(MODULE.ContractError):
+                SettingsReceiptTests.observe(changed)
+
+    def test_receipt_cannot_drop_or_weaken_the_owner_restriction(self):
+        for field in ("active_main_branch_ruleset_count", "owner_update_ruleset",
+                      "owner_update_ref", "owner_update_fetch_and_merge"):
+            for invalid in (None, "foreign", True, 0):
+                changed = settings_receipt()
+                changed[field] = invalid
+                with self.subTest(field=field, value=invalid), self.assertRaises(MODULE.ContractError):
+                    MODULE.validate_settings_receipt(changed, "owner/platform")
+
+    def test_only_the_exact_owner_user_can_bypass_through_a_pr(self):
+        actor = {"actor_id": 39077795, "actor_type": "User", "bypass_mode": "pull_request"}
+        for actors in (None, [], [actor, actor], [{**actor, "actor_id": True}],
+                       [{**actor, "actor_id": 1}], [{**actor, "actor_type": "RepositoryRole"}],
+                       [{**actor, "bypass_mode": "always"}], [{**actor, "extra": True}]):
+            changed = settings_api()
+            changed["repos/owner/platform/rulesets/44"]["bypass_actors"] = actors
+            with self.subTest(actors=actors), self.assertRaises(MODULE.ContractError):
+                SettingsReceiptTests.observe(changed)
+        changed = settings_api()
+        del changed["repos/owner/platform/rulesets/44"]["bypass_actors"]
+        with self.assertRaises(MODULE.ContractError): SettingsReceiptTests.observe(changed)
 
 
 class SettingsReceiptTests(unittest.TestCase):
@@ -853,6 +953,7 @@ class SettingsReceiptTests(unittest.TestCase):
             "repos/owner/platform/rulesets?includes_parents=true&per_page=100",
             "repos/owner/platform/rulesets/42",
             "repos/owner/platform/rulesets/43",
+            "repos/owner/platform/rulesets/44",
         ]
         if calls != expected:
             raise AssertionError(f"unexpected settings endpoints: {calls}")

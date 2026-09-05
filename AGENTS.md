@@ -383,12 +383,25 @@ Delivery-lane requirements, explicit and numbered:
    Private Vulnerability Reporting,
    strict current-base required checks bound to GitHub Actions, required signed
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
-   or update restriction before this release policy is Ready.
+   in the core security ruleset before this release policy is Ready. A separate
+   `Owner-PR-Updates` restriction permits only owner-account PR merges, without
+   bypassing the core checks; the controls runbook defines its exact shape.
 
 **Promoter feature freeze — DISCHARGED.** The condition was one real promotion
 run and reviewed: PR #287 was cut by hand and merged 2026-09-01, and #303 was
 cut by the tool, reviewed and closed 2026-09-03. Promoter changes are ordinary
 work again, at the security tier every path in that tool earns.
+
+**Generated promotion validation.** A deterministic promotion validates the
+candidate through `make check-gitleaks` and `make check-kubernetes` before
+signing, then the unchanged `make pre-push-security` gate on the exact signed
+outgoing commit before publication. That publication gate includes the isolated
+repository validators, full outgoing-history validation and range secret scan.
+The complete unittest and coverage battery runs in required hosted CI before
+merge; it is not repeated locally by the promoter. This exception applies only
+to generated promotions, whose exact surface and receipt are independently
+re-derived. Changes to the promoter, validators, workflows or this contract
+retain the full author gate and independent security review.
 
 ## Adversarial review protocol
 
