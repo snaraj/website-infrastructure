@@ -383,7 +383,9 @@ Delivery-lane requirements, explicit and numbered:
    Private Vulnerability Reporting,
    strict current-base required checks bound to GitHub Actions, required signed
    commits, read-only token defaults, enforced action SHA pinning, and no bypass
-   or update restriction before this release policy is Ready.
+   in the core security ruleset before this release policy is Ready. A separate
+   `Owner-PR-Updates` restriction permits only owner-account PR merges, without
+   bypassing the core checks; the controls runbook defines its exact shape.
 
 **Promoter feature freeze — DISCHARGED.** The condition was one real promotion
 run and reviewed: PR #287 was cut by hand and merged 2026-09-01, and #303 was
