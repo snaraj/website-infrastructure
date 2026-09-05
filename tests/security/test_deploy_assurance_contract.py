@@ -72,7 +72,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write # read gate/publish runs; the one bounded rerun-failed-jobs
+      actions: write # read gate/publish runs; the one bounded rerun
       issues: write # open/close the per-condition tracking issues
     steps:
       - name: Check out desired state
@@ -488,7 +488,7 @@ class PublishVerdictTests(unittest.TestCase):
             {"pending", "stuck", "absent", "ok", "retry", "failing", "abnormal"},
         )
         rerun_sites = re.findall(
-            r"rerun_failed_jobs\(", (REPO_ROOT / "scripts/ci/deploy_assurance.py").read_text()
+            r"rerun_workflow\(", (REPO_ROOT / "scripts/ci/deploy_assurance.py").read_text()
         )
         # One definition, one call site — the bounded retry has no second door.
         self.assertEqual(len(rerun_sites), 2)
@@ -716,7 +716,7 @@ class GitHubLayerTests(unittest.TestCase):
                         {"head_sha": "a" * 40, "id": 2},
                     ]
                 },
-                ("POST", "/repos/snaraj/website-infrastructure/actions/runs/2/rerun-failed-jobs"): None,
+                ("POST", "/repos/snaraj/website-infrastructure/actions/runs/2/rerun"): None,
             }
         ) as calls:
             self.assertEqual(
@@ -727,7 +727,7 @@ class GitHubLayerTests(unittest.TestCase):
                 self.github.publish_run_for("a" * 40), {"head_sha": "a" * 40, "id": 2}
             )
             self.assertIsNone(self.github.publish_run_for("c" * 40))
-            self.github.rerun_failed_jobs(2)
+            self.github.rerun_workflow(2)
         # The gate question is only answerable about protected main pushes:
         # a query drifted to another branch or event answers about attacker
         # state, so the exact query string is contract, not implementation.
@@ -843,7 +843,7 @@ class _ScriptedGitHub:
     def publish_run_for(self, head_sha):
         return self._publish
 
-    def rerun_failed_jobs(self, run_id):
+    def rerun_workflow(self, run_id):
         self.reruns.append(run_id)
 
     def open_assurance_issues(self):
@@ -1038,7 +1038,7 @@ class GatherConditionsTests(unittest.TestCase):
         reconcile_issues from recording the failed publish at all)."""
 
         class _DispatchBroken(_ScriptedGitHub):
-            def rerun_failed_jobs(self, run_id):
+            def rerun_workflow(self, run_id):
                 raise urllib.error.URLError("boom")
 
         github = _DispatchBroken(

@@ -1351,6 +1351,28 @@ class TickTests(unittest.TestCase):
 
 
 class HermeticGitTests(unittest.TestCase):
+    def test_every_child_uses_an_empty_private_registry_configuration(self):
+        with tempfile.TemporaryDirectory() as caller:
+            config = Path(caller) / "config.json"
+            config.write_text(json.dumps({"credsStore": "synthetic-helper"}))
+            original = config.read_bytes()
+            environment = {**os.environ, "DOCKER_CONFIG": caller}
+            pinned = MODULE.pinned_environment(environment)
+            directory = Path(pinned["DOCKER_CONFIG"])
+            self.assertNotEqual(directory, Path(caller))
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((directory / "config.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads((directory / "config.json").read_text()), {})
+            probe = (
+                "import json, os; from pathlib import Path; "
+                "print(json.dumps(json.loads((Path(os.environ['DOCKER_CONFIG']) "
+                "/ 'config.json').read_text())))"
+            )
+            self.assertEqual(MODULE.run_command([sys.executable, "-I", "-B", "-c", probe], env=environment).strip(), "{}")
+            self.assertEqual(MODULE.run_command([sys.executable, "-I", "-B", "-c", probe]).strip(), "{}")
+            self.assertEqual(environment["DOCKER_CONFIG"], caller)
+            self.assertEqual(config.read_bytes(), original)
+
     def test_auto_maintenance_is_pinned_off_in_every_hermetic_repository(self):
         environment = quiet_git_environment()
         pins = {environment[f"GIT_CONFIG_KEY_{i}"]: environment[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(environment["GIT_CONFIG_COUNT"]))}

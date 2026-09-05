@@ -56,6 +56,7 @@ no readiness authority: under AGENTS.md the coordinator flips Ready
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import contextlib
 import datetime as dt
@@ -503,6 +504,23 @@ class Registry:
 GIT_MAINTENANCE_PINS = (("gc.auto", "0"), ("gc.autoDetach", "false"), ("maintenance.auto", "false"))
 
 
+_anonymous_registry_directory = None
+
+
+def anonymous_registry_config() -> str:
+    """One private, credential-free Docker config for this process lifetime."""
+    global _anonymous_registry_directory
+    if _anonymous_registry_directory is None:
+        directory = tempfile.TemporaryDirectory(prefix="release-promoter-registry-")
+        atexit.register(directory.cleanup)
+        config = Path(directory.name) / "config.json"
+        descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write("{}\n")
+        _anonymous_registry_directory = directory
+    return _anonymous_registry_directory.name
+
+
 def pinned_environment(env=None) -> dict:
     """The environment every command runs in: the caller's (or the
     process's) plus git's post-command auto maintenance pinned OFF through
@@ -513,6 +531,10 @@ def pinned_environment(env=None) -> dict:
     tick supervises."""
 
     merged = dict(os.environ if env is None else env)
+    # Public artifact verification never needs registry credentials. Override
+    # even an explicit caller setting so cosign/oras cannot consult an ambient
+    # credential store or launch its interactive helper.
+    merged["DOCKER_CONFIG"] = anonymous_registry_config()
     start = int(merged.get("GIT_CONFIG_COUNT", "0") or 0)
     for offset, (key, value) in enumerate(GIT_MAINTENANCE_PINS):
         merged[f"GIT_CONFIG_KEY_{start + offset}"] = key

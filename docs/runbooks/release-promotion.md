@@ -29,6 +29,17 @@ battery is `tests/security/test_promote_releases_contract.py`; the command
 blocks below are pinned byte for byte against `RUNBOOK_BLOCKS` there, so a
 neutralized or smuggled invocation is a red test, never prose drift.
 
+Registry reads use a process-owned empty Docker configuration. The promoter
+overrides any inherited `DOCKER_CONFIG` for its children, so public cosign/ORAS
+verification never invokes a workstation credential helper. The private
+temporary directory is cleaned up on normal process exit; no plist override or
+registry login is required.
+
+The deploy-assurance watchdog retries a failed first publisher attempt by
+rerunning the complete workflow once. That rebuilds the immutable-settings
+attestation for the new run attempt; a partial failed-job rerun cannot satisfy
+the publisher's existing run-attempt binding. A subsequent failure is reported.
+
 ## Extending to a new workload
 
 Commit the workload's `OCIRepository` with the

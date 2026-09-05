@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write # read gate/publish runs; the one bounded rerun-failed-jobs
+      actions: write # read gate/publish runs; the one bounded rerun
       issues: write # open/close the per-condition tracking issues
     steps:
       - name: Check out desired state
