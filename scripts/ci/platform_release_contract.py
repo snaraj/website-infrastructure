@@ -2452,6 +2452,10 @@ def _validate_identity_asset_metadata(
                     "staged platform release identity download URL is foreign"
                 )
             token = staged_match.group("token")
+            # GitHub may expose its temporary tag in the draft record as well
+            # as both asset URLs. It never changes the signed intended tag.
+            if release_record.get("tag_name") not in (evidence["tag"]["name"], token):
+                raise ContractError("staged platform release identity tag is foreign")
             if staged_download_token is None:
                 staged_download_token = token
             elif token != staged_download_token:
@@ -2596,7 +2600,7 @@ def selector_image_from_release(
     ):
         raise ContractError("selector predecessor release evidence is foreign")
     if (
-        release_record.get("tag_name") != expected_tag
+        (not staged and release_record.get("tag_name") != expected_tag)
         or release_record.get("name") != f"Platform {expected_tag}"
         or release_record.get("target_commitish") != expected_target
         or release_record.get("draft") is not staged

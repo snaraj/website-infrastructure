@@ -237,8 +237,8 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
             )
         return {
             "id": cls.RELEASE_ID,
-            # GitHub keeps the canonical draft tag_name while exposing the
-            # mutable draft download namespace only in asset URLs.
+            # The canonical draft-tag variant; separate cases cover GitHub's
+            # temporary server tag appearing in this field too.
             "tag_name": cls.TAG,
             "target_commitish": cls.SOURCE,
             "name": f"Platform {cls.TAG}",
@@ -406,8 +406,8 @@ class PlatformReleaseIdentityAssetTests(unittest.TestCase):
         nonempty_label["assets"][0]["label"] = "identity"
         mutations["nonempty label"] = nonempty_label
         synthetic_tag = copy.deepcopy(staged)
-        synthetic_tag["tag_name"] = "untagged-aaaaaaaaaaaaaaaaaaaa"
-        mutations["synthetic tag_name"] = synthetic_tag
+        synthetic_tag["tag_name"] = "untagged-bbbbbbbbbbbbbbbbbbbb"
+        mutations["mismatched temporary tag_name"] = synthetic_tag
         mixed_tokens = copy.deepcopy(staged)
         mixed_tokens["assets"][1]["browser_download_url"] = mixed_tokens[
             "assets"

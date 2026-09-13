@@ -97,6 +97,68 @@ def validate(value, *, run_records=True):
 
 
 class PlatformReleaseV4Tests(unittest.TestCase):
+    def staged_recovery(self, token="untagged-" + "a" * 20):
+        value = evidence()
+        identity, bundle, release, _ = records(value)
+        release.update(tag_name=token, draft=True, immutable=False)
+        for asset in release["assets"]:
+            asset["browser_download_url"] = asset["browser_download_url"].replace("/v0.1.81/", f"/{token}/")
+        kwargs = dict(identity=identity, bundle=bundle, tag="v0.1.81",
+                      source_sha=value["source"]["merge_sha"], tree_sha=value["source"]["tree_sha"],
+                      tag_object_sha=value["tag"]["object_sha"],
+                      api_repository="snaraj/platform", api_repository_id=1327645656, staged=True)
+        return release, kwargs
+
+    def test_staged_recovery_accepts_bound_temporary_and_canonical_tags(self):
+        for token in ("untagged-" + "a" * 20, "untagged-" + "b" * 20):
+            release, kwargs = self.staged_recovery(token)
+            for tag in (token, "v0.1.81"):
+                with self.subTest(token=token, tag=tag):
+                    try:
+                        C.validate_identity_release_record({**release, "tag_name": tag}, **kwargs)
+                    except C.ContractError as error:
+                        self.fail(f"bound staged draft refused: {error}")
+
+    def test_staged_recovery_refuses_foreign_record_and_asset_namespaces(self):
+        release, kwargs = self.staged_recovery()
+        for tag in (None, "v0.1.82", "untagged-" + "b" * 20, "untagged-" + "A" * 20,
+                    "untagged-" + "a" * 19, "untagged-" + "a" * 21):
+            with self.subTest(tag=tag), self.assertRaises(C.ContractError):
+                C.validate_identity_release_record({**release, "tag_name": tag}, **kwargs)
+        for indexes in ((0,), (1,), (0, 1)):
+            changed = copy.deepcopy(release)
+            for index in indexes:
+                changed["assets"][index]["browser_download_url"] = changed["assets"][index][
+                    "browser_download_url"].replace("untagged-" + "a" * 20, "untagged-" + "b" * 20)
+            with self.subTest(assets=indexes), self.assertRaises(C.ContractError):
+                C.validate_identity_release_record(changed, **kwargs)
+        for token in ("untagged-" + "A" * 20, "untagged-" + "a" * 19, "untagged-" + "a" * 21):
+            # A coherent pair must still reject a malformed namespace, without
+            # relying on the separate mixed-token guard to catch it.
+            changed, kwargs = self.staged_recovery(token)
+            with self.subTest(coherent_token=token), self.assertRaises(C.ContractError):
+                C.validate_identity_release_record(changed, **kwargs)
+
+    def test_staged_recovery_keeps_lifecycle_custody_and_intended_tag_checks(self):
+        release, kwargs = self.staged_recovery()
+        for key, value in (("draft", False), ("immutable", True), ("prerelease", True),
+                           ("target_commitish", "a" * 40), ("name", "Platform v0.1.82"),
+                           ("id", 301), ("author", {"login": "other", "id": 1})):
+            with self.subTest(field=key), self.assertRaises(C.ContractError):
+                C.validate_identity_release_record({**release, key: value}, **kwargs)
+        for key, value in (("source_sha", "a" * 40), ("tag", "v0.1.82"),
+                           ("tag_object_sha", "c" * 40), ("tree_sha", "d" * 40)):
+            with self.subTest(binding=key), self.assertRaises(C.ContractError):
+                C.validate_identity_release_record(release, **{**kwargs, key: value})
+
+    def test_immutable_recovery_refuses_temporary_tag_even_with_matching_asset_urls(self):
+        release, kwargs = self.staged_recovery()
+        release.update(draft=False, immutable=True)
+        # Coherent temporary final URLs pass the metadata projection; the
+        # immutable release boundary itself must still reject this tag.
+        with self.assertRaisesRegex(C.ContractError, "REST release"):
+            C.validate_identity_release_record(release, **{**kwargs, "staged": False})
+
     def test_recovery_draft_target_custody_and_zero_assets_are_independent(self):
         value = evidence()
         record = {"id": 300, "tag_name": "v0.1.81", "name": "Platform v0.1.81", "target_commitish": "main",
