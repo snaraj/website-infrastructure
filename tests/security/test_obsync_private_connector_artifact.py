@@ -75,7 +75,11 @@ class SelectionTests(unittest.TestCase):
                 MODULE.select_artifact(fixture().replace(before, after), REVISION)
 
     def test_empty_oversized_and_unidentified_documents_refuse(self):
-        for text in ("", " " * (128 * 1024 + 1), fixture() + "---\n# extra document\n"):
+        valid = fixture()
+        at_bound = valid + " " * (128 * 1024 - len(valid.encode("utf-8")))
+        self.assertEqual(MODULE.select_artifact(at_bound, REVISION),
+                         MODULE.select_artifact(valid, REVISION))
+        for text in ("", at_bound + " ", valid + "---\n# extra document\n"):
             with self.subTest(size=len(text)), self.assertRaises(ValueError):
                 MODULE.select_artifact(text, REVISION)
 
@@ -172,6 +176,82 @@ class RealChartTests(unittest.TestCase):
         self.assertEqual(render(), before, "offline selection must leave the normal chart unchanged")
 
 
+class CanonicalGateTests(unittest.TestCase):
+    def canonical_gate(self, *, empty=False):
+        """Run the complete canonical shell with recording offline adapters."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            scripts, tools = root / "scripts", root / "bin"
+            scripts.mkdir()
+            tools.mkdir()
+            (scripts / "render-manifests.sh").write_text(
+                (ROOT / "scripts/render-manifests.sh").read_text())
+            (scripts / "test-policy-fixtures.sh").write_text("exit 0\n")
+            for name in (
+                "kubernetes/platform/cloudflare-public/chart/Chart.yaml",
+                *(f"kubernetes/{name}/kustomization.yaml" for name in (
+                    "flux-system/canary", "flux-system/egress", "platform/prerequisites",
+                    "platform/obsync-tls-proxy", "platform/cloudflare-public/release")),
+                "tests/kubernetes/fixtures/release-deny/missing-readiness.yaml",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("offline fixture\n")
+            artifact = "" if empty else MODULE.select_artifact(fixture(), REVISION)
+            (root / "selected.yaml").write_text(artifact)
+            adapter = f"#!{sys.executable}\n" + '''import json,os,sys
+from pathlib import Path
+tool,args=Path(sys.argv[0]).name,sys.argv[1:]
+root=Path(os.environ["CONNECTOR_GATE_FIXTURE"])
+if tool=="python3":
+    script=Path(args[1]).name
+    if script=="validate_release_transition.py":
+        print("mode=scaffold\\ncloudflare-public=initial\\nplatform-services-suspended=true\\nany-workload-active=false")
+    elif script=="render_obsync_private_connector.py":
+        assert args[2:]==["--token-revision","rev-offline-validation"]
+        print((root/"selected.yaml").read_text(),end="")
+    else: assert script=="validate_signature_policy.py"
+elif tool in ("helm","kustomize"):
+    if args[0]!="lint": print("kind: ConfigMap\\nmetadata:\\n  name: offline-fixture")
+else:
+    assert tool in ("kubeconform","conftest")
+    path=Path(args[-1])
+    with (root/"calls.jsonl").open("a") as out:
+        out.write(json.dumps([tool,args,path.read_text()])+"\\n")
+    if tool=="conftest" and Path(args[2]).name=="release-conftest":
+        print({"missing-readiness.yaml":"Deployment readiness-missing is not marked ready",
+               "helm-cloudflare-public.yaml":"cloudflared tunnel token revision remains unresolved",
+               "kubernetes-platform-cloudflare-public-release.yaml":"HelmRelease cloudflare-public remains suspended"}[path.name])
+        sys.exit(1)
+'''
+            for name in ("python3", "helm", "kustomize", "kubeconform", "conftest"):
+                executable = tools / name
+                executable.write_text(adapter)
+                executable.chmod(0o700)
+            env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                   "CONNECTOR_GATE_FIXTURE": str(root)}
+            result = subprocess.run(["bash", str(scripts / "render-manifests.sh"), "--scaffold"],
+                                    env=env, capture_output=True, text=True, check=False)
+            calls = root / "calls.jsonl"
+            recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        return result, recorded, artifact
+
+    def test_selected_artifact_reaches_both_canonical_validators(self):
+        result, recorded, artifact = self.canonical_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = [(tool, args, text) for tool, args, text in recorded
+                    if pathlib.Path(args[-1]).name == "obsync-private-connector.yaml"]
+        self.assertEqual([tool for tool, _, _ in selected], ["kubeconform", "conftest"])
+        self.assertTrue(all(text == artifact for _, _, text in selected))
+        self.assertEqual(pathlib.Path(selected[1][1][2]).name, "conftest")
+
+    def test_empty_selected_artifact_stops_before_canonical_validation(self):
+        result, recorded, _ = self.canonical_gate(empty=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("private connector selection produced an empty render", result.stderr)
+        self.assertEqual(recorded, [])
+
+
 class RunbookTests(unittest.TestCase):
     def test_operator_ceremony_keeps_source_and_live_authority_separate(self):
         text = " ".join((ROOT / "docs/runbooks/obsync-private-connector.md").read_text().split())
@@ -183,9 +263,6 @@ class RunbookTests(unittest.TestCase):
             "never adopt", "not native-device acceptance",
         ):
             self.assertIn(required, text)
-        renderer = (ROOT / "scripts/render-manifests.sh").read_text()
-        self.assertIn("scripts/render_obsync_private_connector.py", renderer)
-        self.assertIn("obsync-private-connector.yaml", renderer)
 
     def preflight(self, *, existing=(), missing=(), failed_read=None, automount="false"):
         text = (ROOT / "docs/runbooks/obsync-private-connector.md").read_text()
