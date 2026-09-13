@@ -127,6 +127,15 @@ for row in "${CHART_ROWS[@]}"; do
   rendered_files+=("$output")
 done
 
+# The private connector's owner artifact derives from the same chart but emits
+# only its own policy and Deployment. The synthetic revision is offline gate
+# data, never a credential-installation or private-route readiness claim.
+output="${ARTIFACT_ROOT}/obsync-private-connector.yaml"
+python3 -B "${REPO_ROOT}/scripts/render_obsync_private_connector.py" \
+  --token-revision rev-offline-validation >"$output"
+[[ -s "$output" ]] || die 'private connector selection produced an empty render'
+rendered_files+=("$output")
+
 target='' output_name=''
 for target in "${KUSTOMIZE_TARGETS[@]}"; do
   [[ -f "${REPO_ROOT}/${target}/kustomization.yaml" ]] || die "missing required Kustomize root: ${target}"

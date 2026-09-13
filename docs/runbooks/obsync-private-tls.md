@@ -135,7 +135,10 @@ Follow this order; a TCP startup check is not backend-dependent readiness:
    any failure; never bypass readiness or widen backend access to proceed.
 5. Enable the separately approved private path.
    Only after the preceding gates pass, enable the intended device path under
-   its own authorization and complete the real-client acceptance below.
+   its own authorization and complete the real-client acceptance below. The
+   [isolated connector procedure](obsync-private-connector.md) prepares only
+   that connector's policy and Deployment; it leaves shared resources and the
+   shared release untouched and requires its own prerequisite/owner checkpoints.
 
 NGINX resolves the backend Service at startup: create that Service first.
 Replacing its ClusterIP requires a proxy restart; ordinary app Pod replacement
