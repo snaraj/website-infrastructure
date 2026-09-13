@@ -284,7 +284,7 @@ restrict_recovery_request() {
   case "${phase}" in
     create) filter='del(.target_commitish)' ;;
     body) filter='{body}' ;;
-    publish) filter='{draft:false}' ;;
+    publish) filter='{tag_name,draft:false}' ;;
     *) return 1 ;;
   esac
   jq "${filter}" "${path}" > "${path}.scoped"

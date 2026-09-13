@@ -152,8 +152,12 @@ After owner preparation of the exact annotated tag, recovery creates a draft wit
 `tag_name`, `name`, `body`, `draft:true` and `prerelease:false`. It omits
 `target_commitish` and requires GitHub's returned default-target hint to be
 exactly `main`; the tag object and peeled commit bind the historical source.
-The notes PATCH contains only `body`; the publish PATCH contains only
-`draft:false`. Before and after each Release or asset write, the publisher
+The notes PATCH contains only `body`; the publish PATCH contains only the
+selected `tag_name` and `draft:false`, with no `target_commitish`. A staged
+record may expose the canonical tag or GitHub's temporary `untagged-<20 hex>`
+tag matching both staged asset URL tokens. The signed intended tag and exact
+annotated object remain fixed; final immutable validation accepts only that
+canonical tag and its final asset URLs. Before and after each Release or asset write, the publisher
 rechecks the unchanged tag object, source, predecessor and selected executor.
 An exact zero-asset draft may resume on a fresh dispatch. Partial assets,
 foreign custody, a moved tag, a missing settings proof or permission refusal

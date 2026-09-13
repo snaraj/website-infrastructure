@@ -137,7 +137,8 @@ class RecoveryWiringTests(unittest.TestCase):
         original = {"tag_name": "v0.1.81", "name": "Platform v0.1.81", "body": "bound notes",
                     "draft": True, "prerelease": False, "target_commitish": "a" * 40}
         for phase, expected in (("create", {k: v for k, v in original.items() if k != "target_commitish"}),
-                                ("body", {"body": "bound notes"}), ("publish", {"draft": False})):
+                                ("body", {"body": "bound notes"}),
+                                ("publish", {"tag_name": "v0.1.81", "draft": False})):
             for historical in ("true", "false"):
                 code = source + '\nhistorical_recovery="' + historical + '"\nrestrict_recovery_request "' + phase + '" "${RUNNER_TEMP}/request.json"\n'
                 completed, files = self.execute(code, files={"request.json": json.dumps(original)})
@@ -146,6 +147,17 @@ class RecoveryWiringTests(unittest.TestCase):
                 self.assertNotIn("request.json.scoped", files)
         completed, _ = self.execute(source + '\nhistorical_recovery=true\nrestrict_recovery_request unknown "${RUNNER_TEMP}/request.json"', files={"request.json": json.dumps(original)})
         self.assertNotEqual(completed.returncode, 0)
+
+    def test_publish_selects_each_existing_historical_tag_without_target_or_extra_fields(self):
+        source = function(TRANSACTION.read_text(), "restrict_recovery_request")
+        for tag in ("v0.1.81", "v0.1.82", "v0.1.83"):
+            original = {"tag_name": tag, "draft": True, "target_commitish": "a" * 40,
+                        "name": "ignored", "body": "ignored", "prerelease": True}
+            code = source + '\nhistorical_recovery=true\nrestrict_recovery_request publish "${RUNNER_TEMP}/request.json"\n'
+            with self.subTest(tag=tag):
+                completed, files = self.execute(code, files={"request.json": json.dumps(original)})
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(json.loads(files["request.json"]), {"tag_name": tag, "draft": False})
 
     def test_wrapper_settles_read_proof_before_passing_only_derived_write_context(self):
         preamble = r'''
@@ -420,7 +432,7 @@ sleep() { :; }
         self.assertEqual(json.loads(files["create-payload"]), {"tag_name": "v0.1.81", "name": "Platform v0.1.81",
                          "body": "marker", "draft": True, "prerelease": False})
         self.assertEqual(json.loads(files["body-payload"]), {"body": "notes"})
-        self.assertEqual(json.loads(files["publish-payload"]), {"draft": False})
+        self.assertEqual(json.loads(files["publish-payload"]), {"tag_name": "v0.1.81", "draft": False})
         for phase in phases:
             for failure in ({"TEST_REFUSE": phase, "TEST_HTTP": "403"},
                             {"TEST_REFUSE": phase, "TEST_HTTP": "404"}, {"TEST_AMBIGUOUS": phase}):
